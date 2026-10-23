@@ -44,9 +44,10 @@ const MAX_SAVED_VIEW_RECORD_COUNT: usize = 32;
 pub struct SavedView {
     /// The tab the client was viewing.
     pub active_tab_id: TabId,
-    /// The pane the client had focused in each tab, keyed by tab id. A tab with
-    /// no entry had no focused pane.
-    pub focused_pane_id_by_tab_id: HashMap<TabId, PaneId>,
+    /// The panes the client focused in each tab, newest first
+    /// ([`Client::list_focus_history`]), keyed by tab id. A tab with no entry
+    /// had no focused pane.
+    pub focus_history_by_tab_id: HashMap<TabId, Vec<PaneId>>,
     /// The pane the client had zoomed in each tab, keyed by tab id. A tab with
     /// no entry was tiled.
     pub zoomed_pane_id_by_tab_id: HashMap<TabId, PaneId>,
@@ -127,7 +128,7 @@ impl SavedViewStore {
             expires_at,
             saved_view: SavedView {
                 active_tab_id: client.get_active_tab_id(),
-                focused_pane_id_by_tab_id: client.list_focused_pane_ids().clone(),
+                focus_history_by_tab_id: client.list_focus_histories().clone(),
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
                 floating_pane_view_by_pane_id: client.list_floating_pane_views().clone(),

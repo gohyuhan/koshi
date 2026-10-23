@@ -15,10 +15,9 @@ use koshi_ipc::frame::{
     MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_ipc::image_chunk::ImageChunkFrame;
-use koshi_ipc::placement::{EncodedRow, PanePlacementSnapshot, PlacementWindow};
 use koshi_ipc::transport::ReceivedFrame;
 use koshi_layout::mode::LayoutMode;
-use koshi_renderer::snapshot::CursorSnapshot;
+use koshi_renderer::snapshot::{CursorSnapshot, GridView};
 use koshi_runtime::runtime::frame::build_wire_frame;
 use koshi_runtime::runtime::painted_update::{
     PaintedUpdateReceiver, PaintedUpdateSender, SessionFrame,
@@ -301,7 +300,6 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
         is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
-            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id: active_tab_id,
@@ -371,7 +369,6 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
         pane_snapshots,
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
-            client_revision: 0,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,
@@ -382,9 +379,21 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             lock_mode: LockMode::Locked,
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
+            last_applied_placement_command_id: None,
             is_mouse_selection_enabled: true,
         },
+        placement_preview: None,
     }
+}
+
+/// An available placement preview of `render_snapshot`'s first pane from its
+/// active tab into a new tab ([`crate::tests::build_test_placement_snapshot`]).
+fn build_test_placement_preview(render_snapshot: &RenderSnapshot) -> PlacementPreview {
+    PlacementPreview::Available(Box::new(crate::tests::build_test_placement_snapshot(
+        render_snapshot.pane_snapshots[0].pane_id,
+        render_snapshot.client_snapshot.active_tab_id,
+        TabId::new(),
+    )))
 }
 
 /// The painted frame a client reads when a connection that sent nothing sends
@@ -454,6 +463,12 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         .client_snapshot
         .last_applied_floating_pane_move_command_id = Some(CommandId::new());
     expected_render_snapshot
+        .client_snapshot
+        .last_applied_placement_command_id = Some(CommandId::new());
+    expected_render_snapshot.placement_preview = Some(Arc::new(build_test_placement_preview(
+        &expected_render_snapshot,
+    )));
+    expected_render_snapshot
         .session_snapshot
         .floating_pane_slots = vec![
         FloatingPaneSlot {
@@ -502,6 +517,103 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         build_received_render_snapshot(&expected_render_snapshot),
         expected_render_snapshot
     );
+}
+
+#[test]
+fn an_unavailable_placement_preview_travels_and_is_read_back_as_itself() {
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
+        build_content_pane_snapshot(PaneId::new()),
+        PaneSnapshot::from_empty_pane(PaneId::new()),
+    ]);
+    expected_render_snapshot.placement_preview = Some(Arc::new(PlacementPreview::Unavailable {
+        source_pane_id: expected_render_snapshot.pane_snapshots[0].pane_id,
+        destination_tab_id: TabId::new(),
+    }));
+
+    assert_eq!(
+        build_received_render_snapshot(&expected_render_snapshot),
+        expected_render_snapshot
+    );
+}
+
+#[test]
+fn the_image_cache_builds_a_placement_preview_once_while_updates_hold_the_same_preview() {
+    let mut render_snapshot = build_two_pane_render_snapshot(vec![
+        build_content_pane_snapshot(PaneId::new()),
+        PaneSnapshot::from_empty_pane(PaneId::new()),
+    ]);
+    let sent_placement_preview = build_test_placement_preview(&render_snapshot);
+    render_snapshot.placement_preview = Some(Arc::new(sent_placement_preview.clone()));
+    let mut painted_update_sender = PaintedUpdateSender::new();
+    let mut painted_update_receiver = PaintedUpdateReceiver::new();
+    let mut image_cache = ImageCache::new();
+    let mut adopt_update = |render_snapshot: &RenderSnapshot| {
+        image_cache
+            .adopt_painted_frame(Box::new(carry_painted_update(
+                &mut painted_update_sender,
+                &mut painted_update_receiver,
+                render_snapshot,
+                &build_wire_frame(render_snapshot),
+            )))
+            .expect("the update reads")
+            .expect("the update holds no image")
+            .placement_preview
+            .expect("the update holds the preview")
+    };
+
+    let first_placement_preview = adopt_update(&render_snapshot);
+    render_snapshot.client_snapshot.lock_mode = LockMode::Normal;
+    let unchanged_placement_preview = adopt_update(&render_snapshot);
+    render_snapshot.placement_preview = Some(Arc::new(sent_placement_preview.clone()));
+    let replaced_placement_preview = adopt_update(&render_snapshot);
+
+    assert_eq!(*first_placement_preview, sent_placement_preview);
+    assert!(
+        Arc::ptr_eq(&first_placement_preview, &unchanged_placement_preview),
+        "an update that keeps the preview shares the preview the cache built"
+    );
+    assert!(
+        !Arc::ptr_eq(&unchanged_placement_preview, &replaced_placement_preview),
+        "an update that replaces the preview gets a preview built anew"
+    );
+    assert_eq!(*replaced_placement_preview, sent_placement_preview);
+}
+
+#[test]
+fn a_painted_update_with_an_invalid_placement_preview_is_refused_and_the_cache_keeps_its_frame() {
+    let base_render_snapshot = build_two_pane_render_snapshot(vec![
+        build_content_pane_snapshot(PaneId::new()),
+        PaneSnapshot::from_empty_pane(PaneId::new()),
+    ]);
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(carry_first_painted_frame(
+            &base_render_snapshot,
+            &build_wire_frame(&base_render_snapshot),
+        )))
+        .expect("the base frame reads");
+    let held_painted_frame = image_cache.painted_frame.clone();
+    let mut invalid_render_snapshot = base_render_snapshot.clone();
+    let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
+        base_render_snapshot.pane_snapshots[0].pane_id,
+        base_render_snapshot.client_snapshot.active_tab_id,
+        TabId::new(),
+    );
+    // A preview into another tab that holds no destination tab.
+    placement_snapshot.destination_tab_snapshot = None;
+    invalid_render_snapshot.placement_preview = Some(Arc::new(PlacementPreview::Available(
+        Box::new(placement_snapshot),
+    )));
+
+    assert_eq!(
+        image_cache.adopt_painted_frame(Box::new(carry_first_painted_frame(
+            &invalid_render_snapshot,
+            &build_wire_frame(&invalid_render_snapshot),
+        ))),
+        Err(ImageAssemblyError::InvalidPlacementPreview)
+    );
+    assert_eq!(image_cache.painted_frame, held_painted_frame);
+    assert!(image_cache.placement_preview.is_none());
 }
 
 #[test]
@@ -606,7 +718,6 @@ fn a_complete_cached_image_is_reused_by_the_next_frame() {
     assert_eq!(reused_snapshot, Some(expected_render_snapshot));
     assert_eq!(image_cache.image_record_by_content_id.len(), 1);
     assert!(image_cache.missing_painted_image_content_ids.is_empty());
-    assert!(image_cache.missing_placement_image_content_ids.is_empty());
     assert_eq!(
         image_cache
             .pending_image_transfer
@@ -778,7 +889,6 @@ fn a_frame_without_the_placement_keeps_the_record_until_its_release() {
     assert_eq!(image_cache.image_record_by_content_id.len(), 0);
     assert_eq!(image_cache.retained_image_byte_count, 0);
     assert_eq!(image_cache.missing_painted_image_content_ids.len(), 0);
-    assert_eq!(image_cache.missing_placement_image_content_ids.len(), 0);
 }
 
 #[test]
@@ -884,7 +994,6 @@ fn a_returning_image_waits_for_its_new_connection_identity() {
         image_cache.missing_painted_image_content_ids,
         HashSet::from([2])
     );
-    assert!(image_cache.missing_placement_image_content_ids.is_empty());
     let mut image_transfer = build_image_transfer(2);
     image_transfer.image_content_id = 2;
     image_cache
@@ -1117,7 +1226,6 @@ fn one_pane_cannot_repeat_a_terminal_image_placement_identity() {
     assert_eq!(image_cache.retained_image_byte_count, 0);
     assert_eq!(image_cache.painted_frame, None);
     assert_eq!(image_cache.missing_painted_image_content_ids.len(), 0);
-    assert_eq!(image_cache.missing_placement_image_content_ids.len(), 0);
     assert_eq!(
         image_cache
             .pending_image_transfer
@@ -1129,10 +1237,12 @@ fn one_pane_cannot_repeat_a_terminal_image_placement_identity() {
 
 #[test]
 fn an_image_cache_reset_discards_complete_and_incomplete_connection_state() {
-    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         PaneSnapshot::from_empty_pane(PaneId::new()),
     ]);
+    let sent_placement_preview = build_test_placement_preview(&expected_render_snapshot);
+    expected_render_snapshot.placement_preview = Some(Arc::new(sent_placement_preview.clone()));
     let mut image_cache = ImageCache::new();
     image_cache
         .adopt_painted_frame(Box::new(carry_first_painted_frame(
@@ -1143,14 +1253,21 @@ fn an_image_cache_reset_discards_complete_and_incomplete_connection_state() {
     image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
+    assert_eq!(
+        image_cache
+            .placement_preview
+            .as_ref()
+            .map(|held_placement_preview| held_placement_preview.placement_preview.as_ref()),
+        Some(&sent_placement_preview)
+    );
 
     image_cache.clear_image_cache();
 
     assert_eq!(image_cache.image_record_by_content_id.len(), 0);
     assert_eq!(image_cache.retained_image_byte_count, 0);
     assert_eq!(image_cache.painted_frame, None);
+    assert!(image_cache.placement_preview.is_none());
     assert_eq!(image_cache.missing_painted_image_content_ids.len(), 0);
-    assert_eq!(image_cache.missing_placement_image_content_ids.len(), 0);
     assert_eq!(
         image_cache
             .pending_image_transfer
@@ -1376,10 +1493,9 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
 }
 
 #[test]
-fn records_sent_after_a_stale_placement_preview_are_kept_for_the_next_frame() {
-    // The client accepted no preview, so the transfer of record 9 that
-    // follows the stale one fills no frame. The record is kept, and the next
-    // frame that shows record 9 paints at once.
+fn a_record_no_frame_names_yet_is_kept_and_the_next_frame_naming_it_paints_at_once() {
+    // The transfer of record 9 fills no frame. The record is kept, and the
+    // next frame that shows record 9 paints at once.
     let image_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         PaneSnapshot::from_empty_pane(PaneId::new()),
@@ -1395,15 +1511,14 @@ fn records_sent_after_a_stale_placement_preview_are_kept_for_the_next_frame() {
             &build_wire_frame(&empty_render_snapshot),
         )))
         .expect("the base frame reads");
-    image_cache.clear_image_transfer_count();
 
     image_cache
         .start_image_transfer(build_image_transfer(9))
-        .expect("the transfer after the stale preview starts");
+        .expect("the transfer of record 9 starts");
     assert_eq!(
         image_cache
             .accept_image_chunk(&build_image_chunk(9))
-            .expect("the transfer after the stale preview reads"),
+            .expect("the transfer of record 9 reads"),
         None
     );
     assert_eq!(
@@ -1437,109 +1552,15 @@ fn records_sent_after_a_stale_placement_preview_are_kept_for_the_next_frame() {
     );
 }
 
-/// The preview of [`crate::tests::build_test_placement_snapshot`] for the
-/// client and session of `render_snapshot`, whose destination pane shows the
-/// first image placement of `render_snapshot`'s first pane under
-/// `image_content_id`.
-fn build_preview_showing_image(
-    render_snapshot: &RenderSnapshot,
-    image_content_id: u64,
-) -> PanePlacementSnapshot {
-    let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
-        render_snapshot.session_snapshot.session_id,
-        render_snapshot.client_snapshot.client_id,
-        render_snapshot.pane_snapshots[0].pane_id,
-        render_snapshot.client_snapshot.active_tab_id,
-        TabId::new(),
-        0,
-        0,
-    );
-    let mut image_placement =
-        build_wire_frame(render_snapshot).pane_snapshots[0].image_placement_snapshots[0].clone();
-    image_placement.image_content_id = image_content_id;
-    let terminal_grid_view = render_snapshot.pane_snapshots[0]
-        .terminal_grid_view
-        .as_ref()
-        .expect("the test pane has rows");
-    let destination_pane_snapshot = &mut placement_snapshot
-        .destination_tab_snapshot
-        .as_mut()
-        .expect("the test preview has a destination tab")
-        .pane_snapshots[0];
-    destination_pane_snapshot.terminal_window = Some(PlacementWindow {
-        column_count: terminal_grid_view.column_count,
-        encoded_rows: terminal_grid_view
-            .row_snapshots
-            .iter()
-            .map(|row_snapshot| EncodedRow {
-                encoded_row_bytes: row_snapshot.get_encoded_row_bytes().to_vec(),
-            })
-            .collect(),
-    });
-    destination_pane_snapshot.image_placement_snapshots = vec![image_placement];
-    placement_snapshot
-}
-
 #[test]
-fn a_held_preview_names_its_request_and_its_records_outlive_it_until_released() {
-    let image_render_snapshot = build_two_pane_render_snapshot(vec![
+fn a_frame_whose_last_record_arrives_is_returned_with_its_placement_preview() {
+    let mut image_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         PaneSnapshot::from_empty_pane(PaneId::new()),
     ]);
-    let empty_render_snapshot = build_two_pane_render_snapshot(vec![
-        PaneSnapshot::from_empty_pane(PaneId::new()),
-        PaneSnapshot::from_empty_pane(PaneId::new()),
-    ]);
-    let mut image_cache = ImageCache::new();
-    image_cache
-        .adopt_painted_frame(Box::new(carry_first_painted_frame(
-            &empty_render_snapshot,
-            &build_wire_frame(&empty_render_snapshot),
-        )))
-        .expect("the base frame reads");
-
-    image_cache
-        .adopt_placement_snapshot(
-            9,
-            Box::new(build_preview_showing_image(&image_render_snapshot, 5)),
-        )
-        .expect("the preview reads");
-    image_cache
-        .start_image_transfer(build_image_transfer(5))
-        .expect("the preview's transfer starts");
-    let completed_preview_record = image_cache
-        .accept_image_chunk(&build_image_chunk(5))
-        .expect("the preview's record reads");
-
-    assert_eq!(completed_preview_record, None);
-    assert_eq!(image_cache.find_placement_request_id(), Some(9));
-    assert_eq!(
-        image_cache.release_image_contents(&[5]),
-        Err(ImageAssemblyError::ReleasedImageInUse {
-            image_content_id: 5
-        })
-    );
-
-    image_cache.clear_placement_snapshot();
-
-    assert_eq!(image_cache.find_placement_request_id(), None);
-    assert_eq!(
-        image_cache
-            .image_record_by_content_id
-            .keys()
-            .collect::<Vec<_>>(),
-        vec![&5]
-    );
-    assert_eq!(image_cache.release_image_contents(&[5]), Ok(()));
-    assert_eq!(image_cache.retained_image_byte_count, 0);
-}
-
-#[test]
-fn a_frame_whose_last_record_arrives_while_a_preview_is_held_is_returned_for_drawing() {
-    let image_render_snapshot = build_two_pane_render_snapshot(vec![
-        build_content_pane_snapshot_with_image(PaneId::new()),
-        PaneSnapshot::from_empty_pane(PaneId::new()),
-    ]);
+    image_render_snapshot.placement_preview = Some(Arc::new(build_test_placement_preview(
+        &image_render_snapshot,
+    )));
     let mut image_cache = ImageCache::new();
     assert_eq!(
         image_cache
@@ -1551,12 +1572,6 @@ fn a_frame_whose_last_record_arrives_while_a_preview_is_held_is_returned_for_dra
         None
     );
     image_cache
-        .adopt_placement_snapshot(
-            9,
-            Box::new(build_preview_showing_image(&image_render_snapshot, 1)),
-        )
-        .expect("the preview reads");
-    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the frame's transfer starts");
 
@@ -1565,7 +1580,6 @@ fn a_frame_whose_last_record_arrives_while_a_preview_is_held_is_returned_for_dra
         .expect("the frame's record reads");
 
     assert_eq!(completed_render_snapshot, Some(image_render_snapshot));
-    assert_eq!(image_cache.find_placement_request_id(), Some(9));
 }
 
 #[test]
@@ -1843,6 +1857,23 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         String::from("\u{202e}gpj.exe");
     expected_render_snapshot.pane_snapshots[0].pane_title =
         Some(String::from("~/work\u{7}\u{1b}]0;owned\u{7}"));
+    let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
+        focused_pane_id,
+        expected_render_snapshot.client_snapshot.active_tab_id,
+        TabId::new(),
+    );
+    crate::tests::get_source_tab_snapshot_mut(&mut placement_snapshot)
+        .tab_snapshot
+        .tab_name = String::from("src\u{1b}[2J");
+    placement_snapshot
+        .destination_tab_snapshot
+        .as_mut()
+        .expect("the test preview has a destination tab")
+        .tab_snapshot
+        .tab_name = String::from("dst\u{7}");
+    expected_render_snapshot.placement_preview = Some(Arc::new(PlacementPreview::Available(
+        Box::new(placement_snapshot),
+    )));
 
     let received_snapshot = build_received_render_snapshot(&expected_render_snapshot);
 
@@ -1869,6 +1900,27 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         received_snapshot.pane_snapshots[0].pane_title.as_deref(),
         Some("~/work]0;owned"),
         "the pane title reaches the window title"
+    );
+    let received_placement_snapshot = received_snapshot
+        .placement_preview
+        .as_deref()
+        .and_then(PlacementPreview::find_placement_snapshot)
+        .expect("the preview is available");
+    assert_eq!(
+        received_placement_snapshot
+            .find_source_tab_snapshot()
+            .map(|source_tab_snapshot| source_tab_snapshot.tab_snapshot.tab_name.as_str()),
+        Some("src[2J")
+    );
+    assert_eq!(
+        received_placement_snapshot
+            .destination_tab_snapshot
+            .as_ref()
+            .map(|destination_tab_snapshot| destination_tab_snapshot
+                .tab_snapshot
+                .tab_name
+                .as_str()),
+        Some("dst")
     );
 }
 

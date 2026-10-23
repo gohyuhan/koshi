@@ -8,6 +8,7 @@
 pub mod floating_pane_chrome;
 pub mod hit_test;
 pub mod images;
+pub mod placement;
 pub mod region;
 pub mod render;
 pub mod snapshot;

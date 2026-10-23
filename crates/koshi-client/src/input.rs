@@ -34,7 +34,7 @@ use koshi_config::types::BoundAction;
 use koshi_core::action::{ActionReference, ClientActionKind};
 use koshi_core::command::{
     Command, FocusPaneArgs, FocusTarget, MoveFloatingPaneArgs, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, PlacementRevision, TiledPlacementTarget,
+    PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget,
 };
 use koshi_core::geometry::{Direction, Point, Rect};
 use koshi_core::ids::{CommandId, PaneId};
@@ -42,19 +42,16 @@ use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey, PendingKeySequence,
 };
 use koshi_core::lock::LockMode;
-use koshi_ipc::placement::{PanePlacementSizing, PanePlacementSnapshot, PanePlacementTabSnapshot};
-use koshi_layout::mode::LayoutMode;
 use koshi_layout::neighbor::select_directional_neighbor;
 use koshi_layout::placement::{
-    is_same_tab_placement_noop as is_layout_placement_noop, list_placement_destinations,
+    find_stack_target_pane_id, is_same_tab_placement_noop as is_layout_placement_noop,
     InsertionSpan, PlacementDestinations, PlacementTarget,
 };
-use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
-use koshi_renderer::snapshot::MouseFrame;
+use koshi_renderer::snapshot::{MouseFrame, PlacementSnapshot, TabSnapshot};
 
 use crate::{
     is_focused_pane_floating, Client, DockUndockMode, FloatingPaneMoveSelection, LinkStatus,
-    PaneMoveMode, PendingPlacementCommand, PlacementInputAction, PlacementModeLifetime,
+    PaneMoveMode, PlacementInputAction, PlacementModeLifetime, PlacementTargetOutcome,
     TiledPaneSelection,
 };
 
@@ -372,9 +369,9 @@ impl Client {
 
     /// Apply one viewer-local action selected by the active keymap, against
     /// `mouse_frame`, the frame this viewer last painted. With no painted
-    /// frame, `None`, this viewer draws no floating pane. Returns the
-    /// placement read or the command the attachment runs next, or
-    /// [`PlacementInputAction::Consumed`] when the action needs neither.
+    /// frame, `None`, this viewer draws no floating pane. Returns the command
+    /// or the placement confirmation the attachment sends next, or
+    /// [`PlacementInputAction::Consumed`] when the action sends neither.
     pub(crate) fn apply_client_action(
         &mut self,
         client_action_kind: ClientActionKind,
@@ -457,7 +454,7 @@ impl Client {
     ///
     /// - A floating pane opens pane placement mode for it, which previews the
     ///   frame's active tab with the insertion at the right edge of that whole
-    ///   tab selected, and returns the read of that preview.
+    ///   tab selected, and the result is `Consumed`.
     /// - A tiled pane stays selected for Enter, and the result is `Consumed`.
     /// - With no painted frame, or a frame that focuses no pane, nothing is
     ///   selected.
@@ -495,14 +492,14 @@ impl Client {
             return PlacementInputAction::Consumed;
         }
         let destination_tab_id = mouse_frame.client_snapshot.active_tab_id;
-        let Some((source_pane_id, destination_tab_id)) = self.open_placement_mode(
+        if !self.open_placement_mode(
             selected_pane_id,
             None,
             destination_tab_id,
             PlacementModeLifetime::UntilCancelled,
-        ) else {
+        ) {
             return PlacementInputAction::Consumed;
-        };
+        }
         if let Some(placement_mode) = self.placement_state.placement_mode.as_mut() {
             placement_mode.placement_target = Some(TiledPlacementTarget::Split {
                 destination_tab_id,
@@ -510,11 +507,7 @@ impl Client {
                 direction: Direction::Right,
             });
         }
-        PlacementInputAction::ReadPlacement {
-            pane_id_to_focus: None,
-            source_pane_id,
-            destination_tab_id,
-        }
+        PlacementInputAction::Consumed
     }
 
     /// Answer Enter in dock/undock mode: float the selected tiled pane where
@@ -541,12 +534,12 @@ impl Client {
     }
 
     /// Select tiled pane `pane_id` in dock/undock mode, and send the
-    /// `PlacePane` that floats it where this viewer draws it, with no expected
-    /// placement revision, under a new command id that the mode waits for.
+    /// `PlacePane` that floats it where this viewer draws it, under a new
+    /// command id that the mode waits for.
     ///
     /// Enter with tiled pane `pane-7` selected sends `PlacePane {
     /// source_pane_id: Some(pane-7), placement_target: Floating { top_left_cell:
-    /// None }, expected_placement_revision: None }`.
+    /// None } }`.
     pub(crate) fn submit_undock_command(&mut self, pane_id: PaneId) -> PlacementInputAction {
         let command_id = CommandId::new();
         self.dock_undock_mode = Some(DockUndockMode {
@@ -562,7 +555,6 @@ impl Client {
                 placement_target: PanePlacementTarget::Floating {
                     top_left_cell: None,
                 },
-                expected_placement_revision: None,
             }),
         }
     }
@@ -593,12 +585,12 @@ impl Client {
         self.begin_tiled_pane_placement()
     }
 
-    /// Open pane placement mode for the active tab's focused pane and return
-    /// the preview read of the active tab. Returns `Consumed` when pane
-    /// placement mode does not open
-    /// ([`begin_placement_mode`](Self::begin_placement_mode)).
+    /// Open pane placement mode for the active tab's focused pane, which
+    /// previews the active tab ([`begin_placement_mode`](Self::begin_placement_mode)),
+    /// and return `Consumed`.
     fn begin_tiled_pane_placement(&mut self) -> PlacementInputAction {
-        PlacementInputAction::from_placement_read(self.begin_placement_mode())
+        self.begin_placement_mode();
+        PlacementInputAction::Consumed
     }
 
     /// Open floating pane move mode for the floating pane that `mouse_frame`
@@ -934,9 +926,8 @@ impl Client {
         let Some(&destination_tab_id) = self.visible_tab_ids.get(target_tab_index) else {
             return PlacementInputAction::Consumed;
         };
-        PlacementInputAction::from_placement_read(
-            self.select_placement_destination_tab(destination_tab_id),
-        )
+        self.select_placement_destination_tab(destination_tab_id);
+        PlacementInputAction::Consumed
     }
 
     /// Select a placement target in `direction` and retain it for confirmation.
@@ -947,7 +938,9 @@ impl Client {
     ///   insertion beside the whole stack.
     /// - With the whole destination tab selected, Shift+Left selects `insert
     ///   left` of that tab, and an Arrow searches as if no target were selected.
-    /// - With a floating source pane, an Arrow selects what Shift+Arrow does.
+    /// - With a floating source pane, an Arrow that reaches a pane selects the
+    ///   insertion Shift+Arrow selects there: from the whole tab `[A | B]`,
+    ///   Right selects `insert right` of `B`.
     /// - Reaching the source pane, or a target that leaves the layout as it is,
     ///   clears the target. Finding no pane keeps the current target.
     fn select_placement_target(
@@ -961,15 +954,17 @@ impl Client {
         let Some(placement_mode) = self.placement_state.placement_mode.as_ref() else {
             return PlacementInputAction::Consumed;
         };
-        let is_insertion_target = is_insertion_target || placement_mode.source_tab_id.is_none();
-        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
+        let should_select_pane_insertion =
+            is_insertion_target || placement_mode.source_tab_id.is_none();
+        let Some(placement_snapshot) = self.get_placement_snapshot() else {
             return PlacementInputAction::Consumed;
         };
         let destination_tab_id = placement_mode.destination_tab_id;
         let source_pane_id = placement_mode.source_pane_id;
-        let Some(destination_tab_snapshot) =
-            placement_snapshot.find_tab_snapshot(destination_tab_id)
-        else {
+        let (Some(destination_tab_snapshot), Some(placement_destinations)) = (
+            placement_snapshot.find_displayed_tab_snapshot(),
+            placement_snapshot.list_placement_destinations(),
+        ) else {
             return PlacementInputAction::Consumed;
         };
         let is_whole_tab_target_selected = matches!(
@@ -991,14 +986,9 @@ impl Client {
             } else {
                 placement_mode.placement_target.as_ref()
             };
-            let placement_destinations = build_placement_destinations(
-                destination_tab_snapshot,
-                source_pane_id,
-                placement_snapshot.pane_sizing,
-            );
             let Some(target_pane_id) = find_directional_target_pane_id(
                 &placement_destinations,
-                destination_tab_snapshot,
+                &destination_tab_snapshot.tab_snapshot,
                 source_pane_id,
                 current_placement_target,
                 direction,
@@ -1007,7 +997,7 @@ impl Client {
             };
             if target_pane_id == source_pane_id {
                 None
-            } else if is_insertion_target {
+            } else if should_select_pane_insertion {
                 find_smallest_insertion_span(
                     &placement_destinations.insertion_spans,
                     target_pane_id,
@@ -1045,23 +1035,15 @@ impl Client {
         let Some(placement_mode) = self.placement_state.placement_mode.as_ref() else {
             return PlacementInputAction::Consumed;
         };
-        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
+        let Some(placement_snapshot) = self.get_placement_snapshot() else {
             return PlacementInputAction::Consumed;
         };
         let destination_tab_id = placement_mode.destination_tab_id;
-        let source_pane_id = placement_mode.source_pane_id;
         let placement_direction = placement_mode.placement_direction;
-        let Some(destination_tab_snapshot) =
-            placement_snapshot.find_tab_snapshot(destination_tab_id)
-        else {
+        let Some(placement_destinations) = placement_snapshot.list_placement_destinations() else {
             return PlacementInputAction::Consumed;
         };
-        let mut insertion_spans = build_placement_destinations(
-            destination_tab_snapshot,
-            source_pane_id,
-            placement_snapshot.pane_sizing,
-        )
-        .insertion_spans;
+        let mut insertion_spans = placement_destinations.insertion_spans;
         insertion_spans.retain(|insertion_span| {
             let placement_target = TiledPlacementTarget::Split {
                 destination_tab_id,
@@ -1098,20 +1080,28 @@ impl Client {
         PlacementInputAction::Consumed
     }
 
-    /// Switch the selected target between beside a pane and that pane's
-    /// stack:
+    /// Switch the selected target between beside a pane, a whole stack or the
+    /// whole tab, and the stack of what that span holds:
     ///
-    /// - `Swap { p }`, and a `Split` beside pane `p`, become `Stack { p }`.
+    /// - `Swap { p }` becomes `Stack { p }`.
+    /// - A `Split` becomes `Stack { m }`, with `m` the pane its anchor names
+    ///   in the held preview ([`find_stack_target_pane_id`]): pane `p` for a
+    ///   span beside `p`, and the member a stack shows open for a span beside
+    ///   that stack, or for the whole tab when one stack fills the tab.
     /// - `Stack { p }` becomes `Swap { p }` for a tiled source pane, and, for
     ///   a floating source pane, the insertion beside the smallest span that
     ///   holds `p`, on the edge of the last insertion.
     /// - A target that leaves the layout as it is clears the target.
     ///
     /// Returns `Consumed`, changing nothing, while a placement command is
-    /// pending, with no preview, and with no target, a group or whole-tab
-    /// target, or no span that holds `p`. In `[A | B]` with `A` the source,
-    /// `s` on `Swap { B }` selects `Stack { B }`, and Enter gives the stack
-    /// `[B, A]`.
+    /// pending, with no preview, and with no target, a group that is not one
+    /// stack, a whole tab that a directional split fills, or no span that
+    /// holds `p`. In `[A | B]` with `A` the source, `s` on `Swap { B }`
+    /// selects `Stack { B }`, and Enter gives the stack `[B, A]`. In
+    /// `[P | stack(A, B open)]` with a floating source `F`, `s` on the
+    /// insertion beside the stack selects `Stack { B }`, and Enter gives the
+    /// stack `[A, B, F]`. In a tab that holds only `stack(A, B open)`, `s` on
+    /// the whole-tab insertion selects `Stack { B }` the same way.
     fn toggle_placement_stack(&mut self) -> PlacementInputAction {
         if self.is_placement_confirmation_pending() {
             return PlacementInputAction::Consumed;
@@ -1119,19 +1109,28 @@ impl Client {
         let Some(placement_mode) = self.placement_state.placement_mode.as_ref() else {
             return PlacementInputAction::Consumed;
         };
-        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
+        let Some(placement_snapshot) = self.get_placement_snapshot() else {
             return PlacementInputAction::Consumed;
         };
         let placement_target = match placement_mode.placement_target.as_ref() {
-            Some(
-                TiledPlacementTarget::Swap { target_pane_id }
-                | TiledPlacementTarget::Split {
-                    anchor: PanePlacementAnchor::Pane(target_pane_id),
-                    ..
-                },
-            ) => TiledPlacementTarget::Stack {
+            Some(TiledPlacementTarget::Swap { target_pane_id }) => TiledPlacementTarget::Stack {
                 target_pane_id: *target_pane_id,
             },
+            Some(TiledPlacementTarget::Split { anchor, .. }) => {
+                let Some(target_pane_id) = placement_snapshot
+                    .find_displayed_tab_snapshot()
+                    .and_then(|displayed_tab_snapshot| {
+                        find_stack_target_pane_id(
+                            &displayed_tab_snapshot.layout_tree,
+                            anchor,
+                            &displayed_tab_snapshot.focus_history,
+                        )
+                    })
+                else {
+                    return PlacementInputAction::Consumed;
+                };
+                TiledPlacementTarget::Stack { target_pane_id }
+            }
             Some(TiledPlacementTarget::Stack { target_pane_id })
                 if placement_mode.source_tab_id.is_some() =>
             {
@@ -1141,17 +1140,11 @@ impl Client {
             }
             Some(TiledPlacementTarget::Stack { target_pane_id }) => {
                 let destination_tab_id = placement_mode.destination_tab_id;
-                let Some(destination_tab_snapshot) =
-                    placement_snapshot.find_tab_snapshot(destination_tab_id)
+                let Some(placement_destinations) = placement_snapshot.list_placement_destinations()
                 else {
                     return PlacementInputAction::Consumed;
                 };
-                let insertion_spans = build_placement_destinations(
-                    destination_tab_snapshot,
-                    placement_mode.source_pane_id,
-                    placement_snapshot.pane_sizing,
-                )
-                .insertion_spans;
+                let insertion_spans = placement_destinations.insertion_spans;
                 let Some(insertion_span) =
                     find_smallest_insertion_span(&insertion_spans, *target_pane_id)
                 else {
@@ -1163,7 +1156,7 @@ impl Client {
                     direction: placement_mode.placement_direction,
                 }
             }
-            _ => return PlacementInputAction::Consumed,
+            None => return PlacementInputAction::Consumed,
         };
         let is_placement_target_noop =
             is_same_tab_placement_noop(placement_snapshot, &placement_target);
@@ -1175,21 +1168,23 @@ impl Client {
     }
 
     /// Select insertion at the right edge of the whole destination tab when the
-    /// retained snapshot previews a tab other than the source pane's tab, no
-    /// target is selected, and no drag is active. A floating source pane over
-    /// this viewer's active tab gets no target there. Tab from `[A | B]` onto
-    /// `[C]` selects `insert right` of that tab, and Enter gives `[C | A]`.
+    /// held preview shows a tab other than the source pane's tab, no target is
+    /// selected, and no drag is active. A floating source pane over this
+    /// viewer's active tab gets no target there. Tab from `[A | B]` onto `[C]`
+    /// selects `insert right` of that tab, and Enter gives `[C | A]`.
     pub(crate) fn select_whole_tab_insertion_target(&mut self) {
         if self.placement_state.placement_drag.is_some() || self.is_placement_confirmation_pending()
         {
             return;
         }
-        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
+        let Some(placement_snapshot) = self.get_placement_snapshot() else {
             return;
         };
         let destination_tab_id = placement_snapshot.destination_tab_id;
-        let is_source_drawn_on_destination = match placement_snapshot.find_source_tab_id() {
-            Some(source_tab_id) => source_tab_id == destination_tab_id,
+        let is_source_drawn_on_destination = match placement_snapshot.find_source_tab_snapshot() {
+            Some(source_tab_snapshot) => {
+                source_tab_snapshot.tab_snapshot.tab_id == destination_tab_id
+            }
             None => self.active_tab_id == Some(destination_tab_id),
         };
         let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
@@ -1200,55 +1195,62 @@ impl Client {
         }
         placement_mode.placement_direction = Direction::Right;
         placement_mode.placement_target = Some(TiledPlacementTarget::Split {
-            destination_tab_id: placement_snapshot.destination_tab_id,
+            destination_tab_id,
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Right,
         });
     }
 
-    /// Build the `PlacePane` command for the selected target, record it as the
-    /// pending placement command under a new command id, and return it to
-    /// send.
+    /// Confirm the selected target: record it as the pending placement under a
+    /// new command id, and return the `ConfirmPanePlacement` to send, which
+    /// carries the destination tab as the held preview draws it after the
+    /// placement ([`PlacementSnapshot::build_placed_preview`]).
     ///
-    /// - Returns `Consumed` while a placement command is pending.
+    /// - Returns `Consumed` while a placement is pending, and while this
+    ///   viewer holds no preview of the target's tab yet.
     /// - Returns `Consumed` and clears the target when the target leaves the
     ///   layout as it is, such as a swap of `pane-123` with itself.
+    /// - Returns `Consumed` and keeps the target when the session refuses it in
+    ///   the held preview, such as a dock into a tab with no room for the pane.
     /// - Returns `None` with no placement mode or no target.
     pub(crate) fn submit_placement_command(&mut self) -> Option<PlacementInputAction> {
         let placement_mode = self.placement_state.placement_mode.as_ref()?;
-        if placement_mode.pending_placement_command.is_some() {
+        if placement_mode.pending_placement_command_id.is_some() {
             return Some(PlacementInputAction::Consumed);
         }
-        let placement_target = placement_mode.placement_target.clone()?;
-        if self
-            .placement_state
-            .placement_snapshot
-            .as_deref()
-            .is_some_and(|placement_snapshot| {
-                is_same_tab_placement_noop(placement_snapshot, &placement_target)
-            })
-        {
-            let placement_mode = self.placement_state.placement_mode.as_mut()?;
-            placement_mode.placement_target = None;
+        let placement_target = placement_mode.placement_target.as_ref()?;
+        let source_pane_id = placement_mode.source_pane_id;
+        let Some(placement_snapshot) = self.get_placement_snapshot() else {
+            return Some(PlacementInputAction::Consumed);
+        };
+        if is_same_tab_placement_noop(placement_snapshot, placement_target) {
+            self.placement_state
+                .placement_mode
+                .as_mut()?
+                .placement_target = None;
             return Some(PlacementInputAction::Consumed);
         }
-        let command = Command::PlacePane(PlacePaneArgs {
-            source_pane_id: Some(placement_mode.source_pane_id),
-            placement_target: PanePlacementTarget::Tiled(placement_target),
-            expected_placement_revision: Some(PlacementRevision {
-                session_revision: self.placement_state.session_placement_revision,
-                client_revision: self.placement_state.client_placement_revision,
-            }),
-        });
+        self.update_placement_target_outcome();
+        let Some(PlacementTargetOutcome {
+            placement_target,
+            placed_preview: Ok(placed_preview),
+            ..
+        }) = self.get_placement_target_outcome()
+        else {
+            return Some(PlacementInputAction::Consumed);
+        };
+        let placement_target = placement_target.clone();
+        let expected_placed_tab_layout = Box::new(placed_preview.placed_tab_layout.clone());
         let command_id = CommandId::new();
-        let placement_mode = self.placement_state.placement_mode.as_mut()?;
-        placement_mode.pending_placement_command = Some(PendingPlacementCommand {
+        self.placement_state
+            .placement_mode
+            .as_mut()?
+            .pending_placement_command_id = Some(command_id);
+        Some(PlacementInputAction::ConfirmPlacement {
             command_id,
-            is_committed: false,
-        });
-        Some(PlacementInputAction::SubmitCommand {
-            command_id,
-            command,
+            source_pane_id,
+            placement_target,
+            expected_placed_tab_layout,
         })
     }
 
@@ -1412,14 +1414,14 @@ impl Client {
 /// floating source pane, and a destination other than the source pane's tab,
 /// never do.
 pub(crate) fn is_same_tab_placement_noop(
-    placement_snapshot: &PanePlacementSnapshot,
+    placement_snapshot: &PlacementSnapshot,
     placement_target: &TiledPlacementTarget,
 ) -> bool {
     let Some(source_tab_snapshot) =
         placement_snapshot
             .find_source_tab_snapshot()
             .filter(|source_tab_snapshot| {
-                source_tab_snapshot.tab_id == placement_snapshot.destination_tab_id
+                source_tab_snapshot.tab_snapshot.tab_id == placement_snapshot.destination_tab_id
             })
     else {
         return false;
@@ -1428,39 +1430,18 @@ pub(crate) fn is_same_tab_placement_noop(
         destination_tab_id, ..
     } = placement_target
     {
-        if *destination_tab_id != source_tab_snapshot.tab_id {
+        if *destination_tab_id != source_tab_snapshot.tab_snapshot.tab_id {
             return false;
         }
     }
     let layout_target = PlacementTarget::from_tiled_placement_target(placement_target);
-    let tab_rect = Rect::from_size_at_origin(source_tab_snapshot.tab_size);
+    let tab_rect = Rect::from_size_at_origin(source_tab_snapshot.tab_snapshot.tab_size);
     is_layout_placement_noop(
         &source_tab_snapshot.layout_tree,
         placement_snapshot.source_pane_id,
         &layout_target,
         tab_rect,
-        PaneSizing::from(placement_snapshot.pane_sizing),
-    )
-}
-
-/// List the keyboard and mouse destinations for one placement snapshot tab.
-pub(crate) fn build_placement_destinations(
-    destination_tab_snapshot: &PanePlacementTabSnapshot,
-    source_pane_id: PaneId,
-    pane_sizing: PanePlacementSizing,
-) -> PlacementDestinations {
-    let tab_rect = Rect::from_size_at_origin(destination_tab_snapshot.tab_size);
-    let layout_solve = solve_layout_with_mode(
-        &destination_tab_snapshot.layout_tree,
-        LayoutMode::Tiled,
-        tab_rect,
-        PaneSizing::from(pane_sizing),
-    );
-    list_placement_destinations(
-        &destination_tab_snapshot.layout_tree,
-        &layout_solve,
-        tab_rect,
-        source_pane_id,
+        placement_snapshot.pane_sizing,
     )
 }
 
@@ -1513,7 +1494,7 @@ fn find_placement_target_rect(
 /// returns `C`.
 fn find_directional_target_pane_id(
     placement_destinations: &PlacementDestinations,
-    destination_tab_snapshot: &PanePlacementTabSnapshot,
+    destination_tab_snapshot: &TabSnapshot,
     source_pane_id: PaneId,
     current_placement_target: Option<&TiledPlacementTarget>,
     direction: Direction,

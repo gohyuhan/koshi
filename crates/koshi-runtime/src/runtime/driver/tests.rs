@@ -29,7 +29,9 @@ use crate::runtime::command::tests::{
 };
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::event::RuntimeEvent;
-use crate::runtime::render_schedule::tests::{get_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION};
+use crate::runtime::render_schedule::tests::{
+    mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
+};
 use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 use koshi_test_support::fixtures::build_new_pane_args;
 
@@ -473,6 +475,7 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
         is_remote: false,
         max_frames_per_second: 120,
         response_sender: attach_response_sender,
+        placement_preview_target: None,
     });
     let attach_accepted = attach_response_receiver
         .try_recv()
@@ -485,7 +488,11 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
     server.handle_pty_output(pane_id, b"x");
 
     assert_eq!(
-        get_frame_wait(&server, attach_accepted.client_id, current_time),
+        mark_changed_views_then_compute_frame_wait(
+            &mut server,
+            attach_accepted.client_id,
+            current_time
+        ),
         Some(Duration::from_nanos(8_333_334))
     );
 }
@@ -569,7 +576,11 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
                 "step {step_index}: the last frame of client {client_index} is stale"
             );
             assert_eq!(
-                get_frame_wait(&server, viewing_client_id, pass_time),
+                mark_changed_views_then_compute_frame_wait(
+                    &mut server,
+                    viewing_client_id,
+                    pass_time
+                ),
                 None,
                 "step {step_index}: client {client_index} still owes a frame"
             );
@@ -578,7 +589,8 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
 }
 
 #[test]
-fn a_command_that_fails_validation_marks_no_view_and_a_handled_command_marks_every_view() {
+fn a_command_that_fails_validation_marks_no_view_and_a_lock_toggle_marks_the_view_of_its_client_alone(
+) {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
@@ -606,7 +618,11 @@ fn a_command_that_fails_validation_marks_no_view_and_a_handled_command_marks_eve
     );
     for viewing_client_id in [client_id, other_client_id] {
         assert_eq!(
-            get_frame_wait(&server, viewing_client_id, current_time),
+            mark_changed_views_then_compute_frame_wait(
+                &mut server,
+                viewing_client_id,
+                current_time
+            ),
             None
         );
     }
@@ -615,10 +631,17 @@ fn a_command_that_fails_validation_marks_no_view_and_a_handled_command_marks_eve
         CommandSource::KeyBinding { client_id },
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     ));
-    for viewing_client_id in [client_id, other_client_id] {
+    for (viewing_client_id, expected_frame_wait) in [
+        (client_id, Some(DEFAULT_FRAME_INTERVAL_DURATION)),
+        (other_client_id, None),
+    ] {
         assert_eq!(
-            get_frame_wait(&server, viewing_client_id, current_time),
-            Some(DEFAULT_FRAME_INTERVAL_DURATION)
+            mark_changed_views_then_compute_frame_wait(
+                &mut server,
+                viewing_client_id,
+                current_time
+            ),
+            expected_frame_wait
         );
     }
 }
@@ -681,8 +704,8 @@ fn list_frame_waits_after_input_event(
     server.handle_pty_output(pane_id, b"a");
 
     (
-        get_frame_wait(&server, client_id, current_time),
-        get_frame_wait(&server, other_client_id, current_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, current_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, other_client_id, current_time),
     )
 }
 
@@ -789,19 +812,22 @@ fn the_exit_of_a_tiled_pane_and_of_a_floating_pane_each_mark_every_view() {
 
     let _ = server.handle_child_exit(tiled_pane_id, koshi_core::process::ExitStatus::ExitCode(0));
     assert_eq!(
-        get_frame_wait(&server, client_id, first_exit_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, first_exit_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
 
     let second_exit_time = first_exit_time + DEFAULT_FRAME_INTERVAL_DURATION;
     server.push_due_frames(second_exit_time);
-    assert_eq!(get_frame_wait(&server, client_id, second_exit_time), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, second_exit_time),
+        None
+    );
     let _ = server.handle_child_exit(
         floating_pane_id,
         koshi_core::process::ExitStatus::ExitCode(0),
     );
     assert_eq!(
-        get_frame_wait(&server, client_id, second_exit_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, second_exit_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
 }
@@ -887,10 +913,13 @@ fn an_animated_pane_marks_the_view_that_shows_it_only_when_its_frame_changes() {
     server.push_due_frames(start_time);
 
     server.advance_due_pane_renders(start_time + Duration::from_millis(50));
-    assert_eq!(get_frame_wait(&server, client_id, start_time), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, start_time),
+        None
+    );
     server.advance_due_pane_renders(start_time + Duration::from_millis(100));
     assert_eq!(
-        get_frame_wait(&server, client_id, start_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, start_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
 
@@ -916,8 +945,14 @@ fn an_animation_that_starts_after_an_idle_stretch_shows_its_first_frame_for_its_
     server.push_due_frames(first_poll_time);
 
     assert_eq!(get_shown_rgba_bytes(&server, pane_id), RED_RGBA_BYTES);
-    // Starting the clock changes no pixel. No frame goes.
-    assert_eq!(take_queued_frames(&delivery_receiver).len(), 0);
+    // The new engine marks the view that shows the pane, so the frame at
+    // `first_poll_time` shows the red frame.
+    let first_animation_frames = take_queued_frames(&delivery_receiver);
+    assert_eq!(first_animation_frames.len(), 1);
+    assert_eq!(
+        get_framed_rgba_bytes(&first_animation_frames[0]),
+        RED_RGBA_BYTES
+    );
     // The red frame shows for its 100 ms, rounded up to the frame grid.
     assert_eq!(
         server.compute_next_render_wakeup(first_poll_time),

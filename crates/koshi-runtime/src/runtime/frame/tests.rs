@@ -1,11 +1,12 @@
 //! Tests for [`build_wire_frame`] and the placement preview builder: the
 //! session, tab, slot, floating pane slot, client and per-pane scalars come
 //! across unchanged; an image placement and its record travel apart; a large
-//! image's frames stay under the frame cap; and a preview pane's rows travel
-//! in the row encoding.
+//! image's frames stay under the frame cap; and a placement preview travels
+//! field for field.
 
 use std::sync::Arc;
 
+use koshi_core::geometry::SplitDirection;
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -15,18 +16,19 @@ use koshi_ipc::frame::MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT;
 use koshi_ipc::image_chunk::build_image_chunk_frame_head;
 use koshi_ipc::transport::MAX_FRAME_BYTE_COUNT;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::solver::StackHeader;
+use koshi_layout::placement::PlacementTabSizes;
+use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing, StackHeader};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot,
-    PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata,
-    TabSnapshot,
+    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView,
+    ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
     SixelBackground,
 };
-use koshi_terminal::grid::row_snapshot::RowSnapshot;
-use koshi_terminal::grid::state::{Cell, Grid, RowEnd};
+use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::state::CursorShape;
 use koshi_terminal::style::{Color, Style, UnderlineStyle};
 
@@ -154,7 +156,6 @@ pub(crate) fn build_render_snapshot(
         is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
-            session_revision: 17,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -227,7 +228,6 @@ pub(crate) fn build_render_snapshot(
         ],
         client_snapshot: ClientSnapshot {
             client_id,
-            client_revision: 19,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,
@@ -239,7 +239,9 @@ pub(crate) fn build_render_snapshot(
             last_applied_lock_command_id: Some(CommandId::new()),
             last_applied_floating_pane_move_command_id: Some(CommandId::new()),
             is_mouse_selection_enabled: true,
+            last_applied_placement_command_id: None,
         },
+        placement_preview: None,
     }
 }
 
@@ -302,41 +304,84 @@ fn an_oversized_image_frame_splits_into_bounded_wire_events() {
 }
 
 #[test]
-fn a_placement_window_carries_each_row_in_the_row_encoding() {
-    let mut grid = Grid::build_blank(2, 3, Style::default());
-    *grid
-        .get_cell_mut(0, 0)
-        .expect("the grid has a cell at (0, 0)") = Cell::from_character('a', 1, Style::default());
-    grid.set_row_end(1, RowEnd::Soft);
-    let grid_view = GridView::from_grid(&grid, 0);
-
-    let placement_window = build_wire_placement_window(&grid_view);
-
-    assert_eq!(placement_window.column_count, 3);
-    assert_eq!(
-        placement_window.encoded_rows,
+fn a_placement_preview_travels_field_for_field() {
+    let (source_pane_id, other_pane_id) = (PaneId::new(), PaneId::new());
+    let tab_id = TabId::new();
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
         vec![
-            EncodedRow {
-                encoded_row_bytes: grid_view.row_snapshots[0].get_encoded_row_bytes().to_vec(),
-            },
-            EncodedRow {
-                encoded_row_bytes: grid_view.row_snapshots[1].get_encoded_row_bytes().to_vec(),
-            },
-        ]
+            LayoutNode::Pane(source_pane_id),
+            LayoutNode::Pane(other_pane_id),
+        ],
+    ));
+    let tab_size = Size {
+        column_count: 40,
+        row_count: 10,
+    };
+    let pane_sizing = PaneSizing::default();
+    let layout_solve = solve_layout_with_sizing(
+        &layout_tree,
+        Rect::from_size_at_origin(tab_size),
+        pane_sizing,
     );
-    let decoded_rows: Vec<RowSnapshot> = placement_window
-        .encoded_rows
-        .into_iter()
-        .map(|encoded_row| {
-            RowSnapshot::from_encoded_row_bytes(encoded_row.encoded_row_bytes, 3)
-                .expect("an encoded row decodes at its own width")
-        })
-        .collect();
+    let tab_snapshot = TabSnapshot {
+        tab_id,
+        tab_name: String::from("work"),
+        pane_slots: list_pane_slots(&layout_solve),
+        tab_size,
+        stack_headers: layout_solve.stack_headers,
+        layout_mode: LayoutMode::Tiled,
+        is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
+        gap_cell_count: pane_sizing.gap_cell_count,
+    };
+    let insertion_tab_sizes = PlacementTabSizes {
+        destination_tab_size: Some(tab_size),
+        source_tab_size: None,
+    };
+    let placement_preview = PlacementPreview::Available(Box::new(PlacementSnapshot {
+        source_pane_id,
+        source: PlacementSource::Tiled(PlacementTabSnapshot {
+            layout_tree: layout_tree.clone(),
+            focus_history: vec![source_pane_id],
+            tab_snapshot: tab_snapshot.clone(),
+        }),
+        destination_tab_id: tab_id,
+        destination_tab_snapshot: None,
+        pane_sizing,
+        insertion_tab_sizes,
+        swap_tab_sizes: Vec::new(),
+    }));
+
+    let wire_placement_preview = build_wire_placement_preview(&placement_preview);
+
+    let expected_wire_placement_snapshot = WirePlacementSnapshot {
+        source_pane_id,
+        source: WirePlacementSource::Tiled(WirePlacementTabSnapshot {
+            layout_tree,
+            focus_history: vec![source_pane_id],
+            tab_snapshot: build_wire_tab(&tab_snapshot),
+        }),
+        destination_tab_id: tab_id,
+        destination_tab_snapshot: None,
+        pane_sizing: WirePlacementSizing::from(pane_sizing),
+        insertion_tab_sizes,
+        swap_tab_sizes: Vec::new(),
+    };
+    assert_eq!(expected_wire_placement_snapshot.validate(), Ok(()));
     assert_eq!(
-        decoded_rows[0].list_row_cells(),
-        grid_view.row_snapshots[0].list_row_cells()
+        wire_placement_preview,
+        WirePlacementPreview::Available(Box::new(expected_wire_placement_snapshot))
     );
-    assert_eq!(decoded_rows[1].get_row_metadata().row_end, RowEnd::Soft);
+    assert_eq!(
+        build_wire_placement_preview(&PlacementPreview::Unavailable {
+            source_pane_id,
+            destination_tab_id: tab_id,
+        }),
+        WirePlacementPreview::Unavailable {
+            source_pane_id,
+            destination_tab_id: tab_id,
+        }
+    );
 }
 
 #[test]
@@ -562,6 +607,9 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
     let empty_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
     render_snapshot.client_snapshot.active_tab_focused_pane_id = Some(empty_pane_id);
+    render_snapshot
+        .client_snapshot
+        .last_applied_placement_command_id = Some(CommandId::new());
 
     let painted_frame = build_wire_frame(&render_snapshot);
 
@@ -569,7 +617,6 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame.session_snapshot.session_id,
         render_snapshot.session_snapshot.session_id
     );
-    assert_eq!(painted_frame.session_snapshot.session_revision, 17);
     assert_eq!(
         painted_frame.session_snapshot.session_name,
         String::from("session")
@@ -670,7 +717,6 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame.client_snapshot,
         FrameClient {
             client_id: render_snapshot.client_snapshot.client_id,
-            client_revision: render_snapshot.client_snapshot.client_revision,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6
@@ -685,6 +731,9 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
             last_applied_floating_pane_move_command_id: render_snapshot
                 .client_snapshot
                 .last_applied_floating_pane_move_command_id,
+            last_applied_placement_command_id: render_snapshot
+                .client_snapshot
+                .last_applied_placement_command_id,
             is_mouse_selection_enabled: true,
         }
     );

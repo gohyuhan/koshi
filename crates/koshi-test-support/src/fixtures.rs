@@ -790,16 +790,13 @@ pub fn send_committed_request_through_halves(
         .expect("send the Commit");
 }
 
-/// The report that a client painted update `update_sequence` and shows no
-/// placement preview, under request id `update_sequence`.
+/// The report that a client painted update `update_sequence`, under request
+/// id `update_sequence`.
 #[must_use]
 pub fn build_paint_report_request(update_sequence: u64) -> IpcRequest {
     IpcRequest {
         request_id: update_sequence,
-        request_kind: IpcRequestKind::PaintedUpdate {
-            update_sequence,
-            shown_placement_request_id: None,
-        },
+        request_kind: IpcRequestKind::PaintedUpdate { update_sequence },
     }
 }
 

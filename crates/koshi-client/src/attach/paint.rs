@@ -16,13 +16,15 @@
 //! keeps complete records by their connection-local content identity and
 //! rebuilds the newest snapshot after all required image chunks finish.
 //!
-//! A placement preview carries each visible pane's rows in the row encoding
-//! ([`koshi_terminal::row_encoding`]). `ImageCache` decodes them once, when it
-//! adopts the preview, and refuses a row that does not decode or is not as
-//! wide as its window.
+//! A painted update's placement preview
+//! ([`PanePlacementPreview`](koshi_ipc::placement::PanePlacementPreview))
+//! becomes the renderer's [`PlacementPreview`] once: `ImageCache` keeps the
+//! built preview while updates hold the same preview, and every snapshot built
+//! from them shares it. The panes the preview draws carry their content in the
+//! update's own panes.
 //!
-//! The session name, the active tab's name, every tab-bar entry's name and
-//! every pane title pass through
+//! The session name, every tab's name, every tab-bar entry's name and every
+//! pane title pass through
 //! [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text). This
 //! process paints those four into its own terminal and puts two of them inside
 //! an `OSC 0` window-title sequence. A pane's cells are not
@@ -33,72 +35,63 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use koshi_core::ids::PaneId;
-use koshi_core::lock::LockMode;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::frame::{
     FrameGraphicsProtocol, FrameImageAction, FrameImageDimension, FrameImageDisplay,
     FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
-    FrameSixelBackground, FrameSlot, FrameTabMetadata, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
+    FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
     MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_ipc::image_chunk::ImageChunkFrame;
-use koshi_ipc::placement::{PanePlacementSnapshot, PanePlacementSource, PlacementWindow};
+use koshi_ipc::placement::{PanePlacementPreview, PanePlacementSource, PanePlacementTabSnapshot};
+use koshi_layout::solver::PaneSizing;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPaneSlot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
-    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementSource,
-    PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
-    TabMetadata, TabSnapshot,
+    ClientSnapshot, FloatingPaneSlot, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
+    PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_runtime::runtime::painted_update::{ReceivedPaintedFrame, ReceivedPaneView};
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
     SixelBackground,
 };
-use koshi_terminal::grid::row_snapshot::RowSnapshot;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 /// Turn one painted update read off the event stream into the snapshot the
-/// renderer draws, with every image placement marked unavailable.
+/// renderer draws, with every image placement marked unavailable and its
+/// placement preview built anew (`build_placement_preview`).
 ///
-/// The session name, the active tab's name, every tab-bar entry's name and
-/// every pane title are filtered by [`sanitize_reported_text`]. A frame naming
-/// its session `"dev\u{7}"` reads back naming it `"dev"`.
+/// The session name, every tab's name, every tab-bar entry's name and every
+/// pane title are filtered by [`sanitize_reported_text`]. A frame naming its
+/// session `"dev\u{7}"` reads back naming it `"dev"`.
 #[must_use]
 pub fn build_render_snapshot(received_painted_frame: &ReceivedPaintedFrame) -> RenderSnapshot {
-    build_render_snapshot_with_images(received_painted_frame, &HashMap::new())
+    let placement_preview = received_painted_frame
+        .placement_preview
+        .as_deref()
+        .map(|placement_preview| Arc::new(build_placement_preview(placement_preview)));
+    build_render_snapshot_with_images(received_painted_frame, &HashMap::new(), placement_preview)
 }
 
 /// Turn one painted update into a render snapshot using image records already
-/// received. Pane `n` of the JSON part takes pane view `n`.
+/// received, with `placement_preview` as its placement preview. Pane `n` of
+/// the JSON part takes pane view `n`.
 fn build_render_snapshot_with_images(
     received_painted_frame: &ReceivedPaintedFrame,
     image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
+    placement_preview: Option<Arc<PlacementPreview>>,
 ) -> RenderSnapshot {
     let painted_frame = &received_painted_frame.painted_frame;
-    let active_tab_snapshot = &painted_frame.session_snapshot.active_tab_snapshot;
     RenderSnapshot {
         is_recovery_notice_visible: painted_frame.is_recovery_notice_visible,
         session_snapshot: SessionSnapshot {
             session_id: painted_frame.session_snapshot.session_id,
-            session_revision: painted_frame.session_snapshot.session_revision,
             session_name: sanitize_reported_text(&painted_frame.session_snapshot.session_name),
-            active_tab_snapshot: TabSnapshot {
-                tab_id: active_tab_snapshot.tab_id,
-                tab_name: sanitize_reported_text(&active_tab_snapshot.tab_name),
-                pane_slots: active_tab_snapshot
-                    .pane_slots
-                    .iter()
-                    .map(build_pane_slot)
-                    .collect(),
-                tab_size: active_tab_snapshot.tab_size,
-                stack_headers: active_tab_snapshot.stack_headers.clone(),
-                layout_mode: active_tab_snapshot.layout_mode,
-                is_every_pane_suppressed: active_tab_snapshot.is_every_pane_suppressed,
-                gap_cell_count: active_tab_snapshot.gap_cell_count,
-            },
+            active_tab_snapshot: build_tab_snapshot(
+                &painted_frame.session_snapshot.active_tab_snapshot,
+            ),
             tabs_metadata: painted_frame
                 .session_snapshot
                 .tab_snapshots
@@ -128,7 +121,6 @@ fn build_render_snapshot_with_images(
             .collect(),
         client_snapshot: ClientSnapshot {
             client_id: painted_frame.client_snapshot.client_id,
-            client_revision: painted_frame.client_snapshot.client_revision,
             viewport_size: painted_frame.client_snapshot.viewport_size,
             active_tab_id: painted_frame.client_snapshot.active_tab_id,
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,
@@ -140,104 +132,81 @@ fn build_render_snapshot_with_images(
             last_applied_floating_pane_move_command_id: painted_frame
                 .client_snapshot
                 .last_applied_floating_pane_move_command_id,
+            last_applied_placement_command_id: painted_frame
+                .client_snapshot
+                .last_applied_placement_command_id,
             is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
         },
+        placement_preview,
     }
 }
 
-/// Build the renderer-owned placement preview from the bounded wire snapshot
-/// and the rows `held_placement_snapshot` decoded for each of its panes.
-fn build_placement_render_snapshot(
-    held_placement_snapshot: &HeldPlacementSnapshot,
-    image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
-) -> Option<PlacementSnapshot> {
-    let placement_snapshot = &held_placement_snapshot.placement_snapshot;
-    let build_pane_snapshot = |pane_snapshot: &koshi_ipc::placement::PanePlacementPaneSnapshot| {
-        let image_placement_snapshots = pane_snapshot
-            .image_placement_snapshots
-            .iter()
-            .map(|image_placement| {
-                build_image_placement_snapshot(image_placement, image_record_by_content_id)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(PlacementPaneSnapshot {
-            pane_id: pane_snapshot.pane_id,
-            terminal_grid_view: held_placement_snapshot
-                .grid_view_by_pane_id
-                .get(&pane_snapshot.pane_id)
-                .cloned(),
-            image_placement_snapshots,
-        })
-    };
-    let build_tab_snapshot = |tab_snapshot: &koshi_ipc::placement::PanePlacementTabSnapshot| {
-        let pane_snapshots = tab_snapshot
-            .pane_snapshots
-            .iter()
-            .map(build_pane_snapshot)
-            .collect::<Option<Vec<_>>>()?;
-        Some(PlacementTabSnapshot {
-            layout_tree: tab_snapshot.layout_tree.clone(),
-            tab_snapshot: TabSnapshot {
-                tab_id: tab_snapshot.tab_id,
-                tab_name: sanitize_reported_text(&tab_snapshot.tab_name),
-                pane_slots: tab_snapshot
-                    .pane_slots
-                    .iter()
-                    .map(build_pane_slot)
-                    .collect(),
-                tab_size: tab_snapshot.tab_size,
-                stack_headers: tab_snapshot.stack_headers.clone(),
-                layout_mode: tab_snapshot.layout_mode,
-                is_every_pane_suppressed: tab_snapshot.is_every_pane_suppressed,
-                gap_cell_count: tab_snapshot.gap_cell_count,
-            },
-            pane_snapshots,
-        })
-    };
-    let source = match &placement_snapshot.source {
-        PanePlacementSource::Tiled(source_tab_snapshot) => {
-            PlacementSource::Tiled(build_tab_snapshot(source_tab_snapshot)?)
-        }
-        PanePlacementSource::Floating(source_pane_snapshot) => {
-            PlacementSource::Floating(build_pane_snapshot(source_pane_snapshot)?)
-        }
-    };
-    let destination_tab_snapshot = match placement_snapshot.destination_tab_snapshot.as_ref() {
-        Some(destination_tab_snapshot) => Some(build_tab_snapshot(destination_tab_snapshot)?),
-        None => None,
-    };
-    Some(PlacementSnapshot {
-        session_id: placement_snapshot.session_id,
-        source_pane_id: placement_snapshot.source_pane_id,
-        source,
-        destination_tab_id: placement_snapshot.destination_tab_id,
-        session_placement_revision: placement_snapshot.session_placement_revision,
-        client_placement_revision: placement_snapshot.client_placement_revision,
-        destination_tab_snapshot,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: ClientSnapshot {
-                client_id: placement_snapshot.client_snapshot.client_id,
-                client_revision: placement_snapshot.client_placement_revision,
-                viewport_size: placement_snapshot.client_snapshot.viewport_size,
-                active_tab_id: placement_snapshot.client_snapshot.active_tab_id,
-                focused_pane_id: placement_snapshot.client_snapshot.focused_pane_id,
-                active_tab_focused_pane_id: None,
-                lock_mode: LockMode::Normal,
-                last_applied_lock_command_id: None,
-                last_applied_floating_pane_move_command_id: None,
-                is_mouse_selection_enabled: false,
-            },
-            reported_pane_area: placement_snapshot.client_snapshot.pane_area,
-        },
-        pane_sizing: koshi_layout::solver::PaneSizing::from(placement_snapshot.pane_sizing),
-    })
+/// One solved tab, as the renderer reads it. The name is filtered by
+/// [`sanitize_reported_text`].
+fn build_tab_snapshot(frame_tab: &FrameTab) -> TabSnapshot {
+    TabSnapshot {
+        tab_id: frame_tab.tab_id,
+        tab_name: sanitize_reported_text(&frame_tab.tab_name),
+        pane_slots: frame_tab.pane_slots.iter().map(build_pane_slot).collect(),
+        tab_size: frame_tab.tab_size,
+        stack_headers: frame_tab.stack_headers.clone(),
+        layout_mode: frame_tab.layout_mode,
+        is_every_pane_suppressed: frame_tab.is_every_pane_suppressed,
+        gap_cell_count: frame_tab.gap_cell_count,
+    }
 }
 
-/// Image records retained by one attached client connection.
+/// One placement preview as the renderer reads it: the same source pane,
+/// destination tab, trees, focus histories, sizing and tab sizes, with each
+/// tab built by [`build_tab_snapshot`].
+fn build_placement_preview(placement_preview: &PanePlacementPreview) -> PlacementPreview {
+    let placement_snapshot = match placement_preview {
+        PanePlacementPreview::Available(placement_snapshot) => placement_snapshot,
+        PanePlacementPreview::Unavailable {
+            source_pane_id,
+            destination_tab_id,
+        } => {
+            return PlacementPreview::Unavailable {
+                source_pane_id: *source_pane_id,
+                destination_tab_id: *destination_tab_id,
+            };
+        }
+    };
+    PlacementPreview::Available(Box::new(PlacementSnapshot {
+        source_pane_id: placement_snapshot.source_pane_id,
+        source: match &placement_snapshot.source {
+            PanePlacementSource::Tiled(source_tab_snapshot) => {
+                PlacementSource::Tiled(build_placement_tab_snapshot(source_tab_snapshot))
+            }
+            PanePlacementSource::Floating => PlacementSource::Floating,
+        },
+        destination_tab_id: placement_snapshot.destination_tab_id,
+        destination_tab_snapshot: placement_snapshot
+            .destination_tab_snapshot
+            .as_ref()
+            .map(build_placement_tab_snapshot),
+        pane_sizing: PaneSizing::from(placement_snapshot.pane_sizing),
+        insertion_tab_sizes: placement_snapshot.insertion_tab_sizes,
+        swap_tab_sizes: placement_snapshot.swap_tab_sizes.clone(),
+    }))
+}
+
+/// One tab of a placement preview, as the renderer reads it.
+fn build_placement_tab_snapshot(
+    placement_tab_snapshot: &PanePlacementTabSnapshot,
+) -> PlacementTabSnapshot {
+    PlacementTabSnapshot {
+        layout_tree: placement_tab_snapshot.layout_tree.clone(),
+        focus_history: placement_tab_snapshot.focus_history.clone(),
+        tab_snapshot: build_tab_snapshot(&placement_tab_snapshot.tab_snapshot),
+    }
+}
+
+/// Image records retained by one attached client connection, with the newest
+/// painted update and its placement preview as the renderer reads it.
 ///
 /// Each complete record stays until an `ImageContentReleased` names it or the
-/// cache is cleared. A painted update or a placement preview keeps no record
-/// and drops none.
+/// cache is cleared. A painted update keeps no record and drops none.
 pub(crate) struct ImageCache {
     /// Complete records, keyed by image content identity.
     image_record_by_content_id: HashMap<u64, Arc<ImageRecord>>,
@@ -245,26 +214,24 @@ pub(crate) struct ImageCache {
     retained_image_byte_count: u64,
     /// The newest painted update, retained while records arrive.
     painted_frame: Option<Box<ReceivedPaintedFrame>>,
-    /// The newest placement preview, retained while its records arrive.
-    placement_snapshot: Option<Box<HeldPlacementSnapshot>>,
+    /// The placement preview of the newest painted update, or `None` when it
+    /// holds none.
+    placement_preview: Option<HeldPlacementPreview>,
     /// Record identities the newest painted frame still needs.
     missing_painted_image_content_ids: HashSet<u64>,
-    /// Record identities the newest placement preview still needs.
-    missing_placement_image_content_ids: HashSet<u64>,
-    /// Image transfers accepted since the newest painted update or placement
-    /// preview, or since [`ImageCache::clear_image_transfer_count`].
+    /// Image transfers accepted since the newest painted update.
     image_transfer_count: usize,
     /// The record whose chunks are currently arriving.
     pending_image_transfer: Option<PendingImageTransfer>,
 }
 
-/// A placement preview as the cache holds it: the request it answered, the
-/// wire snapshot, and the rows of each pane that sent rows, decoded once. A
-/// pane id appears at most once in a valid preview.
-struct HeldPlacementSnapshot {
-    request_id: u64,
-    placement_snapshot: PanePlacementSnapshot,
-    grid_view_by_pane_id: HashMap<PaneId, GridView>,
+/// The placement preview of one painted update, as it arrived and as the
+/// renderer reads it ([`build_placement_preview`]).
+struct HeldPlacementPreview {
+    /// The preview the painted update holds.
+    received_placement_preview: Arc<PanePlacementPreview>,
+    /// `received_placement_preview` as the renderer reads it.
+    placement_preview: Arc<PlacementPreview>,
 }
 
 /// One image transfer and the bytes received for it.
@@ -327,6 +294,9 @@ pub(crate) enum ImageAssemblyError {
     InvalidTransferLength,
     /// A placement or its complete record cannot become valid render state.
     InvalidPlacement,
+    /// The painted update's placement preview fails
+    /// [`PanePlacementSnapshot::validate`](koshi_ipc::placement::PanePlacementSnapshot::validate).
+    InvalidPlacementPreview,
 }
 
 impl fmt::Display for ImageAssemblyError {
@@ -390,6 +360,9 @@ impl fmt::Display for ImageAssemblyError {
             Self::InvalidPlacement => {
                 formatter.write_str("image transfer cannot become a render placement")
             }
+            Self::InvalidPlacementPreview => {
+                formatter.write_str("placement preview does not describe valid layouts")
+            }
         }
     }
 }
@@ -403,36 +376,21 @@ impl ImageCache {
             image_record_by_content_id: HashMap::new(),
             retained_image_byte_count: 0,
             painted_frame: None,
-            placement_snapshot: None,
+            placement_preview: None,
             missing_painted_image_content_ids: HashSet::new(),
-            missing_placement_image_content_ids: HashSet::new(),
             image_transfer_count: 0,
             pending_image_transfer: None,
         }
     }
 
-    /// Set the count of image transfers since the last painted update or
-    /// placement preview to `0`, as adopting one does.
-    pub(crate) fn clear_image_transfer_count(&mut self) {
-        self.image_transfer_count = 0;
-    }
-
-    /// The request whose placement preview the cache holds, or `None` when it
-    /// holds no preview.
-    pub(crate) fn find_placement_request_id(&self) -> Option<u64> {
-        self.placement_snapshot
-            .as_ref()
-            .map(|held_placement_snapshot| held_placement_snapshot.request_id)
-    }
-
-    /// Discard every connection-local image record and incomplete transfer.
+    /// Discard every connection-local image record and incomplete transfer,
+    /// and the newest painted update with its placement preview.
     pub(crate) fn clear_image_cache(&mut self) {
         self.image_record_by_content_id.clear();
         self.retained_image_byte_count = 0;
         self.painted_frame = None;
-        self.placement_snapshot = None;
+        self.placement_preview = None;
         self.missing_painted_image_content_ids.clear();
-        self.missing_placement_image_content_ids.clear();
         self.image_transfer_count = 0;
         self.pending_image_transfer = None;
     }
@@ -442,8 +400,8 @@ impl ImageCache {
     /// # Errors
     /// [`ImageAssemblyError::UnknownRelease`] for an identity the cache does
     /// not hold, and [`ImageAssemblyError::ReleasedImageInUse`] for one that
-    /// an available placement of the newest painted frame or of the held
-    /// placement preview names. The identities before it are dropped.
+    /// an available placement of the newest painted frame names. The
+    /// identities before it are dropped.
     pub(crate) fn release_image_contents(
         &mut self,
         image_content_ids: &[u64],
@@ -473,11 +431,30 @@ impl ImageCache {
     }
 
     /// Adopt a painted update and return its render snapshot when every
-    /// required image is complete.
+    /// required image is complete. A placement preview the update holds is
+    /// built for the renderer ([`build_placement_preview`]) unless the cache
+    /// already built that same preview `Arc`.
+    ///
+    /// # Errors
+    /// [`ImageAssemblyError::DuplicatePlacement`] for two image placements of
+    /// one pane with one identity, [`ImageAssemblyError::InvalidPlacement`] for
+    /// an image placement no record can fill,
+    /// [`ImageAssemblyError::InvalidPlacementPreview`] for an available
+    /// placement preview that fails
+    /// [`PanePlacementSnapshot::validate`](koshi_ipc::placement::PanePlacementSnapshot::validate),
+    /// and [`ImageAssemblyError::TransferCountExceedsFrame`] or
+    /// [`ImageAssemblyError::ByteLengthDoesNotFit`] when the placements cannot
+    /// be counted or held.
     pub(crate) fn adopt_painted_frame(
         &mut self,
         received_painted_frame: Box<ReceivedPaintedFrame>,
     ) -> Result<Option<RenderSnapshot>, ImageAssemblyError> {
+        let placement_preview = match received_painted_frame.placement_preview.as_ref() {
+            Some(received_placement_preview) => {
+                Some(self.build_held_placement_preview(received_placement_preview)?)
+            }
+            None => None,
+        };
         let painted_frame = &received_painted_frame.painted_frame;
         let placement_count = painted_frame
             .pane_snapshots
@@ -520,11 +497,52 @@ impl ImageCache {
         self.pending_image_transfer = None;
         self.image_transfer_count = 0;
         self.painted_frame = Some(received_painted_frame);
+        self.placement_preview = placement_preview;
         if self.missing_painted_image_content_ids.is_empty() {
             Ok(self.build_render_snapshot())
         } else {
             Ok(None)
         }
+    }
+
+    /// The renderer's preview of `received_placement_preview`: the one the
+    /// cache holds when it holds the same `Arc`, else one built anew
+    /// ([`build_placement_preview`]).
+    ///
+    /// # Errors
+    /// [`ImageAssemblyError::InvalidPlacementPreview`] for an available
+    /// preview that fails
+    /// [`PanePlacementSnapshot::validate`](koshi_ipc::placement::PanePlacementSnapshot::validate).
+    fn build_held_placement_preview(
+        &self,
+        received_placement_preview: &Arc<PanePlacementPreview>,
+    ) -> Result<HeldPlacementPreview, ImageAssemblyError> {
+        if let Some(held_placement_preview) =
+            self.placement_preview
+                .as_ref()
+                .filter(|held_placement_preview| {
+                    Arc::ptr_eq(
+                        &held_placement_preview.received_placement_preview,
+                        received_placement_preview,
+                    )
+                })
+        {
+            return Ok(HeldPlacementPreview {
+                received_placement_preview: Arc::clone(received_placement_preview),
+                placement_preview: Arc::clone(&held_placement_preview.placement_preview),
+            });
+        }
+        if let PanePlacementPreview::Available(placement_snapshot) =
+            received_placement_preview.as_ref()
+        {
+            placement_snapshot
+                .validate()
+                .map_err(|_| ImageAssemblyError::InvalidPlacementPreview)?;
+        }
+        Ok(HeldPlacementPreview {
+            received_placement_preview: Arc::clone(received_placement_preview),
+            placement_preview: Arc::new(build_placement_preview(received_placement_preview)),
+        })
     }
 
     /// Return the bytes of decoded pixels the cache holds: every retained
@@ -540,86 +558,15 @@ impl ImageCache {
             .saturating_add(pending_image_byte_count)
     }
 
-    /// Drop the retained placement preview while keeping the newest painted
-    /// frame and every record.
-    pub(crate) fn clear_placement_snapshot(&mut self) {
-        self.placement_snapshot = None;
-        self.missing_placement_image_content_ids.clear();
-    }
-
-    /// Build the renderer preview from the newest retained wire snapshot.
-    pub(crate) fn build_placement_render_snapshot(&self) -> Option<PlacementSnapshot> {
-        self.placement_snapshot
-            .as_deref()
-            .and_then(|held_placement_snapshot| {
-                build_placement_render_snapshot(
-                    held_placement_snapshot,
-                    &self.image_record_by_content_id,
-                )
-            })
-    }
-
-    /// Retain the placement preview that answers request `request_id` while
-    /// its image records arrive, with each pane's rows decoded.
-    ///
-    /// # Errors
-    /// [`ImageAssemblyError::InvalidPlacement`] for a preview that fails
-    /// [`PanePlacementSnapshot::validate`], holds a row that does not decode or
-    /// is not as wide as its window, or names an image placement no record
-    /// can fill.
-    pub(crate) fn adopt_placement_snapshot(
-        &mut self,
-        request_id: u64,
-        placement_snapshot: Box<PanePlacementSnapshot>,
-    ) -> Result<(), ImageAssemblyError> {
-        placement_snapshot
-            .validate()
-            .map_err(|_| ImageAssemblyError::InvalidPlacement)?;
-        let mut grid_view_by_pane_id = HashMap::new();
-        for pane_snapshot in placement_snapshot.list_pane_snapshots() {
-            if let Some(terminal_window) = &pane_snapshot.terminal_window {
-                grid_view_by_pane_id.insert(
-                    pane_snapshot.pane_id,
-                    decode_placement_grid_view(terminal_window)?,
-                );
-            }
-        }
-        let mut missing_image_content_ids = HashSet::new();
-        for image_placement in placement_snapshot.list_image_placements() {
-            let is_placement_valid = build_image_placement_snapshot_from_record(
-                image_placement,
-                self.image_record_by_content_id
-                    .get(&image_placement.image_content_id),
-            )
-            .is_some();
-            if !is_placement_valid {
-                return Err(ImageAssemblyError::InvalidPlacement);
-            }
-            if self.is_image_record_missing(image_placement) {
-                missing_image_content_ids.insert(image_placement.image_content_id);
-            }
-        }
-        self.placement_snapshot = Some(Box::new(HeldPlacementSnapshot {
-            request_id,
-            placement_snapshot: *placement_snapshot,
-            grid_view_by_pane_id,
-        }));
-        self.missing_placement_image_content_ids = missing_image_content_ids;
-        self.pending_image_transfer = None;
-        self.image_transfer_count = 0;
-        Ok(())
-    }
-
     /// Start receiving one record. The cache keeps every record the session
-    /// sends, whether or not the newest painted frame or placement preview
-    /// names it.
+    /// sends, whether or not the newest painted frame names it.
     ///
     /// # Errors
     /// [`ImageAssemblyError::TransferAlreadyOpen`] while another transfer is
     /// open, [`ImageAssemblyError::TransferAlreadyComplete`] for a held
     /// identity, [`ImageAssemblyError::TransferCountExceedsFrame`] past
     /// [`MAX_FRAME_IMAGE_TRANSFER_COUNT`] transfers since the last painted
-    /// update or placement preview,
+    /// update,
     /// [`ImageAssemblyError::InvalidTransferLength`] for a byte count other
     /// than four per pixel, [`ImageAssemblyError::TransferBytesExceedFrame`]
     /// when the held records and this one pass
@@ -758,8 +705,6 @@ impl ImageCache {
         let has_completed_painted_record = self
             .missing_painted_image_content_ids
             .remove(&image_content_id);
-        self.missing_placement_image_content_ids
-            .remove(&image_content_id);
         if !has_completed_painted_record || !self.missing_painted_image_content_ids.is_empty() {
             return Ok(None);
         }
@@ -767,7 +712,7 @@ impl ImageCache {
     }
 
     /// Check a complete record against every available placement of the
-    /// newest painted frame and of the held placement preview that names it.
+    /// newest painted frame that names it.
     fn validate_image_record(
         &self,
         image_content_id: u64,
@@ -789,23 +734,12 @@ impl ImageCache {
         }
     }
 
-    /// Every image placement of the newest painted frame, then every image
-    /// placement of the held placement preview.
+    /// Every image placement of the newest painted frame.
     fn list_held_image_placements(&self) -> impl Iterator<Item = &FrameImagePlacement> {
-        let painted_image_placements = self
-            .painted_frame
+        self.painted_frame
             .iter()
             .flat_map(|received_painted_frame| &received_painted_frame.painted_frame.pane_snapshots)
-            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots);
-        let preview_image_placements =
-            self.placement_snapshot
-                .iter()
-                .flat_map(|held_placement_snapshot| {
-                    held_placement_snapshot
-                        .placement_snapshot
-                        .list_image_placements()
-                });
-        painted_image_placements.chain(preview_image_placements)
+            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
     }
 
     /// Whether `image_placement` is available and the cache holds no record of
@@ -817,13 +751,19 @@ impl ImageCache {
                 .contains_key(&image_placement.image_content_id)
     }
 
-    /// Rebuild the newest painted update with each available cached record,
-    /// or `None` when the cache holds no painted update.
+    /// Rebuild the newest painted update with each available cached record and
+    /// the held placement preview, or `None` when the cache holds no painted
+    /// update.
     fn build_render_snapshot(&self) -> Option<RenderSnapshot> {
         self.painted_frame.as_deref().map(|received_painted_frame| {
             build_render_snapshot_with_images(
                 received_painted_frame,
                 &self.image_record_by_content_id,
+                self.placement_preview
+                    .as_ref()
+                    .map(|held_placement_preview| {
+                        Arc::clone(&held_placement_preview.placement_preview)
+                    }),
             )
         })
     }
@@ -1053,32 +993,4 @@ fn build_image_display(frame_image_display: &FrameImageDisplay) -> ImageDisplay 
         cell_pixel_offset_y: frame_image_display.cell_pixel_offset_y,
         should_move_cursor: frame_image_display.should_move_cursor,
     }
-}
-
-/// The rows of one pane of a placement preview, decoded. A preview view is
-/// never scrolled back.
-///
-/// # Errors
-/// [`ImageAssemblyError::InvalidPlacement`] for a row that does not decode,
-/// or is not `terminal_window.column_count` cells wide.
-fn decode_placement_grid_view(
-    terminal_window: &PlacementWindow,
-) -> Result<GridView, ImageAssemblyError> {
-    let row_snapshots = terminal_window
-        .encoded_rows
-        .iter()
-        .map(|encoded_row| {
-            RowSnapshot::from_encoded_row_bytes(
-                encoded_row.encoded_row_bytes.clone(),
-                terminal_window.column_count,
-            )
-            .map(Arc::new)
-            .map_err(|_| ImageAssemblyError::InvalidPlacement)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(GridView {
-        row_snapshots,
-        column_count: terminal_window.column_count,
-        view_row_offset: 0,
-    })
 }

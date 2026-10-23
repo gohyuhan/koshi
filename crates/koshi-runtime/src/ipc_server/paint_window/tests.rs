@@ -50,7 +50,6 @@ impl WindowDriver {
         self.paint_window
             .record_update_painted(PaintedUpdateReport {
                 update_sequence,
-                shown_placement_request_id: None,
                 reported_at: self.clock,
             })
             .expect("the update was sent");
@@ -117,7 +116,6 @@ fn before_the_first_paint_report_one_update_waits_for_a_report_at_most() {
     paint_window
         .record_update_painted(PaintedUpdateReport {
             update_sequence: 1,
-            shown_placement_request_id: None,
             reported_at: sent_at + Duration::from_millis(10),
         })
         .expect("update 1 was sent");
@@ -284,7 +282,6 @@ fn a_report_of_an_update_sent_before_the_last_change_is_no_measurement() {
         paint_window
             .record_update_painted(PaintedUpdateReport {
                 update_sequence,
-                shown_placement_request_id: None,
                 reported_at: sent_at + Duration::from_millis(50),
             })
             .expect("the update was sent");
@@ -296,7 +293,6 @@ fn a_report_of_an_update_sent_before_the_last_change_is_no_measurement() {
         paint_window
             .record_update_painted(PaintedUpdateReport {
                 update_sequence,
-                shown_placement_request_id: None,
                 reported_at: sent_at + Duration::from_millis(60),
             })
             .expect("the update was sent");
@@ -311,7 +307,6 @@ fn a_report_of_an_update_sent_before_the_last_change_is_no_measurement() {
     paint_window
         .record_update_painted(PaintedUpdateReport {
             update_sequence: 6,
-            shown_placement_request_id: None,
             reported_at: sent_at + Duration::from_millis(40),
         })
         .expect("update 6 was sent");
@@ -443,7 +438,6 @@ fn a_report_of_an_unsent_update_is_refused_and_changes_nothing() {
     assert_eq!(
         paint_window.record_update_painted(PaintedUpdateReport {
             update_sequence: 1,
-            shown_placement_request_id: None,
             reported_at: sent_at,
         }),
         Err(PaintReportError::UnsentUpdate {
@@ -456,7 +450,6 @@ fn a_report_of_an_unsent_update_is_refused_and_changes_nothing() {
     assert_eq!(
         paint_window.record_update_painted(PaintedUpdateReport {
             update_sequence: 2,
-            shown_placement_request_id: None,
             reported_at: sent_at,
         }),
         Err(PaintReportError::UnsentUpdate {
@@ -487,7 +480,6 @@ fn a_report_frees_its_update_and_every_earlier_one_and_an_older_report_changes_n
     paint_window
         .record_update_painted(PaintedUpdateReport {
             update_sequence: 2,
-            shown_placement_request_id: None,
             reported_at: sent_at + Duration::from_millis(20),
         })
         .expect("update 2 was sent");
@@ -499,7 +491,6 @@ fn a_report_frees_its_update_and_every_earlier_one_and_an_older_report_changes_n
         paint_window
             .record_update_painted(PaintedUpdateReport {
                 update_sequence,
-                shown_placement_request_id: None,
                 reported_at: sent_at + Duration::from_millis(30),
             })
             .expect("the update was sent");
@@ -637,7 +628,6 @@ fn run_link_simulation(link_simulation: &LinkSimulation) -> SimulationOutcome {
                 paint_window
                     .record_update_painted(PaintedUpdateReport {
                         update_sequence,
-                        shown_placement_request_id: None,
                         reported_at: clock_start + event_at,
                     })
                     .expect("the client reports updates that were sent");

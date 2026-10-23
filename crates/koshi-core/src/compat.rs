@@ -72,12 +72,24 @@ pub struct Surface {
 ///   swap or split target with no `Tiled` wrapper, and had no `Stack` and no
 ///   `Floating` target. A `PlacePane` command's `source_pane_id` is `null` for
 ///   the pane the command source acts on; 4 required a pane id.
-/// - A placement preview carries `source`: `{"Tiled": …}` with the source
-///   tab's snapshot, or `{"Floating": …}` with the floating source pane's own
-///   snapshot. 4 carried `source_tab_id` and `source_tab_snapshot`.
-/// - A frame's two revisions, an image placement's `is_available`, a close
-///   command's `should_kill_process_tree`, and a terminal-too-small event's
-///   cause are required. 4 read a message without them.
+/// - A client names the placement target it previews with the
+///   `SetPanePlacementPreview` request, and with the `placement_preview_target`
+///   of its `Attach`, which 4 has not. The target's preview rides that
+///   client's painted updates: a part whose `part_flags` set bit 2 carries the
+///   preview's JSON after the frame's JSON, and a byte count of `0` drops the
+///   preview. A preview carries `source`: `{"Tiled": …}` with the source tab's
+///   tree and solved slots, or `"Floating"`. It carries no pane content: the
+///   frame's own panes carry it. The `ConfirmPanePlacement` request runs a
+///   tiled placement only when the destination tab's solve for its client
+///   equals the request's `expected_placed_tab_layout`. 4 read a preview with
+///   the `ReadPanePlacement` request and answered it with a
+///   `PanePlacementSnapshot` or `PanePlacementRefused` event that carried
+///   `source_tab_id`, `source_tab_snapshot` and each pane's rows; 5 has none
+///   of them. A `PaintedUpdate` request carries only `update_sequence`.
+/// - A frame carries no session or client revision; 4 carried both. An image
+///   placement's `is_available`, a close command's
+///   `should_kill_process_tree`, and a terminal-too-small event's cause are
+///   required. 4 read a message without them.
 /// - A frame carries `floating_pane_slots`: the floating panes its client
 ///   shows, back to front, each with its outer rect, content rect and pin
 ///   state. It also carries `floating_pane_ids`: every floating pane of the
@@ -87,7 +99,10 @@ pub struct Surface {
 ///   command that the client's own connection sent and the session ran, or
 ///   `null`. It also carries `last_applied_floating_pane_move_command_id`: the
 ///   last floating pane move that the client's mouse or key binding sent and
-///   the session ran, or `null`. It also carries `active_tab_focused_pane_id`:
+///   the session ran, or `null`. It also carries
+///   `last_applied_placement_command_id`: the last pane placement that the
+///   client confirmed and the session ran, or `null`. It also carries
+///   `active_tab_focused_pane_id`:
 ///   the client's focused pane in its active tab, also while a floating pane
 ///   takes its input, or `null`. 4 has none of these fields.
 /// - The `MoveFloatingPane`, `SetPanePinned`, `SetPaneMinimized` and
@@ -266,9 +281,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// writes 5: format 5 adds each session's floating panes, each client's view of
 /// them, each tab's solved tab size, the views detached clients left with the
 /// resume-token hashes, and the process IDs of the children closed panes left
-/// running. It drops each pane record's lifecycle and close policy. Formats 4
-/// and 5 use the declared field names in the saved records. Formats 1 through
-/// 4 pass through the ordered migration steps before they are restored.
+/// running. It turns each client's focused pane in each tab into a one-pane
+/// focus history, and drops each pane record's lifecycle and close policy.
+/// Formats 4 and 5 use the declared field names in the saved records. Formats 1
+/// through 4 pass through the ordered migration steps before they are restored.
 ///
 /// The build being installed states which format it writes. The running server
 /// reads that answer before it commits to the swap.

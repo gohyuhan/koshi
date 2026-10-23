@@ -398,8 +398,11 @@ are running; name one with --session <name-or-id>`.
 only that viewer's screen. Example: terminals `client-1a2b…` and `client-3c4d…`
 both watch the same tab. `koshi toggle-pane-fullscreen --client client-3c4d…`
 zooms the focused pane on `client-3c4d…` alone, and `client-1a2b…` keeps its
-panes tiled. A session started by koshi 0.3.0 cannot carry the named viewer, so
-against one the command refuses instead of zooming the wrong viewer.
+panes tiled. A pane command typed inside a pane of the same session still acts
+on that pane: `koshi pin-pane --client client-3c4d…` typed in floating pane
+`htop` pins `htop` on `client-3c4d…`, whatever pane `client-3c4d…` focuses. A
+session started by koshi 0.3.0 cannot carry the named viewer, so against one
+the command refuses instead of zooming the wrong viewer.
 
 Session and tab flags that say `NAME_OR_ID` accept either their generated name
 or printed id. A value that reads as an id is always the id — it never falls
@@ -669,16 +672,22 @@ its top-left cell at column 4, row 2.
 
 `koshi undock-pane` floats a tiled or stacked pane up where the client draws
 it: the pane keeps its top-left cell and its size, each axis cut to 90% as
-above. `--x` and `--y` move its top-left cell. The client shows it and gives
-it its input, unless it cannot draw floating panes, as above. The other panes
-of its tab fill the space it leaves. The last tiled pane of the session's only
-tab is refused with `the last pane of the last tab cannot be undocked; a
-session needs one tiled pane`, and a 13th floating pane with `a session holds
-at most 12 floating panes`.
+above. A stack member that the client draws collapsed, on its header, keeps
+the top-left cell and the size it opens into in its stack. `--x` and `--y`
+move its top-left cell. The client shows it and gives
+it its input, unless it cannot draw floating panes, as above. Every other
+client whose input is on the pane does the same, at the top-left cell where
+that client draws the pane. Every other client holds it minimized. The other
+panes of its tab fill the space it leaves. The last tiled pane of the
+session's only tab is refused with `the last pane of the last tab cannot be
+undocked; a session needs one tiled pane`, and a 13th floating pane with `a
+session holds at most 12 floating panes`.
 
 Example: tab `#1` holds `A | B` in an `80x22` pane area. `koshi undock-pane
 --pane <B>` leaves `A` alone in the tab, and `B` floats at `(40, 0)` with the
-size `40x19`.
+size `40x19`. In an `80x22` tab that holds only the stack `[vim, htop]` with
+`vim` open, `koshi undock-pane --pane <htop>` floats `htop` at `(0, 1)` with
+the size `72x19`.
 
 `koshi dock-pane` puts a floating pane into a tab's tiled layout. `--tab`
 names the tab, and `--direction` the side of the whole tab where the pane
@@ -697,17 +706,29 @@ tabs, the refusal is ``session `work` has 3 tabs; name one with --tab or
 `two`. `koshi dock-pane` typed in a floating pane docks it into `two`.
 
 `--stack-onto <PANE_ID>` puts the pane into the stack of that tiled pane as its
-open member instead. A tiled pane in no stack forms a new stack with it. A
+last member instead. A tiled pane in no stack forms a new stack with it. A
 tiled pane moves to that place, as `place-pane` moves it. The client moves to
-the destination tab. The docked pane does not take the client's input: the
-input goes to the newest floating pane the client still shows, else to the
-pane the client focuses in its active tab. A tab with no room refuses with
-`tab <name> has no room for another pane`.
-`koshi place-pane --stack-onto <PANE_ID>` puts any pane, tiled or floating,
-into that stack.
+the destination tab, and the docked pane takes its input: every floating pane
+the client shows is minimized. A tab with no room refuses with `tab <name> has
+no room for another pane`. `koshi place-pane --stack-onto <PANE_ID>` puts any
+pane, tiled or floating, into that stack.
+
+A pane that `dock-pane` or `place-pane` moves takes along every other client
+whose input is on it: that client moves to the pane's tab and keeps typing in
+it, and every floating pane it shows is minimized. Every other client keeps
+its tab, its input and its floating panes.
+
+Each client shows open, in each stack, the member it focused last there. A
+client that focused no member of a stack sees the stack's active member. A
+pane that joins a stack opens for another client only when that client
+focused it more recently than every other member of the stack. Example: two
+clients view the stack `[vim, htop]`, one focused on `vim`, one on `htop`. The
+first runs `koshi place-pane --pane <logs> --stack-onto <vim>`: it sees `logs`
+open and focused, and the second still sees `htop`.
 
 Example: tab `#1` holds `[S1, S2]` stacked, and `F` floats. `koshi dock-pane
---pane <F> --stack-onto <S2>` gives the stack `[S1, S2, F]` with `F` open.
+--pane <F> --stack-onto <S2>` gives the stack `[S1, S2, F]`, with `F` open on
+the screen of the client that docked it.
 
 `koshi move-pane --pane <PANE_ID> --x <COLUMN> --y <ROW>` moves a floating
 pane on one client's screen. A pinned pane is refused with `<pane> is pinned;

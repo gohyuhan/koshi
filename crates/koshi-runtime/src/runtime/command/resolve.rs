@@ -432,8 +432,10 @@ impl Server {
     /// placement into a tab's tiled layout, `tiled_placement_target`. A swap's
     /// and a stack's destination tab is the tab of its target pane, which may
     /// be the source tab. The destination target must stay inside the source
-    /// pane's session, and the selected client must be attached there
-    /// ([`Self::resolve_placement_client`]).
+    /// pane's session. The acting client is the target client the command
+    /// source names, else the issuing client while it is attached there, else,
+    /// for a CLI source, the sole attached client
+    /// ([`Self::resolve_view_client`]).
     ///
     /// A floating source pane resolves to a dock
     /// ([`ResolvedTiledPlacement::FloatingSource`]). Each refusal is
@@ -504,10 +506,10 @@ impl Server {
                 *destination_tab_id
             }
         };
-        let client_id = Self::resolve_placement_client(
-            owner_session,
-            command_args.expected_placement_revision,
+        let client_id = Self::resolve_view_client(
+            command_source.get_target_client_id(),
             command_source,
+            owner_session,
         )?;
         let resolved_tiled_placement = match source_pane_target.tab_id {
             Some(source_tab_id) => ResolvedTiledPlacement::TiledSource(PlacePaneTarget {
@@ -541,8 +543,8 @@ impl Server {
     ///   [`MAX_FLOATING_PANES_PER_SESSION`](koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION)
     ///   floating panes: `a session holds at most 12 floating panes`.
     ///
-    /// The acting client and the revision check are
-    /// [`Self::resolve_placement_client`]'s.
+    /// The acting client is [`Self::resolve_view_client`]'s, as in
+    /// [`Self::resolve_tiled_placement_target`].
     pub(super) fn resolve_undock_pane_target(
         &self,
         command_args: &PlacePaneArgs,
@@ -580,10 +582,10 @@ impl Server {
                 &FloatingSetError::TooManyPanes.to_string(),
             ));
         }
-        let client_id = Self::resolve_placement_client(
-            owner_session,
-            command_args.expected_placement_revision,
+        let client_id = Self::resolve_view_client(
+            command_source.get_target_client_id(),
             command_source,
+            owner_session,
         )?;
         Ok(UndockPaneTarget {
             session_id: source_pane_target.session_id,
@@ -591,40 +593,6 @@ impl Server {
             source_tab_id,
             client_id,
         })
-    }
-
-    /// Resolve the acting client of a [`Command::PlacePane`] in
-    /// `owner_session`: the target client the command source names, else the
-    /// issuing client while it is attached there, else, for a CLI source, the
-    /// sole attached client ([`Self::resolve_view_client`]).
-    ///
-    /// With `expected_placement_revision` set, the session's placement
-    /// revision and the acting client's must equal it, else
-    /// [`RejectReason::InvalidState`] `placement preview is stale; refresh and
-    /// confirm again`.
-    fn resolve_placement_client(
-        owner_session: &Session,
-        expected_placement_revision: Option<PlacementRevision>,
-        command_source: &CommandSource,
-    ) -> Result<ClientId, Rejection> {
-        let client_id = Self::resolve_view_client(
-            command_source.get_target_client_id(),
-            command_source,
-            owner_session,
-        )?;
-        if let Some(expected_placement_revision) = expected_placement_revision {
-            let client = Self::require_client(owner_session, client_id)?;
-            if expected_placement_revision.session_revision
-                != owner_session.get_placement_revision()
-                || expected_placement_revision.client_revision != client.get_placement_revision()
-            {
-                return Err(Rejection::from_reason_and_help(
-                    RejectReason::InvalidState,
-                    "placement preview is stale; refresh and confirm again",
-                ));
-            }
-        }
-        Ok(client_id)
     }
 
     /// Resolve the client and the pane a scroll command changes: a tiled pane
@@ -1636,7 +1604,7 @@ impl Server {
             return Err(Rejection::from_reason(RejectReason::InvalidState));
         }
         let client_solve = session
-            .compute_client_solve(tab_id, client.get_layout_mode(tab_id))
+            .compute_client_solve(client, tab_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let source_pane_rect = client_solve
             .find_pane_rect(source_pane_id)

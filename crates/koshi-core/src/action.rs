@@ -329,8 +329,9 @@ pub enum ClientActionKind {
     ConfirmDockUndock,
     /// Leave dock/undock mode and return to the base input mode.
     CancelDockUndock,
-    /// Switch the selected placement target between an insertion beside a
-    /// pane and that pane's stack.
+    /// Switch the selected placement target between a swap with a pane, or an
+    /// insertion beside a pane or a whole stack, and the stack of that pane or
+    /// that stack.
     TogglePanePlacementStack,
 }
 
@@ -626,7 +627,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "toggle-pane-placement-stack",
             "Toggle Pane Placement Stack",
-            "Switch the selected target between beside a pane and into its stack",
+            "Switch the selected target between beside a pane or stack and into that stack",
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::TogglePanePlacementStack),

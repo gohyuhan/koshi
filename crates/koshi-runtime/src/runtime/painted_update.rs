@@ -31,20 +31,28 @@ use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::painted_update::{
     decode_session_binary_frame, encode_painted_update, PaintedUpdateEncodeError,
     PaintedUpdatePart, PaneCursor, PaneCursorShape, PaneHeader, PaneSection, PaneUpdate,
-    PaneWindow, RowInstruction, SessionBinaryFrame,
+    PaneWindow, PlacementPreviewUpdate, RowInstruction, SessionBinaryFrame,
 };
+use koshi_ipc::placement::PanePlacementPreview;
 use koshi_ipc::transport::ReceivedFrame;
-use koshi_renderer::snapshot::{CursorSnapshot, GridView, PaneSnapshot, RenderSnapshot};
+use koshi_renderer::snapshot::{
+    CursorSnapshot, GridView, PaneSnapshot, PlacementPreview, RenderSnapshot,
+};
 use koshi_terminal::grid::row_snapshot::RowSnapshot;
 use koshi_terminal::row_encoding::RowDecodeError;
 use koshi_terminal::state::CursorShape;
 
-/// What one connection's writer sent last: the JSON, the rows of each pane,
-/// and the number of the next update.
+use crate::runtime::frame::build_wire_placement_preview;
+
+/// What one connection's writer sent last: the JSON, the placement preview,
+/// the rows of each pane, and the number of the next update.
 #[derive(Debug)]
 pub struct PaintedUpdateSender {
     /// The JSON part of the last update sent, or empty before the first.
     sent_structure_json_bytes: Vec<u8>,
+    /// The placement preview the client holds since the last update sent, or
+    /// `None` while it holds none.
+    sent_placement_preview: Option<Arc<PlacementPreview>>,
     /// What the last update sent for each pane.
     sent_pane_by_id: HashMap<PaneId, SentPane>,
     /// The number the next update carries.
@@ -76,6 +84,7 @@ impl PaintedUpdateSender {
     pub fn new() -> Self {
         PaintedUpdateSender {
             sent_structure_json_bytes: Vec::new(),
+            sent_placement_preview: None,
             sent_pane_by_id: HashMap::new(),
             next_update_sequence: 1,
         }
@@ -98,13 +107,18 @@ impl PaintedUpdateSender {
     /// column count or its row count, and a pane that enters or leaves the
     /// alternate screen send every row.
     ///
+    /// The placement preview part goes only when `render_snapshot`'s preview
+    /// is not the `Arc` sent last: the preview as JSON
+    /// (`build_wire_placement_preview`), or a clear when the snapshot holds
+    /// none.
+    ///
     /// # Errors
     /// The [`PaintedUpdateEncodeError`] of an update whose JSON or one of
     /// whose rows does not fit one frame. Nothing is recorded as sent then.
     ///
     /// # Panics
-    /// When `painted_frame` does not encode as JSON, or a pane's window holds
-    /// more than 65 535 rows.
+    /// When `painted_frame` or the placement preview does not encode as JSON,
+    /// or a pane's window holds more than 65 535 rows.
     pub fn build_update_frames(
         &mut self,
         render_snapshot: &RenderSnapshot,
@@ -114,6 +128,22 @@ impl PaintedUpdateSender {
         let structure_json_bytes =
             serde_json::to_vec(painted_frame).expect("a painted frame encodes as JSON");
         let is_structure_unchanged = structure_json_bytes == self.sent_structure_json_bytes;
+        let placement_preview_json_bytes = match (
+            &render_snapshot.placement_preview,
+            &self.sent_placement_preview,
+        ) {
+            (None, None) => PlacementPreviewUpdate::Unchanged,
+            (None, Some(_)) => PlacementPreviewUpdate::Cleared,
+            (Some(placement_preview), Some(sent_placement_preview))
+                if Arc::ptr_eq(placement_preview, sent_placement_preview) =>
+            {
+                PlacementPreviewUpdate::Unchanged
+            }
+            (Some(placement_preview), _) => PlacementPreviewUpdate::Replaced(
+                serde_json::to_vec(&build_wire_placement_preview(placement_preview))
+                    .expect("a placement preview encodes as JSON"),
+            ),
+        };
         let mut is_every_pane_unchanged = true;
         let mut pane_updates = Vec::with_capacity(render_snapshot.pane_snapshots.len());
         for pane_snapshot in &render_snapshot.pane_snapshots {
@@ -122,12 +152,26 @@ impl PaintedUpdateSender {
             is_every_pane_unchanged &= is_pane_update_unchanged(&pane_update, sent_pane);
             pane_updates.push(pane_update);
         }
-        if is_structure_unchanged && is_every_pane_unchanged && !is_update_required {
+        let is_placement_preview_unchanged =
+            placement_preview_json_bytes == PlacementPreviewUpdate::Unchanged;
+        if is_structure_unchanged
+            && is_placement_preview_unchanged
+            && is_every_pane_unchanged
+            && !is_update_required
+        {
             return Ok(None);
         }
+        let placement_preview_update = match &placement_preview_json_bytes {
+            PlacementPreviewUpdate::Unchanged => PlacementPreviewUpdate::Unchanged,
+            PlacementPreviewUpdate::Cleared => PlacementPreviewUpdate::Cleared,
+            PlacementPreviewUpdate::Replaced(preview_json_bytes) => {
+                PlacementPreviewUpdate::Replaced(preview_json_bytes.as_slice())
+            }
+        };
         let part_payloads = encode_painted_update(
             self.next_update_sequence,
             (!is_structure_unchanged).then_some(structure_json_bytes.as_slice()),
+            placement_preview_update,
             &pane_updates,
         )?;
         self.sent_pane_by_id = render_snapshot
@@ -158,6 +202,7 @@ impl PaintedUpdateSender {
             })
             .collect();
         self.sent_structure_json_bytes = structure_json_bytes;
+        self.sent_placement_preview = render_snapshot.placement_preview.clone();
         self.next_update_sequence += 1;
         Ok(Some(part_payloads))
     }
@@ -305,14 +350,17 @@ pub enum SessionFrame<Message> {
     ImageChunk(ImageChunkFrame),
 }
 
-/// One painted update, applied: the JSON part and every pane's cursor, scroll
-/// position and rows.
+/// One painted update, applied: the JSON part, the placement preview and
+/// every pane's cursor, scroll position and rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedPaintedFrame {
     /// The update's number on its connection.
     pub update_sequence: u64,
     /// The JSON part: the update's own, or the one the client held.
     pub painted_frame: Arc<PaintedFrame>,
+    /// The placement preview the client holds after the update: the update's
+    /// own, the one the client held, or `None` once an update clears it.
+    pub placement_preview: Option<Arc<PanePlacementPreview>>,
     /// One view per pane, in the order of
     /// [`PaintedFrame::pane_snapshots`].
     pub pane_views: Vec<ReceivedPaneView>,
@@ -448,12 +496,15 @@ impl fmt::Display for PaintedUpdateError {
 
 impl std::error::Error for PaintedUpdateError {}
 
-/// What one connection's reader holds: the JSON part and each pane's rows of
-/// the last update it applied, and the update it is applying.
+/// What one connection's reader holds: the JSON part, the placement preview
+/// and each pane's rows of the last update it applied, and the update it is
+/// applying.
 #[derive(Debug)]
 pub struct PaintedUpdateReceiver {
     /// The JSON part of the last update applied, or `None` before the first.
     held_painted_frame: Option<Arc<PaintedFrame>>,
+    /// The placement preview the last update applied leaves, or `None`.
+    held_placement_preview: Option<Arc<PanePlacementPreview>>,
     /// The rows of each pane with a window, as the last update applied left
     /// them.
     held_pane_by_id: HashMap<PaneId, HeldPane>,
@@ -479,6 +530,8 @@ struct OpenUpdate {
     update_sequence: u64,
     /// The update's JSON part: its own, or the one the receiver held.
     painted_frame: Arc<PaintedFrame>,
+    /// The placement preview the update leaves.
+    placement_preview: Option<Arc<PanePlacementPreview>>,
     /// The panes opened so far, in the order of the JSON part's panes.
     staged_panes: Vec<StagedPane>,
 }
@@ -507,6 +560,7 @@ impl PaintedUpdateReceiver {
     pub fn new() -> Self {
         PaintedUpdateReceiver {
             held_painted_frame: None,
+            held_placement_preview: None,
             held_pane_by_id: HashMap::new(),
             last_update_sequence: 0,
             open_update: None,
@@ -590,9 +644,17 @@ impl PaintedUpdateReceiver {
                             .ok_or(PaintedUpdateError::MissingStructure)?,
                     ),
                 };
+                let placement_preview = match update_opening.placement_preview_update {
+                    PlacementPreviewUpdate::Unchanged => self.held_placement_preview.clone(),
+                    PlacementPreviewUpdate::Cleared => None,
+                    PlacementPreviewUpdate::Replaced(placement_preview) => {
+                        Some(Arc::from(placement_preview))
+                    }
+                };
                 OpenUpdate {
                     update_sequence: update_opening.update_sequence,
                     painted_frame,
+                    placement_preview,
                     staged_panes: Vec::new(),
                 }
             }
@@ -653,10 +715,12 @@ impl PaintedUpdateReceiver {
         }
         self.held_pane_by_id = held_pane_by_id;
         self.held_painted_frame = Some(Arc::clone(&open_update.painted_frame));
+        self.held_placement_preview = open_update.placement_preview.clone();
         self.last_update_sequence = open_update.update_sequence;
         Ok(ReceivedPaintedFrame {
             update_sequence: open_update.update_sequence,
             painted_frame: open_update.painted_frame,
+            placement_preview: open_update.placement_preview,
             pane_views,
         })
     }

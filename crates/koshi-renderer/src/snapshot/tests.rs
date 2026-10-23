@@ -66,7 +66,6 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
 
     let session_snapshot = SessionSnapshot {
         session_id: SessionId::new(),
-        session_revision: 0,
         session_name: "sess".to_string(),
         active_tab_snapshot,
         tabs_metadata: vec![TabMetadata {
@@ -105,7 +104,6 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
 
     let client_snapshot = ClientSnapshot {
         client_id: ClientId::new(),
-        client_revision: 0,
         viewport_size: Size {
             column_count: 80,
             row_count: 24,
@@ -117,6 +115,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
         last_applied_lock_command_id: None,
         last_applied_floating_pane_move_command_id: None,
         is_mouse_selection_enabled: false,
+        last_applied_placement_command_id: None,
     };
 
     RenderSnapshot {
@@ -124,6 +123,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
         session_snapshot,
         pane_snapshots: vec![pane_snapshot],
         client_snapshot,
+        placement_preview: None,
     }
 }
 
@@ -781,12 +781,12 @@ fn find_visible_pane_slot_finds_only_a_visible_slot_of_the_pane() {
 }
 
 /// A placement tab snapshot of `tab_snapshot`, its layout one leaf of the
-/// tab's first pane, with no pane content.
+/// tab's first pane.
 fn build_placement_tab_snapshot(tab_snapshot: TabSnapshot) -> PlacementTabSnapshot {
     PlacementTabSnapshot {
         layout_tree: LayoutNode::Pane(tab_snapshot.pane_slots[0].pane_id),
+        focus_history: Vec::new(),
         tab_snapshot,
-        pane_snapshots: Vec::new(),
     }
 }
 
@@ -809,18 +809,16 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
          destination_tab_id: TabId,
          destination_tab_snapshot: Option<PlacementTabSnapshot>| {
             PlacementSnapshot {
-                session_id: render_snapshot.session_snapshot.session_id,
                 source_pane_id,
                 source,
                 destination_tab_id,
-                session_placement_revision: 0,
-                client_placement_revision: 0,
                 destination_tab_snapshot,
-                client_snapshot: PlacementClientSnapshot {
-                    client_snapshot: render_snapshot.client_snapshot.clone(),
-                    reported_pane_area: None,
-                },
                 pane_sizing: PaneSizing::default(),
+                insertion_tab_sizes: koshi_layout::placement::PlacementTabSizes {
+                    destination_tab_size: None,
+                    source_tab_size: None,
+                },
+                swap_tab_sizes: Vec::new(),
             }
         };
     let tiled_pane_id = source_tab_snapshot.pane_slots[0].pane_id;
@@ -842,11 +840,7 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
     );
     let floating_placement_snapshot = build_placement_snapshot(
         floating_pane_id,
-        PlacementSource::Floating(PlacementPaneSnapshot {
-            pane_id: floating_pane_id,
-            terminal_grid_view: None,
-            image_placement_snapshots: Vec::new(),
-        }),
+        PlacementSource::Floating,
         destination_tab_id,
         Some(build_placement_tab_snapshot(
             destination_tab_snapshot.clone(),
@@ -854,7 +848,9 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
     );
 
     assert_eq!(
-        same_tab_placement_snapshot.find_source_tab_id(),
+        same_tab_placement_snapshot
+            .find_source_tab_snapshot()
+            .map(|source_tab_snapshot| source_tab_snapshot.tab_snapshot.tab_id),
         Some(source_tab_id)
     );
     assert_eq!(
@@ -871,7 +867,6 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
             destination_tab_snapshot.clone()
         ))
     );
-    assert_eq!(floating_placement_snapshot.find_source_tab_id(), None);
     assert_eq!(floating_placement_snapshot.find_source_tab_snapshot(), None);
     assert_eq!(
         floating_placement_snapshot.find_displayed_tab_snapshot(),

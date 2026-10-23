@@ -52,9 +52,10 @@ pub enum SessionConsistencyError {
     #[error("pane {pane_id:?} is absent from every layout and from the floating panes")]
     OrphanedPaneRecord { pane_id: PaneId },
 
-    /// A client focuses a pane that has no record in the registry at all.
+    /// A pane of a client's focus history in a tab has no record in the
+    /// registry at all.
     #[error(
-        "client {client_id:?} focuses pane {pane_id:?} (tab {tab_id:?}) with no registry record"
+        "client {client_id:?} remembers pane {pane_id:?} (tab {tab_id:?}) with no registry record"
     )]
     FocusPaneNotInRegistry {
         client_id: ClientId,
@@ -64,14 +65,14 @@ pub enum SessionConsistencyError {
 
     /// A client remembers focus in a tab that is no longer in the session.
     /// Distinct from [`SessionConsistencyError::ActiveTabMissing`]: this is a
-    /// stale `focused_pane_id_by_tab_id` entry for a closed tab, not the tab shown now.
+    /// stale focus history for a closed tab, not the tab shown now.
     #[error("client {client_id:?} remembers focus in tab {tab_id:?} that is not in the session")]
     FocusTabMissing { client_id: ClientId, tab_id: TabId },
 
-    /// A client's remembered focus names a pane that is not a leaf in that
+    /// A pane of a client's focus history in a tab is not a leaf in that
     /// tab's layout. The tab is in the session; the pane may or may not have a
     /// registry record.
-    #[error("client {client_id:?} focuses pane {pane_id:?} absent from tab {tab_id:?} layout")]
+    #[error("client {client_id:?} remembers pane {pane_id:?} absent from tab {tab_id:?} layout")]
     FocusTargetMissing {
         client_id: ClientId,
         tab_id: TabId,

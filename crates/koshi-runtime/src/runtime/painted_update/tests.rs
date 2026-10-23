@@ -222,6 +222,7 @@ fn a_first_update_carries_the_structure_and_every_row() {
             update_opening: Some(PaintedUpdateOpening {
                 update_sequence: 1,
                 painted_frame: Some(Box::new(build_wire_frame(&render_snapshot))),
+                placement_preview_update: PlacementPreviewUpdate::Unchanged,
             }),
             is_last_part: true,
             pane_sections: vec![PaneSection {
@@ -325,6 +326,7 @@ fn a_keystroke_sends_the_one_row_it_changed_and_keeps_the_others() {
             update_opening: Some(PaintedUpdateOpening {
                 update_sequence: 2,
                 painted_frame: None,
+                placement_preview_update: PlacementPreviewUpdate::Unchanged,
             }),
             is_last_part: true,
             pane_sections: vec![PaneSection {
@@ -450,6 +452,7 @@ fn an_update_that_changes_nothing_is_not_sent_unless_it_is_required() {
         Some(PaintedUpdateOpening {
             update_sequence: 2,
             painted_frame: None,
+            placement_preview_update: PlacementPreviewUpdate::Unchanged,
         })
     );
     assert_eq!(
@@ -541,6 +544,7 @@ fn the_structure_travels_again_only_after_it_changes() {
         Some(PaintedUpdateOpening {
             update_sequence: 2,
             painted_frame: Some(Box::new(build_wire_frame(&render_snapshot))),
+            placement_preview_update: PlacementPreviewUpdate::Unchanged,
         })
     );
     assert_eq!(
@@ -781,6 +785,7 @@ fn build_whole_update_part(
         update_opening: Some(PaintedUpdateOpening {
             update_sequence,
             painted_frame: painted_frame.map(|painted_frame| Box::new(painted_frame.clone())),
+            placement_preview_update: PlacementPreviewUpdate::Unchanged,
         }),
         is_last_part: true,
         pane_sections,

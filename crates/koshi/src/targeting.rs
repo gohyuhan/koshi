@@ -63,7 +63,8 @@ pub enum Route {
         /// The user id whose folder of the shared directory advertises the
         /// session, or `None` for a session looked up by its id alone.
         owner_user_id: Option<u32>,
-        /// The command's resolved `--session`/`--tab` flags.
+        /// The command's resolved `--session`/`--tab` flags, and its default
+        /// pane.
         targets: ResolvedTargets,
     },
 }
@@ -77,6 +78,12 @@ pub enum Route {
 /// itself. The other sessions in scope are the ones [`resolve_session_scope`]
 /// gives for the `--session` flag. A session another user's folder of the
 /// shared directory advertises is sent the command with that user's id.
+///
+/// A command that names `--client` ([`CliCommand::get_source_client_id`])
+/// always goes as an external command. When it goes to the session of the
+/// pane this CLI runs in, [`ResolvedTargets::pane_id`] names that pane:
+/// `koshi pin-pane --client <client>` typed in floating pane `F` pins `F` on
+/// that client's screen.
 pub fn resolve_command_route(
     command: &CliCommand,
     in_session_context: Option<&InSessionContext>,
@@ -142,6 +149,7 @@ fn resolve_command_route_in_runtime_directory(
             return Ok(Route::InSession(ResolvedTargets {
                 session_id: None,
                 tab_id: target_tab_id,
+                pane_id: None,
             }));
         }
     }
@@ -158,14 +166,25 @@ fn resolve_command_route_in_runtime_directory(
 
     // A probe can land back on the session this CLI runs inside (e.g.
     // `--session` naming it); then the command still travels as the pane's
-    // own, keeping the issuing pane as the default target.
+    // own, keeping the issuing pane as the default target. A command that
+    // names `--client` travels as an external command there, with the issuing
+    // pane as its default pane.
     match in_session_context {
         Some(in_session_context)
             if in_session_context.session_id == target_session_id
-                && target_owner_user_id.is_none()
-                && !has_source_client =>
+                && target_owner_user_id.is_none() =>
         {
-            Ok(Route::InSession(resolved_targets))
+            if !has_source_client {
+                return Ok(Route::InSession(resolved_targets));
+            }
+            Ok(Route::External {
+                session_id: target_session_id,
+                owner_user_id: None,
+                targets: ResolvedTargets {
+                    pane_id: Some(in_session_context.pane_id),
+                    ..resolved_targets
+                },
+            })
         }
         _ => Ok(Route::External {
             session_id: target_session_id,
@@ -316,6 +335,7 @@ fn resolve_command_targets(
         ResolvedTargets {
             session_id: Some(target_session_id),
             tab_id: target_tab_id,
+            pane_id: None,
         },
     ))
 }

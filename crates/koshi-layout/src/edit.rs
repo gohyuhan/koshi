@@ -75,10 +75,11 @@ pub fn split_leaf(
 /// Stack `new_pane_id` onto `anchor_pane_id`'s position.
 ///
 /// If `anchor_pane_id` already sits inside a stack, the new pane is appended as the
-/// last member of the innermost stack holding it; otherwise the anchor's
-/// leaf becomes a two-member stack of `anchor_pane_id` then `new_pane_id`. Either way
-/// the new pane is the active (expanded) member afterwards and every other
-/// member is collapsed.
+/// last member of the innermost stack holding it, and the stack's active member
+/// stays the same; otherwise the anchor's leaf becomes a two-member stack of
+/// `anchor_pane_id` then `new_pane_id`, with `anchor_pane_id` active. The new
+/// pane is never the active member: `S[a, b]` with `b` active, `c` stacked onto
+/// `a`, gives `S[a, b, c]` with `b` active.
 ///
 /// # Errors
 ///
@@ -101,7 +102,6 @@ pub fn add_pane_to_stack(
             .children
             .push(LayoutNode::Pane(new_pane_id));
         containing_stack.weights.push(SizeWeight::default());
-        containing_stack.active_child_index = containing_stack.children.len() - 1;
     } else {
         let pane_path = edited_layout_tree
             .find_pane_path(anchor_pane_id)
@@ -109,7 +109,7 @@ pub fn add_pane_to_stack(
         let anchor_pane_node_slot = edited_layout_tree.get_node_at_path_mut(&pane_path);
         *anchor_pane_node_slot = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
             vec![anchor_pane_id, new_pane_id],
-            1,
+            0,
         ));
     }
     Ok(edited_layout_tree)

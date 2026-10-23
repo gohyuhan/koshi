@@ -11,15 +11,15 @@ use super::*;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use koshi_core::event::{QuitCause, TabClosed};
+use koshi_core::event::{PaneFocused, QuitCause, TabClosed};
 use koshi_core::geometry::{Point, Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{Client, ClientOrigin, ClientRegistry, FloatingPanePosition};
-use crate::session::state::tests::{build_default_floating_member, build_tab};
+use crate::client::{Client, ClientOrigin, FloatingPanePosition};
+use crate::session::state::tests::{build_default_floating_member, build_empty_session, build_tab};
 use crate::session::state::Tab;
 
 /// Standard terminal size (80×24) used across all test fixtures.
@@ -43,9 +43,7 @@ fn build_single_pane_tab(tab_id: TabId, pane_id: PaneId) -> Tab {
 
 /// Creates a single-pane tab at the given display position (`tab_index`).
 fn build_tab_at_index(tab_id: TabId, pane_id: PaneId, tab_index: usize) -> Tab {
-    let mut tab = build_single_pane_tab(tab_id, pane_id);
-    tab.update_tab_index(tab_index);
-    tab
+    build_tab(tab_id, "code", tab_index, LayoutNode::Pane(pane_id))
 }
 
 /// Creates a tab split horizontally (left/right) between two panes with equal widths.
@@ -87,12 +85,7 @@ fn build_focused_client(session_id: SessionId, tab_id: TabId, focused_pane_id: P
 /// clients. [`Session::attach_client`] adds them afterward, each built with
 /// the session's own id.
 fn build_session_with(tabs: Vec<Tab>, pane_records: Vec<PaneRecord>) -> Session {
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     for tab in tabs {
         session.tabs.insert(tab.get_tab_id(), tab);
     }
@@ -486,14 +479,15 @@ fn removing_a_focused_pane_with_no_room_to_refocus_lands_on_the_surviving_pane()
 }
 
 #[test]
-fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
-    // Stack `[A, B, C]`, `C` expanded, focus history `C, A, B`. Removing `C`
-    // expands `B`. With no room for any pane, the landing passes over `A`,
-    // the newer history entry that stays collapsed to its header.
+fn removing_a_focused_stack_member_with_no_room_lands_each_client_on_its_shown_member() {
+    // Stack `[A, B, C]`, `C` active, two clients focused on `C`. Removing
+    // `C` makes `B` the stack's active member. With no room for any pane,
+    // the client whose focus history is `C, A, B` sees `A` open and lands on
+    // it; the client whose history is `C` sees `B` open and lands on it.
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id, removed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut tab = build_tab(
+    let tab = build_tab(
         tab_id,
         "code",
         0,
@@ -502,9 +496,6 @@ fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
             2,
         )),
     );
-    tab.record_focus_mru(second_pane_id);
-    tab.record_focus_mru(first_pane_id);
-    tab.record_focus_mru(removed_pane_id);
     let mut session = build_session_with(
         vec![tab],
         vec![
@@ -513,10 +504,16 @@ fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
             PaneRecord::from_terminal_pane(removed_pane_id),
         ],
     );
-    let mut client = build_focused_client(session.session_id, tab_id, removed_pane_id);
-    client.update_viewport_size(TINY_VIEWPORT_SIZE);
-    let client_id = client.get_client_id();
-    session.attach_client(client);
+    let mut remembering_client = build_focused_client(session.session_id, tab_id, second_pane_id);
+    remembering_client.update_focused_pane(tab_id, first_pane_id);
+    remembering_client.update_focused_pane(tab_id, removed_pane_id);
+    remembering_client.update_viewport_size(TINY_VIEWPORT_SIZE);
+    let remembering_client_id = remembering_client.get_client_id();
+    session.attach_client(remembering_client);
+    let mut fresh_client = build_focused_client(session.session_id, tab_id, removed_pane_id);
+    fresh_client.update_viewport_size(TINY_VIEWPORT_SIZE);
+    let fresh_client_id = fresh_client.get_client_id();
+    session.attach_client(fresh_client);
     assert_eq!(session.update_tab_solve(tab_id), vec![]);
     let emitted_events = remove_pane_cascade(&mut session, tab_id, removed_pane_id, None);
 
@@ -532,36 +529,48 @@ fn removing_a_focused_stack_member_with_no_room_lands_on_the_expanded_member() {
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
             Event::PaneFocused(PaneFocused {
-                client_id,
+                client_id: remembering_client_id,
+                tab_id: Some(tab_id),
+                pane_id: first_pane_id,
+                previous_pane_id: Some(removed_pane_id),
+            }),
+            Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
+                client_id: remembering_client_id,
+                viewport_size: TINY_VIEWPORT_SIZE,
+                pane_area: None,
+                cause: TerminalTooSmallCause::Terminal,
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: fresh_client_id,
                 tab_id: Some(tab_id),
                 pane_id: second_pane_id,
                 previous_pane_id: Some(removed_pane_id),
             }),
             Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
-                client_id,
+                client_id: fresh_client_id,
                 viewport_size: TINY_VIEWPORT_SIZE,
                 pane_area: None,
                 cause: TerminalTooSmallCause::Terminal,
             }),
         ]
     );
-    let layout_tree = session.tabs[&tab_id].get_layout_tree();
     assert_eq!(
-        layout_tree.list_leaf_pane_ids(),
-        vec![first_pane_id, second_pane_id]
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![first_pane_id, second_pane_id],
+            1,
+        ))
     );
+    let remembering_client = session
+        .clients
+        .get_client_by_id(remembering_client_id)
+        .unwrap();
     assert_eq!(
-        layout_tree.list_expanded_leaf_pane_ids(),
-        vec![second_pane_id]
+        remembering_client.list_focus_history(tab_id),
+        [first_pane_id, second_pane_id]
     );
-    assert_eq!(
-        session
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_focused_pane_id(tab_id),
-        Some(second_pane_id)
-    );
+    let fresh_client = session.clients.get_client_by_id(fresh_client_id).unwrap();
+    assert_eq!(fresh_client.list_focus_history(tab_id), [second_pane_id]);
     assert_eq!(
         session.tabs[&tab_id].list_focus_mru(),
         [second_pane_id, first_pane_id]
@@ -1513,7 +1522,7 @@ fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_
         .add_member(build_default_floating_member(floating_pane_id))
         .expect("the floating set is empty");
     let mut unfocused_client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
-    unfocused_client.remove_focused_pane(tab_id);
+    unfocused_client.clear_focus_history(tab_id);
     unfocused_client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
     assert!(unfocused_client.focus_floating_pane(floating_pane_id));
     let unfocused_client_id = unfocused_client.get_client_id();

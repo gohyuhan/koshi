@@ -667,6 +667,7 @@ fn a_new_tab_client_flag_reaches_the_session_lookup() {
         ResolvedTargets {
             session_id: Some(client_session_id),
             tab_id: None,
+            pane_id: None,
         }
     );
 }
@@ -698,6 +699,7 @@ fn a_fullscreen_client_flag_reaches_the_session_lookup() {
         ResolvedTargets {
             session_id: Some(client_session_id),
             tab_id: None,
+            pane_id: None,
         }
     );
 }
@@ -1122,6 +1124,7 @@ fn in_session_command_naming_its_own_session_id_in_another_users_folder_routes_t
             targets: ResolvedTargets {
                 session_id: Some(in_session_context.session_id),
                 tab_id: None,
+                pane_id: None,
             },
         }
     );
@@ -1508,6 +1511,7 @@ fn a_bare_dock_pane_resolves_the_sole_tab_of_the_target_session() {
             ResolvedTargets {
                 session_id: Some(session_id),
                 tab_id: Some(tab_id),
+                pane_id: None,
             }
         )
     );
@@ -1712,6 +1716,7 @@ fn a_dock_pane_with_a_stack_target_resolves_no_tab() {
             ResolvedTargets {
                 session_id: Some(session_id),
                 tab_id: None,
+                pane_id: None,
             }
         )
     );
@@ -1748,11 +1753,127 @@ fn an_in_session_bare_dock_pane_asks_its_own_session_for_its_panes_tab() {
         Route::InSession(ResolvedTargets {
             session_id: None,
             tab_id: Some(tab_id),
+            pane_id: None,
         })
     );
     discovery_server_thread
         .join()
         .expect("stand-in session exits");
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_client_flag_typed_in_a_pane_goes_external_with_that_pane_as_the_default_pane() {
+    let runtime_directory = build_test_runtime_directory("client-flag-default-pane");
+    let named_client_id = ClientId::new();
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let tab_id = TabId::new();
+    let discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "amber-fox",
+            in_session_context.session_id,
+            &[(tab_id, "one")],
+            &[(in_session_context.pane_id, tab_id)],
+            &[named_client_id],
+        ),
+    );
+    let command = CliCommand::PinPane {
+        pane_id: None,
+        client_id: Some(named_client_id),
+    };
+
+    let command_route = resolve_command_route_in_runtime_directory(
+        &runtime_directory,
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("the session answers");
+
+    discovery_server_thread
+        .join()
+        .expect("stand-in session exits");
+    assert_eq!(
+        command_route,
+        Route::External {
+            session_id: in_session_context.session_id,
+            owner_user_id: None,
+            targets: ResolvedTargets {
+                session_id: Some(in_session_context.session_id),
+                tab_id: None,
+                pane_id: Some(in_session_context.pane_id),
+            },
+        }
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_client_flag_naming_another_sessions_client_carries_no_default_pane() {
+    let runtime_directory = build_test_runtime_directory("client-flag-other-session");
+    let named_client_id = ClientId::new();
+    let in_session_context = InSessionContext {
+        session_id: SessionId::new(),
+        client_id: None,
+        pane_id: PaneId::new(),
+    };
+    let (home_tab_id, other_tab_id) = (TabId::new(), TabId::new());
+    let other_session_id = SessionId::new();
+    let home_discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "amber-fox",
+            in_session_context.session_id,
+            &[(home_tab_id, "one")],
+            &[(in_session_context.pane_id, home_tab_id)],
+            &[],
+        ),
+    );
+    let other_discovery_server_thread = serve_discovery(
+        &runtime_directory,
+        build_session_overview(
+            "blue-owl",
+            other_session_id,
+            &[(other_tab_id, "one")],
+            &[(PaneId::new(), other_tab_id)],
+            &[named_client_id],
+        ),
+    );
+    let command = CliCommand::PinPane {
+        pane_id: None,
+        client_id: Some(named_client_id),
+    };
+
+    let command_route = resolve_command_route_in_runtime_directory(
+        &runtime_directory,
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("both sessions answer");
+
+    for discovery_server_thread in [home_discovery_server_thread, other_discovery_server_thread] {
+        discovery_server_thread
+            .join()
+            .expect("stand-in session exits");
+    }
+    assert_eq!(
+        command_route,
+        Route::External {
+            session_id: other_session_id,
+            owner_user_id: None,
+            targets: ResolvedTargets {
+                session_id: Some(other_session_id),
+                tab_id: None,
+                pane_id: None,
+            },
+        }
+    );
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 

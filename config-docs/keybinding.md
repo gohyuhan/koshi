@@ -183,17 +183,23 @@ The default `pane-placement` bindings are:
 
 - Arrow keys choose a destination pane. A collapsed stack member is a
   destination at its header strip: in a stack `[A, B, C open]`, Up from `C`
-  picks `B`, and Enter gives `[A, C open, B]`. A swap trades places, so a pane
-  that lands in a stack slot joins that stack and a stack member that lands in
-  a plain slot leaves it.
+  picks `B`, and Enter gives `[A, C open, B]` on this client's screen. A swap
+  trades places, so a pane that lands in a stack slot joins that stack and a
+  stack member that lands in a plain slot leaves it.
 - Shift+Arrow keys choose a split edge. Toward a stacked pane, the edge belongs
   to the whole stack, and the placed pane lands beside the stack as a plain pane.
 - Space cycles the available split spans.
 - `s` (`core:toggle-pane-placement-stack`) switches the target between a
   swap with a pane, or a split edge of a pane, and that pane's stack. In
   `[A | B]` with `A` picked, Right then `s` targets the stack of `B`, and
-  Enter gives the stack `[B, A]` with `A` open. Pressed on the stack target,
-  `s` goes back to the swap.
+  Enter gives the stack `[B, A]` with `A` open on this client's screen.
+  Pressed on the stack target, `s` goes back to the swap. On the split edge
+  of a whole stack, `s` targets that stack, and pressed again it picks the
+  swap with the member that stack shows open. On the edge of a whole tab,
+  `s` targets the pane or the stack that fills the tab: in a tab that holds
+  only the stack `[S1, S2]` with `S2` open, `s` targets that stack, and
+  Enter gives the stack `[S1, S2, A]`. A tab that a split fills has no stack
+  target, and `s` changes nothing there.
 - Tab and Shift+Tab preview the next or previous visible tab with the pane
   placed at the right edge of that whole tab. Enter places it there: from tab
   `#1` `[A | B]`, Tab and Enter on `A` give `#1` `[B]` and `#2` `[C | A]`. In
@@ -205,10 +211,20 @@ The default `pane-placement` bindings are:
   collapsed stack header picks that pane up. On the tab you are on, the pane
   also takes focus, so a collapsed member opens in its stack as the drag
   starts. On a tab you only preview, focus stays where it is and a collapsed
-  member stays collapsed.
+  member stays collapsed. A release over a target with no room sends nothing,
+  and the target stays selected. A drag that began on a grab handle outside
+  pane placement mode ends there, and nothing moves.
 - Enter submits the selected placement. Pane placement mode stays active after
   the session accepts it, unless `koshi.kdl` sets
   `stay-in-pane-placement-mode-after-placement #false`.
+- If the selected target has no room, the preview draws the tab as it is.
+  The moving pane reads `Moving pane cannot go there`, and the target's panes
+  read `No room for this pane in <name>`, or `No room for the panes left in
+  <name>` when the pane's own tab cannot hold the panes it leaves behind. A
+  tab that no client would show with a pane area reads `No room to show
+  <name>`, and any other refusal reads `This place is not available`. Enter
+  then changes nothing, and the target stays selected until you pick another
+  target or press Escape.
 - Escape runs `core:cancel-pane-placement`, discards the unconfirmed placement,
   and returns to the base normal or locked mode.
 
@@ -253,16 +269,21 @@ floats the pane up where this client draws it:
 - The pane keeps its id, its program and its scrollback. It keeps its top-left
   cell and its size. Each axis is cut to 90% of the smallest pane area of the
   attached clients, rounded down. A client with a pane area smaller than `5x6`
-  does not count.
+  does not count. A collapsed stack member keeps the top-left cell and the
+  size it opens into in its stack: in an `80x22` tab that holds only the
+  stack `[vim, htop]` with `vim` open, `htop` floats at `(0, 1)` with the size
+  `72x19`.
 - The other panes of its tab fill the space it leaves. If the pane was the
   only pane of its tab, the tab closes, and every client on that tab goes to
   the nearest tab.
-- The pane takes this client's input. Only this client shows it: every other
-  client holds it minimized. A client cannot draw floating panes when its pane
-  area is smaller than `5x6`, or when its tab shows `Terminal too small —
-  enlarge window` in place of every pane. That client also holds the pane
-  minimized, and its input stays where it was. With motion on, the pane slides
-  to its floating place in 160 ms.
+- The pane takes this client's input. Every other client whose input is on
+  the pane also shows it, at the top-left cell where that client draws the
+  pane, and keeps typing in it. Every other client holds it minimized. A
+  client cannot draw floating panes when its pane area is smaller than `5x6`,
+  or when its tab shows `Terminal too small — enlarge window` in place of
+  every pane. That client also holds the pane minimized, and its input moves
+  to the pane that inherits its focus in the tab. With motion on, the pane
+  slides to its floating place in 160 ms.
 - The floating pane stays selected, with no dock target, and the mode stays
   open.
 
@@ -278,30 +299,49 @@ With a floating pane selected, the mode docks it into a tab:
 - While a dock target is selected, the frame shows the pane docked there, and
   this client draws no other floating pane.
 - Arrow and Shift+Arrow keys pick the pane to dock beside, and the edge, as
-  Shift+Arrow does in pane placement mode. Space cycles the spans. `s` switches
-  between the edge of a pane and that pane's stack: in `[A | B]`, the target
-  beside `B` becomes the stack of `B`, and Enter gives `A` beside the stack
-  `[B, F]` with `F` open. Tab and Shift+Tab preview the next or previous tab
-  with the pane at the right edge of that whole tab.
-- Enter docks the pane at the target. The docked pane does not take the
-  input: the newest floating pane that this client still shows takes it, or
-  else the pane focused in the active tab. A dock into another tab moves this
-  client to that tab. After the dock, nothing is selected and the mode stays
-  open.
-- If the destination tab has no room for the pane, the session refuses the
-  dock with `tab <name> has no room for another pane`, and nothing changes.
+  Shift+Arrow does in pane placement mode. Toward a stacked pane, the edge
+  belongs to the whole stack. On the whole-tab target, an Arrow picks a pane
+  and Shift+Arrow picks another edge of the tab: in `[A | B]`, Right picks
+  the right edge of `B`. Space cycles the spans. `s` switches between the
+  edge of a pane and that pane's stack: in `[A | B]`, the target beside `B`
+  becomes the stack of `B`, and Enter gives `A` beside the stack `[B, F]`
+  with `F` open on this client's screen. On the edge of a whole stack, `s`
+  targets that stack: in `[stack(S1, S2) | P]`, Left from `P` picks the edge
+  of the stack, `s` targets the stack, and Enter gives the stack
+  `[S1, S2, F]`. On the whole-tab target, `s` targets the pane or the stack
+  that fills the tab: tab `[A]` gives the stack `[A, F]`, and a tab that a
+  split fills has no stack target. Tab and Shift+Tab preview
+  the next or previous tab with the pane at the right edge of that whole tab.
+- Enter docks the pane at the target, and the docked pane takes this
+  client's input: every other floating pane this client shows is minimized.
+  A dock into another tab moves this client to that tab. Every other client
+  whose input is on the pane moves with it in the same way. Every other
+  client keeps the stack member it shows open: a client that shows `A` open
+  in the stack `[A, F]` still shows `A` open. After the dock, nothing is
+  selected and the mode stays open.
+- If the destination tab has no room for the pane, the frame draws the tab as
+  it is. The pane reads `Moving pane cannot go there`, and the target's panes
+  read `No room for this pane in <name>`. Enter then changes nothing, and the
+  target stays selected until you pick another target or press Escape. If
+  the tab changes after the frame and before the session answers, the session
+  refuses the dock with `tab <name> has no room for another pane`, and
+  nothing changes.
 
 With the mouse:
 
 - A press on a tiled pane, then a drag, floats the pane up where it is drawn
-  and selects it. The same drag goes on with the floating pane.
+  and selects it. The same drag goes on with the floating pane. A press on a
+  collapsed stack member's header, then a drag, floats that member up at the
+  rect it opens into in its stack.
 - A drag of the selected floating pane moves it with the pointer. The pane
   under the pointer shows its edge nearest the pointer as the dock target,
   and this client draws no other floating pane during the drag. A release
-  over a target docks the pane there. A release over no target leaves the
-  pane floating where it was dropped. A pinned floating pane stays at its
+  over a target docks the pane there. A release over no target, or over a
+  target with no room, leaves the pane floating where it was dropped. A
+  pinned floating pane stays at its
   pinned cell during the drag: a release over a target docks it, and a
-  release over no target leaves it where it was.
+  release over no target, or over a target with no room, leaves it where it
+  was.
 - A press on another floating pane selects it, and a drag moves it as above.
 
 During a drag, Escape ends only the drag, and the pane goes back to where it

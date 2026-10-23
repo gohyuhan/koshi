@@ -47,8 +47,6 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::FrameImageTransfer;
-use crate::placement::PanePlacementSnapshot;
-use crate::protocol::IpcErrorPayload;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 
 /// An event as a client reads it: it may name a frame this build does not
@@ -88,28 +86,13 @@ pub enum SessionEvent {
         image_transfer: FrameImageTransfer,
     },
     /// Drop the image records with these connection-local identities. The
-    /// newest painted update and the placement preview the client may hold
-    /// show none of them. After a painted update that stops showing a
-    /// record, the release of that record follows the update and goes
-    /// before the records that follow the update. One frame names at most
-    /// [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities.
+    /// newest painted update shows none of them. After a painted update that
+    /// stops showing a record, the release of that record follows the update
+    /// and goes before the records that follow the update. One frame names at
+    /// most [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities.
     ImageContentReleased {
         /// The identities of the records the client drops.
         image_content_ids: Vec<u64>,
-    },
-    /// A read-only placement preview for one request.
-    PanePlacementSnapshot {
-        /// The request this preview answers.
-        request_id: u64,
-        /// The bounded source and destination snapshot.
-        snapshot: Box<PanePlacementSnapshot>,
-    },
-    /// A read-only placement preview request was refused.
-    PanePlacementRefused {
-        /// The request this refusal answers.
-        request_id: u64,
-        /// The typed refusal and its human-readable message.
-        refusal: IpcErrorPayload,
     },
     /// A pane was created and registered.
     PaneCreated {
@@ -280,9 +263,10 @@ pub enum SessionEvent {
         #[serde(deserialize_with = "Option::deserialize")]
         owner_user_id: Option<u32>,
     },
-    /// A pane placement command from this client's key binding, or a
-    /// floating pane move from its key binding or its mouse round, was
-    /// rejected.
+    /// A pane placement this client confirmed
+    /// ([`ConfirmPanePlacement`](crate::protocol::IpcRequestKind::ConfirmPanePlacement)),
+    /// a pane placement command from its key binding, or a floating pane move
+    /// from its key binding or its mouse round, was rejected.
     PlacementCommandRejected {
         /// The rejected command.
         command_id: CommandId,
@@ -302,8 +286,6 @@ impl SessionEvent {
             SessionEvent::ImageCacheReset => "ImageCacheReset",
             SessionEvent::ImageContentStart { .. } => "ImageContentStart",
             SessionEvent::ImageContentReleased { .. } => "ImageContentReleased",
-            SessionEvent::PanePlacementSnapshot { .. } => "PanePlacementSnapshot",
-            SessionEvent::PanePlacementRefused { .. } => "PanePlacementRefused",
             SessionEvent::PaneCreated { .. } => "PaneCreated",
             SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
             SessionEvent::PaneClosing { .. } => "PaneClosing",
@@ -336,8 +318,6 @@ impl WireVariants for SessionEvent {
         "ImageCacheReset",
         "ImageContentStart",
         "ImageContentReleased",
-        "PanePlacementSnapshot",
-        "PanePlacementRefused",
         "PaneCreated",
         "PaneProcessExited",
         "PaneClosing",

@@ -18,7 +18,9 @@
 use std::fmt;
 use std::sync::OnceLock;
 
-use koshi_core::command::{Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs, TiledPlacementTarget,
+};
 use koshi_core::compat::SESSION_PROTOCOL;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
@@ -27,6 +29,7 @@ use koshi_core::key::{BindingModifierFlags, KeyInput};
 use koshi_core::mouse::MouseKind;
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
+use koshi_layout::placement::PlacedTabLayout;
 use serde::de::{self, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
@@ -34,6 +37,7 @@ use uuid::Uuid;
 
 use crate::attach::AttachedSessionStructureSnapshot;
 use crate::layout::SessionLayout;
+use crate::placement::PanePlacementPreviewTarget;
 use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 
 /// The highest protocol version this build speaks, and the one it uses when
@@ -458,6 +462,11 @@ pub enum IpcRequestKind {
         /// wait. A value outside `30..=120` is refused with
         /// [`IpcErrorCode::RequestFailed`].
         max_frames_per_second: u16,
+        /// The placement target the client previews
+        /// ([`SetPanePlacementPreview`](Self::SetPanePlacementPreview)),
+        /// named before the client's first frame: that frame and each frame
+        /// after it carry the target's preview. `None` names no target.
+        placement_preview_target: Option<PanePlacementPreviewTarget>,
     },
     /// One keyboard event an attached client sends for the pane it is typing
     /// into: its keymap bound nothing to the event, or no chord could name it.
@@ -508,13 +517,33 @@ pub enum IpcRequestKind {
         /// The one tab to describe, or every tab when absent.
         tab_id: Option<TabId>,
     },
-    /// Ask for a bounded read-only preview of moving `pane_id` toward
-    /// `destination_tab_id`. The answer arrives on the attached event stream.
-    ReadPanePlacement {
-        /// The pane whose current visible content is previewed.
-        pane_id: PaneId,
-        /// The tab whose current layout is previewed as the destination.
-        destination_tab_id: TabId,
+    /// Name the placement target whose preview rides this client's painted
+    /// updates, or stop the preview with `None`. Nothing answers it. Each
+    /// painted update after it carries the target's preview whenever the
+    /// preview differs from the one the client holds
+    /// ([`painted_update`](crate::painted_update)). On a connection with no
+    /// attached client, it closes the connection.
+    SetPanePlacementPreview {
+        /// The pane and the destination tab the client previews.
+        placement_target: Option<PanePlacementPreviewTarget>,
+    },
+    /// Confirm one tiled pane placement that the client previews. The session
+    /// solves the destination tab as the placement leaves it, for this client,
+    /// and runs the placement only when that layout equals
+    /// `expected_placed_tab_layout`. A frame naming `command_id` as its
+    /// client's `last_applied_placement_command_id` shows the placement. A
+    /// refused placement is answered with `PlacementCommandRejected` naming
+    /// `command_id`. On a connection with no attached client, it closes the
+    /// connection.
+    ConfirmPanePlacement {
+        /// The id the client chose for the placement.
+        command_id: CommandId,
+        /// The pane being placed.
+        source_pane_id: PaneId,
+        /// Where the pane goes.
+        placement_target: TiledPlacementTarget,
+        /// The destination tab as the client draws it after the placement.
+        expected_placed_tab_layout: PlacedTabLayout,
     },
     /// Ask the session for the events it published most recently, newest last.
     /// The answer holds each event's name and the ids it named, and no payload
@@ -564,18 +593,9 @@ pub enum IpcRequestKind {
     /// report of an update the session has not sent closes the connection. On
     /// a connection with no attached client, a `PaintedUpdate` closes the
     /// connection.
-    ///
-    /// The session releases the image records of every placement preview it
-    /// sent before the reported update, except the preview that
-    /// `shown_placement_request_id` names.
     PaintedUpdate {
         /// The number of the last painted update the client applied.
         update_sequence: u64,
-        /// The request whose placement preview the client holds when it sends
-        /// the report, or `None` when it holds no preview. A report without
-        /// this field is refused.
-        #[serde(deserialize_with = "Option::deserialize")]
-        shown_placement_request_id: Option<u64>,
     },
     /// One part of a clipboard copy that a stand-in clipboard tool in a pane
     /// sends before the last part, which goes as
@@ -717,7 +737,8 @@ impl IpcRequestKind {
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
             IpcRequestKind::Layout { .. } => "Layout",
-            IpcRequestKind::ReadPanePlacement { .. } => "ReadPanePlacement",
+            IpcRequestKind::SetPanePlacementPreview { .. } => "SetPanePlacementPreview",
+            IpcRequestKind::ConfirmPanePlacement { .. } => "ConfirmPanePlacement",
             IpcRequestKind::RecentEvents => "RecentEvents",
             IpcRequestKind::Restart => "Restart",
             IpcRequestKind::Leaving { .. } => "Leaving",
@@ -982,7 +1003,8 @@ impl WireVariants for IpcRequestKind {
         "SubmitCommand",
         "Discovery",
         "Layout",
-        "ReadPanePlacement",
+        "SetPanePlacementPreview",
+        "ConfirmPanePlacement",
         "RecentEvents",
         "Restart",
         "Leaving",

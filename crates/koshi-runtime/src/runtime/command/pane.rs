@@ -123,39 +123,24 @@ impl Server {
             pane_sizing,
         )?;
 
-        // Solve the candidate against that tab size to size the new pane and
-        // its siblings. A solve that gives the new pane no content rect rejects
-        // before any mutation.
-        let tab_rect = Rect::from_size_at_origin(tab_size);
-        let pane_content_rects = list_content_rects(&solve_layout_with_mode(
-            &candidate_layout_tree,
-            LayoutMode::Tiled,
-            tab_rect,
-            pane_sizing,
-        ));
-        let new_pane_content_rect = pane_content_rects
-            .iter()
-            .find(|(pane_id, _)| *pane_id == new_pane_id)
-            .and_then(|(_, content_rect)| *content_rect)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::InvalidState))?;
+        // Solve the candidate against that tab size, with a stack that holds
+        // the new pane showing it, to size the new pane. A solve that gives the
+        // new pane no content rect rejects before any mutation.
+        let new_pane_shown_layout_tree =
+            candidate_layout_tree.build_shown_layout_tree(&[new_pane_id]);
+        let new_pane_content_rect = find_content_rect(
+            &solve_layout_with_mode(
+                new_pane_shown_layout_tree
+                    .as_ref()
+                    .unwrap_or(&candidate_layout_tree),
+                LayoutMode::Tiled,
+                Rect::from_size_at_origin(tab_size),
+                pane_sizing,
+            ),
+            new_pane_id,
+        )
+        .ok_or_else(|| Rejection::from_reason(RejectReason::InvalidState))?;
         let new_pane_pty_size = compute_pty_size(new_pane_content_rect);
-        let previous_tab_id = designated_client_id.and_then(|client_id| {
-            session
-                .clients
-                .get_client_by_id(client_id)
-                .map(|client| client.get_active_tab_id())
-        });
-        let mut affected_tab_ids = vec![new_pane_target.tab_id];
-        if let Some(previous_tab_id) = previous_tab_id {
-            if previous_tab_id != new_pane_target.tab_id {
-                affected_tab_ids.push(previous_tab_id);
-            }
-        }
-        let affected_client_ids =
-            list_clients_affected_by_tabs(session, &affected_tab_ids, designated_client_id);
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
-
         // The child launches before any state commits. A launch failure
         // registers nothing, moves no view, and rejects the command.
         let new_pane_spec = Self::launch_new_pane_child(
@@ -181,8 +166,6 @@ impl Server {
             designated_client_id,
             new_pane_spec,
         );
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // Register the live pane and its size, and create the terminal engine
         // that receives the child's output.
@@ -193,12 +176,13 @@ impl Server {
             pty_size: new_pane_pty_size,
         }));
 
-        // Reflow the target tab's other live panes to the new geometry (excluding
-        // the pane just spawned, already sized above).
-        self.reflow_changed(
+        // Reflow the target tab's live panes to the smallest rect a viewer
+        // draws each in. The pane just spawned resizes only when that rect
+        // differs from the size it was spawned at.
+        self.reflow_tab_if_viewed(
             pty_backend.as_ref(),
-            pane_content_rects,
-            Some(new_pane_id),
+            new_pane_target.session_id,
+            new_pane_target.tab_id,
             &mut emitted_events,
         );
 
@@ -298,11 +282,10 @@ impl Server {
     /// pane, store the designated client's position, and focus the
     /// pane for the designated client, drawn above its other floating panes.
     /// The new pane then takes that client's input. A launch failure commits
-    /// nothing and rejects. No other client's focus moves.
+    /// nothing and rejects. No other client's focus moves. Every attached
+    /// client gains a view of the pane.
     ///
-    /// The session's placement revision advances, and so does the revision of
-    /// every attached client: each one gains a view of the pane. Emits
-    /// [`Event::PaneCreated`] with `tab_id: None`, the
+    /// Emits [`Event::PaneCreated`] with `tab_id: None`, the
     /// designated client's [`Event::PaneFocused`] with `tab_id: None`, then
     /// [`Event::PtyResized`] with the spawn size.
     fn handle_new_floating_pane(
@@ -342,9 +325,6 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let affected_client_ids = session.clients.list_client_ids();
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         let new_pane_id = PaneId::new();
         let new_pane_spec = Self::launch_new_pane_child(
@@ -378,8 +358,6 @@ impl Server {
                 ));
             }
         };
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         self.park_pane_pty(new_pane_id, new_floating_pane_target.pty_size);
         emitted_events.push(Event::PtyResized(PtyResized {
@@ -450,14 +428,7 @@ impl Server {
             command_args.should_kill_process_tree,
         );
 
-        let affected_client_ids = list_clients_affected_by_tabs(
-            session,
-            &list_tabs_affected_by_pane_close(session, tab_id, pane_target.pane_id),
-            command_source.get_client_id(),
-        );
         let floating_pane_ids = session.floating_set.list_pane_ids();
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         // Closing drops the zoom of the client that closed, and of that client
         // only; it returns to the tiled view. A client zoomed on a pane that
@@ -474,8 +445,6 @@ impl Server {
         // Commit the state removal: registry drop, layout collapse, per-client
         // focus repair, empty-tab close, last-tab quit — one shared cascade.
         let mut emitted_events = remove_pane_cascade(session, tab_id, pane_target.pane_id, None);
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // The pane is gone from state; drop its runtime bookkeeping and reflow
         // the survivors into the space it freed.
@@ -508,9 +477,7 @@ impl Server {
     /// ([`compute_pane_kill_policy`]). [`remove_floating_pane`] drops
     /// the registry record, the member and every client's view of the pane,
     /// and moves the input of each client that focused the pane; no layout
-    /// changes and nothing reflows. The session's placement revision
-    /// advances, and so does the revision of every client whose floating view
-    /// named the pane. Emits [`Event::PaneClosing`] and [`Event::PaneRemoved`]
+    /// changes and nothing reflows. Emits [`Event::PaneClosing`] and [`Event::PaneRemoved`]
     /// with `tab_id: None`, then one [`Event::PaneFocused`] for each client
     /// whose input moved.
     fn handle_close_floating_pane(
@@ -528,13 +495,8 @@ impl Server {
             command_args.should_force_close,
             command_args.should_kill_process_tree,
         );
-        let affected_client_ids = session.clients.list_client_ids();
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         let emitted_events = remove_floating_pane(session, pane_id);
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         self.release_pane_bookkeeping(session_id, pane_id);
         self.kill_pane_off_thread(pane_id, kill_policy);
@@ -660,8 +622,7 @@ impl Server {
     /// removed at once through [`remove_floating_pane`], and nothing reflows.
     /// An exit for a pane no session holds, or whose record no tab holds,
     /// changes no session, and `kill_pane` still releases any backend entry
-    /// for it. An exit that removes a pane marks the view of every subscriber
-    /// changed (`mark_every_view_changed`).
+    /// for it.
     ///
     /// Releasing a removed pane's bookkeeping clears its live ID, size cache,
     /// and terminal engine. If the backend still holds the pane, `kill_pane`
@@ -709,14 +670,10 @@ impl Server {
             // view, then a `PaneFocused` for each client whose input it held.
             // No layout collapses and no tab closes.
             Ok(None) => {
-                let affected_client_ids = session.clients.list_client_ids();
                 let mut emitted_events = vec![Event::PaneProcessExited(pane_exit)];
                 emitted_events.extend(remove_floating_pane(session, pane_id));
-                advance_session_placement_revision(session);
-                advance_client_placement_revisions(session, &affected_client_ids);
                 self.release_pane_bookkeeping(session_id, pane_id);
                 let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
-                self.mark_every_view_changed();
                 return emitted_events;
             }
             // No tab's layout holds the pane and it does not float: its record
@@ -728,16 +685,9 @@ impl Server {
             }
         };
 
-        let affected_client_ids = list_clients_affected_by_tabs(
-            session,
-            &list_tabs_affected_by_pane_close(session, tab_id, pane_id),
-            None,
-        );
         let floating_pane_ids = session.floating_set.list_pane_ids();
         // `PaneProcessExited`, then the removal cascade.
         let mut emitted_events = apply_child_exit(session, tab_id, pane_exit);
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // Drop the removed pane's runtime bookkeeping and reflow the survivors
         // into the space it freed.
@@ -758,8 +708,6 @@ impl Server {
             floating_pane_ids,
             compute_pane_kill_policy(false, false),
         );
-
-        self.mark_every_view_changed();
 
         emitted_events
     }
@@ -839,10 +787,6 @@ impl Server {
         let resizing_client_id = command_source
             .get_target_client_id()
             .or(command_source.get_client_id());
-        let affected_client_ids =
-            list_clients_affected_by_tabs(session, &[tab_id], resizing_client_id);
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         // Resizing drops the zoom of the resizing client, and of that client
         // only: the client the command source names, else the issuing client.
@@ -854,8 +798,6 @@ impl Server {
             client.clear_zoom(tab_id);
         }
         let solve_events = session.update_tab_layout(tab_id, resized_layout_tree);
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         // The border moved: resize each live PTY whose size changed.
         let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged { tab_id })];
@@ -881,9 +823,7 @@ impl Server {
     /// changed ([`Self::reflow_floating_panes`]). A client that pinned the pane
     /// keeps its pinned cell. No other client's view changes.
     ///
-    /// The session's placement revision advances, and so does the acting
-    /// client's when its stored position changed. Emits one
-    /// [`Event::PtyResized`] per resized PTY.
+    /// Emits one [`Event::PtyResized`] per resized PTY.
     fn handle_resize_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -901,25 +841,16 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let previous_floating_pane_view =
-            Self::require_client(session, client_id)?.get_floating_pane_view(pane_id);
-        let acting_client_ids: Vec<ClientId> =
-            top_left_cell.map(|_| client_id).into_iter().collect();
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &acting_client_ids)?;
+        Self::require_client(session, client_id)?;
 
         session
             .floating_set
             .update_member_desired_size(pane_id, desired_size);
-        advance_session_placement_revision(session);
         if let (Some(top_left_cell), Some(client)) = (
             top_left_cell,
             session.clients.get_client_mut_by_id(client_id),
         ) {
             let _ = client.set_floating_pane_position(pane_id, top_left_cell);
-            if client.get_floating_pane_view(pane_id) != previous_floating_pane_view {
-                let _ = client.advance_placement_revision();
-            }
         }
 
         let mut emitted_events = Vec::new();
@@ -960,7 +891,6 @@ impl Server {
         let place_pane_args = PlacePaneArgs {
             source_pane_id: Some(pane_target.pane_id),
             placement_target: PanePlacementTarget::Tiled(tiled_placement_target.clone()),
-            expected_placement_revision: None,
         };
         let placement_target = PlacePaneTarget {
             session_id: pane_target.session_id,
@@ -974,7 +904,63 @@ impl Server {
             &place_pane_args,
             &tiled_placement_target,
             placement_target,
+            None,
         )
+    }
+
+    /// Run the pane placement that `client_id` confirmed from its preview
+    /// ([`ConfirmPanePlacement`](koshi_ipc::protocol::IpcRequestKind::ConfirmPanePlacement)):
+    /// a [`Command::PlacePane`] of `source_pane_id` to
+    /// `tiled_placement_target` from the client's key binding, checked as
+    /// [`Self::dispatch`] checks a command. The placement commits only when the
+    /// destination tab, as the client draws it after the placement, equals
+    /// `expected_placed_tab_layout`
+    /// ([`Self::validate_expected_placed_tab_layout`]).
+    ///
+    /// An applied placement records `command_id` as the client's last applied
+    /// placement ([`Client::set_last_applied_placement_command_id`]). A
+    /// refused placement changes nothing, and a
+    /// [`PlacementCommandRejected`](koshi_ipc::event::SessionEvent::PlacementCommandRejected)
+    /// naming `command_id` goes on the client's queue
+    /// ([`Self::send_placement_command_rejection`]).
+    pub(crate) fn confirm_pane_placement(
+        &mut self,
+        client_id: ClientId,
+        command_id: CommandId,
+        source_pane_id: PaneId,
+        tiled_placement_target: TiledPlacementTarget,
+        expected_placed_tab_layout: &PlacedTabLayout,
+    ) -> CommandResult {
+        let command_source = CommandSource::from_key_binding(client_id);
+        let place_pane_args = PlacePaneArgs {
+            source_pane_id: Some(source_pane_id),
+            placement_target: PanePlacementTarget::Tiled(tiled_placement_target),
+        };
+        let envelope = CommandEnvelope::from_parts(
+            command_id,
+            command_source.clone(),
+            Command::PlacePane(place_pane_args.clone()),
+        );
+        let outcome = self.validate_command(&envelope).and_then(|()| {
+            self.apply_place_pane(
+                command_id,
+                &command_source,
+                &place_pane_args,
+                Some(expected_placed_tab_layout),
+            )
+        });
+        match outcome {
+            Ok(command_result) => {
+                if let Some(client) = self.get_client_mut(client_id) {
+                    client.set_last_applied_placement_command_id(command_id);
+                }
+                command_result
+            }
+            Err(rejection) => {
+                let _ = self.send_placement_command_rejection(client_id, command_id);
+                Self::reject_command(command_id, rejection)
+            }
+        }
     }
 
     /// Handle [`Command::PlacePane`]. A tiled target installs one prepared
@@ -982,18 +968,24 @@ impl Server {
     /// whose viewers change. A tiled target from a floating source pane docks
     /// the pane ([`Self::apply_dock_pane`]). A
     /// [`PanePlacementTarget::Floating`] target undocks the pane
-    /// ([`Self::apply_undock_pane`]). Every fallible layout and revision check
-    /// runs before the session commit.
+    /// ([`Self::apply_undock_pane`]). Every fallible layout check runs before
+    /// the session commit.
     ///
-    /// Within one tab, no focus moves: a floating pane that takes a client's
-    /// input keeps it. Across two tabs, the acting client moves to the
-    /// destination tab and focuses the placed pane, which takes its input
-    /// ([`commit_cross_tab_placement`]).
+    /// Within one tab, a floating pane that takes a client's input keeps it,
+    /// and only a focus the placement collapses moves
+    /// ([`Self::apply_place_pane_within_tab`]). Across two tabs, the acting
+    /// client moves to the destination tab and focuses the placed pane, which
+    /// takes its input ([`commit_cross_tab_placement`]).
+    ///
+    /// With `expected_placed_tab_layout` set, a tiled target commits only when
+    /// the destination tab, as the acting client draws it after the
+    /// placement, equals it ([`Self::validate_expected_placed_tab_layout`]).
     pub(super) fn apply_place_pane(
         &mut self,
         command_id: CommandId,
         command_source: &CommandSource,
         command_args: &PlacePaneArgs,
+        expected_placed_tab_layout: Option<&PlacedTabLayout>,
     ) -> Result<CommandResult, Rejection> {
         let tiled_placement_target = match &command_args.placement_target {
             PanePlacementTarget::Tiled(tiled_placement_target) => tiled_placement_target,
@@ -1020,6 +1012,7 @@ impl Server {
                     command_args,
                     tiled_placement_target,
                     dock_target,
+                    expected_placed_tab_layout,
                 );
             }
         };
@@ -1029,6 +1022,7 @@ impl Server {
                 command_args,
                 tiled_placement_target,
                 placement_target,
+                expected_placed_tab_layout,
             );
         }
         self.apply_place_pane_across_tabs(
@@ -1036,19 +1030,28 @@ impl Server {
             command_args,
             tiled_placement_target,
             placement_target,
+            expected_placed_tab_layout,
         )
     }
 
-    /// Apply a checked swap or insertion of the source pane into another tab:
-    /// the layout crate builds both trees, [`commit_cross_tab_placement`]
+    /// Apply a checked swap, insertion or stack of the source pane into another
+    /// tab: the layout crate builds both trees, [`commit_cross_tab_placement`]
     /// installs them, and the destination tab, the source tab or the tab its
-    /// viewers land on, reflows.
+    /// viewers land on, and each other tab a moving client left, reflows. An
+    /// insertion or a stack of the source tab's only pane closes that tab.
+    ///
+    /// Both trees are checked against the tab sizes they take once the moving
+    /// clients switch tabs ([`compute_placement_tab_sizes`]): the acting
+    /// client and every client whose input is on the source pane move to the
+    /// destination tab, and every client whose input is on the swapped pane
+    /// moves to the source tab.
     fn apply_place_pane_across_tabs(
         &mut self,
         command_id: CommandId,
         command_args: &PlacePaneArgs,
         tiled_placement_target: &TiledPlacementTarget,
         placement_target: PlacePaneTarget,
+        expected_placed_tab_layout: Option<&PlacedTabLayout>,
     ) -> Result<CommandResult, Rejection> {
         let pane_sizing = self.get_pane_sizing();
         let session = self
@@ -1061,7 +1064,7 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?
             .get_layout_tree();
         let is_source_tab_closing =
-            matches!(tiled_placement_target, TiledPlacementTarget::Split { .. })
+            !matches!(tiled_placement_target, TiledPlacementTarget::Swap { .. })
                 && source_tree.list_leaf_pane_ids() == vec![placement_target.source_pane_id];
         let landing_tab_id = if is_source_tab_closing {
             Some(
@@ -1071,31 +1074,19 @@ impl Server {
         } else {
             None
         };
-        let mut affected_tab_ids = vec![
-            placement_target.source_tab_id,
-            placement_target.destination_tab_id,
-        ];
-        if let Some(landing_tab_id) = landing_tab_id {
-            if !affected_tab_ids.contains(&landing_tab_id) {
-                affected_tab_ids.push(landing_tab_id);
-            }
-        }
-        let affected_client_ids = list_clients_affected_by_tabs(
-            session,
-            &affected_tab_ids,
-            Some(placement_target.client_id),
-        );
-        let landing_viewer_tab_id = if landing_tab_id == Some(placement_target.destination_tab_id) {
-            Some(placement_target.source_tab_id)
-        } else {
-            None
+        let swapped_pane_id = match tiled_placement_target {
+            TiledPlacementTarget::Swap { target_pane_id } => Some(*target_pane_id),
+            TiledPlacementTarget::Split { .. } | TiledPlacementTarget::Stack { .. } => None,
         };
-        let destination_tab_size = compute_placement_destination_tab_size(
+        let placement_tab_sizes = compute_placement_tab_sizes(
             session,
+            placement_target.source_pane_id,
             placement_target.destination_tab_id,
-            landing_viewer_tab_id,
+            swapped_pane_id,
             placement_target.client_id,
-        )?;
+        );
+        Self::require_client(session, placement_target.client_id)?;
+        let destination_tab_size = require_placement_destination_tab_size(placement_tab_sizes)?;
         let destination_tab_rect = Rect::from_size_at_origin(destination_tab_size);
         let layout_target = PlacementTarget::from_tiled_placement_target(tiled_placement_target);
         let destination_tree = session
@@ -1112,23 +1103,27 @@ impl Server {
             pane_sizing,
         )
         .map_err(|placement_error| Self::build_placement_rejection(&placement_error))?;
-        if let Some(placed_source_tree) = prepared_placement.source_tree.as_ref() {
-            if let Some(source_tab_size) = compute_placement_source_tab_size(
-                session,
-                placement_target.source_tab_id,
-                placement_target.client_id,
-            ) {
-                let source_tab_rect = Rect::from_size_at_origin(source_tab_size);
-                if !is_layout_within_rect(placed_source_tree, source_tab_rect, pane_sizing) {
-                    return Err(Rejection::from_reason_and_help(
-                        RejectReason::InvalidState,
-                        "pane placement does not fit the source tab",
-                    ));
-                }
+        if let (Some(placed_source_tree), Some(source_tab_size)) = (
+            prepared_placement.source_tree.as_ref(),
+            placement_tab_sizes.source_tab_size,
+        ) {
+            let source_tab_rect = Rect::from_size_at_origin(source_tab_size);
+            if !is_layout_within_rect(placed_source_tree, source_tab_rect, pane_sizing) {
+                return Err(Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    "pane placement does not fit the source tab",
+                ));
             }
         }
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
+        Self::validate_expected_placed_tab_layout(
+            session,
+            placement_target.client_id,
+            placement_target.destination_tab_id,
+            &prepared_placement.destination_tree,
+            placement_target.source_pane_id,
+            destination_tab_size,
+            expected_placed_tab_layout,
+        )?;
 
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = vec![Event::PanePlacementCommitted(PanePlacementCommitted {
@@ -1154,8 +1149,6 @@ impl Server {
                 )
                 .map_err(|_| Rejection::from_reason(RejectReason::InvalidState))?,
             );
-            advance_session_placement_revision(session);
-            advance_client_placement_revisions(session, &affected_client_ids);
         }
 
         let mut tab_ids_to_reflow = vec![placement_target.destination_tab_id];
@@ -1166,6 +1159,11 @@ impl Server {
         }
         if !is_source_tab_closing && !tab_ids_to_reflow.contains(&placement_target.source_tab_id) {
             tab_ids_to_reflow.push(placement_target.source_tab_id);
+        }
+        for tab_id in list_tab_ids_switched_away_from(&emitted_events) {
+            if tab_id != placement_target.source_tab_id && !tab_ids_to_reflow.contains(&tab_id) {
+                tab_ids_to_reflow.push(tab_id);
+            }
         }
         for tab_id in tab_ids_to_reflow {
             self.reflow_tab_if_viewed(
@@ -1188,8 +1186,9 @@ impl Server {
     /// [`Self::resolve_undock_pane_target`].
     ///
     /// The pane asks for the cells of the rect the acting client draws it in
-    /// ([`Self::find_lifted_floating_pane_rect`]), and a pane the acting
-    /// client does not draw asks for [`DEFAULT_FLOATING_PANE_SIZE`]. The
+    /// ([`find_lifted_floating_pane_rect`]), a stack member the acting client
+    /// draws on its header asks for the rect it opens into, and a pane the
+    /// acting client does not draw asks for [`DEFAULT_FLOATING_PANE_SIZE`]. The
     /// acting client stores `top_left_cell` when it is set, else the rect's
     /// top-left cell, else its default placement. A `40x19` pane drawn at
     /// `(40, 0)` floats as `Cells(40)` by `Cells(19)` at `(40, 0)`, or at
@@ -1199,11 +1198,12 @@ impl Server {
     /// [`commit_undock_placement`] adds the member at
     /// [`Session::compute_new_floating_pane_size`], takes the leaf out of its
     /// tab, closes a tab left with no pane, and shows the pane for the acting
-    /// client when it can draw floating panes. Every other client holds the
-    /// pane minimized at its default placement.
+    /// client and for every other client whose input is on the pane, each when
+    /// it can draw floating panes. Such another client holds the pane at the
+    /// top-left cell of the rect it drew the pane in. Every other client holds
+    /// the pane minimized at its default placement.
     ///
-    /// The session's placement revision advances, and so does the revision of
-    /// every attached client: each one gains a view of the pane.
+    /// Every attached client gains a view of the pane.
     ///
     /// Emits [`Event::PanePlacementCommitted`] with `destination_tab_id: None`,
     /// then the commit's events, then one [`Event::PtyResized`] per pane the
@@ -1227,11 +1227,8 @@ impl Server {
             .session_by_id
             .get_mut(&undock_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let affected_client_ids = session.clients.list_client_ids();
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
-        let lifted_floating_pane_rect = Self::find_lifted_floating_pane_rect(
+        let lifted_floating_pane_rect = find_lifted_floating_pane_rect(
             session,
             undock_target.client_id,
             undock_target.source_tab_id,
@@ -1275,8 +1272,6 @@ impl Server {
                 )
             })?,
         );
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
         self.reflow_tab_or_landing_tab(
             undock_target.session_id,
@@ -1302,29 +1297,31 @@ impl Server {
     /// tiled pane. The target comes from [`Self::resolve_tiled_placement_target`].
     ///
     /// The destination tree is built against the destination tab's size once
-    /// the acting client views it ([`compute_placement_destination_tab_size`])
-    /// with [`place_floating_pane_in_tab`], then [`commit_dock_placement`]
-    /// takes the pane out of the floating panes and installs the tree. The
-    /// pane keeps its id, its PTY and its terminal state.
+    /// the acting client and every client whose input is on the pane view it
+    /// ([`compute_placement_tab_sizes`]) with [`place_floating_pane_in_tab`],
+    /// then [`commit_dock_placement`] takes the pane out of the floating panes
+    /// and installs the tree. The pane keeps its id, its PTY and its terminal
+    /// state.
     ///
     /// A tree that does not fit the destination is refused with
     /// [`RejectReason::InvalidState`] `tab <name> has no room for another
     /// pane`; every other layout refusal is
     /// [`Self::build_placement_rejection`]'s. A refusal changes nothing.
     ///
-    /// The session's placement revision advances, and so does the revision of
-    /// every attached client: each one's floating view drops the pane.
+    /// Every attached client's floating view drops the pane.
     ///
     /// Emits [`Event::PanePlacementCommitted`] with `source_tab_id: None`,
     /// then the commit's events, then one [`Event::PtyResized`] per pane the
     /// destination tab resizes, the docked pane included, then one per pane
-    /// the tab the acting client left resizes ([`Self::reflow_tab_if_viewed`]).
+    /// each tab that a moving client left resizes
+    /// ([`Self::reflow_tab_if_viewed`]).
     fn apply_dock_pane(
         &mut self,
         command_id: CommandId,
         command_args: &PlacePaneArgs,
         tiled_placement_target: &TiledPlacementTarget,
         dock_target: DockPaneTarget,
+        expected_placed_tab_layout: Option<&PlacedTabLayout>,
     ) -> Result<CommandResult, Rejection> {
         let pane_sizing = self.get_pane_sizing();
         let pty_backend = Arc::clone(self.get_pty_backend());
@@ -1336,14 +1333,15 @@ impl Server {
             .tabs
             .get(&dock_target.destination_tab_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let acting_previous_tab_id =
-            Self::require_client(session, dock_target.client_id)?.get_active_tab_id();
-        let destination_tab_size = compute_placement_destination_tab_size(
-            session,
-            dock_target.destination_tab_id,
-            None,
-            dock_target.client_id,
-        )?;
+        Self::require_client(session, dock_target.client_id)?;
+        let destination_tab_size =
+            require_placement_destination_tab_size(compute_placement_tab_sizes(
+                session,
+                dock_target.source_pane_id,
+                dock_target.destination_tab_id,
+                None,
+                dock_target.client_id,
+            ))?;
         let destination_tree = place_floating_pane_in_tab(
             destination_tab.get_layout_tree(),
             dock_target.source_pane_id,
@@ -1361,9 +1359,15 @@ impl Server {
             ),
             other_placement_error => Self::build_placement_rejection(&other_placement_error),
         })?;
-        let affected_client_ids = session.clients.list_client_ids();
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
+        Self::validate_expected_placed_tab_layout(
+            session,
+            dock_target.client_id,
+            dock_target.destination_tab_id,
+            &destination_tree,
+            dock_target.source_pane_id,
+            destination_tab_size,
+            expected_placed_tab_layout,
+        )?;
 
         let mut emitted_events = vec![Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
@@ -1387,20 +1391,18 @@ impl Server {
                 )
             })?,
         );
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
 
-        self.reflow_tab_if_viewed(
-            pty_backend.as_ref(),
-            dock_target.session_id,
-            dock_target.destination_tab_id,
-            &mut emitted_events,
-        );
-        if acting_previous_tab_id != dock_target.destination_tab_id {
+        let mut tab_ids_to_reflow = vec![dock_target.destination_tab_id];
+        for tab_id in list_tab_ids_switched_away_from(&emitted_events) {
+            if !tab_ids_to_reflow.contains(&tab_id) {
+                tab_ids_to_reflow.push(tab_id);
+            }
+        }
+        for tab_id in tab_ids_to_reflow {
             self.reflow_tab_if_viewed(
                 pty_backend.as_ref(),
                 dock_target.session_id,
-                acting_previous_tab_id,
+                tab_id,
                 &mut emitted_events,
             );
         }
@@ -1411,62 +1413,40 @@ impl Server {
         ))
     }
 
-    /// Where `client_id` draws the tiled pane `pane_id` of `tab_id`: the size
-    /// a floating pane lifted from that spot asks for, in cells, and its
-    /// top-left cell, counted from the client's pane-area origin. The rect is
-    /// the pane's rect in the client's own view of the tab
-    /// ([`Session::compute_client_solve`]), moved by the offset that centers
-    /// the tab in the client's pane area
-    /// ([`Size::compute_centered_origin`]).
-    ///
-    /// A `40x22` rect at `(40, 0)` in an `80x22` tab, drawn in a `100x30` pane
-    /// area → `Cells(40)` by `Cells(22)` at `(50, 4)`.
-    ///
-    /// `None` when the client is not attached, views another tab, reports
-    /// [`PaneArea::Starving`], or draws the pane at zero area.
-    fn find_lifted_floating_pane_rect(
-        session: &Session,
-        client_id: ClientId,
-        tab_id: TabId,
-        pane_id: PaneId,
-    ) -> Option<(FloatingPaneSize, Point)> {
-        let client = session.clients.get_client_by_id(client_id)?;
-        if client.get_active_tab_id() != tab_id {
-            return None;
-        }
-        let pane_area = client.get_pane_area()?;
-        let tab_size = session.tabs.get(&tab_id)?.get_solved_tab_size();
-        let pane_rect = session
-            .compute_client_solve(tab_id, client.get_layout_mode(tab_id))?
-            .find_pane_rect(pane_id)?;
-        let desired_size = FloatingPaneSize {
-            width: FloatingPaneDimension::Cells(NonZeroU16::new(pane_rect.size.column_count)?),
-            height: FloatingPaneDimension::Cells(NonZeroU16::new(pane_rect.size.row_count)?),
-        };
-        let tab_origin = pane_area.compute_centered_origin(tab_size);
-        let top_left_cell = Point {
-            column: pane_rect.origin.column.saturating_add(tab_origin.column),
-            row: pane_rect.origin.row.saturating_add(tab_origin.row),
-        };
-        Some((desired_size, top_left_cell))
-    }
-
     /// Apply a checked swap, insertion or stack within one tab. A swap or a
     /// stack whose target is the source pane commits no events and does not
     /// solve or resize the tab.
+    ///
+    /// When the source pane lands collapsed to a stack header in the acting
+    /// client's own view of the tab ([`LayoutNode::is_pane_collapsed`] with
+    /// its focus history), the acting client focuses it there, which opens it
+    /// in that view. The tab records it as its most-recent focus, and an
+    /// [`Event::PaneFocused`] names the pane the client focused in the tab
+    /// before as `previous_pane_id`. A floating pane that takes the acting
+    /// client's input keeps it. `place-pane --pane B --stack-onto A` from a
+    /// client focused on `A` in `A | B` gives the stack `[A, B]` with `A`
+    /// active in the tab's tree, and `B` open and focused for that client. No
+    /// other client's focus moves.
+    ///
+    /// A swap or a stack onto the source pane with `expected_placed_tab_layout`
+    /// set is checked against the tab as it is, then commits no events.
     fn apply_place_pane_within_tab(
         &mut self,
         command_id: CommandId,
         command_args: &PlacePaneArgs,
         tiled_placement_target: &TiledPlacementTarget,
         placement_target: PlacePaneTarget,
+        expected_placed_tab_layout: Option<&PlacedTabLayout>,
     ) -> Result<CommandResult, Rejection> {
-        if let TiledPlacementTarget::Swap { target_pane_id }
-        | TiledPlacementTarget::Stack { target_pane_id } = tiled_placement_target
-        {
-            if *target_pane_id == placement_target.source_pane_id {
-                return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+        let is_source_pane_target = match tiled_placement_target {
+            TiledPlacementTarget::Swap { target_pane_id }
+            | TiledPlacementTarget::Stack { target_pane_id } => {
+                *target_pane_id == placement_target.source_pane_id
             }
+            TiledPlacementTarget::Split { .. } => false,
+        };
+        if is_source_pane_target && expected_placed_tab_layout.is_none() {
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
         let layout_target = PlacementTarget::from_tiled_placement_target(tiled_placement_target);
         let pane_sizing = self.get_pane_sizing();
@@ -1488,13 +1468,18 @@ impl Server {
             pane_sizing,
         )
         .map_err(|placement_error| Self::build_placement_rejection(&placement_error))?;
-        let affected_client_ids = list_clients_affected_by_tabs(
+        Self::validate_expected_placed_tab_layout(
             session,
-            &[placement_target.source_tab_id],
-            Some(placement_target.client_id),
-        );
-        ensure_session_placement_revision_capacity(session)?;
-        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
+            placement_target.client_id,
+            placement_target.source_tab_id,
+            &placed_layout_tree,
+            placement_target.source_pane_id,
+            tab_size,
+            expected_placed_tab_layout,
+        )?;
+        if is_source_pane_target {
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+        }
         if let Some(client) = session
             .clients
             .get_client_mut_by_id(placement_target.client_id)
@@ -1503,8 +1488,26 @@ impl Server {
         }
         let solve_events =
             session.update_tab_layout(placement_target.source_tab_id, placed_layout_tree);
-        advance_session_placement_revision(session);
-        advance_client_placement_revisions(session, &affected_client_ids);
+        let is_placed_pane_collapsed = session
+            .clients
+            .get_client_by_id(placement_target.client_id)
+            .zip(session.tabs.get(&placement_target.source_tab_id))
+            .is_some_and(|(client, tab_state)| {
+                tab_state.get_layout_tree().is_pane_collapsed(
+                    placement_target.source_pane_id,
+                    client.list_focus_history(placement_target.source_tab_id),
+                )
+            });
+        let placed_pane_focused_event = if is_placed_pane_collapsed {
+            update_client_tab_focus(
+                session,
+                placement_target.client_id,
+                placement_target.source_tab_id,
+                placement_target.source_pane_id,
+            )
+        } else {
+            None
+        };
         let mut emitted_events = vec![
             Event::PanePlacementCommitted(PanePlacementCommitted {
                 command_id,
@@ -1518,6 +1521,7 @@ impl Server {
             }),
         ];
         emitted_events.extend(solve_events);
+        emitted_events.extend(placed_pane_focused_event);
         self.reflow_tab_if_viewed(
             pty_backend.as_ref(),
             placement_target.session_id,
@@ -1557,6 +1561,48 @@ impl Server {
             );
         }
         Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
+    }
+
+    /// Refuse a confirmed placement whose destination tab, as the acting
+    /// client draws it once the placement put `source_pane_id` in
+    /// `placed_layout_tree`, differs from `expected_placed_tab_layout`:
+    /// [`RejectReason::InvalidState`] `placement preview is stale; confirm
+    /// again`. The drawn tab is [`solve_placed_tab`] of `placed_layout_tree`
+    /// at `destination_tab_size`, with the acting client's focus history in
+    /// `destination_tab_id` and the session's pane sizing. `None` checks
+    /// nothing.
+    fn validate_expected_placed_tab_layout(
+        session: &Session,
+        acting_client_id: ClientId,
+        destination_tab_id: TabId,
+        placed_layout_tree: &LayoutNode,
+        source_pane_id: PaneId,
+        destination_tab_size: Size,
+        expected_placed_tab_layout: Option<&PlacedTabLayout>,
+    ) -> Result<(), Rejection> {
+        let Some(expected_placed_tab_layout) = expected_placed_tab_layout else {
+            return Ok(());
+        };
+        let acting_client = Self::require_client(session, acting_client_id)?;
+        let placed_tab_solve = solve_placed_tab(
+            placed_layout_tree,
+            source_pane_id,
+            acting_client.list_focus_history(destination_tab_id),
+            destination_tab_size,
+            session.get_pane_sizing(),
+        );
+        let placed_tab_layout = PlacedTabLayout {
+            tab_id: destination_tab_id,
+            tab_size: destination_tab_size,
+            layout_solve: placed_tab_solve.layout_solve,
+        };
+        if placed_tab_layout != *expected_placed_tab_layout {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                "placement preview is stale; confirm again",
+            ));
+        }
+        Ok(())
     }
 
     /// Map a placement failure to a command rejection: a missing source or
@@ -1611,22 +1657,24 @@ impl Server {
     /// active tab takes the client's input, and every floating pane the
     /// client shows is minimized for it ([`apply_tiled_pane_focus`]).
     ///
-    /// A tiled pane must be visible on screen in the client's own view of the
-    /// tab ([`Session::compute_client_solve`]): one suppressed for lack of
-    /// space is [`RejectReason::InvalidState`]. A collapsed stack member is a valid
-    /// target — focusing it activates its stack (the member expands, the
-    /// previously active member collapses to a header) and the tab's PTYs
-    /// reflow to the new geometry. Zoom follows focus, per client: when the
-    /// target client has this tab zoomed, focusing another pane moves its zoom
-    /// onto that pane — its zoomed view swaps content and stays on, and no other
-    /// client's view moves. Emits [`Event::LayoutChanged`] plus per-pane
-    /// [`Event::PtyResized`] when a stack activation or a zoom retarget changed
-    /// the geometry, then one [`Event::PaneMinimizedChanged`] per floating pane
-    /// minimized, then [`Event::PaneFocused`] when the client's input
-    /// actually moved, naming as `previous_pane_id` the pane that took it
-    /// before; focusing the pane that already takes the client's input, in an
-    /// already-active member, completes with no events. A rejected focus
-    /// mutates nothing.
+    /// A tiled pane must have room in the solve of the client's layout mode
+    /// ([`Session::compute_layout_mode_solve`]): one suppressed for lack of
+    /// space is [`RejectReason::InvalidState`]. A stack member collapsed to its
+    /// header in the client's own view of the tab
+    /// ([`LayoutNode::is_pane_collapsed`] with its focus history) is a valid
+    /// target: focusing it opens it in that view, the member the client had
+    /// open collapses to its header, and the tab's PTYs reflow to what every
+    /// viewer now draws. The tab's tree and every other client's view stay as
+    /// they are. Zoom follows focus, per client: when the target client has
+    /// this tab zoomed, focusing another pane moves its zoom onto that pane —
+    /// its zoomed view swaps content and stays on, and no other client's view
+    /// moves. Emits [`Event::LayoutChanged`] plus per-pane
+    /// [`Event::PtyResized`] when the focus opened a stack member or
+    /// retargeted the zoom, then one [`Event::PaneMinimizedChanged`] per
+    /// floating pane minimized, then [`Event::PaneFocused`] when the client's
+    /// input actually moved, naming as `previous_pane_id` the pane that took it
+    /// before; focusing the pane that already takes the client's input
+    /// completes with no events. A rejected focus mutates nothing.
     pub(super) fn handle_focus_pane(
         &mut self,
         command_id: CommandId,
@@ -1665,10 +1713,9 @@ impl Server {
         };
         let is_layout_mode_retargeted = effective_layout_mode != client_layout_mode;
 
-        // The tab as this client will display it: a pane suppressed for lack
-        // of space cannot take focus.
+        // A pane suppressed for lack of space cannot take focus.
         let is_pane_suppressed = session
-            .compute_client_solve(pane_target.tab_id, effective_layout_mode)
+            .compute_layout_mode_solve(pane_target.tab_id, effective_layout_mode)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
             .suppressed_pane_ids
             .contains(&pane_target.pane_id);
@@ -1679,38 +1726,25 @@ impl Server {
             ));
         }
 
-        // A collapsed stack member is a valid target: focusing it expands it.
-        // The activation mutates a candidate tree, swapped in whole.
-        let mut candidate_layout_tree = session
-            .tabs
-            .get(&pane_target.tab_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
-            .get_layout_tree()
-            .clone();
-        let is_stack_member_activated = candidate_layout_tree
-            .find_containing_stack_mut(pane_target.pane_id)
-            .is_some_and(|stack| activate_stack_member(stack, pane_target.pane_id));
+        // A stack member collapsed in this client's view opens for this client
+        // alone: its focus history decides which member its view shows.
+        let is_stack_member_opened = client_layout_mode == LayoutMode::Tiled
+            && session
+                .tabs
+                .get(&pane_target.tab_id)
+                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
+                .get_layout_tree()
+                .is_pane_collapsed(
+                    pane_target.pane_id,
+                    client.list_focus_history(pane_target.tab_id),
+                );
 
         if previous_focused_pane_id == Some(pane_target.pane_id)
-            && !is_stack_member_activated
+            && !is_stack_member_opened
             && !is_layout_mode_retargeted
         {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
-
-        let client_ids_to_advance = if is_stack_member_activated {
-            list_clients_affected_by_tabs(
-                session,
-                &[pane_target.tab_id],
-                Some(pane_target.client_id),
-            )
-        } else {
-            vec![pane_target.client_id]
-        };
-        if is_stack_member_activated {
-            ensure_session_placement_revision_capacity(session)?;
-        }
-        ensure_client_placement_revision_capacity(session, &client_ids_to_advance)?;
 
         // The focus, and this client's zoom with it, moves before the reflow;
         // the reflow solves PTY sizes from what every client now displays.
@@ -1719,24 +1753,15 @@ impl Server {
         if let Some(tab_state) = session.tabs.get_mut(&pane_target.tab_id) {
             tab_state.record_focus_mru(pane_target.pane_id);
         }
-        let solve_events = if is_stack_member_activated {
-            session.update_tab_layout(pane_target.tab_id, candidate_layout_tree)
-        } else {
-            Vec::new()
-        };
-        if is_stack_member_activated {
-            advance_session_placement_revision(session);
-        }
-        advance_client_placement_revisions(session, &client_ids_to_advance);
 
-        // The activation, the zoom retarget, or both changed what is drawn:
-        // announce the new geometry and resize each live PTY whose size changed.
+        // Opening a stack member, the zoom retarget, or both changed what this
+        // client draws: announce the new geometry and resize each live PTY
+        // whose size changed.
         let mut emitted_events = Vec::new();
-        if is_stack_member_activated || is_layout_mode_retargeted {
+        if is_stack_member_opened || is_layout_mode_retargeted {
             emitted_events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: pane_target.tab_id,
             }));
-            emitted_events.extend(solve_events);
             self.reflow_tab_if_viewed(
                 pty_backend.as_ref(),
                 pane_target.session_id,
@@ -1759,13 +1784,11 @@ impl Server {
     /// input.
     ///
     /// A pane that already takes the client's input completes with no events.
-    /// Otherwise the client's placement revision advances, one
-    /// [`Event::PaneMinimizedChanged`] with `is_minimized: false` reports a
-    /// pane the client had minimized, and one [`Event::PaneFocused`] with
-    /// `tab_id: None` names the pane and, as `previous_pane_id`, the pane that
-    /// took the client's input before. A placement revision that cannot
-    /// advance is [`RejectReason::InvalidState`] `placement revision cannot
-    /// advance`, changing nothing. Every other client's view stays as it is.
+    /// Otherwise one [`Event::PaneMinimizedChanged`] with
+    /// `is_minimized: false` reports a pane the client had minimized, and one
+    /// [`Event::PaneFocused`] with `tab_id: None` names the pane and, as
+    /// `previous_pane_id`, the pane that took the client's input before. Every
+    /// other client's view stays as it is.
     fn handle_focus_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -1785,12 +1808,10 @@ impl Server {
         if previous_focused_pane_id == Some(pane_id) {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
-        ensure_client_placement_revision_capacity(session, &[client_id])?;
         let client = Self::require_client_mut(session, client_id)?;
-        let was_minimized = client.focus_floating_pane(pane_id);
-        let _ = client.advance_placement_revision();
+        let is_pane_restored = client.focus_floating_pane(pane_id);
         let mut emitted_events: Vec<Event> = Vec::new();
-        if was_minimized {
+        if is_pane_restored {
             emitted_events.extend(build_pane_minimized_changed_events(
                 client_id,
                 &[pane_id],
@@ -1864,7 +1885,7 @@ impl Server {
                     focused_pane_id: pane_target.pane_id,
                 };
                 let is_pane_suppressed = session
-                    .compute_client_solve(tab_id, fullscreen_layout_mode)
+                    .compute_layout_mode_solve(tab_id, fullscreen_layout_mode)
                     .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
                     .suppressed_pane_ids
                     .contains(&pane_target.pane_id);
@@ -1877,7 +1898,6 @@ impl Server {
                 true
             }
         };
-        ensure_client_placement_revision_capacity(session, &[client_id])?;
 
         // The zoom applies to the target client alone; every other client
         // viewing this tab keeps its view. Entering also moves this client's
@@ -1899,7 +1919,6 @@ impl Server {
                 tab_state.record_focus_mru(pane_target.pane_id);
             }
         }
-        advance_client_placement_revisions(session, &[client_id]);
 
         // This client's view changed: re-solve the tab and resize each live PTY
         // whose size changed.
@@ -2066,75 +2085,21 @@ impl Server {
     }
 }
 
-/// `tab_id`, plus the nearest surviving tab when `pane_id` is the last pane in
-/// `tab_id`: the tabs whose viewers change when that pane closes.
-fn list_tabs_affected_by_pane_close(
-    session: &Session,
-    tab_id: TabId,
-    pane_id: PaneId,
-) -> Vec<TabId> {
-    let mut affected_tab_ids = vec![tab_id];
-    let is_last_pane_in_tab = session
-        .tabs
-        .get(&tab_id)
-        .is_some_and(|tab| tab.get_layout_tree().list_leaf_pane_ids() == vec![pane_id]);
-    if is_last_pane_in_tab {
-        if let Some(landing_tab_id) = tab_ops::find_nearest_surviving_tab(session, tab_id) {
-            affected_tab_ids.push(landing_tab_id);
-        }
-    }
-    affected_tab_ids
-}
-
-/// The destination tab's size once the acting client follows the placed pane
-/// into it: the per-axis minimum pane area of the clients that view
-/// `destination_tab_id` then. Those are the acting client, every client that
-/// views the destination tab before the placement, and every client that
-/// views `landing_viewer_tab_id`, a source tab that closes and sends its
-/// viewers to the destination.
+/// The destination tab size of `placement_tab_sizes`
+/// ([`compute_placement_tab_sizes`]).
 ///
 /// # Errors
 ///
 /// [`RejectReason::InvalidState`] `destination tab has no drawable client
-/// view` when none of those clients contributes a pane area.
-pub(super) fn compute_placement_destination_tab_size(
-    session: &Session,
-    destination_tab_id: TabId,
-    landing_viewer_tab_id: Option<TabId>,
-    acting_client_id: ClientId,
+/// view` when none of the clients that then view the destination tab has a
+/// pane area.
+fn require_placement_destination_tab_size(
+    placement_tab_sizes: PlacementTabSizes,
 ) -> Result<Size, Rejection> {
-    session
-        .clients
-        .list_attached_clients()
-        .filter(|client| {
-            let active_tab_id = client.get_active_tab_id();
-            client.get_client_id() == acting_client_id
-                || active_tab_id == destination_tab_id
-                || landing_viewer_tab_id == Some(active_tab_id)
-        })
-        .filter_map(Client::get_pane_area)
-        .reduce(Size::compute_minimum_axes)
-        .ok_or_else(|| {
-            Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                "destination tab has no drawable client view",
-            )
-        })
-}
-
-/// Compute the source tab's size after the acting client leaves it.
-fn compute_placement_source_tab_size(
-    session: &Session,
-    source_tab_id: TabId,
-    acting_client_id: ClientId,
-) -> Option<Size> {
-    session
-        .clients
-        .list_attached_clients()
-        .filter(|client| {
-            client.get_client_id() != acting_client_id
-                && client.get_active_tab_id() == source_tab_id
-        })
-        .filter_map(|client| client.get_pane_area())
-        .reduce(Size::compute_minimum_axes)
+    placement_tab_sizes.destination_tab_size.ok_or_else(|| {
+        Rejection::from_reason_and_help(
+            RejectReason::InvalidState,
+            "destination tab has no drawable client view",
+        )
+    })
 }

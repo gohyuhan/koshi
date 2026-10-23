@@ -15,8 +15,8 @@
 //! cascade both drop a tab through `close_and_refocus_tab`.
 
 use koshi_core::event::{
-    Event, PaneClosing, PaneCreated, PaneFocused, PaneProcessExited, PaneRemoved, QuitCause,
-    TabClosed, TabCreated, TabFocused, TabMoved,
+    Event, PaneClosing, PaneCreated, PaneProcessExited, PaneRemoved, QuitCause, TabClosed,
+    TabCreated, TabFocused, TabMoved,
 };
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, TabId};
@@ -24,7 +24,7 @@ use koshi_layout::tree::LayoutNode;
 
 use crate::client::Client;
 use crate::session::cascade::remove_floating_pane;
-use crate::session::focus::apply_tiled_pane_focus;
+use crate::session::focus::{apply_tiled_pane_focus, update_client_tab_focus};
 use crate::session::lifecycle::SessionLifecycleEvent;
 use crate::session::pane_ops::{register_spawned_pane, NewPaneSpec};
 use crate::session::state::{Session, Tab};
@@ -95,7 +95,7 @@ pub fn commit_new_tab(
     if session.tabs.is_empty() {
         let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
     }
-    session.tabs.insert(new_tab_id, new_tab);
+    let _ = session.add_tab(new_tab);
 
     emitted_events.push(Event::TabCreated(TabCreated { tab_id: new_tab_id }));
     emitted_events.push(Event::PaneCreated(PaneCreated {
@@ -213,7 +213,7 @@ pub fn commit_profile_tab(
     if session.tabs.is_empty() {
         let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
     }
-    session.tabs.insert(tab_id, new_tab);
+    let _ = session.add_tab(new_tab);
 
     emitted_events.push(Event::TabCreated(TabCreated { tab_id }));
     for pane_id in &pane_ids {
@@ -325,30 +325,32 @@ pub fn focus_tab(session: &mut Session, client_id: ClientId, tab_target: TabTarg
     emitted_events
 }
 
-/// The pane a client landing on `tab_id` focuses: the tab's focus history
-/// newest-first, then its expanded leaves in layout order, taking the first
-/// entry that is an expanded leaf of `tab_id`
-/// ([`LayoutNode::list_expanded_leaf_pane_ids`]) and has a record in the pane
-/// registry. A stack member collapsed to its header is never the landing pane.
+/// The pane `client` lands on in `tab_id`: its focus history in the tab,
+/// newest first ([`Client::list_focus_history`]), then the tab's leaves in
+/// layout order, taking the first entry that is a leaf of the tab, is shown
+/// in the client's own view of the tab
+/// ([`LayoutNode::is_pane_collapsed`] with that history), and has a record in
+/// the pane registry. A stack member collapsed to its header in that view is
+/// never the landing pane.
 ///
-/// Example: a tab holding `stack(a, b expanded)` with focus history `a, b`
-/// lands on `b`.
+/// Example: a tab holding `stack(a, b active)` lands a client with no focus
+/// history there on `b`, and a client whose history there is `[a]` on `a`.
 ///
-/// `None` when the session does not hold `tab_id`, and when no expanded leaf
-/// of the tab has a registry record.
-///
-/// [`LayoutNode::list_expanded_leaf_pane_ids`]: koshi_layout::tree::LayoutNode::list_expanded_leaf_pane_ids
+/// `None` when the session does not hold `tab_id`, and when no shown leaf of
+/// the tab has a registry record.
 #[must_use]
-pub fn find_landing_pane(session: &Session, tab_id: TabId) -> Option<PaneId> {
-    let tab = session.tabs.get(&tab_id)?;
-    let expanded_leaf_pane_ids = tab.get_layout_tree().list_expanded_leaf_pane_ids();
-    tab.list_focus_mru()
+pub fn find_landing_pane(session: &Session, client: &Client, tab_id: TabId) -> Option<PaneId> {
+    let layout_tree = session.tabs.get(&tab_id)?.get_layout_tree();
+    let leaf_pane_ids = layout_tree.list_leaf_pane_ids();
+    let focus_history = client.list_focus_history(tab_id);
+    focus_history
         .iter()
+        .chain(&leaf_pane_ids)
         .copied()
-        .chain(expanded_leaf_pane_ids.iter().copied())
-        .find(|pane_id| {
-            expanded_leaf_pane_ids.contains(pane_id)
-                && session.panes.get_pane_record_by_id(*pane_id).is_some()
+        .find(|&pane_id| {
+            leaf_pane_ids.contains(&pane_id)
+                && !layout_tree.is_pane_collapsed(pane_id, focus_history)
+                && session.panes.get_pane_record_by_id(pane_id).is_some()
         })
 }
 
@@ -372,22 +374,14 @@ pub fn land_focus(
         return;
     }
 
-    let Some(pane_id) = find_landing_pane(session, tab_id) else {
+    let Some(pane_id) = session
+        .clients
+        .get_client_by_id(client_id)
+        .and_then(|client| find_landing_pane(session, client, tab_id))
+    else {
         return;
     };
-    let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
-        return;
-    };
-    client.update_focused_pane(tab_id, pane_id);
-    if let Some(tab) = session.tabs.get_mut(&tab_id) {
-        tab.record_focus_mru(pane_id);
-    }
-    emitted_events.push(Event::PaneFocused(PaneFocused {
-        client_id,
-        tab_id: Some(tab_id),
-        pane_id,
-        previous_pane_id: None,
-    }));
+    emitted_events.extend(update_client_tab_focus(session, client_id, tab_id, pane_id));
 }
 
 /// Resolve a [`TabTarget`] to a concrete tab id against the current display
@@ -463,15 +457,11 @@ pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usiz
         } else {
             tab_position
         };
-        if let Some(tab) = session.tabs.get_mut(&current_tab_id) {
-            tab.update_tab_index(settled_tab_index);
-        }
+        session.update_tab_index(current_tab_id, settled_tab_index);
     }
 
     // 2. Drop the target into its new slot.
-    if let Some(tab) = session.tabs.get_mut(&target_tab_id) {
-        tab.update_tab_index(new_tab_index);
-    }
+    session.update_tab_index(target_tab_id, new_tab_index);
 
     vec![Event::TabMoved(TabMoved {
         tab_id: target_tab_id,
@@ -505,7 +495,7 @@ pub(crate) fn close_and_refocus_tab(
 ) -> Vec<Event> {
     let mut emitted_events = vec![];
 
-    let closed_tab_index = session.tabs.remove(&tab_id).map(|tab| tab.get_tab_index());
+    let closed_tab_index = session.remove_tab(tab_id).map(|tab| tab.get_tab_index());
     emitted_events.push(Event::TabClosed(TabClosed { tab_id }));
 
     // Move every client off the closed tab: drop its focus and zoom for the
@@ -520,7 +510,7 @@ pub(crate) fn close_and_refocus_tab(
         .map(Client::get_client_id)
         .collect();
     for client in session.clients.list_attached_clients_mut() {
-        client.remove_focused_pane(tab_id);
+        client.clear_focus_history(tab_id);
     }
     if let Some(next_tab_id) = next_tab_id {
         for client_id in viewing_client_ids {
@@ -567,9 +557,7 @@ fn reindex_tabs_by_display_index(session: &mut Session) {
         .into_iter()
         .enumerate()
     {
-        if let Some(tab) = session.tabs.get_mut(&tab_id) {
-            tab.update_tab_index(tab_position);
-        }
+        session.update_tab_index(tab_id, tab_position);
     }
 }
 

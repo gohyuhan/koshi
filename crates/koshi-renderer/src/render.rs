@@ -357,7 +357,8 @@ pub fn render_frame(
 /// shared rows at its index ([`Arc::ptr_eq`]). That row lands on the buffer
 /// row of its pane's content area, tiled or floating, when that area shows
 /// it. Each pane's cursor, mouse modes, alternate screen state, top line
-/// number and `has_selection` are drawn into no cell and may differ. Every
+/// number and `has_selection` are drawn into no cell and may differ, and so
+/// may the placement preview, which [`render_frame`] does not read. Every
 /// other field must be equal, each grid view must keep its row count, column
 /// count and scroll offset, and each pane must show the same scroll position
 /// text.
@@ -377,6 +378,7 @@ pub fn list_changed_screen_rows(
         session_snapshot,
         pane_snapshots,
         client_snapshot,
+        placement_preview: _,
     } = next_render_snapshot;
     if previous_render_snapshot.is_recovery_notice_visible != *is_recovery_notice_visible
         || previous_render_snapshot.session_snapshot != *session_snapshot

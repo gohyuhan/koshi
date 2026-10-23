@@ -37,8 +37,8 @@ pub const MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT: u64 = 67_108_864;
 /// ([`image_chunk`](crate::image_chunk)).
 pub const MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT: usize = 1_048_576;
 
-/// The most image transfers a client accepts after one painted update or
-/// placement preview: 4096.
+/// The most image transfers a client accepts after one painted update:
+/// 4096.
 pub const MAX_FRAME_IMAGE_TRANSFER_COUNT: usize = 4_096;
 
 /// Decode an image presentation value through an owned JSON value, falling
@@ -84,8 +84,6 @@ pub struct PaintedFrame {
 pub struct FrameSession {
     /// The session's stable id.
     pub session_id: SessionId,
-    /// The session's committed layout, membership, and shared-sizing revision.
-    pub session_revision: u64,
     /// The session's display name.
     pub session_name: String,
     /// The tab this client is shown, solved and ready to draw.
@@ -525,8 +523,6 @@ pub(crate) fn compute_frame_image_byte_count(
 pub struct FrameClient {
     /// The client's stable id.
     pub client_id: ClientId,
-    /// The client's committed geometry and view revision.
-    pub client_revision: u64,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is viewing.
@@ -552,6 +548,10 @@ pub struct FrameClient {
     /// frame. `None` before the session runs one, and again after the session
     /// restarts.
     pub last_applied_floating_pane_move_command_id: Option<CommandId>,
+    /// The last tiled pane placement that the client's own connection
+    /// confirmed and the session ran before it built this frame. `None` before
+    /// the session runs one, and again after the session restarts.
+    pub last_applied_placement_command_id: Option<CommandId>,
     /// Whether this client grabs the mouse for text selection. Adds the
     /// `SELECT` tag to the mode indicator, and decides whether a press in a
     /// mouse-aware pane begins a highlight.

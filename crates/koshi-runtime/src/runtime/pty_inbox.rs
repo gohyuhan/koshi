@@ -385,8 +385,10 @@ impl Server {
     }
 
     /// Hold `terminal_engine` as `pane_id`'s engine, replacing any engine held
-    /// for it, and record the engine's next timed renders
-    /// ([`refresh_pane_render_deadlines`](Self::refresh_pane_render_deadlines)).
+    /// for it, record the engine's next timed renders
+    /// ([`refresh_pane_render_deadlines`](Self::refresh_pane_render_deadlines)),
+    /// and mark the views that show the pane changed
+    /// ([`mark_views_showing_pane`](Self::mark_views_showing_pane)).
     /// While `pane-clipboard-writes` allows writes, the engine first starts
     /// reading the `OSC 52` copies of at most `max-copy-bytes` decoded bytes in
     /// the pane's output
@@ -404,6 +406,7 @@ impl Server {
         self.terminal_engine_by_pane_id
             .insert(pane_id, terminal_engine);
         self.refresh_pane_render_deadlines(pane_id, Instant::now());
+        self.mark_views_showing_pane(pane_id);
     }
 }
 

@@ -1178,14 +1178,19 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
 /// `{"column_count":0,"row_count":0}` on each of its tabs, and
 /// `floating_pane_view_by_pane_id` `{}`, `shown_floating_pane_ids` `[]` and
 /// `focused_floating_pane_id` `null` on each of its clients. A field that is
-/// present keeps its value. Removes `lifecycle` and `close_policy` from each
-/// record in a session's `panes.pane_record_by_id`.
+/// present keeps its value. Replaces each client's
+/// `focused_pane_id_by_tab_id` with `focus_history_by_tab_id`, the same tabs
+/// each with a one-pane history: `{"t":"p"}` becomes `{"t":["p"]}`. Removes
+/// `lifecycle` and `close_policy` from each record in a session's
+/// `panes.pane_record_by_id`, and `placement_revision` from each session and
+/// each of its clients.
 ///
 /// # Errors
 /// Returns an invalid-resume error when `body.session_by_id`, a session's
-/// `tabs`, `clients`, `clients.client_by_id`, `panes` or
-/// `panes.pane_record_by_id` is missing, or when the body, a value on that
-/// path, a tab, a client or a pane record is not an object.
+/// `tabs`, `clients`, `clients.client_by_id`, `panes`,
+/// `panes.pane_record_by_id` or a client's `focused_pane_id_by_tab_id` is
+/// missing, or when the body, a value on that path, a tab, a client or a pane
+/// record is not an object.
 fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageError> {
     let sessions = get_required_json_field(
         get_json_object(resume_body, "body")?,
@@ -1197,6 +1202,7 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
         session_fields
             .entry("floating_set")
             .or_insert(serde_json::json!({"members": []}));
+        session_fields.remove("placement_revision");
         let tabs = get_required_json_field(session_fields, "tabs", session_path)?;
         migrate_json_object_members(tabs, "session.tabs", |tab, tab_path| {
             get_json_object(tab, tab_path)?
@@ -1224,6 +1230,26 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
                 client_fields
                     .entry("focused_floating_pane_id")
                     .or_insert(Value::Null);
+                client_fields.remove("placement_revision");
+                let focused_pane_ids = get_json_object(
+                    get_required_json_field(
+                        client_fields,
+                        "focused_pane_id_by_tab_id",
+                        client_path,
+                    )?,
+                    "client.focused_pane_id_by_tab_id",
+                )?;
+                let focus_history_by_tab_id: Map<String, Value> = std::mem::take(focused_pane_ids)
+                    .into_iter()
+                    .map(|(tab_key, focused_pane_id)| {
+                        (tab_key, Value::Array(vec![focused_pane_id]))
+                    })
+                    .collect();
+                client_fields.remove("focused_pane_id_by_tab_id");
+                client_fields.insert(
+                    "focus_history_by_tab_id".to_owned(),
+                    Value::Object(focus_history_by_tab_id),
+                );
                 Ok(())
             },
         )?;

@@ -94,7 +94,6 @@ fn build_populated_place_pane_command_envelope() -> CommandEnvelope {
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Down,
         }),
-        expected_placement_revision: None,
     }))
 }
 
@@ -309,6 +308,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
         IpcRequestKind::Keyboard {
             key_input: build_control_c_key_input(),
@@ -332,18 +332,15 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
         IpcRequestKind::Discovery,
         IpcRequestKind::Layout { tab_id: None },
-        IpcRequestKind::ReadPanePlacement {
-            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-            destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+        IpcRequestKind::SetPanePlacementPreview {
+            placement_target: Some(build_test_placement_preview_target()),
         },
+        build_test_confirm_pane_placement(),
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving { is_returning: true },
         IpcRequestKind::Ping,
-        IpcRequestKind::PaintedUpdate {
-            update_sequence: 7,
-            shown_placement_request_id: Some(3),
-        },
+        IpcRequestKind::PaintedUpdate { update_sequence: 7 },
         IpcRequestKind::ClipboardCopyPart {
             copied_bytes: b"hel".to_vec(),
         },
@@ -746,8 +743,7 @@ fn the_place_pane_command_wire_shape_belongs_to_this_protocol_version() {
                             "direction": "Down"
                         }
                     }
-                },
-                "expected_placement_revision": null
+                }
             }
         })
     );
@@ -764,7 +760,6 @@ fn the_undock_command_wire_shape_belongs_to_this_protocol_version() {
                     placement_target: PanePlacementTarget::Floating {
                         top_left_cell: Some(Point { column: 7, row: 3 }),
                     },
-                    expected_placement_revision: None,
                 },
             )),
         )),
@@ -778,8 +773,7 @@ fn the_undock_command_wire_shape_belongs_to_this_protocol_version() {
                 "source_pane_id": "00000000-0000-0000-0000-000000000001",
                 "placement_target": {
                     "Floating": { "top_left_cell": { "column": 7, "row": 3 } }
-                },
-                "expected_placement_revision": null
+                }
             }
         })
     );
@@ -792,7 +786,6 @@ fn the_stack_dock_command_wire_shape_belongs_to_this_protocol_version() {
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
             target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
         }),
-        expected_placement_revision: None,
     });
     let ipc_request = IpcRequest {
         request_id: 7,
@@ -808,8 +801,7 @@ fn the_stack_dock_command_wire_shape_belongs_to_this_protocol_version() {
                 "Tiled": {
                     "Stack": { "target_pane_id": "00000000-0000-0000-0000-000000000001" }
                 }
-            },
-            "expected_placement_revision": null
+            }
         }
     });
 
@@ -843,6 +835,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -856,7 +849,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                     "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
-                    "pane_area": null
+                    "pane_area": null,
+                    "placement_preview_target": null
                 }
             }
         })
@@ -920,6 +914,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
     assert_eq!(
@@ -934,7 +929,8 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": null,
-                    "graphics_capabilities": { "supports_kitty": true, "supports_iterm": false, "supports_sixel": false }
+                    "graphics_capabilities": { "supports_kitty": true, "supports_iterm": false, "supports_sixel": false },
+                    "placement_preview_target": null
                 }
             }
         })
@@ -973,6 +969,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         }
     );
@@ -1159,6 +1156,7 @@ fn attach_request_round_trips() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -1183,6 +1181,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
             cell_size: Some(cell_size),
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
     let resize_request = IpcRequest {
@@ -1220,6 +1219,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         }
     );
@@ -1258,6 +1258,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -1280,6 +1281,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -1322,6 +1324,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         }
     );
@@ -1372,6 +1375,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -1385,7 +1389,8 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
                     "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
-                    "pane_area": { "Reported": { "column_count": 100, "row_count": 30 } }
+                    "pane_area": { "Reported": { "column_count": 100, "row_count": 30 } },
+                    "placement_preview_target": null
                 }
             }
         })
@@ -1409,6 +1414,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -1422,7 +1428,8 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
                     "max_frames_per_second": 60,
                     "resume_client_id": null,
                     "resume_token": null,
-                    "pane_area": "Starving"
+                    "pane_area": "Starving",
+                    "placement_preview_target": null
                 }
             }
         })
@@ -1591,6 +1598,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         }
     );
@@ -1624,6 +1632,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             cell_size: None,
             link_timeout_ms: None,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
 
@@ -1803,7 +1812,6 @@ fn pane_commands_round_trip_inside_a_submit_command_request() {
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Down,
             }),
-            expected_placement_revision: None,
         }),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
@@ -1935,6 +1943,7 @@ fn attach_carries_a_link_timeout_only_when_it_has_one() {
             cell_size: None,
             link_timeout_ms,
             max_frames_per_second: 60,
+            placement_preview_target: None,
         },
     };
     let attach_with_timeout = build_attach(Some(30_000));
@@ -2336,21 +2345,90 @@ fn a_response_to_unreadable_bytes_names_no_request() {
     );
 }
 
-#[test]
-fn placement_request_uses_the_declared_wire_field_names() {
-    let request_kind = IpcRequestKind::ReadPanePlacement {
-        pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+/// The placement target of the fixed test pane and the fixed test tab.
+fn build_test_placement_preview_target() -> PanePlacementPreviewTarget {
+    PanePlacementPreviewTarget {
+        source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
         destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-    };
-    let encoded_json = serde_json::to_value(request_kind).expect("request kind encodes");
+    }
+}
+
+/// A confirm of a swap of the fixed test pane, expecting an `80x22` tab with
+/// an empty solve.
+fn build_test_confirm_pane_placement() -> IpcRequestKind {
+    IpcRequestKind::ConfirmPanePlacement {
+        command_id: CommandId::from_uuid(build_fixed_test_uuid()),
+        source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        placement_target: TiledPlacementTarget::Swap {
+            target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        },
+        expected_placed_tab_layout: PlacedTabLayout {
+            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            tab_size: Size {
+                column_count: 80,
+                row_count: 22,
+            },
+            layout_solve: koshi_layout::solver::LayoutSolve::default(),
+        },
+    }
+}
+
+#[test]
+fn a_placement_preview_request_uses_the_declared_wire_field_names() {
+    let named_target_json = serde_json::to_value(IpcRequestKind::SetPanePlacementPreview {
+        placement_target: Some(build_test_placement_preview_target()),
+    })
+    .expect("request kind encodes");
+    let stopped_preview_json = serde_json::to_value(IpcRequestKind::SetPanePlacementPreview {
+        placement_target: None,
+    })
+    .expect("request kind encodes");
+
     assert_eq!(
-        encoded_json,
+        named_target_json,
         json!({
-            "ReadPanePlacement": {
-                "pane_id": "00000000-0000-0000-0000-000000000001",
-                "destination_tab_id": "00000000-0000-0000-0000-000000000001"
+            "SetPanePlacementPreview": {
+                "placement_target": {
+                    "source_pane_id": "00000000-0000-0000-0000-000000000001",
+                    "destination_tab_id": "00000000-0000-0000-0000-000000000001"
+                }
             }
         })
+    );
+    assert_eq!(
+        stopped_preview_json,
+        json!({"SetPanePlacementPreview": {"placement_target": null}})
+    );
+}
+
+#[test]
+fn a_placement_confirm_uses_the_declared_wire_field_names_and_round_trips() {
+    let confirm_request_kind = build_test_confirm_pane_placement();
+
+    let encoded_json = serde_json::to_value(&confirm_request_kind).expect("request kind encodes");
+
+    let confirm_fields = encoded_json["ConfirmPanePlacement"]
+        .as_object()
+        .expect("the confirm is tagged with its name");
+    assert_eq!(
+        confirm_fields
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<&str>>(),
+        [
+            "command_id",
+            "expected_placed_tab_layout",
+            "placement_target",
+            "source_pane_id"
+        ]
+    );
+    assert_eq!(
+        encoded_json["ConfirmPanePlacement"]["expected_placed_tab_layout"]["tab_size"],
+        json!({"column_count": 80, "row_count": 22})
+    );
+    assert_eq!(
+        serde_json::from_value::<IpcRequestKind>(encoded_json).expect("the confirm decodes"),
+        confirm_request_kind
     );
 }
 
@@ -2813,13 +2891,10 @@ fn a_clipboard_copy_answer_names_whether_the_tool_runs() {
 }
 
 #[test]
-fn a_paint_report_that_holds_no_preview_names_none() {
+fn a_paint_report_names_only_its_update_sequence() {
     let paint_report = IpcRequest {
         request_id: 9,
-        request_kind: IpcRequestKind::PaintedUpdate {
-            update_sequence: 8,
-            shown_placement_request_id: None,
-        },
+        request_kind: IpcRequestKind::PaintedUpdate { update_sequence: 8 },
     };
 
     let encoded_json = serde_json::to_value(&paint_report).expect("the paint report encodes");
@@ -2828,30 +2903,11 @@ fn a_paint_report_that_holds_no_preview_names_none() {
         encoded_json,
         json!({
             "request_id": 9,
-            "request_kind": {"PaintedUpdate": {
-                "update_sequence": 8,
-                "shown_placement_request_id": null,
-            }},
+            "request_kind": {"PaintedUpdate": {"update_sequence": 8}},
         })
     );
     assert_eq!(
         serde_json::from_value::<IpcRequest>(encoded_json).expect("the paint report decodes"),
         paint_report
-    );
-}
-
-#[test]
-fn a_paint_report_without_the_shown_placement_request_is_refused() {
-    let paint_report_without_preview_json = json!({
-        "request_id": 9,
-        "request_kind": {"PaintedUpdate": {"update_sequence": 7}},
-    });
-
-    let decode_error = serde_json::from_value::<IpcRequest>(paint_report_without_preview_json)
-        .expect_err("a paint report without the field is refused");
-
-    assert_eq!(
-        decode_error.to_string(),
-        "missing field `shown_placement_request_id`"
     );
 }

@@ -365,15 +365,6 @@ pub enum TiledPlacementTarget {
     },
 }
 
-/// The committed generations a placement confirmation was built from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlacementRevision {
-    /// Generation of committed layout, membership, and shared sizing.
-    pub session_revision: u64,
-    /// Generation of the acting client's committed geometry and view.
-    pub client_revision: u64,
-}
-
 /// Arguments for [`Command::NewTab`]. The tab's name is not supplied by the
 /// caller — the runtime assigns a freshly generated one.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -478,9 +469,6 @@ pub struct PlacePaneArgs {
     pub source_pane_id: Option<PaneId>,
     /// The checked destination in the same session.
     pub placement_target: PanePlacementTarget,
-    /// Revisions captured by an interactive preview, or `None` for a direct
-    /// command planned against the current state in this dispatcher turn.
-    pub expected_placement_revision: Option<PlacementRevision>,
 }
 
 /// Arguments for [`Command::ScrollPane`].

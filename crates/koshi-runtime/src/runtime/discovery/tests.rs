@@ -480,7 +480,7 @@ fn floating_panes_follow_the_tiled_panes_in_the_order_they_became_floating_with_
                         row_count: 10,
                     },
                 },
-                None,
+                &[],
             )
             .expect("the set has room");
     }

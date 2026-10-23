@@ -101,9 +101,7 @@ use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_address};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_observability::logging::recent_events;
 use koshi_observability::repeated_warning::WarningRateLimiter;
-use koshi_renderer::snapshot::{
-    Delivery, ImagePlacementSnapshot, PlacementSnapshot, PlacementSource, RenderSnapshot,
-};
+use koshi_renderer::snapshot::{Delivery, ImagePlacementSnapshot, RenderSnapshot};
 use koshi_terminal::graphics::{DecodedAnimation, DecodedImage, ImageRecord};
 
 use crate::executable_watch::ExecutableWatch;
@@ -112,8 +110,7 @@ use crate::runtime::delivery_queue::{DeliveryReceiver, PacedReceive, PaintedUpda
 use crate::runtime::event::{EndingNotice, RunningCount, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
     build_wire_frame, build_wire_frame_with_content_ids, build_wire_image_chunk_sources,
-    build_wire_image_transfer, build_wire_placement_snapshot,
-    build_wire_placement_snapshot_with_content_ids,
+    build_wire_image_transfer,
 };
 use crate::runtime::painted_update::PaintedUpdateSender;
 use crate::server::{RestartCheck, RestartRefusal};
@@ -1180,6 +1177,7 @@ fn serve_connection(
                 cell_size,
                 link_timeout_ms,
                 max_frames_per_second,
+                placement_preview_target,
             } => {
                 // A connection that ends before its first request after this
                 // attach reports its client as returning when it came from
@@ -1201,6 +1199,7 @@ fn serve_connection(
                         attached_at: SystemTime::now(),
                         is_remote: handshake.is_remote_caller(),
                         max_frames_per_second,
+                        placement_preview_target,
                         response_sender,
                     },
                 );
@@ -1261,16 +1260,17 @@ fn serve_connection(
                 return;
             }
             // A keyboard event, a resize, a cell size, a paste, a mouse round,
-            // a placement read, a ping and a paint report belong on an
-            // attached client's connection, which the `Attach` arm above hands
-            // to `stream_events`. On this control path they name no client and
-            // close the connection.
+            // a placement preview target, a placement confirm, a ping and a
+            // paint report belong on an attached client's connection, which
+            // the `Attach` arm above hands to `stream_events`. On this control
+            // path they name no client and close the connection.
             IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
             | IpcRequestKind::Mouse(_)
-            | IpcRequestKind::ReadPanePlacement { .. }
+            | IpcRequestKind::SetPanePlacementPreview { .. }
+            | IpcRequestKind::ConfirmPanePlacement { .. }
             | IpcRequestKind::Ping
             | IpcRequestKind::PaintedUpdate { .. } => return,
             IpcRequestKind::Discovery => {
@@ -1656,20 +1656,6 @@ fn stream_events(
                         );
                         break true;
                     }
-                    let released_image_content_ids = image_cache.record_paint_report(
-                        painted_update_report.update_sequence,
-                        painted_update_report.shown_placement_request_id,
-                    );
-                    if send_image_releases(
-                        &mut frame_writer,
-                        &mut image_cache,
-                        client_id,
-                        &released_image_content_ids,
-                    )
-                    .is_err()
-                    {
-                        break true;
-                    }
                     continue;
                 }
                 // The top of the next turn writes the goodbye.
@@ -1718,18 +1704,6 @@ fn stream_events(
                         write_started_at,
                     );
                 }),
-                Delivery::PanePlacementSnapshot {
-                    request_id,
-                    snapshot: placement_snapshot,
-                } => send_placement_snapshot(
-                    &mut frame_writer,
-                    &mut image_cache,
-                    *request_id,
-                    previous_update_sequence,
-                    placement_snapshot,
-                    graphics_capabilities,
-                    client_id,
-                ),
                 // The wake is read. The top of the next turn writes the
                 // waiting bytes.
                 Delivery::HostWrite => {
@@ -1741,10 +1715,7 @@ fn stream_events(
             if send_result.is_err() {
                 break true;
             }
-            if matches!(
-                delivery,
-                Delivery::Frame(_) | Delivery::PanePlacementSnapshot { .. }
-            ) {
+            if matches!(delivery, Delivery::Frame(_)) {
                 continue;
             }
             let session_event = build_wire_event(&delivery);
@@ -1910,23 +1881,28 @@ fn stream_events(
                     response_sender,
                 }
             }
-            IpcRequestKind::ReadPanePlacement {
-                pane_id,
-                destination_tab_id,
-            } => RuntimeEvent::ReadPanePlacement {
+            IpcRequestKind::SetPanePlacementPreview { placement_target } => {
+                RuntimeEvent::SetPanePlacementPreview {
+                    client_id,
+                    placement_target,
+                }
+            }
+            IpcRequestKind::ConfirmPanePlacement {
+                command_id,
+                source_pane_id,
+                placement_target,
+                expected_placed_tab_layout,
+            } => RuntimeEvent::ConfirmPanePlacement {
                 client_id,
-                request_id: incoming_request.request_id,
-                source_pane_id: pane_id,
-                destination_tab_id,
+                command_id,
+                source_pane_id,
+                placement_target,
+                expected_placed_tab_layout: Box::new(expected_placed_tab_layout),
             },
             IpcRequestKind::Ping => continue,
-            IpcRequestKind::PaintedUpdate {
-                update_sequence,
-                shown_placement_request_id,
-            } => {
+            IpcRequestKind::PaintedUpdate { update_sequence } => {
                 paint_reporter.report_painted_update(PaintedUpdateReport {
                     update_sequence,
-                    shown_placement_request_id,
                     reported_at: Instant::now(),
                 });
                 continue;
@@ -1980,8 +1956,7 @@ struct HeldConnectionImage {
     image_record: Arc<ImageRecord>,
 }
 
-/// The images one painted frame or placement preview shows with their
-/// pixels.
+/// The images one painted frame shows with their pixels.
 #[derive(Default)]
 struct ShownImages {
     /// The RGBA byte count of each shown image, by the address of its decoded
@@ -1989,17 +1964,6 @@ struct ShownImages {
     image_byte_count_by_address: HashMap<usize, u64>,
     /// Each animation a shown image plays, in placement order, each once.
     animations: Vec<Arc<DecodedAnimation>>,
-}
-
-/// A placement preview sent on this connection that its client may still
-/// hold.
-struct SentPlacementPreview {
-    /// The request the preview answered.
-    request_id: u64,
-    /// The number of the last painted update sent before the preview.
-    sent_after_update_sequence: u64,
-    /// The images the preview shows with their pixels.
-    shown_images: ShownImages,
 }
 
 /// The images a client keeps, chosen one by one while their RGBA bytes stay
@@ -2061,8 +2025,7 @@ impl ImageBudget {
 /// The client keeps each record the session sends until an
 /// `ImageContentReleased` names it or an `ImageCacheReset` arrives. The
 /// session keeps, in this order and while their RGBA bytes stay within
-/// [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`]: the images that each placement
-/// preview the client may still hold shows, the images the last painted frame
+/// [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`]: the images the last painted frame
 /// shows, and every frame of each animation those images play, an animation
 /// whole or not at all. Every other record the client holds is released.
 struct ConnectionImageCache {
@@ -2071,8 +2034,6 @@ struct ConnectionImageCache {
     held_image_by_address: HashMap<usize, HeldConnectionImage>,
     /// The images the last painted frame shows with their pixels.
     frame_shown_images: ShownImages,
-    /// The placement previews the client may still hold, oldest first.
-    sent_placement_previews: Vec<SentPlacementPreview>,
     /// The next nonzero connection-local content identity.
     next_image_content_id: u64,
     /// Whether the next successful frame must invalidate the client's records.
@@ -2085,7 +2046,6 @@ impl ConnectionImageCache {
         Self {
             held_image_by_address: HashMap::new(),
             frame_shown_images: ShownImages::default(),
-            sent_placement_previews: Vec::new(),
             next_image_content_id: 1,
             needs_image_cache_reset: false,
         }
@@ -2093,10 +2053,8 @@ impl ConnectionImageCache {
 
     /// Prepare `render_snapshot` for this connection.
     ///
-    /// The images that the placement previews the client may still hold show
-    /// stay. Each image of the frame, in placement order, is shown when it
-    /// fits with them and the frame's earlier images, and travels without its
-    /// record otherwise. A shown image the client does not hold gets the next
+    /// Each image of the frame, in placement order, is shown when it fits with
+    /// the frame's earlier images, and travels without its record otherwise. A shown image the client does not hold gets the next
     /// content identity and an upload. Every held record the client no longer
     /// keeps is listed for release.
     fn prepare_image_frame(&mut self, render_snapshot: &RenderSnapshot) -> PreparedImageFrame {
@@ -2107,9 +2065,6 @@ impl ConnectionImageCache {
             .collect();
         let should_reset_image_cache = self.reset_image_cache_when_due(&image_placements);
         let mut image_budget = ImageBudget::default();
-        for sent_placement_preview in &self.sent_placement_previews {
-            keep_shown_images(&mut image_budget, &sent_placement_preview.shown_images);
-        }
         let frame_shown_images = select_shown_images(&mut image_budget, &image_placements);
         let image_uploads = self.hold_shown_images(&frame_shown_images, &image_placements);
         self.frame_shown_images = frame_shown_images;
@@ -2126,89 +2081,7 @@ impl ConnectionImageCache {
         }
     }
 
-    /// Prepare the placement preview that answers request `request_id`, sent
-    /// after painted update `sent_after_update_sequence`, for this connection.
-    ///
-    /// The images the last painted frame and the earlier previews show stay.
-    /// Each image of the preview, in placement order, is shown when it fits
-    /// with them and the preview's earlier images, and travels without its
-    /// record otherwise. The preview counts as held by the client until
-    /// [`ConnectionImageCache::record_paint_report`] says otherwise.
-    fn prepare_placement_snapshot(
-        &mut self,
-        request_id: u64,
-        sent_after_update_sequence: u64,
-        placement_snapshot: &PlacementSnapshot,
-    ) -> PreparedPlacementSnapshot {
-        let source_pane_snapshots = match &placement_snapshot.source {
-            PlacementSource::Tiled(source_tab_snapshot) => {
-                source_tab_snapshot.pane_snapshots.as_slice()
-            }
-            PlacementSource::Floating(source_pane_snapshot) => {
-                std::slice::from_ref(source_pane_snapshot)
-            }
-        };
-        let image_placements: Vec<&ImagePlacementSnapshot> = source_pane_snapshots
-            .iter()
-            .chain(
-                placement_snapshot
-                    .destination_tab_snapshot
-                    .iter()
-                    .flat_map(|tab_snapshot| &tab_snapshot.pane_snapshots),
-            )
-            .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
-            .collect();
-        let should_reset_image_cache = self.reset_image_cache_when_due(&image_placements);
-        let mut image_budget = ImageBudget::default();
-        keep_shown_images(&mut image_budget, &self.frame_shown_images);
-        for sent_placement_preview in &self.sent_placement_previews {
-            keep_shown_images(&mut image_budget, &sent_placement_preview.shown_images);
-        }
-        let preview_shown_images = select_shown_images(&mut image_budget, &image_placements);
-        let image_uploads = self.hold_shown_images(&preview_shown_images, &image_placements);
-        self.sent_placement_previews.push(SentPlacementPreview {
-            request_id,
-            sent_after_update_sequence,
-            shown_images: preview_shown_images,
-        });
-        let released_image_content_ids = self.release_unkept_images();
-        let placement_snapshot = build_wire_placement_snapshot_with_content_ids(
-            placement_snapshot,
-            |_, image_placement| self.find_image_content_id(image_placement),
-        );
-        PreparedPlacementSnapshot {
-            should_reset_image_cache,
-            released_image_content_ids,
-            placement_snapshot,
-            image_uploads,
-        }
-    }
-
-    /// Take the client's report that it painted update `update_sequence`
-    /// while it held the placement preview of request
-    /// `shown_placement_request_id`, and return the content identities of the
-    /// records to release, in ascending order.
-    ///
-    /// A preview sent before that update leaves, unless the report names it.
-    /// A preview sent after it stays.
-    fn record_paint_report(
-        &mut self,
-        update_sequence: u64,
-        shown_placement_request_id: Option<u64>,
-    ) -> Vec<u64> {
-        let sent_placement_preview_count = self.sent_placement_previews.len();
-        self.sent_placement_previews
-            .retain(|sent_placement_preview| {
-                Some(sent_placement_preview.request_id) == shown_placement_request_id
-                    || sent_placement_preview.sent_after_update_sequence >= update_sequence
-            });
-        if self.sent_placement_previews.len() == sent_placement_preview_count {
-            return Vec::new();
-        }
-        self.release_unkept_images()
-    }
-
-    /// Forget every held image and preview, start content identities at 1 when
+    /// Forget every held image, start content identities at 1 when
     /// `image_placements` name more images the client does not hold than
     /// identities are left or a reset is due, and return whether it did.
     fn reset_image_cache_when_due(&mut self, image_placements: &[&ImagePlacementSnapshot]) -> bool {
@@ -2273,24 +2146,14 @@ impl ConnectionImageCache {
     /// content identities in ascending order.
     ///
     /// The client keeps, in this order and within
-    /// [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`]: the images each preview shows,
-    /// the images the last painted frame shows, and the frames of each
-    /// animation those images play, an animation whole or not at all.
+    /// [`MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT`]: the images the last painted
+    /// frame shows, and the frames of each animation those images play, an
+    /// animation whole or not at all.
     fn release_unkept_images(&mut self) -> Vec<u64> {
         let mut image_budget = ImageBudget::default();
-        let shown_image_lists: Vec<&ShownImages> = self
-            .sent_placement_previews
-            .iter()
-            .map(|sent_placement_preview| &sent_placement_preview.shown_images)
-            .chain([&self.frame_shown_images])
-            .collect();
-        for shown_images in &shown_image_lists {
-            keep_shown_images(&mut image_budget, shown_images);
-        }
-        for shown_images in &shown_image_lists {
-            for animation in &shown_images.animations {
-                image_budget.keep_animation(animation);
-            }
+        keep_shown_images(&mut image_budget, &self.frame_shown_images);
+        for animation in &self.frame_shown_images.animations {
+            image_budget.keep_animation(animation);
         }
         let mut released_image_content_ids = Vec::new();
         self.held_image_by_address
@@ -2318,12 +2181,11 @@ impl ConnectionImageCache {
         }
     }
 
-    /// Forget every held image and preview, start identities at 1 again, and
-    /// mark the next frame to reset the client's image records.
+    /// Forget every held image, start identities at 1 again, and mark the
+    /// next frame to reset the client's image records.
     fn clear_image_cache(&mut self) {
         self.held_image_by_address.clear();
         self.frame_shown_images = ShownImages::default();
-        self.sent_placement_previews.clear();
         self.next_image_content_id = 1;
         self.needs_image_cache_reset = true;
     }
@@ -2383,18 +2245,6 @@ struct PreparedImageFrame {
     released_image_content_ids: Vec<u64>,
     /// Placement geometry and connection-local content identities.
     painted_frame: PaintedFrame,
-    /// New content identities and the records uploaded under them.
-    image_uploads: Vec<(u64, Arc<ImageRecord>)>,
-}
-
-/// A placement preview plus the image records its connection still needs.
-struct PreparedPlacementSnapshot {
-    /// Whether the client must discard every record before this preview.
-    should_reset_image_cache: bool,
-    /// The records the client drops before this preview, in ascending order.
-    released_image_content_ids: Vec<u64>,
-    /// The preview with connection-local image identities.
-    placement_snapshot: koshi_ipc::placement::PanePlacementSnapshot,
     /// New content identities and the records uploaded under them.
     image_uploads: Vec<(u64, Arc<ImageRecord>)>,
 }
@@ -2607,99 +2457,6 @@ fn send_host_write(
     Ok(())
 }
 
-/// Send one placement preview, the answer to request `request_id`, and each
-/// new image record after it.
-///
-/// In this order: an `ImageCacheReset` when one is due, the
-/// `ImageContentReleased` frames of the records the client no longer keeps,
-/// the preview, and the records it shows that the client does not hold, as
-/// [`ConnectionImageCache::prepare_placement_snapshot`] chooses them.
-/// `sent_after_update_sequence` is the number of the last painted update sent
-/// before the preview.
-///
-/// A client whose terminal has no native image protocol receives every image
-/// placement through [`hide_image_records`], and no image record.
-///
-/// # Errors
-/// The [`IpcError`] of a write that left the connection unusable, as
-/// [`report_image_send_error`] sorts it.
-fn send_placement_snapshot(
-    frame_writer: &mut FrameWriter,
-    image_cache: &mut ConnectionImageCache,
-    request_id: u64,
-    sent_after_update_sequence: u64,
-    placement_snapshot: &PlacementSnapshot,
-    graphics_capabilities: GraphicsCapabilities,
-    client_id: ClientId,
-) -> Result<(), IpcError> {
-    if !graphics_capabilities.has_native_image_protocol() {
-        let mut wire_placement_snapshot = build_wire_placement_snapshot(placement_snapshot);
-        hide_placement_image_records(&mut wire_placement_snapshot);
-        let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
-            request_id,
-            snapshot: Box::new(wire_placement_snapshot),
-        };
-        return match frame_writer.send(&placement_snapshot_event) {
-            Ok(()) => Ok(()),
-            Err(write_error) => report_image_send_error(
-                image_cache,
-                client_id,
-                write_error,
-                "the placement snapshot",
-            ),
-        };
-    }
-    let prepared_placement_snapshot = image_cache.prepare_placement_snapshot(
-        request_id,
-        sent_after_update_sequence,
-        placement_snapshot,
-    );
-    if prepared_placement_snapshot.should_reset_image_cache {
-        if let Err(write_error) = frame_writer.send(&SessionEvent::ImageCacheReset) {
-            return report_image_send_error(
-                image_cache,
-                client_id,
-                write_error,
-                "the placement image cache reset",
-            );
-        }
-    }
-    send_image_releases(
-        frame_writer,
-        image_cache,
-        client_id,
-        &prepared_placement_snapshot.released_image_content_ids,
-    )?;
-    let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
-        request_id,
-        snapshot: Box::new(prepared_placement_snapshot.placement_snapshot),
-    };
-    let mut send_placement_snapshot_event =
-        |frame_writer: &mut FrameWriter, image_cache: &mut ConnectionImageCache| match frame_writer
-            .send(&placement_snapshot_event)
-        {
-            Ok(()) => Ok(true),
-            Err(write_error) => report_image_send_error(
-                image_cache,
-                client_id,
-                write_error,
-                "the placement snapshot",
-            )
-            .map(|()| false),
-        };
-    if !send_placement_snapshot_event(frame_writer, image_cache)? {
-        return Ok(());
-    }
-    send_image_uploads(
-        frame_writer,
-        image_cache,
-        client_id,
-        &mut send_placement_snapshot_event,
-        "the placement snapshot",
-        prepared_placement_snapshot.image_uploads,
-    )
-}
-
 /// Send `released_image_content_ids` as `ImageContentReleased` frames of at
 /// most [`MAX_RELEASED_IMAGE_CONTENT_COUNT`] identities each, in order. No
 /// identity sends no frame.
@@ -2795,30 +2552,6 @@ fn send_image_uploads(
         }
     }
     Ok(())
-}
-
-/// Run [`hide_image_records`] on every pane of the source tab, or on the
-/// floating source pane, and on every pane of the destination tab, when there
-/// is one, in `placement_snapshot`.
-fn hide_placement_image_records(
-    placement_snapshot: &mut koshi_ipc::placement::PanePlacementSnapshot,
-) {
-    let source_pane_snapshots = match &mut placement_snapshot.source {
-        koshi_ipc::placement::PanePlacementSource::Tiled(source_tab_snapshot) => {
-            source_tab_snapshot.pane_snapshots.as_mut_slice()
-        }
-        koshi_ipc::placement::PanePlacementSource::Floating(source_pane_snapshot) => {
-            std::slice::from_mut(source_pane_snapshot)
-        }
-    };
-    for pane_snapshot in source_pane_snapshots.iter_mut().chain(
-        placement_snapshot
-            .destination_tab_snapshot
-            .iter_mut()
-            .flat_map(|tab_snapshot| tab_snapshot.pane_snapshots.iter_mut()),
-    ) {
-        hide_image_records(&mut pane_snapshot.image_placement_snapshots);
-    }
 }
 
 /// Clear `image_record` and set `is_available` to `false` on every placement in

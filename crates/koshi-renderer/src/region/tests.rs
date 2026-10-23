@@ -23,7 +23,6 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
         is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
-            session_revision: 0,
             session_name: "one".to_string(),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -50,7 +49,6 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
-            client_revision: 0,
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
@@ -62,7 +60,9 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
+            last_applied_placement_command_id: None,
         },
+        placement_preview: None,
     }
 }
 

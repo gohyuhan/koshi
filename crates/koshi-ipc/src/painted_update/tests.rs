@@ -78,7 +78,9 @@ fn a_keystroke_update_encodes_to_the_exact_bytes_of_the_module_example() {
         ],
     };
 
-    let part_payloads = encode_painted_update(7, None, &[pane_update]).expect("the update fits");
+    let part_payloads =
+        encode_painted_update(7, None, PlacementPreviewUpdate::Unchanged, &[pane_update])
+            .expect("the update fits");
 
     assert_eq!(part_payloads, vec![build_keystroke_payload()]);
 }
@@ -139,8 +141,13 @@ fn an_update_reads_back_every_field_it_was_written_with() {
         },
     ];
 
-    let part_payloads = encode_painted_update(u64::MAX, Some(&structure_json_bytes), &pane_updates)
-        .expect("the update fits");
+    let part_payloads = encode_painted_update(
+        u64::MAX,
+        Some(&structure_json_bytes),
+        PlacementPreviewUpdate::Unchanged,
+        &pane_updates,
+    )
+    .expect("the update fits");
 
     assert_eq!(part_payloads.len(), 1);
     assert_eq!(
@@ -149,6 +156,7 @@ fn an_update_reads_back_every_field_it_was_written_with() {
             update_opening: Some(PaintedUpdateOpening {
                 update_sequence: u64::MAX,
                 painted_frame: Some(Box::new(build_painted_frame())),
+                placement_preview_update: PlacementPreviewUpdate::Unchanged,
             }),
             is_last_part: true,
             pane_sections: vec![
@@ -192,8 +200,14 @@ fn an_update_over_one_part_splits_between_rows_and_goes_on_in_a_section_with_no_
             .collect(),
     };
 
-    let part_payloads =
-        encode_painted_update_in_parts(3, None, &[pane_update], 140).expect("each row fits a part");
+    let part_payloads = encode_painted_update_in_parts(
+        3,
+        None,
+        PlacementPreviewUpdate::Unchanged,
+        &[pane_update],
+        140,
+    )
+    .expect("each row fits a part");
 
     assert_eq!(
         part_payloads
@@ -220,6 +234,7 @@ fn an_update_over_one_part_splits_between_rows_and_goes_on_in_a_section_with_no_
                 update_opening: Some(PaintedUpdateOpening {
                     update_sequence: 3,
                     painted_frame: None,
+                    placement_preview_update: PlacementPreviewUpdate::Unchanged,
                 }),
                 is_last_part: false,
                 pane_sections: vec![PaneSection {
@@ -255,9 +270,16 @@ fn json_that_does_not_fit_one_part_is_refused() {
     let structure_json_bytes = [b' '; 50];
 
     assert_eq!(
-        encode_painted_update_in_parts(1, Some(&structure_json_bytes), &[], 60),
+        encode_painted_update_in_parts(
+            1,
+            Some(&structure_json_bytes),
+            PlacementPreviewUpdate::Unchanged,
+            &[],
+            60,
+        ),
         Err(PaintedUpdateEncodeError::StructureTooLarge {
-            structure_byte_count: 50
+            structure_byte_count: 50,
+            placement_preview_byte_count: 0,
         })
     );
 }
@@ -274,7 +296,13 @@ fn a_row_that_does_not_fit_one_part_is_refused() {
     };
 
     assert_eq!(
-        encode_painted_update_in_parts(1, None, &[pane_update], 60),
+        encode_painted_update_in_parts(
+            1,
+            None,
+            PlacementPreviewUpdate::Unchanged,
+            &[pane_update],
+            60,
+        ),
         Err(PaintedUpdateEncodeError::RowTooLarge { row_byte_count: 50 })
     );
 }
@@ -331,10 +359,10 @@ fn each_malformed_part_names_its_fault() {
     let malformed_part_cases: Vec<(Vec<u8>, SessionBinaryFrameDecodeError)> = vec![
         (Vec::new(), SessionBinaryFrameDecodeError::MissingFrameKind),
         (
-            build_payload_with_byte(1, 0x07),
+            build_payload_with_byte(1, 0x0b),
             SessionBinaryFrameDecodeError::UnknownFlags {
                 field_name: "part_flags",
-                flag_bits: 0x07,
+                flag_bits: 0x0b,
             },
         ),
         (
@@ -422,4 +450,99 @@ fn a_part_cut_at_any_byte_reads_as_truncated() {
             "the first {kept_byte_count} bytes"
         );
     }
+}
+
+#[test]
+fn an_update_carries_a_replaced_or_cleared_placement_preview_and_reads_it_back() {
+    let placement_preview = PanePlacementPreview::Available(Box::new(
+        crate::placement::tests::build_cross_tab_test_snapshot(),
+    ));
+    let placement_preview_json_bytes =
+        serde_json::to_vec(&placement_preview).expect("the preview encodes");
+
+    let replaced_payloads = encode_painted_update(
+        2,
+        None,
+        PlacementPreviewUpdate::Replaced(&placement_preview_json_bytes),
+        &[],
+    )
+    .expect("the update fits");
+    let cleared_payloads = encode_painted_update(3, None, PlacementPreviewUpdate::Cleared, &[])
+        .expect("the update fits");
+
+    assert_eq!(replaced_payloads.len(), 1);
+    assert_eq!(replaced_payloads[0][1], 0x07);
+    assert_eq!(
+        decode_painted_update_part(&replaced_payloads[0]).update_opening,
+        Some(PaintedUpdateOpening {
+            update_sequence: 2,
+            painted_frame: None,
+            placement_preview_update: PlacementPreviewUpdate::Replaced(Box::new(placement_preview)),
+        })
+    );
+    assert_eq!(
+        cleared_payloads,
+        vec![vec![
+            PAINTED_UPDATE_FRAME_KIND,
+            0x07,
+            0x03,
+            0x00,
+            0x00,
+            0x00
+        ]]
+    );
+    assert_eq!(
+        decode_painted_update_part(&cleared_payloads[0])
+            .update_opening
+            .map(|update_opening| update_opening.placement_preview_update),
+        Some(PlacementPreviewUpdate::Cleared)
+    );
+}
+
+#[test]
+fn a_placement_preview_that_does_not_fit_one_part_is_refused() {
+    let placement_preview_json_bytes = [b' '; 50];
+
+    assert_eq!(
+        encode_painted_update_in_parts(
+            1,
+            None,
+            PlacementPreviewUpdate::Replaced(&placement_preview_json_bytes),
+            &[],
+            60,
+        ),
+        Err(PaintedUpdateEncodeError::StructureTooLarge {
+            structure_byte_count: 0,
+            placement_preview_byte_count: 50,
+        })
+    );
+}
+
+#[test]
+fn a_placement_preview_flag_on_a_part_that_opens_no_update_is_refused() {
+    assert_eq!(
+        decode_session_binary_frame(vec![PAINTED_UPDATE_FRAME_KIND, 0x06, 0x00]),
+        Err(SessionBinaryFrameDecodeError::UnknownFlags {
+            field_name: "part_flags",
+            flag_bits: 0x06,
+        })
+    );
+}
+
+#[test]
+fn a_placement_preview_that_does_not_decode_is_refused() {
+    let payload_bytes = vec![
+        PAINTED_UPDATE_FRAME_KIND,
+        0x07,
+        0x01,
+        0x00,
+        0x01,
+        b'{',
+        0x00,
+    ];
+
+    assert!(matches!(
+        decode_session_binary_frame(payload_bytes),
+        Err(SessionBinaryFrameDecodeError::MalformedStructure { .. })
+    ));
 }

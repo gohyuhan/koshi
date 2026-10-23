@@ -200,7 +200,7 @@ pub fn commit_new_floating_pane(
     new_pane_spec: NewPaneSpec,
 ) -> Result<Vec<Event>, FloatingSetError> {
     let new_pane_id = floating_member.pane_id;
-    session.add_floating_member(floating_member, acting_view)?;
+    session.add_floating_member(floating_member, acting_view.as_slice())?;
     register_spawned_pane(session, new_pane_id, new_pane_spec);
     let mut emitted_events = vec![Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,

@@ -96,9 +96,14 @@ fn build_single_pane_tab(tab_id: TabId, pane_id: PaneId) -> Tab {
 
 /// A single-pane tab at display position `tab_index`.
 fn build_tab_at_index(tab_id: TabId, pane_id: PaneId, tab_index: usize) -> Tab {
-    let mut tab = build_single_pane_tab(tab_id, pane_id);
-    tab.update_tab_index(tab_index);
-    tab
+    Tab::from_layout_tree(
+        tab_id,
+        "code".to_owned(),
+        tab_index,
+        LayoutNode::Pane(pane_id),
+        TEST_TAB_SIZE,
+        PaneSizing::default(),
+    )
 }
 
 /// A tab split between `left_pane_id` and `right_pane_id`, at display position 0.

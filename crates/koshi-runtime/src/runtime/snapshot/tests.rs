@@ -10,8 +10,10 @@ use std::time::SystemTime;
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::GridPosition;
-use koshi_core::geometry::{PaneArea, Point, SplitDirection, DEFAULT_FLOATING_PANE_SIZE};
-use koshi_core::ids::{CommandId, SessionId};
+use koshi_core::geometry::{
+    PaneArea, Point, Rect, Size, SplitDirection, DEFAULT_FLOATING_PANE_SIZE,
+};
+use koshi_core::ids::{CommandId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -611,60 +613,6 @@ fn native_image_fragments_keep_one_content_id_across_snapshot_placements() {
     );
 }
 
-/// The resources the placement preview limits count for `pane_output_bytes`
-/// written into one 80x24 pane: `(cell_count, image_count, image_byte_count)`.
-/// The pane is counted twice; the second count adds nothing.
-fn count_live_placement_pane_resources(pane_output_bytes: &[u8]) -> (u64, usize, u64) {
-    let mut server = build_test_runtime();
-    let (session, session_id, _tab_id, pane_id, _client_id) = build_session_with_client(Size {
-        column_count: 80,
-        row_count: 24,
-    });
-    server.session_by_id.insert(session_id, session);
-    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
-        column_count: 80,
-        row_count: 24,
-    });
-    let _ = terminal_engine.process_pty_output(pane_output_bytes);
-    server
-        .terminal_engine_by_pane_id
-        .insert(pane_id, terminal_engine);
-
-    let mut placement_resource_count = super::PlacementSnapshotResourceCount::default();
-    placement_resource_count.add_live_placement_pane_resources(&server, pane_id);
-    placement_resource_count.add_live_placement_pane_resources(&server, pane_id);
-    (
-        placement_resource_count.cell_count,
-        placement_resource_count.image_count,
-        placement_resource_count.image_byte_count,
-    )
-}
-
-#[test]
-fn placement_resource_count_shares_one_decoded_image_across_placements() {
-    // One iTerm2 image split by `x` into two placements of the same decoded image.
-    let mut pane_output_bytes = b"\x1b]1337;File=inline=1;width=3;height=1;preserveAspectRatio=0:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\x07".to_vec();
-    pane_output_bytes.extend_from_slice(b"\x1b[1;2Hx");
-
-    assert_eq!(
-        count_live_placement_pane_resources(&pane_output_bytes),
-        (1_920, 2, 4)
-    );
-}
-
-#[test]
-fn placement_resource_count_adds_the_bytes_of_every_distinct_image() {
-    // Two Kitty transmissions of different 1x1 RGBA pixels, 4 bytes each.
-    let mut pane_output_bytes = b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec();
-    pane_output_bytes.extend_from_slice(b"\x1b[1;3H");
-    pane_output_bytes.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;AP8A/w==\x1b\\");
-
-    assert_eq!(
-        count_live_placement_pane_resources(&pane_output_bytes),
-        (1_920, 2, 8)
-    );
-}
-
 #[test]
 fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     let mut server = build_test_runtime();
@@ -713,88 +661,6 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
             column_count: 40,
             row_count: 8
         }
-    );
-}
-
-#[test]
-fn placement_destination_size_includes_requesting_client_before_destination_viewers() {
-    let mut server = build_test_runtime();
-    let (mut session, session_id, source_tab_id, source_pane_id, requesting_client_id) =
-        build_session_with_client_reporting(
-            Size {
-                column_count: 160,
-                row_count: 50,
-            },
-            Some(PaneArea::Reported(Size {
-                column_count: 80,
-                row_count: 20,
-            })),
-        );
-    let destination_tab_id = TabId::new();
-    let destination_pane_id = PaneId::new();
-    session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(destination_pane_id))
-        .expect("unique pane id");
-    session.tabs.insert(
-        destination_tab_id,
-        build_tab(
-            destination_tab_id,
-            "destination",
-            1,
-            LayoutNode::Pane(destination_pane_id),
-        ),
-    );
-
-    let destination_viewer_id = ClientId::new();
-    let mut destination_viewer = Client::from_attachment(
-        destination_viewer_id,
-        session_id,
-        SystemTime::now(),
-        Size {
-            column_count: 240,
-            row_count: 60,
-        },
-        Some(PaneArea::Reported(Size {
-            column_count: 120,
-            row_count: 40,
-        })),
-        destination_tab_id,
-        ClientOrigin::Local,
-        "C-test-destination-viewer".to_string(),
-        0,
-    );
-    destination_viewer.update_focused_pane(destination_tab_id, destination_pane_id);
-    attach_client_record(&mut session, destination_viewer);
-    server.session_by_id.insert(session_id, session);
-    server.terminal_engine_by_pane_id.insert(
-        destination_pane_id,
-        TerminalEngine::from_pty_size(PtySize {
-            column_count: 118,
-            row_count: 38,
-        }),
-    );
-
-    let placement_snapshot = server
-        .build_placement_snapshot(requesting_client_id, source_pane_id, destination_tab_id)
-        .expect("placement snapshot");
-
-    assert_eq!(placement_snapshot.find_source_tab_id(), Some(source_tab_id));
-    assert_eq!(
-        placement_snapshot
-            .destination_tab_snapshot
-            .as_ref()
-            .expect("cross-tab destination")
-            .tab_snapshot
-            .tab_size,
-        Size {
-            column_count: 80,
-            row_count: 20,
-        }
-    );
-    assert_eq!(
-        crate::runtime::frame::build_wire_placement_snapshot(&placement_snapshot).validate(),
-        Ok(())
     );
 }
 
@@ -883,176 +749,6 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
             (second_pane_id, true, false, None)
         ]
     );
-}
-
-#[test]
-fn a_placement_snapshot_of_a_floating_source_carries_its_content_and_the_destination_tab() {
-    let mut server = build_test_runtime();
-    let (mut session, session_id, tab_id, _, client_id) = build_session_with_client_reporting(
-        Size {
-            column_count: 80,
-            row_count: 24,
-        },
-        Some(PaneArea::Reported(Size {
-            column_count: 80,
-            row_count: 22,
-        })),
-    );
-    let floating_pane_id = PaneId::new();
-    session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(floating_pane_id))
-        .expect("unique pane id");
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: DEFAULT_FLOATING_PANE_SIZE,
-                solved_size: Size {
-                    column_count: 48,
-                    row_count: 13,
-                },
-            },
-            None,
-        )
-        .expect("the set has room");
-    server.session_by_id.insert(session_id, session);
-
-    let placement_snapshot = server
-        .build_placement_snapshot(client_id, floating_pane_id, tab_id)
-        .expect("a floating pane previews a dock");
-
-    assert_eq!(
-        placement_snapshot.source,
-        PlacementSource::Floating(PlacementPaneSnapshot {
-            pane_id: floating_pane_id,
-            terminal_grid_view: None,
-            image_placement_snapshots: Vec::new(),
-        })
-    );
-    assert_eq!(placement_snapshot.find_source_tab_id(), None);
-    assert_eq!(
-        placement_snapshot
-            .destination_tab_snapshot
-            .as_ref()
-            .map(|destination_tab_snapshot| (
-                destination_tab_snapshot.tab_snapshot.tab_id,
-                destination_tab_snapshot.tab_snapshot.tab_size
-            )),
-        Some((
-            tab_id,
-            Size {
-                column_count: 80,
-                row_count: 22,
-            }
-        ))
-    );
-    assert_eq!(
-        crate::runtime::frame::build_wire_placement_snapshot(&placement_snapshot).validate(),
-        Ok(())
-    );
-}
-
-#[test]
-fn placement_snapshot_omits_cells_for_suppressed_panes() {
-    let mut server = build_test_runtime();
-    let (session, session_id, tab_id, pane_id, client_id) = build_session_with_client_reporting(
-        Size {
-            column_count: 80,
-            row_count: 24,
-        },
-        Some(PaneArea::Starving),
-    );
-    server.session_by_id.insert(session_id, session);
-    server.terminal_engine_by_pane_id.insert(
-        pane_id,
-        TerminalEngine::from_pty_size(PtySize {
-            column_count: 80,
-            row_count: 24,
-        }),
-    );
-
-    let placement_snapshot = server
-        .build_placement_snapshot(client_id, pane_id, tab_id)
-        .expect("placement snapshot");
-    let source_tab_snapshot = placement_snapshot
-        .find_source_tab_snapshot()
-        .expect("the source pane is tiled");
-    let pane_slot = &source_tab_snapshot.tab_snapshot.pane_slots[0];
-    let pane_snapshot = &source_tab_snapshot.pane_snapshots[0];
-
-    assert!(pane_slot.is_suppressed);
-    assert!(!pane_slot.is_visible);
-    assert_eq!(pane_snapshot.terminal_grid_view, None);
-    assert!(pane_snapshot.image_placement_snapshots.is_empty());
-}
-
-#[test]
-fn cross_tab_placement_snapshot_retains_a_suppressed_source_pane_for_transfer() {
-    let mut server = build_test_runtime();
-    let (mut session, session_id, source_tab_id, source_pane_id, client_id) =
-        build_session_with_client_reporting(
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            Some(PaneArea::Reported(Size {
-                column_count: 80,
-                row_count: 24,
-            })),
-        );
-    let destination_tab_id = TabId::new();
-    let destination_pane_id = PaneId::new();
-    session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(destination_pane_id))
-        .expect("unique pane id");
-    session.tabs.insert(
-        destination_tab_id,
-        build_tab(
-            destination_tab_id,
-            "destination",
-            1,
-            LayoutNode::Pane(destination_pane_id),
-        ),
-    );
-    server.session_by_id.insert(session_id, session);
-    server.terminal_engine_by_pane_id.insert(
-        source_pane_id,
-        TerminalEngine::from_pty_size(PtySize {
-            column_count: 80,
-            row_count: 24,
-        }),
-    );
-    server.terminal_engine_by_pane_id.insert(
-        destination_pane_id,
-        TerminalEngine::from_pty_size(PtySize {
-            column_count: 80,
-            row_count: 24,
-        }),
-    );
-
-    let placement_snapshot = server
-        .build_placement_snapshot(client_id, source_pane_id, destination_tab_id)
-        .expect("placement snapshot");
-    let source_tab_snapshot = placement_snapshot
-        .find_source_tab_snapshot()
-        .expect("the source pane is tiled");
-    let source_pane_slot = &source_tab_snapshot.tab_snapshot.pane_slots[0];
-    let source_pane_snapshot = &source_tab_snapshot.pane_snapshots[0];
-
-    assert!(source_pane_slot.is_suppressed);
-    assert!(!source_pane_slot.is_visible);
-    let source_grid_view = source_pane_snapshot
-        .terminal_grid_view
-        .as_ref()
-        .expect("the moved pane needs content for the destination preview");
-    assert_eq!(source_grid_view.get_view_dimensions(), (24, 80));
-    assert_eq!(
-        crate::runtime::frame::build_wire_placement_snapshot(&placement_snapshot).validate(),
-        Ok(())
-    );
-    assert_eq!(placement_snapshot.find_source_tab_id(), Some(source_tab_id));
 }
 
 #[test]
@@ -1903,7 +1599,7 @@ fn add_floating_member(session: &mut Session, floating_pane_id: PaneId, solved_s
                 desired_size: DEFAULT_FLOATING_PANE_SIZE,
                 solved_size,
             },
-            None,
+            &[],
         )
         .expect("the set has room");
 }

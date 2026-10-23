@@ -11,16 +11,18 @@ use super::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use koshi_core::event::PaneMinimizedChanged;
+use koshi_core::event::{PaneFocused, PaneMinimizedChanged};
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::SessionId;
 use koshi_layout::tree::SplitNode;
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{ClientOrigin, ClientRegistry};
+use crate::client::ClientOrigin;
 use crate::error::SessionConsistencyError;
 use crate::session::lifecycle::SessionLifecycle;
-use crate::session::state::tests::{build_default_floating_member, build_tab, TEST_TAB_SIZE};
+use crate::session::state::tests::{
+    build_default_floating_member, build_empty_session, build_tab, TEST_TAB_SIZE,
+};
 
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -75,12 +77,7 @@ fn build_client_on(session_id: SessionId, tab_id: TabId) -> Client {
 /// attached yet. Attach clients afterward with [`Session::attach_client`] so
 /// each carries the session's own id.
 fn build_session_with(tabs: Vec<Tab>, pane_ids: Vec<PaneId>) -> Session {
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     for tab in tabs {
         session.tabs.insert(tab.get_tab_id(), tab);
     }
@@ -174,12 +171,7 @@ fn commit_new_tab_registers_its_pane_and_emits_created_then_pane_created() {
 
 #[test]
 fn commit_new_tab_first_tab_transitions_the_session_to_running() {
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Starting);
 
     let _ = commit_new_tab(
@@ -1037,9 +1029,9 @@ fn focus_tab_preserves_per_tab_pane_focus() {
 }
 
 #[test]
-fn focus_tab_lands_on_the_tabs_most_recent_pane() {
-    // A client that never focused a pane in the tab it switches to lands on
-    // that tab's focus history head, not on the first leaf in layout order.
+fn focus_tab_lands_a_client_with_no_focus_there_on_the_first_leaf_not_another_clients_focus() {
+    // The tab's most recent focus is another client's `right`. A client that
+    // never focused a pane in the tab lands on the first leaf, `left`.
     let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
     let (first_pane_id, left_pane_id, right_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
@@ -1065,7 +1057,7 @@ fn focus_tab_lands_on_the_tabs_most_recent_pane() {
             .get_client_by_id(client_id)
             .unwrap()
             .get_focused_pane_id(target_tab_id),
-        Some(right_pane_id)
+        Some(left_pane_id)
     );
     assert_eq!(
         emitted_events,
@@ -1078,7 +1070,7 @@ fn focus_tab_lands_on_the_tabs_most_recent_pane() {
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(target_tab_id),
-                pane_id: right_pane_id,
+                pane_id: left_pane_id,
                 previous_pane_id: None,
             }),
         ]
@@ -1150,38 +1142,31 @@ fn focus_tab_skips_a_landing_candidate_with_no_registry_record() {
 }
 
 #[test]
-fn focus_tab_skips_a_history_entry_that_is_not_a_leaf() {
-    // A focus history entry naming a pane the tab's layout no longer holds is
-    // passed over, so the landing never focuses a pane outside the tab.
-    let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
-    let (first_pane_id, target_pane_id, stale_pane_id) =
+fn find_landing_pane_skips_a_history_entry_that_is_not_a_leaf() {
+    // The client's newest history entry names a pane the tab's layout no
+    // longer holds: the landing passes over it to `right`, the next history
+    // entry, and not to `left`, the first leaf.
+    let (left_pane_id, right_pane_id, stale_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
+    let target_tab_id = TabId::new();
     let mut session = build_session_with(
-        vec![
-            build_single_pane_tab(first_tab_id, first_pane_id, 0),
-            build_single_pane_tab(target_tab_id, target_pane_id, 1),
-        ],
-        vec![first_pane_id, target_pane_id],
+        vec![build_two_pane_tab(
+            target_tab_id,
+            left_pane_id,
+            right_pane_id,
+            0,
+        )],
+        vec![left_pane_id, right_pane_id, stale_pane_id],
     );
-    let _ = session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(stale_pane_id));
-    session
-        .tabs
-        .get_mut(&target_tab_id)
-        .unwrap()
-        .record_focus_mru(stale_pane_id);
-    let client_id = attach_client_on(&mut session, first_tab_id);
+    let client_id = attach_client_on(&mut session, target_tab_id);
+    let client = session.clients.get_client_mut_by_id(client_id).unwrap();
+    let _ = client.update_focused_pane(target_tab_id, right_pane_id);
+    let _ = client.update_focused_pane(target_tab_id, stale_pane_id);
 
-    let _ = focus_tab(&mut session, client_id, TabTarget::Id(target_tab_id));
-
+    let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(
-        session
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_focused_pane_id(target_tab_id),
-        Some(target_pane_id)
+        find_landing_pane(&session, client, target_tab_id),
+        Some(right_pane_id)
     );
 }
 
@@ -1205,56 +1190,42 @@ fn build_stacked_tab(
 }
 
 #[test]
-fn focus_tab_skips_a_history_entry_collapsed_to_a_stack_header() {
-    // The newest history entry is a stack member collapsed to its header,
-    // which draws no content: the landing passes over it to the expanded
-    // member.
-    let (first_tab_id, target_tab_id) = (TabId::new(), TabId::new());
-    let (first_pane_id, collapsed_pane_id, expanded_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
+fn find_landing_pane_lands_on_the_stack_member_the_clients_own_history_shows() {
+    // The stack `[collapsed, expanded]` has `expanded` active. A client with
+    // no focus history there lands on `expanded`. A client whose history
+    // there is `[collapsed]` sees `collapsed` open and lands on it.
+    let target_tab_id = TabId::new();
+    let (collapsed_pane_id, expanded_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
-        vec![
-            build_single_pane_tab(first_tab_id, first_pane_id, 0),
-            build_stacked_tab(target_tab_id, collapsed_pane_id, expanded_pane_id, 1),
-        ],
-        vec![first_pane_id, collapsed_pane_id, expanded_pane_id],
+        vec![build_stacked_tab(
+            target_tab_id,
+            collapsed_pane_id,
+            expanded_pane_id,
+            0,
+        )],
+        vec![collapsed_pane_id, expanded_pane_id],
     );
-    let target_tab = session.tabs.get_mut(&target_tab_id).unwrap();
-    target_tab.record_focus_mru(expanded_pane_id);
-    target_tab.record_focus_mru(collapsed_pane_id);
-    let client_id = attach_client_on(&mut session, first_tab_id);
+    let fresh_client_id = attach_client_on(&mut session, target_tab_id);
+    let remembering_client_id = attach_client_on(&mut session, target_tab_id);
+    let _ = session
+        .clients
+        .get_client_mut_by_id(remembering_client_id)
+        .unwrap()
+        .update_focused_pane(target_tab_id, collapsed_pane_id);
 
-    let emitted_events = focus_tab(&mut session, client_id, TabTarget::Id(target_tab_id));
-
+    let fresh_client = session.clients.get_client_by_id(fresh_client_id).unwrap();
     assert_eq!(
-        session
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_focused_pane_id(target_tab_id),
+        find_landing_pane(&session, fresh_client, target_tab_id),
         Some(expanded_pane_id)
     );
+    let remembering_client = session
+        .clients
+        .get_client_by_id(remembering_client_id)
+        .unwrap();
     assert_eq!(
-        emitted_events,
-        vec![
-            Event::TabFocused(TabFocused {
-                client_id,
-                tab_id: target_tab_id,
-                previous_tab_id: first_tab_id,
-            }),
-            Event::PaneFocused(PaneFocused {
-                client_id,
-                tab_id: Some(target_tab_id),
-                pane_id: expanded_pane_id,
-                previous_pane_id: None,
-            }),
-        ]
+        find_landing_pane(&session, remembering_client, target_tab_id),
+        Some(collapsed_pane_id)
     );
-    assert_eq!(
-        session.tabs[&target_tab_id].list_focus_mru(),
-        [expanded_pane_id, collapsed_pane_id]
-    );
-    assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
@@ -1321,10 +1292,11 @@ fn focus_tab_lands_on_nothing_when_no_leaf_has_a_record() {
 }
 
 #[test]
-fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
+fn close_tab_lands_a_moved_client_with_no_focus_in_the_survivor_on_its_first_leaf() {
     // Closing the tab a client views moves it to the nearest survivor and
-    // gives it that tab's most recent pane, so the arriving client always has
-    // a pane to type into.
+    // focuses a pane there, so the arriving client always has a pane to type
+    // into. The survivor's most recent focus is another client's `right`; a
+    // client with no focus history there lands on the first leaf, `left`.
     let (surviving_tab_id, closed_tab_id) = (TabId::new(), TabId::new());
     let (left_pane_id, right_pane_id, closed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
@@ -1358,7 +1330,7 @@ fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
             .get_client_by_id(client_id)
             .unwrap()
             .get_focused_pane_id(surviving_tab_id),
-        Some(right_pane_id)
+        Some(left_pane_id)
     );
     assert_eq!(
         emitted_events,
@@ -1381,7 +1353,7 @@ fn close_tab_lands_a_moved_client_on_the_surviving_tabs_recent_pane() {
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(surviving_tab_id),
-                pane_id: right_pane_id,
+                pane_id: left_pane_id,
                 previous_pane_id: None,
             }),
         ]

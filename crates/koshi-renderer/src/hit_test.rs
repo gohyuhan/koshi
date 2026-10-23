@@ -87,7 +87,7 @@ pub enum HitRegion {
         /// The floating pane whose close button was hit.
         pane_id: PaneId,
     },
-    /// A collapsed stack member's title strip; clicking it activates that pane.
+    /// A collapsed stack member's title strip; clicking it focuses that pane.
     StackHeader {
         /// The collapsed pane the strip represents.
         pane_id: PaneId,

@@ -132,31 +132,6 @@ fn an_image_content_start_survives_a_round_trip() {
 }
 
 #[test]
-fn a_placement_preview_and_its_refusal_survive_a_round_trip() {
-    let expected_events = [
-        SessionEvent::PanePlacementSnapshot {
-            request_id: 5,
-            snapshot: Box::new(crate::wire::tests::build_test_placement_snapshot()),
-        },
-        SessionEvent::PanePlacementRefused {
-            request_id: 6,
-            refusal: IpcErrorPayload {
-                code: crate::protocol::IpcErrorCode::ResourceLimit,
-                message: "the preview is larger than its limit".to_string(),
-            },
-        },
-    ];
-
-    for expected_event in expected_events {
-        let serialized_event_json = serde_json::to_string(&expected_event).expect("event encodes");
-        let decoded_event: SessionEvent =
-            serde_json::from_str(&serialized_event_json).expect("event decodes");
-
-        assert_eq!(decoded_event, expected_event);
-    }
-}
-
-#[test]
 fn an_image_content_release_has_the_pinned_wire_shape() {
     assert_eq!(
         serde_json::to_value(SessionEvent::ImageContentReleased {

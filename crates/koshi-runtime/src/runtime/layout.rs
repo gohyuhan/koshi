@@ -5,13 +5,14 @@
 //! viewing it — and packs the split trees, the rectangles those trees solve
 //! to, and every attached client's focus into one [`SessionLayout`].
 //!
-//! Each viewing client gets the solve the session holds for its own layout
-//! mode ([`Session::compute_client_solve`]). Two clients on one tab, one tiled
-//! and one with a pane fullscreen, give that tab two sets of rectangles in the
-//! same turn. The size is shared across those clients: the per-axis smallest
-//! pane area among the clients viewing the tab. A client that reported no
-//! pane area contributes its own terminal minus the two chrome rows; a client
-//! that reported
+//! Each viewing client gets the solve of its own view of the tab
+//! ([`Session::compute_client_solve`]): its zoom, and in each stack the member
+//! its focus history opens. Two clients on one tab, one tiled and one with a
+//! pane fullscreen, give that tab two sets of rectangles in the same turn.
+//! The size is shared across those clients: the per-axis smallest pane area
+//! among the clients viewing the tab. A client that reported no pane area
+//! contributes its own terminal minus the two chrome rows; a client that
+//! reported
 //! [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
 //! contributes none. An 80x24 and a 120x40 client, neither reporting a pane
 //! area, both solve against 80x22.
@@ -69,7 +70,7 @@ impl Server {
                             let layout_mode =
                                 client_record.get_layout_mode(tab_record.get_tab_id());
                             let layout_solve = session
-                                .compute_client_solve(tab_record.get_tab_id(), layout_mode)?;
+                                .compute_client_solve(client_record, tab_record.get_tab_id())?;
                             Some(SolvedTab {
                                 client_id: client_record.get_client_id(),
                                 viewport_size: tab_size,

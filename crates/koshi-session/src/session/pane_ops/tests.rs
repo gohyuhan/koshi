@@ -16,7 +16,6 @@ use std::time::SystemTime;
 
 use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::geometry::{Direction, PaneArea, Point, Size, SplitDirection};
-use koshi_core::ids::SessionId;
 use koshi_core::process::ShellKind;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
@@ -24,8 +23,8 @@ use koshi_layout::tree::SplitNode;
 
 use koshi_core::event::{PaneFocused, PaneMinimizedChanged};
 
-use crate::client::{Client, ClientOrigin, ClientRegistry, FloatingPaneView};
-use crate::session::state::tests::{build_default_floating_member, build_tab};
+use crate::client::{Client, ClientOrigin, FloatingPaneView};
+use crate::session::state::tests::{build_default_floating_member, build_empty_session, build_tab};
 
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -39,12 +38,7 @@ fn build_single_pane_session() -> (Session, TabId, PaneId, ClientId) {
     let pane_id = PaneId::new();
     let client_id = ClientId::new();
 
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     session.tabs.insert(
         tab_id,
         build_tab(tab_id, "code", 0, LayoutNode::Pane(pane_id)),
@@ -210,12 +204,7 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let client_id = ClientId::new();
-    let mut session = Session::from_identity_and_client_registry(
-        SessionId::new(),
-        "main".to_owned(),
-        SystemTime::UNIX_EPOCH,
-        ClientRegistry::new(),
-    );
+    let mut session = build_empty_session();
     session.tabs.insert(
         first_tab_id,
         build_tab(first_tab_id, "a", 0, LayoutNode::Pane(first_pane_id)),
@@ -911,7 +900,7 @@ fn commit_reports_no_previous_pane_id_when_the_client_has_no_focused_pane() {
         .clients
         .get_client_mut_by_id(client_id)
         .expect("client")
-        .remove_focused_pane(tab_id);
+        .clear_focus_history(tab_id);
     let (new_pane_id, candidate_layout_tree) =
         prepare_split_candidate(&session, tab_id, source_pane_id, Direction::Right);
 

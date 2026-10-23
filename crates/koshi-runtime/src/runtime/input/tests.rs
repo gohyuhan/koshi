@@ -13,7 +13,8 @@ use crate::runtime::command::tests::{
 };
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::render_schedule::tests::{
-    get_frame_wait, subscribe_and_push_first_frame, DEFAULT_FRAME_INTERVAL_DURATION,
+    mark_changed_views_then_compute_frame_wait, subscribe_and_push_first_frame,
+    DEFAULT_FRAME_INTERVAL_DURATION,
 };
 use crate::runtime::tests::build_viewer;
 use koshi_config::conflict::KeymapVerdict;
@@ -22,6 +23,7 @@ use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, Command, FocusPaneArgs, FocusTarget, NewPaneArgs, NewPanePlacement,
+    PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget,
 };
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::SessionId;
@@ -42,7 +44,7 @@ use koshi_pty::error::PtyError;
 
 use crate::server::Server;
 
-use koshi_core::command::{CommandEnvelope, CommandSource};
+use koshi_core::command::{CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::ids::CommandId;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
@@ -112,7 +114,7 @@ fn showing_and_clearing_the_recovery_notice_each_mark_the_view_of_every_subscrib
     server.show_session_recovery_notice(session_id);
     for viewing_client_id in client_ids {
         assert_eq!(
-            get_frame_wait(&server, viewing_client_id, shown_time),
+            mark_changed_views_then_compute_frame_wait(&mut server, viewing_client_id, shown_time),
             Some(DEFAULT_FRAME_INTERVAL_DURATION)
         );
     }
@@ -121,14 +123,22 @@ fn showing_and_clearing_the_recovery_notice_each_mark_the_view_of_every_subscrib
     server.push_due_frames(cleared_time);
     for viewing_client_id in client_ids {
         assert_eq!(
-            get_frame_wait(&server, viewing_client_id, cleared_time),
+            mark_changed_views_then_compute_frame_wait(
+                &mut server,
+                viewing_client_id,
+                cleared_time
+            ),
             None
         );
     }
     server.clear_session_recovery_notice_after_pane_input(pane_id);
     for viewing_client_id in client_ids {
         assert_eq!(
-            get_frame_wait(&server, viewing_client_id, cleared_time),
+            mark_changed_views_then_compute_frame_wait(
+                &mut server,
+                viewing_client_id,
+                cleared_time
+            ),
             Some(DEFAULT_FRAME_INTERVAL_DURATION)
         );
     }
@@ -185,9 +195,10 @@ impl Server {
     /// Run the action a viewer's keypress resolved to, the way an attached
     /// viewer does: resolve `bound_action.action_reference` against the
     /// built-in table with `new_pane_direction`, dispatch the command it
-    /// stands for attributed to `client_id`'s keybinding, and mark the view
-    /// of every subscriber changed. A viewer-local action dispatches nothing
-    /// and still marks every view changed.
+    /// stands for attributed to `client_id`'s keybinding, then mark the view
+    /// changed of each subscriber whose frame shows a changed state
+    /// ([`Server::mark_changed_views`]). A viewer-local action dispatches
+    /// nothing.
     ///
     /// An action that does not resolve dispatches nothing and marks nothing.
     fn handle_bound_action(
@@ -211,7 +222,7 @@ impl Server {
             );
             let _ = self.dispatch(command_envelope);
         }
-        self.mark_every_view_changed();
+        self.mark_changed_views();
     }
 }
 
@@ -1123,24 +1134,24 @@ fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
         current_time,
     );
 
-    // The leaf becomes a two-member stack: the source collapses to a header
-    // and the new pane is the expanded, focused member.
+    // The leaf becomes a two-member stack with the source as its active
+    // member. The new pane takes the client's focus, so the client's view
+    // opens it and draws the source as a header.
     assert_eq!(server.live_pane_ids.len(), 2);
     let new_pane_id = get_focused_pane_id(&server, client_id);
     assert_ne!(new_pane_id, original_pane_id);
     let session = server.get_session_for_client(client_id).expect("session");
-    let tab_id = session
-        .clients
-        .get_client_by_id(client_id)
-        .expect("client")
-        .get_active_tab_id();
+    let client = session.clients.get_client_by_id(client_id).expect("client");
+    let tab_id = client.get_active_tab_id();
+    let layout_tree = session.tabs[&tab_id].get_layout_tree();
     assert_eq!(
-        session.tabs[&tab_id].get_layout_tree(),
+        layout_tree,
         &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
             vec![original_pane_id, new_pane_id],
-            1
+            0
         ))
     );
+    assert!(layout_tree.is_pane_collapsed(original_pane_id, client.list_focus_history(tab_id)));
 }
 
 #[test]
@@ -1633,7 +1644,7 @@ fn a_key_writes_nothing_when_the_client_has_no_focused_pane() {
         .clients
         .get_client_mut_by_id(client_id)
         .expect("client")
-        .remove_focused_pane(tab_id);
+        .clear_focus_history(tab_id);
 
     apply_key_press(
         &mut server,
@@ -1918,13 +1929,13 @@ fn one_client_zooming_does_not_stop_another_client_keys() {
 /// collapses the pane client A still has focused, and client A's keys stop
 /// reaching it. The collapsed pane is not suppressed: it draws no content.
 #[test]
-fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
+fn each_client_types_into_the_stack_member_its_own_view_opens() {
     let (mut server, fake_pty_backend, first_client_id, mut viewer) = build_test_server();
     let current_time = Instant::now();
     let original_pane_id = get_only_pane_id(&server);
 
-    // Stack a second pane onto the original pane. The new member becomes the
-    // active one and takes client A's focus; the original pane collapses to a header.
+    // Stack a second pane onto the original pane. The new member takes client
+    // A's focus, and client A's view opens it.
     dispatch_test_command(
         &mut server,
         first_client_id,
@@ -1949,8 +1960,8 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
     let second_client_id =
         attach_second_client(&mut server, first_client_id, Some(stacked_pane_id));
 
-    // Client B focuses the other member and activates it. The stacked pane
-    // client A still has focused collapses to a header.
+    // Client B focuses the other member, and client B's view opens it.
+    // Client A's view still opens the stacked pane client A focuses.
     dispatch_test_command(
         &mut server,
         second_client_id,
@@ -1966,8 +1977,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         "test setup: the first client's focus did not move"
     );
 
-    // Client A types at a pane that draws nothing. Client B types at the member
-    // that is drawn.
+    // Each client types into the member its own view opens.
     let mut second_viewer = build_viewer(second_client_id);
     apply_key_press(
         &mut server,
@@ -1986,7 +1996,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
         fake_pty_backend
             .list_pane_write_bytes(stacked_pane_id)
             .expect("writes"),
-        Vec::<Vec<u8>>::new()
+        vec![vec![b'z']]
     );
     assert_eq!(
         fake_pty_backend
@@ -1996,13 +2006,136 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
     );
 }
 
-/// Stack `[A, B, C]` with `C` expanded and focus history `C, A, B`. The
-/// terminal shrinks to `3x3`, a command-line close removes `C`, and the
-/// terminal grows back to `80x24`. Removing `C` expands `B`. The client
-/// lands on `B`, not on `A`, the newer history entry that stays collapsed,
-/// and `l` reaches `B`.
+/// The client focuses the only tiled pane and types in a floating pane. Docking
+/// the floating pane onto the tiled pane's stack collapses the tiled pane to a
+/// header, and the docked pane takes its place and the client's keys.
 #[test]
-fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal() {
+fn a_key_reaches_a_floating_pane_docked_onto_the_stack_of_the_focused_pane() {
+    let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
+    let tiled_pane_id = get_only_pane_id(&server);
+    let floating_pane_id = create_floating_pane(
+        &mut server,
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: Some(floating_pane_id),
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                target_pane_id: tiled_pane_id,
+            }),
+        }),
+        &[
+            "PanePlacementCommitted",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+        ],
+    );
+    apply_key_press(
+        &mut server,
+        &mut viewer,
+        build_key_chord(BindingModifierFlags::NONE, 'z'),
+        Instant::now(),
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(floating_pane_id)
+            .expect("writes"),
+        vec![vec![b'z']]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(tiled_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+}
+
+/// The client focuses `A` in `A | B`. Stacking `B` onto `A` collapses `A` to a
+/// header, and `B` takes its place and the client's keys.
+#[test]
+fn a_key_reaches_the_pane_stacked_onto_the_focused_pane_of_its_own_tab() {
+    let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
+    let focused_pane_id = get_only_pane_id(&server);
+    let CommandResult::Ok { .. } = server.dispatch(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(focused_pane_id),
+                tab_id: None,
+                direction: Direction::Right,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
+        }),
+    )) else {
+        panic!("test setup: the split applies");
+    };
+    let stacked_pane_id = get_focused_pane_id(&server, client_id);
+    let CommandResult::Ok { .. } = server.dispatch(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(focused_pane_id),
+            client_id: None,
+        }),
+    )) else {
+        panic!("test setup: the focus applies");
+    };
+
+    dispatch_test_command(
+        &mut server,
+        client_id,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: Some(stacked_pane_id),
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                target_pane_id: focused_pane_id,
+            }),
+        }),
+        &[
+            "PanePlacementCommitted",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+        ],
+    );
+    assert_eq!(get_focused_pane_id(&server, client_id), stacked_pane_id);
+    apply_key_press(
+        &mut server,
+        &mut viewer,
+        build_key_chord(BindingModifierFlags::NONE, 'z'),
+        Instant::now(),
+    );
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(stacked_pane_id)
+            .expect("writes"),
+        vec![vec![b'z']]
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(focused_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+}
+
+/// Stack `[A, B, C]` with `A` active in the tab's tree and the client's focus
+/// history `C, A, B`: the client's view opens `C`. The terminal shrinks to
+/// `3x3`, a command-line close removes `C`, and the terminal grows back to
+/// `80x24`. The client's view opens `A`, its newest history entry left in the
+/// stack. The client lands on `A`, and `l` reaches `A`.
+#[test]
+fn a_key_reaches_the_stack_member_the_clients_history_opens_after_a_close_in_a_too_small_terminal()
+{
     let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
     let first_pane_id = get_only_pane_id(&server);
     let stack_new_pane = Command::NewPane(NewPaneArgs {
@@ -2015,7 +2148,8 @@ fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal
         client_id: Some(client_id),
     });
 
-    // Each new member expands and takes the client's focus.
+    // Each new member takes the client's focus, and the client's view opens
+    // it.
     dispatch_test_command(
         &mut server,
         client_id,
@@ -2030,7 +2164,8 @@ fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal
         &["PaneCreated", "LayoutChanged", "PaneFocused", "PtyResized"],
     );
     let closed_pane_id = get_focused_pane_id(&server, client_id);
-    // Focus `A`, then `C`: the history reads `C, A, B`, and `C` is expanded.
+    // Focus `A`, then `C`: the history reads `C, A, B`, and the client's view
+    // opens `C`.
     dispatch_test_command(
         &mut server,
         client_id,
@@ -2056,9 +2191,9 @@ fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
             vec![first_pane_id, second_pane_id, closed_pane_id],
-            2,
+            0,
         )),
-        "test setup: `C` is the expanded member"
+        "test setup: `A` is the tree's active member"
     );
     assert_eq!(
         session.tabs[&tab_id].list_focus_mru(),
@@ -2094,7 +2229,7 @@ fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal
             "TerminalTooSmallEntered",
         ])
     );
-    assert_eq!(get_focused_pane_id(&server, client_id), second_pane_id);
+    assert_eq!(get_focused_pane_id(&server, client_id), first_pane_id);
 
     server.handle_client_resize(
         client_id,
@@ -2114,13 +2249,13 @@ fn a_key_reaches_the_expanded_stack_member_after_a_close_in_a_too_small_terminal
 
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(second_pane_id)
+            .list_pane_write_bytes(first_pane_id)
             .expect("writes"),
         vec![vec![b'l']]
     );
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(first_pane_id)
+            .list_pane_write_bytes(second_pane_id)
             .expect("writes"),
         Vec::<Vec<u8>>::new()
     );

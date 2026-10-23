@@ -267,8 +267,9 @@ fn parse_tab_reference(tab_reference_argument: &str) -> Result<TabReference, Str
 }
 
 /// The `--session`/`--tab` flags of one invocation, resolved to concrete ids
-/// (a name looked up against the running sessions). The routing layer builds
-/// this before [`CliCommand::build_action_command`]; a verb without those flags takes
+/// (a name looked up against the running sessions), and the pane a pane verb
+/// given no `--pane` acts on. The routing layer builds this before
+/// [`CliCommand::build_action_command`]; a verb without those flags takes
 /// `default()`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResolvedTargets {
@@ -277,6 +278,11 @@ pub struct ResolvedTargets {
     /// The resolved `--tab` value, or the destination tab the routing layer
     /// reads for a bare `dock-pane`.
     pub tab_id: Option<TabId>,
+    /// The pane a pane verb given no `--pane` acts on: the pane this CLI runs
+    /// in, when the routing layer sends the command to that pane's own session
+    /// as an external command because it names `--client`. `None` on every
+    /// other route.
+    pub pane_id: Option<PaneId>,
 }
 
 /// The output format of a discovery query.
@@ -1407,7 +1413,11 @@ impl CliCommand {
     /// resolved to ids (a name looked up against the running sessions); the
     /// routing layer builds it, and a verb without those flags passes
     /// `ResolvedTargets::default()`. A resolved target wins; without one, a
-    /// flag given directly as an id is used as-is.
+    /// flag given directly as an id is used as-is. A `--pane` flag wins over
+    /// [`ResolvedTargets::pane_id`]: `resize-pane`, `scroll-pane`,
+    /// `move-pane --direction`, `place-pane`, `undock-pane`, `dock-pane`,
+    /// `pin-pane`, `unpin-pane`, `minimize-pane` and `restore-pane` given no
+    /// `--pane` act on that pane. `--all` names no pane.
     ///
     /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
     /// setting, read from `koshi.kdl` by
@@ -1455,7 +1465,7 @@ impl CliCommand {
             } => (
                 "resize-pane",
                 Command::ResizePane(ResizePaneArgs {
-                    pane_id: *pane_id,
+                    pane_id: pane_id.or(resolved_targets.pane_id),
                     direction: Direction::from(*direction),
                     resize_amount_cells: *resize_amount_cells,
                 }),
@@ -1473,7 +1483,7 @@ impl CliCommand {
                     (Some(direction), _, _, _) => (
                         "move-pane",
                         Command::MovePane(MovePaneArgs {
-                            pane_id: *pane_id,
+                            pane_id: pane_id.or(resolved_targets.pane_id),
                             direction: Direction::from(*direction),
                         }),
                     ),
@@ -1499,7 +1509,7 @@ impl CliCommand {
             } => (
                 "place-pane",
                 Command::PlacePane(PlacePaneArgs {
-                    source_pane_id: *pane_id,
+                    source_pane_id: pane_id.or(resolved_targets.pane_id),
                     placement_target: PanePlacementTarget::Tiled(build_tiled_placement_target(
                         *stack_onto_pane_id,
                         resolved_targets
@@ -1507,7 +1517,6 @@ impl CliCommand {
                             .or(resolve_tab_reference_id(tab_reference)),
                         direction.map(Direction::from),
                     )),
-                    expected_placement_revision: None,
                 }),
             ),
             CliCommand::UndockPane {
@@ -1522,9 +1531,8 @@ impl CliCommand {
                 (
                     "undock-pane",
                     Command::PlacePane(PlacePaneArgs {
-                        source_pane_id: *pane_id,
+                        source_pane_id: pane_id.or(resolved_targets.pane_id),
                         placement_target: PanePlacementTarget::Floating { top_left_cell },
-                        expected_placement_revision: None,
                     }),
                 )
             }
@@ -1537,7 +1545,7 @@ impl CliCommand {
             } => (
                 "dock-pane",
                 Command::PlacePane(PlacePaneArgs {
-                    source_pane_id: *pane_id,
+                    source_pane_id: pane_id.or(resolved_targets.pane_id),
                     placement_target: PanePlacementTarget::Tiled(build_tiled_placement_target(
                         *stack_onto_pane_id,
                         resolved_targets
@@ -1545,7 +1553,6 @@ impl CliCommand {
                             .or(resolve_tab_reference_id(tab_reference)),
                         Some(direction.map(Direction::from).unwrap_or(Direction::Right)),
                     )),
-                    expected_placement_revision: None,
                 }),
             ),
             CliCommand::PinPane {
@@ -1554,7 +1561,7 @@ impl CliCommand {
             } => (
                 "pin-pane",
                 Command::SetPanePinned(SetPanePinnedArgs {
-                    pane_id: *pane_id,
+                    pane_id: pane_id.or(resolved_targets.pane_id),
                     is_pinned: true,
                 }),
             ),
@@ -1564,7 +1571,7 @@ impl CliCommand {
             } => (
                 "unpin-pane",
                 Command::SetPanePinned(SetPanePinnedArgs {
-                    pane_id: *pane_id,
+                    pane_id: pane_id.or(resolved_targets.pane_id),
                     is_pinned: false,
                 }),
             ),
@@ -1573,7 +1580,7 @@ impl CliCommand {
                 should_minimize_all_floating_panes,
                 client_id: _,
             } => build_floating_pane_minimize_action(
-                *pane_id,
+                pane_id.or(resolved_targets.pane_id),
                 *should_minimize_all_floating_panes,
                 true,
             ),
@@ -1582,7 +1589,7 @@ impl CliCommand {
                 should_restore_all_floating_panes,
                 client_id: _,
             } => build_floating_pane_minimize_action(
-                *pane_id,
+                pane_id.or(resolved_targets.pane_id),
                 *should_restore_all_floating_panes,
                 false,
             ),
@@ -1593,7 +1600,7 @@ impl CliCommand {
             } => (
                 "scroll-pane",
                 Command::ScrollPane(ScrollPaneArgs {
-                    pane_id: *pane_id,
+                    pane_id: pane_id.or(resolved_targets.pane_id),
                     scroll_line_count: *scroll_line_count,
                 }),
             ),

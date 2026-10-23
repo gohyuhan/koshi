@@ -49,3 +49,10 @@ repos:
         language: system
         always_run: true
         pass_filenames: false
+
+      - id: clean
+        name: cargo clean
+        entry: cargo clean
+        language: system
+        always_run: true
+        pass_filenames: false

@@ -67,7 +67,7 @@ fn focus_pane_not_in_registry_display_names_client_pane_and_tab() {
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client_id:?} focuses pane {pane_id:?} (tab {tab_id:?}) with no registry record")
+        format!("client {client_id:?} remembers pane {pane_id:?} (tab {tab_id:?}) with no registry record")
     );
 }
 
@@ -172,7 +172,9 @@ fn focus_target_missing_display_names_client_pane_and_tab() {
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client_id:?} focuses pane {pane_id:?} absent from tab {tab_id:?} layout")
+        format!(
+            "client {client_id:?} remembers pane {pane_id:?} absent from tab {tab_id:?} layout"
+        )
     );
 }
 

@@ -5,7 +5,7 @@
 //! The offset is per-client view state
 //! ([`Client::get_scroll_offset`](koshi_session::client::Client::get_scroll_offset)), so two
 //! clients scroll a shared pane independently. Every public entry point keeps the offset inside
-//! `[0, scrollback len]` and marks that client's view changed when the offset moves.
+//! `[0, scrollback len]` and records a view change of that client when the offset moves.
 //!
 //! Scrolling moves a view; it never decides whether the view is *held* against live output. That is
 //! [`koshi_session::client::Client::is_view_held`], derived from the offset and the client's
@@ -18,9 +18,9 @@ use crate::server::Server;
 
 impl Server {
     /// Scroll `client_id`'s view of `pane_id` up by `line_count` into scrollback,
-    /// clamped to the pane's retained history. A view that moves marks the
-    /// view of `client_id` changed, and no other client's. An unknown client,
-    /// or a view already at the clamp, moves nothing and marks nothing. A pane
+    /// clamped to the pane's retained history. A view that moves records a
+    /// view change of `client_id` alone ([`Client::set_scroll_offset`](koshi_session::client::Client::set_scroll_offset)). An
+    /// unknown client, or a view already at the clamp, moves nothing. A pane
     /// with no terminal engine retains nothing, so a view scrolled up in it
     /// clamps back to the newest line.
     pub fn scroll_up(&mut self, client_id: ClientId, pane_id: PaneId, line_count: usize) {
@@ -42,15 +42,14 @@ impl Server {
             .min(retained_line_count);
         if target_scroll_offset != current_scroll_offset {
             client.set_scroll_offset(pane_id, target_scroll_offset);
-            self.mark_client_view_changed(client_id);
         }
     }
 
     /// Scroll `client_id`'s view of `pane_id` down by `line_count` toward live output;
     /// reaching `0` returns it to the newest line, where it follows live again
-    /// unless a highlight is holding it. A view that moves marks the view of
-    /// `client_id` changed, and no other client's. An unknown client or a view
-    /// already at the newest line moves nothing and marks nothing.
+    /// unless a highlight is holding it. A view that moves records a view
+    /// change of `client_id` alone ([`Client::set_scroll_offset`](koshi_session::client::Client::set_scroll_offset)). An unknown
+    /// client or a view already at the newest line moves nothing.
     pub fn scroll_down(&mut self, client_id: ClientId, pane_id: PaneId, line_count: usize) {
         let Some(client) = self.get_client_mut(client_id) else {
             return;
@@ -59,7 +58,6 @@ impl Server {
         let target_scroll_offset = current_scroll_offset.saturating_sub(line_count);
         if target_scroll_offset != current_scroll_offset {
             client.set_scroll_offset(pane_id, target_scroll_offset);
-            self.mark_client_view_changed(client_id);
         }
     }
 

@@ -49,7 +49,9 @@ use crate::runtime::command::tests::{
     get_command_outcome,
 };
 use crate::runtime::event::{AttachAccepted, SessionEnding};
-use crate::runtime::render_schedule::tests::{get_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION};
+use crate::runtime::render_schedule::tests::{
+    mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
+};
 use crate::runtime::saved_view::SavedView;
 
 impl Server {
@@ -1001,7 +1003,7 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
     let resync_time = Instant::now();
     server.resync_lagged(resync_time);
     assert_eq!(server.event_bus.list_desynced_subscriber_ids(), Vec::new());
-    server.mark_every_view_changed();
+    server.mark_client_view_changed(client_id);
     let frame_time = resync_time + DEFAULT_FRAME_INTERVAL_DURATION;
 
     server.push_frames(frame_time);
@@ -1026,7 +1028,7 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
         "the frame did not fit, so none was queued"
     );
     assert_eq!(
-        get_frame_wait(&server, client_id, frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, frame_time),
         Some(Duration::ZERO),
         "the frame that did not fit leaves the view change in place"
     );
@@ -1040,7 +1042,7 @@ fn a_paused_subscriber_whose_view_changed_sets_no_wakeup() {
     let current_time = Instant::now();
 
     assert_eq!(
-        get_frame_wait(&server, client_id, current_time),
+        mark_changed_views_then_compute_frame_wait(&mut server, client_id, current_time),
         Some(Duration::ZERO)
     );
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
@@ -1290,7 +1292,7 @@ fn build_booted_saved_view(
 ) -> SavedView {
     SavedView {
         active_tab_id: booted_tab_id,
-        focused_pane_id_by_tab_id: HashMap::from([(booted_tab_id, root_pane_id)]),
+        focus_history_by_tab_id: HashMap::from([(booted_tab_id, vec![root_pane_id])]),
         zoomed_pane_id_by_tab_id: HashMap::new(),
         scroll_offset_by_pane_id,
         floating_pane_view_by_pane_id: HashMap::new(),
@@ -1544,6 +1546,7 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session hands the record back");
 
@@ -1577,6 +1580,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session mints a client");
     assert_eq!(starving_attachment.pane_area, Some(PaneArea::Starving));
@@ -1591,6 +1595,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session mints a client");
     assert_eq!(unreported_attachment.pane_area, None);
@@ -1612,6 +1617,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session mints a client instead of refusing");
 
@@ -1642,6 +1648,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the first attach takes the record");
     assert_eq!(held_attachment.client_id, client_id);
@@ -1656,6 +1663,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the second attach mints a client instead of refusing");
 
@@ -1715,6 +1723,7 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session mints a client");
 
@@ -1791,6 +1800,7 @@ fn attach_with_token(
             attached_at,
             false,
             60,
+            None,
         )
         .expect("the session mints a client")
 }
@@ -1897,7 +1907,6 @@ fn a_token_whose_focused_pane_moved_to_another_tab_keeps_the_focus_the_attach_ga
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
             }),
-            expected_placement_revision: None,
         }),
     ));
     assert_eq!(
@@ -1941,18 +1950,13 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
             .session_by_id
             .get_mut(&session_id)
             .expect("the session");
+        // An attach that restores nothing lands on the tab's first leaf,
+        // `root_pane_id`. The leaving client focuses `split_pane_id`.
         session
             .clients
             .get_client_mut_by_id(leaving_attachment.client_id)
             .expect("the client that is about to leave")
-            .update_focused_pane(booted_tab_id, root_pane_id);
-        // The tab's most recent focus is the split pane, so an attach that
-        // restores nothing lands on `split_pane_id`.
-        session
-            .tabs
-            .get_mut(&booted_tab_id)
-            .expect("the tab")
-            .record_focus_mru(split_pane_id);
+            .update_focused_pane(booted_tab_id, split_pane_id);
     }
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
@@ -1979,25 +1983,25 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
             PaneFocused {
                 client_id: returning_attachment.client_id,
                 tab_id: Some(booted_tab_id),
-                pane_id: split_pane_id,
+                pane_id: root_pane_id,
                 previous_pane_id: None,
             },
             PaneFocused {
                 client_id: returning_attachment.client_id,
                 tab_id: Some(booted_tab_id),
-                pane_id: root_pane_id,
-                previous_pane_id: Some(split_pane_id),
+                pane_id: split_pane_id,
+                previous_pane_id: Some(root_pane_id),
             },
         ],
-        "the attach lands on the tab's most recent pane, then the restored view moves the focus back"
+        "the attach lands on the tab's first leaf, then the restored view moves the focus back"
     );
     assert_eq!(
         server.session_by_id[&session_id]
             .clients
             .get_client_by_id(returning_attachment.client_id)
             .expect("the client the token attached")
-            .get_focused_pane_id(booted_tab_id),
-        Some(root_pane_id)
+            .list_focus_history(booted_tab_id),
+        [split_pane_id, root_pane_id]
     );
 }
 
@@ -2075,11 +2079,6 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
         [pinned_pane_id, focused_pane_id]
     );
     assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
-    assert_eq!(
-        client.get_placement_revision(),
-        1,
-        "the restored floating view advances the fresh client's placement revision once"
-    );
     assert_eq!(session.validate_session_consistency(), Ok(()));
     assert_eq!(
         server.find_typed_pane(returning_attachment.client_id),
@@ -2548,6 +2547,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         now,
         false,
         60,
+        None,
     );
 
     assert!(refused_attachment.is_none(), "no session is left to join");
@@ -2660,6 +2660,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the record is handed back");
 
@@ -3009,6 +3010,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             SystemTime::now(),
             true,
             60,
+            None,
         )
         .expect("the session mints a client");
     let foreign_token_attachment = resumed_server
@@ -3021,6 +3023,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             SystemTime::now(),
             true,
             60,
+            None,
         )
         .expect("the session mints a client");
 
@@ -3045,6 +3048,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session hands the record back");
 
@@ -3084,6 +3088,7 @@ fn after_a_swap_a_carried_client_with_no_token_hash_is_not_handed_back_by_its_id
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session mints a client");
 
@@ -3214,6 +3219,7 @@ fn a_carried_client_whose_tab_is_gone_is_taken_over_by_its_token_and_keeps_its_v
             SystemTime::now(),
             false,
             60,
+            None,
         )
         .expect("the session mints a client");
 
@@ -3250,6 +3256,7 @@ fn a_token_proven_claim_on_a_client_a_connection_is_streaming_for_takes_that_cli
             SystemTime::now(),
             true,
             60,
+            None,
         )
         .expect("the session mints a client");
 
@@ -3386,18 +3393,6 @@ fn carrying_out_names_the_session_the_body_carries() {
     let (mut server, client_id) = boot_server();
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
     let session_name = server.session_by_id[&session_id].session_name.clone();
-    {
-        let session = server
-            .session_by_id
-            .get_mut(&session_id)
-            .expect("session exists");
-        assert!(session.advance_placement_revision());
-        assert!(session
-            .clients
-            .get_client_mut_by_id(client_id)
-            .expect("client exists")
-            .advance_placement_revision());
-    }
 
     let (header, body) = server.carry_out(&[]).expect("a session to carry");
 
@@ -3405,15 +3400,10 @@ fn carrying_out_names_the_session_the_body_carries() {
     assert_eq!(header.session_name, session_name);
     assert_eq!(body.session_by_id[&session_id].session_id, session_id);
     assert_eq!(body.session_by_id[&session_id].session_name, session_name);
-    assert_eq!(body.session_by_id[&session_id].get_placement_revision(), 1);
-    assert_eq!(
-        body.session_by_id[&session_id]
-            .clients
-            .get_client_by_id(client_id)
-            .expect("carried client exists")
-            .get_placement_revision(),
-        1
-    );
+    assert!(body.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(client_id)
+        .is_some());
 }
 
 #[test]

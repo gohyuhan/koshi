@@ -1842,12 +1842,10 @@ fn a_stack_header_survives_a_serde_round_trip() {
 }
 
 #[test]
-fn clicking_a_collapsed_members_header_strip_activates_it() {
-    use crate::focus::activate_stack_member;
-
+fn clicking_a_collapsed_members_header_strip_opens_it_in_the_clicking_view() {
     let (active_pane_id, first_collapsed_pane_id, second_collapsed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![
             active_pane_id,
             first_collapsed_pane_id,
@@ -1859,9 +1857,9 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
 
     // The active pane is expanded over rows 0..22; the other panes sit on the two header rows
     // below.
-    let layout_before_activation = solve_layout(&layout_tree, layout_area);
+    let tree_layout_solve = solve_layout(&layout_tree, layout_area);
     assert_eq!(
-        layout_before_activation.pane_rects,
+        tree_layout_solve.pane_rects,
         [
             (active_pane_id, build_cell_rect(0, 0, 80, 22)),
             (first_collapsed_pane_id, build_cell_rect(0, 22, 80, 1)),
@@ -1871,7 +1869,7 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
 
     // Mouse routing hit-tests the strips: the cell at column 40, row 23 lies
     // on the second collapsed pane's header, so it is the pane the click selects.
-    let clicked_pane_id = layout_before_activation
+    let clicked_pane_id = tree_layout_solve
         .stack_headers
         .iter()
         .find(|header| {
@@ -1884,15 +1882,14 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
         .pane_id;
     assert_eq!(clicked_pane_id, second_collapsed_pane_id);
 
-    let stack_node = layout_tree
-        .find_containing_stack_mut(clicked_pane_id)
-        .expect("the pane lives in a stack");
-    assert!(activate_stack_member(stack_node, clicked_pane_id));
-
-    // The selected pane holds the content region and the other panes sit on header strips.
-    let layout_after_activation = solve_layout(&layout_tree, layout_area);
+    // The view of the client that clicked shows the clicked pane: it holds
+    // the content region and the other panes sit on header strips.
+    let shown_layout_tree = layout_tree
+        .build_shown_layout_tree(&[clicked_pane_id])
+        .expect("the click shows another member");
+    let shown_layout_solve = solve_layout(&shown_layout_tree, layout_area);
     assert_eq!(
-        layout_after_activation.pane_rects,
+        shown_layout_solve.pane_rects,
         [
             (active_pane_id, build_cell_rect(0, 0, 80, 1)),
             (first_collapsed_pane_id, build_cell_rect(0, 1, 80, 1)),
@@ -1900,7 +1897,7 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
         ]
     );
     assert_eq!(
-        layout_after_activation.stack_headers,
+        shown_layout_solve.stack_headers,
         [
             StackHeader {
                 pane_id: active_pane_id,
@@ -1916,12 +1913,12 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
             },
         ]
     );
-    assert_tiles_exactly(&layout_after_activation, layout_area);
+    assert_tiles_exactly(&shown_layout_solve, layout_area);
 }
 
 #[test]
-fn targeting_a_collapsed_stack_member_by_name_expands_it() {
-    use crate::focus::{activate_stack_member, compute_focus_candidates};
+fn targeting_a_collapsed_stack_member_by_name_opens_it_in_the_targeting_view() {
+    use crate::focus::compute_focus_candidates;
 
     let (left_pane_id, active_pane_id, collapsed_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
@@ -1929,16 +1926,16 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
         vec![active_pane_id, collapsed_pane_id],
         0,
     ));
-    let mut layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![build_leaf_node(left_pane_id), stack_layout_node],
     ));
     let layout_area = build_cell_rect(0, 0, 80, 24);
 
     // The active pane is expanded in the stack; the collapsed pane is on the bottom row.
-    let layout_before_activation = solve_layout(&layout_tree, layout_area);
+    let tree_layout_solve = solve_layout(&layout_tree, layout_area);
     assert_eq!(
-        layout_before_activation.pane_rects,
+        tree_layout_solve.pane_rects,
         [
             (left_pane_id, build_cell_rect(0, 0, 40, 24)),
             (active_pane_id, build_cell_rect(40, 0, 40, 23)),
@@ -1949,8 +1946,8 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
     // The normal focus path never offers the collapsed pane: its rect is a header strip.
     let candidates = compute_focus_candidates(
         build_cell_rect(40, 23, 40, 1),
-        &layout_before_activation.pane_rects,
-        &layout_before_activation.stack_headers,
+        &tree_layout_solve.pane_rects,
+        &tree_layout_solve.stack_headers,
     );
     assert_eq!(
         candidates.layout_order_pane_ids,
@@ -1958,15 +1955,13 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
     );
     assert_eq!(candidates.spatial_neighbor_pane_id, Some(active_pane_id));
 
-    // Naming the collapsed pane reaches it through the stack that holds it.
-    let stack_node = layout_tree
-        .find_containing_stack_mut(collapsed_pane_id)
-        .expect("the pane lives in a stack");
-    assert!(activate_stack_member(stack_node, collapsed_pane_id));
-
-    let layout_after_activation = solve_layout(&layout_tree, layout_area);
+    // The view of the client that names the collapsed pane shows it.
+    let shown_layout_tree = layout_tree
+        .build_shown_layout_tree(&[collapsed_pane_id])
+        .expect("naming the pane shows another member");
+    let shown_layout_solve = solve_layout(&shown_layout_tree, layout_area);
     assert_eq!(
-        layout_after_activation.pane_rects,
+        shown_layout_solve.pane_rects,
         [
             (left_pane_id, build_cell_rect(0, 0, 40, 24)),
             (active_pane_id, build_cell_rect(40, 0, 40, 1)),
@@ -1974,7 +1969,7 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
         ]
     );
     assert_eq!(
-        layout_after_activation.stack_headers,
+        shown_layout_solve.stack_headers,
         [StackHeader {
             pane_id: active_pane_id,
             header_rect: build_cell_rect(40, 0, 40, 1),
@@ -1982,7 +1977,7 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
             member_count: 2,
         }]
     );
-    assert_tiles_exactly(&layout_after_activation, layout_area);
+    assert_tiles_exactly(&shown_layout_solve, layout_area);
 }
 
 #[test]

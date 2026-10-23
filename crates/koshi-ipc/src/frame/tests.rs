@@ -20,7 +20,6 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
         is_recovery_notice_visible: false,
         session_snapshot: FrameSession {
             session_id: SessionId::from_uuid(Uuid::from_u128(1)),
-            session_revision: 17,
             session_name: "quiet-lake".to_string(),
             active_tab_snapshot: FrameTab {
                 tab_id,
@@ -106,7 +105,6 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
         }],
         client_snapshot: FrameClient {
             client_id: ClientId::from_uuid(Uuid::from_u128(3)),
-            client_revision: 19,
             viewport_size: Size {
                 column_count: 4,
                 row_count: 3,
@@ -119,6 +117,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
             last_applied_floating_pane_move_command_id: Some(CommandId::from_uuid(
                 Uuid::from_u128(6),
             )),
+            last_applied_placement_command_id: Some(CommandId::from_uuid(Uuid::from_u128(7))),
             is_mouse_selection_enabled: false,
         },
     }
@@ -152,33 +151,6 @@ fn recovery_notice_reads_from_painted_frame_and_absent_field_means_hidden() {
     let decoded_frame: PaintedFrame =
         serde_json::from_str(&frame_without_notice_field).expect("decode frame without notice");
     assert!(!decoded_frame.is_recovery_notice_visible);
-}
-
-#[test]
-fn a_frame_without_a_placement_revision_is_refused() {
-    let encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
-    for (snapshot_name, revision_name) in [
-        ("session_snapshot", "session_revision"),
-        ("client_snapshot", "client_revision"),
-    ] {
-        let mut frame_json_without_revision = encoded_json.clone();
-        frame_json_without_revision[snapshot_name]
-            .as_object_mut()
-            .expect("the snapshot is an object")
-            .remove(revision_name)
-            .expect("the revision is present");
-
-        let decode_error =
-            serde_json::from_str::<PaintedFrame>(&frame_json_without_revision.to_string())
-                .expect_err("a frame without the revision is refused");
-        assert_eq!(
-            decode_error.to_string(),
-            format!(
-                "missing field `{revision_name}` at line 1 column {}",
-                decode_error.column()
-            )
-        );
-    }
 }
 
 #[test]
@@ -400,7 +372,6 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
         json!({
             "session_snapshot": {
                 "session_id": "00000000-0000-0000-0000-000000000001",
-                "session_revision": 17,
                 "session_name": "quiet-lake",
                 "active_tab_snapshot": {
                     "tab_id": "00000000-0000-0000-0000-000000000002",
@@ -467,7 +438,6 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
             }],
             "client_snapshot": {
                 "client_id": "00000000-0000-0000-0000-000000000003",
-                "client_revision": 19,
                 "viewport_size": { "column_count": 4, "row_count": 3 },
                 "active_tab_id": "00000000-0000-0000-0000-000000000002",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",
@@ -476,6 +446,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "last_applied_lock_command_id": "00000000-0000-0000-0000-000000000005",
                 "last_applied_floating_pane_move_command_id":
                     "00000000-0000-0000-0000-000000000006",
+                "last_applied_placement_command_id": "00000000-0000-0000-0000-000000000007",
                 "is_mouse_selection_enabled": false
             }
         })

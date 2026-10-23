@@ -116,6 +116,7 @@ fn attach_test_client_with_pane_area(
                 cell_size: None,
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
+                placement_preview_target: None,
             },
         },
     );

@@ -14,8 +14,8 @@
 //! across. The rows, the cursor and the scroll position travel in the painted
 //! update ([`crate::runtime::painted_update`]).
 //!
-//! A placement preview carries each visible pane's rows itself, each row in
-//! the row encoding ([`koshi_terminal::row_encoding`]).
+//! `build_wire_placement_preview` maps a pane placement preview the same
+//! way. The preview's panes travel in the frame's own pane list.
 
 use koshi_core::ids::PaneId;
 use koshi_ipc::frame::{
@@ -25,15 +25,13 @@ use koshi_ipc::frame::{
     FrameTab, FrameTabMetadata, PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
 };
 use koshi_ipc::placement::{
-    EncodedRow, PanePlacementClientSnapshot as WirePlacementClientSnapshot,
-    PanePlacementPaneSnapshot as WirePlacementPaneSnapshot,
-    PanePlacementSizing as WirePlacementSizing, PanePlacementSnapshot as WirePlacementSnapshot,
-    PanePlacementSource as WirePlacementSource,
-    PanePlacementTabSnapshot as WirePlacementTabSnapshot, PlacementWindow,
+    PanePlacementPreview as WirePlacementPreview, PanePlacementSizing as WirePlacementSizing,
+    PanePlacementSnapshot as WirePlacementSnapshot, PanePlacementSource as WirePlacementSource,
+    PanePlacementTabSnapshot as WirePlacementTabSnapshot,
 };
 use koshi_renderer::snapshot::{
-    GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPaneSnapshot,
-    PlacementSnapshot, PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabMetadata,
+    ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPreview, PlacementSource,
+    PlacementTabSnapshot, RenderSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
@@ -65,28 +63,13 @@ pub(crate) fn build_wire_frame_with_content_ids(
     mut assign_image_content_id: impl FnMut(PaneId, &ImagePlacementSnapshot) -> Option<u64>,
 ) -> PaintedFrame {
     let session_snapshot = &render_snapshot.session_snapshot;
-    let active_tab_snapshot = &session_snapshot.active_tab_snapshot;
     let client_snapshot = &render_snapshot.client_snapshot;
     PaintedFrame {
         is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
         session_snapshot: FrameSession {
             session_id: session_snapshot.session_id,
-            session_revision: session_snapshot.session_revision,
             session_name: session_snapshot.session_name.clone(),
-            active_tab_snapshot: FrameTab {
-                tab_id: active_tab_snapshot.tab_id,
-                tab_name: active_tab_snapshot.tab_name.clone(),
-                pane_slots: active_tab_snapshot
-                    .pane_slots
-                    .iter()
-                    .map(build_wire_slot)
-                    .collect(),
-                tab_size: active_tab_snapshot.tab_size,
-                stack_headers: active_tab_snapshot.stack_headers.clone(),
-                layout_mode: active_tab_snapshot.layout_mode,
-                is_every_pane_suppressed: active_tab_snapshot.is_every_pane_suppressed,
-                gap_cell_count: active_tab_snapshot.gap_cell_count,
-            },
+            active_tab_snapshot: build_wire_tab(&session_snapshot.active_tab_snapshot),
             tab_snapshots: session_snapshot
                 .tabs_metadata
                 .iter()
@@ -111,7 +94,6 @@ pub(crate) fn build_wire_frame_with_content_ids(
             .collect(),
         client_snapshot: FrameClient {
             client_id: client_snapshot.client_id,
-            client_revision: client_snapshot.client_revision,
             viewport_size: client_snapshot.viewport_size,
             active_tab_id: client_snapshot.active_tab_id,
             focused_pane_id: client_snapshot.focused_pane_id,
@@ -120,119 +102,56 @@ pub(crate) fn build_wire_frame_with_content_ids(
             last_applied_lock_command_id: client_snapshot.last_applied_lock_command_id,
             last_applied_floating_pane_move_command_id: client_snapshot
                 .last_applied_floating_pane_move_command_id,
+            last_applied_placement_command_id: client_snapshot.last_applied_placement_command_id,
             is_mouse_selection_enabled: client_snapshot.is_mouse_selection_enabled,
         },
     }
 }
 
-/// Turn a read-only placement preview into wire form with local image ids.
+/// Turn a pane placement preview into the form its painted-update part
+/// travels in, field for field.
 #[must_use]
-pub(crate) fn build_wire_placement_snapshot(
-    placement_snapshot: &PlacementSnapshot,
-) -> WirePlacementSnapshot {
-    let mut next_image_content_id = 1u64;
-    build_wire_placement_snapshot_with_content_ids(placement_snapshot, |_, _| {
-        let image_content_id = next_image_content_id;
-        next_image_content_id = next_image_content_id.saturating_add(1);
-        Some(image_content_id)
-    })
-}
-
-/// Turn a read-only placement preview into wire form with connection-selected image ids.
-///
-/// `assign_image_content_id` gives each image placement its connection-local
-/// content id. A placement it gives `None` travels with its own content id,
-/// no record header and `is_available` `false`.
-#[must_use]
-pub(crate) fn build_wire_placement_snapshot_with_content_ids(
-    placement_snapshot: &PlacementSnapshot,
-    mut assign_image_content_id: impl FnMut(PaneId, &ImagePlacementSnapshot) -> Option<u64>,
-) -> WirePlacementSnapshot {
-    WirePlacementSnapshot {
-        session_id: placement_snapshot.session_id,
-        source_pane_id: placement_snapshot.source_pane_id,
-        source: match &placement_snapshot.source {
-            PlacementSource::Tiled(source_tab_snapshot) => WirePlacementSource::Tiled(
-                build_wire_placement_tab(source_tab_snapshot, &mut assign_image_content_id),
-            ),
-            PlacementSource::Floating(source_pane_snapshot) => WirePlacementSource::Floating(
-                build_wire_placement_pane(source_pane_snapshot, &mut assign_image_content_id),
-            ),
+pub(crate) fn build_wire_placement_preview(
+    placement_preview: &PlacementPreview,
+) -> WirePlacementPreview {
+    match placement_preview {
+        PlacementPreview::Available(placement_snapshot) => {
+            WirePlacementPreview::Available(Box::new(WirePlacementSnapshot {
+                source_pane_id: placement_snapshot.source_pane_id,
+                source: match &placement_snapshot.source {
+                    PlacementSource::Tiled(source_tab_snapshot) => {
+                        WirePlacementSource::Tiled(build_wire_placement_tab(source_tab_snapshot))
+                    }
+                    PlacementSource::Floating => WirePlacementSource::Floating,
+                },
+                destination_tab_id: placement_snapshot.destination_tab_id,
+                destination_tab_snapshot: placement_snapshot
+                    .destination_tab_snapshot
+                    .as_ref()
+                    .map(build_wire_placement_tab),
+                pane_sizing: WirePlacementSizing::from(placement_snapshot.pane_sizing),
+                insertion_tab_sizes: placement_snapshot.insertion_tab_sizes,
+                swap_tab_sizes: placement_snapshot.swap_tab_sizes.clone(),
+            }))
+        }
+        PlacementPreview::Unavailable {
+            source_pane_id,
+            destination_tab_id,
+        } => WirePlacementPreview::Unavailable {
+            source_pane_id: *source_pane_id,
+            destination_tab_id: *destination_tab_id,
         },
-        destination_tab_id: placement_snapshot.destination_tab_id,
-        session_placement_revision: placement_snapshot.session_placement_revision,
-        client_placement_revision: placement_snapshot.client_placement_revision,
-        destination_tab_snapshot: placement_snapshot.destination_tab_snapshot.as_ref().map(
-            |tab_snapshot| build_wire_placement_tab(tab_snapshot, &mut assign_image_content_id),
-        ),
-        client_snapshot: WirePlacementClientSnapshot {
-            client_id: placement_snapshot.client_snapshot.client_snapshot.client_id,
-            viewport_size: placement_snapshot
-                .client_snapshot
-                .client_snapshot
-                .viewport_size,
-            pane_area: placement_snapshot.client_snapshot.reported_pane_area,
-            active_tab_id: placement_snapshot
-                .client_snapshot
-                .client_snapshot
-                .active_tab_id,
-            focused_pane_id: placement_snapshot
-                .client_snapshot
-                .client_snapshot
-                .focused_pane_id,
-        },
-        pane_sizing: WirePlacementSizing::from(placement_snapshot.pane_sizing),
     }
 }
 
+/// One source or destination tab of a placement preview, as it travels.
 fn build_wire_placement_tab(
     placement_tab_snapshot: &PlacementTabSnapshot,
-    assign_image_content_id: &mut impl FnMut(PaneId, &ImagePlacementSnapshot) -> Option<u64>,
 ) -> WirePlacementTabSnapshot {
-    let tab_snapshot = &placement_tab_snapshot.tab_snapshot;
     WirePlacementTabSnapshot {
-        tab_id: tab_snapshot.tab_id,
-        tab_name: tab_snapshot.tab_name.clone(),
         layout_tree: placement_tab_snapshot.layout_tree.clone(),
-        pane_slots: tab_snapshot
-            .pane_slots
-            .iter()
-            .map(build_wire_slot)
-            .collect(),
-        tab_size: tab_snapshot.tab_size,
-        stack_headers: tab_snapshot.stack_headers.clone(),
-        layout_mode: tab_snapshot.layout_mode,
-        is_every_pane_suppressed: tab_snapshot.is_every_pane_suppressed,
-        gap_cell_count: tab_snapshot.gap_cell_count,
-        pane_snapshots: placement_tab_snapshot
-            .pane_snapshots
-            .iter()
-            .map(|pane_snapshot| build_wire_placement_pane(pane_snapshot, assign_image_content_id))
-            .collect(),
-    }
-}
-
-fn build_wire_placement_pane(
-    placement_pane_snapshot: &PlacementPaneSnapshot,
-    assign_image_content_id: &mut impl FnMut(PaneId, &ImagePlacementSnapshot) -> Option<u64>,
-) -> WirePlacementPaneSnapshot {
-    WirePlacementPaneSnapshot {
-        pane_id: placement_pane_snapshot.pane_id,
-        terminal_window: placement_pane_snapshot
-            .terminal_grid_view
-            .as_ref()
-            .map(build_wire_placement_window),
-        image_placement_snapshots: placement_pane_snapshot
-            .image_placement_snapshots
-            .iter()
-            .map(|image_placement_snapshot| {
-                build_wire_image_placement(
-                    placement_pane_snapshot.pane_id,
-                    image_placement_snapshot,
-                    assign_image_content_id,
-                )
-            })
-            .collect(),
+        focus_history: placement_tab_snapshot.focus_history.clone(),
+        tab_snapshot: build_wire_tab(&placement_tab_snapshot.tab_snapshot),
     }
 }
 
@@ -280,6 +199,24 @@ pub(crate) fn build_wire_image_chunk_sources(
             );
             (byte_offset, is_last_chunk, chunk_bytes)
         })
+}
+
+/// One solved tab, as it travels.
+fn build_wire_tab(tab_snapshot: &TabSnapshot) -> FrameTab {
+    FrameTab {
+        tab_id: tab_snapshot.tab_id,
+        tab_name: tab_snapshot.tab_name.clone(),
+        pane_slots: tab_snapshot
+            .pane_slots
+            .iter()
+            .map(build_wire_slot)
+            .collect(),
+        tab_size: tab_snapshot.tab_size,
+        stack_headers: tab_snapshot.stack_headers.clone(),
+        layout_mode: tab_snapshot.layout_mode,
+        is_every_pane_suppressed: tab_snapshot.is_every_pane_suppressed,
+        gap_cell_count: tab_snapshot.gap_cell_count,
+    }
 }
 
 /// One solved pane placement, as it travels.
@@ -421,20 +358,6 @@ fn build_wire_image_display(display: &ImageDisplay) -> FrameImageDisplay {
         cell_pixel_offset_x: display.cell_pixel_offset_x,
         cell_pixel_offset_y: display.cell_pixel_offset_y,
         should_move_cursor: display.should_move_cursor,
-    }
-}
-
-/// The rows of one pane of a placement preview, each in the row encoding.
-fn build_wire_placement_window(terminal_grid_view: &GridView) -> PlacementWindow {
-    PlacementWindow {
-        column_count: terminal_grid_view.column_count,
-        encoded_rows: terminal_grid_view
-            .row_snapshots
-            .iter()
-            .map(|row_snapshot| EncodedRow {
-                encoded_row_bytes: row_snapshot.get_encoded_row_bytes().to_vec(),
-            })
-            .collect(),
     }
 }
 

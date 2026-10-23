@@ -2189,6 +2189,7 @@ mod bridge_round_trip {
                     cell_size: None,
                     link_timeout_ms,
                     max_frames_per_second: 60,
+                    placement_preview_target: None,
                 },
             },
         );

@@ -125,21 +125,6 @@ fn a_new_client_starts_unlocked_with_no_focus() {
 }
 
 #[test]
-fn a_client_placement_revision_advances_once_and_refuses_wraparound() {
-    let mut client = build_test_client(TabId::new());
-
-    assert_eq!(client.get_placement_revision(), 0);
-    assert!(client.can_advance_placement_revision());
-    assert!(client.advance_placement_revision());
-    assert_eq!(client.get_placement_revision(), 1);
-
-    client.placement_revision = u64::MAX;
-    assert!(!client.can_advance_placement_revision());
-    assert!(!client.advance_placement_revision());
-    assert_eq!(client.get_placement_revision(), u64::MAX);
-}
-
-#[test]
 fn two_clients_focus_different_panes_in_the_same_tab() {
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
@@ -224,14 +209,59 @@ fn focus_is_tracked_independently_per_tab() {
 }
 
 #[test]
-fn removing_a_tabs_focus_prunes_it() {
+fn clearing_a_tabs_focus_history_forgets_every_pane_there() {
     let tab_id = TabId::new();
     let mut client = build_test_client(tab_id);
     client.update_focused_pane(tab_id, PaneId::new());
+    client.update_focused_pane(tab_id, PaneId::new());
 
-    client.remove_focused_pane(tab_id);
+    client.clear_focus_history(tab_id);
 
     assert_eq!(client.get_focused_pane_id(tab_id), None);
+    assert_eq!(client.list_focus_history(tab_id), &[] as &[PaneId]);
+    assert!(client.list_focus_histories().is_empty());
+}
+
+#[test]
+fn focusing_panes_keeps_each_pane_once_newest_first() {
+    let tab_id = TabId::new();
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let mut client = build_test_client(tab_id);
+
+    client.update_focused_pane(tab_id, first_pane_id);
+    client.update_focused_pane(tab_id, second_pane_id);
+    let previous_pane_id = client.update_focused_pane(tab_id, first_pane_id);
+
+    assert_eq!(previous_pane_id, Some(second_pane_id));
+    assert_eq!(
+        client.list_focus_history(tab_id),
+        &[first_pane_id, second_pane_id]
+    );
+    assert_eq!(client.get_focused_pane_id(tab_id), Some(first_pane_id));
+}
+
+#[test]
+fn removing_a_pane_from_the_focus_history_keeps_the_other_panes_in_order() {
+    let tab_id = TabId::new();
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut client = build_test_client(tab_id);
+    client.update_focused_pane(tab_id, third_pane_id);
+    client.update_focused_pane(tab_id, second_pane_id);
+    client.update_focused_pane(tab_id, first_pane_id);
+
+    client.remove_pane_from_focus_history(tab_id, second_pane_id);
+    assert_eq!(
+        client.list_focus_history(tab_id),
+        &[first_pane_id, third_pane_id]
+    );
+
+    client.remove_pane_from_focus_history(tab_id, first_pane_id);
+    assert_eq!(client.get_focused_pane_id(tab_id), Some(third_pane_id));
+
+    client.remove_pane_from_focus_history(tab_id, third_pane_id);
+    assert_eq!(client.get_focused_pane_id(tab_id), None);
+    assert!(client.list_focus_histories().is_empty());
 }
 
 #[test]
@@ -286,15 +316,14 @@ fn focusing_a_pane_in_a_tiled_tab_creates_no_zoom() {
 }
 
 #[test]
-fn removing_a_tabs_focus_also_drops_its_zoom() {
-    // Forgetting the focused pane in a tab drops any zoom there too.
+fn clearing_a_tabs_focus_history_also_drops_its_zoom() {
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     let mut client = build_test_client(tab_id);
     client.update_focused_pane(tab_id, pane_id);
     client.zoom_pane(tab_id, pane_id);
 
-    client.remove_focused_pane(tab_id);
+    client.clear_focus_history(tab_id);
 
     assert_eq!(client.get_focused_pane_id(tab_id), None);
     assert_eq!(client.get_zoomed_pane_id(tab_id), None);
@@ -344,18 +373,18 @@ fn focusing_a_pane_in_another_tab_leaves_a_zoom_where_it_is() {
 }
 
 #[test]
-fn removing_the_focus_of_a_never_focused_tab_changes_nothing() {
+fn clearing_the_focus_history_of_a_never_focused_tab_changes_nothing() {
     let (focused_tab_id, untouched_tab_id) = (TabId::new(), TabId::new());
     let pane_id = PaneId::new();
     let mut client = build_test_client(focused_tab_id);
     client.update_focused_pane(focused_tab_id, pane_id);
     client.zoom_pane(focused_tab_id, pane_id);
 
-    client.remove_focused_pane(untouched_tab_id);
+    client.clear_focus_history(untouched_tab_id);
 
     assert_eq!(client.get_focused_pane_id(focused_tab_id), Some(pane_id));
     assert_eq!(client.get_zoomed_pane_id(focused_tab_id), Some(pane_id));
-    assert_eq!(client.list_focused_pane_ids().len(), 1);
+    assert_eq!(client.list_focus_histories().len(), 1);
     assert_eq!(client.list_zoomed_pane_ids().len(), 1);
 }
 
@@ -1270,7 +1299,7 @@ fn a_tab_the_client_has_never_seen_is_tiled() {
 // --- focus and scroll map views ----------------------------------------
 
 #[test]
-fn list_focused_pane_ids_lists_every_remembered_focus_keyed_by_tab() {
+fn list_focus_histories_lists_every_tab_history_keyed_by_tab() {
     let (first_tab_id, second_tab_id) = (TabId::new(), TabId::new());
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     let mut client = build_test_client(first_tab_id);
@@ -1278,22 +1307,22 @@ fn list_focused_pane_ids_lists_every_remembered_focus_keyed_by_tab() {
     client.update_focused_pane(first_tab_id, first_pane_id);
     client.update_focused_pane(second_tab_id, second_pane_id);
 
-    let focused_pane_id_by_tab_id = client.list_focused_pane_ids();
-    assert_eq!(focused_pane_id_by_tab_id.len(), 2);
+    let focus_history_by_tab_id = client.list_focus_histories();
+    assert_eq!(focus_history_by_tab_id.len(), 2);
     assert_eq!(
-        focused_pane_id_by_tab_id.get(&first_tab_id),
-        Some(&first_pane_id)
+        focus_history_by_tab_id.get(&first_tab_id),
+        Some(&vec![first_pane_id])
     );
     assert_eq!(
-        focused_pane_id_by_tab_id.get(&second_tab_id),
-        Some(&second_pane_id)
+        focus_history_by_tab_id.get(&second_tab_id),
+        Some(&vec![second_pane_id])
     );
 
-    client.remove_focused_pane(first_tab_id);
-    assert_eq!(client.list_focused_pane_ids().len(), 1);
+    client.clear_focus_history(first_tab_id);
+    assert_eq!(client.list_focus_histories().len(), 1);
     assert_eq!(
-        client.list_focused_pane_ids().get(&second_tab_id),
-        Some(&second_pane_id)
+        client.list_focus_histories().get(&second_tab_id),
+        Some(&vec![second_pane_id])
     );
 }
 
@@ -1386,7 +1415,6 @@ fn a_clients_whole_view_state_survives_a_serde_round_trip() {
     client.zoom_pane(other_tab_id, other_pane_id);
     client.set_scroll_offset(pane_id, 9);
     client.set_selection(pane_id, build_test_selection());
-    assert!(client.advance_placement_revision());
 
     let serialized_client_json = serde_json::to_string(&client).expect("the client encodes");
     let decoded_client: Client =
@@ -1399,7 +1427,6 @@ fn a_clients_whole_view_state_survives_a_serde_round_trip() {
         decoded_client.get_zoomed_pane_id(other_tab_id),
         Some(other_pane_id)
     );
-    assert_eq!(decoded_client.get_placement_revision(), 1);
     assert_eq!(
         decoded_client.get_layout_mode(other_tab_id),
         LayoutMode::Fullscreen {
@@ -1449,10 +1476,6 @@ fn list_attached_clients_walks_clients_in_id_order() {
         .collect();
     assert_eq!(
         ordered_mutable_client_ids,
-        vec![lower_client_id, higher_client_id]
-    );
-    assert_eq!(
-        client_registry.list_client_ids(),
         vec![lower_client_id, higher_client_id]
     );
 }
@@ -1879,11 +1902,11 @@ fn replace_floating_view_copies_a_saved_view_for_the_listed_floating_panes() {
     leaving_client.pin_floating_pane(pinned_pane_id, Point { column: 4, row: 2 });
     let mut returning_client = build_test_client(TabId::new());
 
-    assert!(returning_client.replace_floating_view(
+    returning_client.replace_floating_view(
         leaving_client.list_floating_pane_views(),
         leaving_client.list_shown_floating_pane_ids(),
         &floating_pane_ids,
-    ));
+    );
 
     assert_eq!(
         returning_client.list_floating_pane_views(),
@@ -1916,8 +1939,9 @@ fn replace_floating_view_copies_a_saved_view_for_the_listed_floating_panes() {
 }
 
 #[test]
-fn replace_floating_view_reports_a_change_in_each_part_alone_and_none_for_the_same_view() {
-    let mut client = build_test_client(TabId::new());
+fn replace_floating_view_records_a_view_change_for_a_pin_or_an_order_alone_and_none_for_the_same_view(
+) {
+    let tab_id = TabId::new();
     let (lower_pane_id, upper_pane_id) = (PaneId::new(), PaneId::new());
     let floating_pane_ids = [lower_pane_id, upper_pane_id];
     let shown_view_by_pane_id = HashMap::from([
@@ -1938,37 +1962,40 @@ fn replace_floating_view_reports_a_change_in_each_part_alone_and_none_for_the_sa
             false,
         ),
     );
-    assert!(client.replace_floating_view(
-        &shown_view_by_pane_id,
-        &[lower_pane_id, upper_pane_id],
-        &floating_pane_ids,
-    ));
-
-    assert!(
+    let show_both_panes = |client: &mut Client| {
+        client.replace_floating_view(
+            &shown_view_by_pane_id,
+            &[lower_pane_id, upper_pane_id],
+            &floating_pane_ids,
+        );
+    };
+    let pin_lower_pane = |client: &mut Client| {
         client.replace_floating_view(
             &pinned_view_by_pane_id,
             &[lower_pane_id, upper_pane_id],
             &floating_pane_ids,
-        ),
-        "a pin alone changes the view"
-    );
-    assert!(
+        );
+    };
+    let raise_lower_pane = |client: &mut Client| {
         client.replace_floating_view(
             &pinned_view_by_pane_id,
             &[upper_pane_id, lower_pane_id],
             &floating_pane_ids,
-        ),
+        );
+    };
+
+    assert!(
+        is_view_change_recorded(tab_id, show_both_panes, pin_lower_pane),
+        "a pin alone changes the view"
+    );
+    assert!(
+        is_view_change_recorded(tab_id, pin_lower_pane, raise_lower_pane),
         "an order alone changes the view"
     );
     assert!(
-        !client.replace_floating_view(
-            &pinned_view_by_pane_id,
-            &[upper_pane_id, lower_pane_id],
-            &floating_pane_ids,
-        ),
+        !is_view_change_recorded(tab_id, raise_lower_pane, raise_lower_pane),
         "the same view changes nothing"
     );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(lower_pane_id));
 }
 
 #[test]
@@ -1990,11 +2017,11 @@ fn replace_floating_view_drops_panes_no_longer_floating_and_minimizes_panes_it_h
     ]);
     let mut returning_client = build_test_client(TabId::new());
 
-    assert!(returning_client.replace_floating_view(
+    returning_client.replace_floating_view(
         &saved_view_by_pane_id,
         &[shown_pane_id, closed_pane_id],
         &[shown_pane_id, new_pane_id],
-    ));
+    );
 
     assert_eq!(
         returning_client.list_floating_pane_views(),
@@ -2028,11 +2055,11 @@ fn replace_floating_view_shows_no_pane_whose_saved_view_is_minimized_or_absent()
     )]);
     let mut returning_client = build_test_client(TabId::new());
 
-    assert!(returning_client.replace_floating_view(
+    returning_client.replace_floating_view(
         &saved_view_by_pane_id,
         &[minimized_pane_id, viewless_pane_id],
         &[minimized_pane_id, viewless_pane_id],
-    ));
+    );
 
     assert_eq!(
         returning_client.list_shown_floating_pane_ids(),
@@ -2505,4 +2532,291 @@ fn place_floating_pane_starts_a_pane_larger_than_the_viewport_at_zero_on_that_ax
         .origin,
         Point { column: 0, row: 3 }
     );
+}
+
+/// Whether `change_client` records a view change for a client viewing
+/// `active_tab_id`, after `prepare_client` ran and its changes were taken.
+fn is_view_change_recorded(
+    active_tab_id: TabId,
+    prepare_client: impl FnOnce(&mut Client),
+    change_client: impl FnOnce(&mut Client),
+) -> bool {
+    let client_id = ClientId::new();
+    let mut client_registry = ClientRegistry::new();
+    let _ =
+        client_registry.attach_client(build_test_client_from_parts(client_id, active_tab_id, None));
+    prepare_client(
+        client_registry
+            .get_client_mut_by_id(client_id)
+            .expect("client is attached"),
+    );
+    let _ = client_registry.take_changed_client_ids();
+    change_client(
+        client_registry
+            .get_client_mut_by_id(client_id)
+            .expect("client is attached"),
+    );
+    client_registry
+        .take_changed_client_ids()
+        .contains(&client_id)
+}
+
+#[test]
+fn attaching_a_client_records_it_once() {
+    let client_id = ClientId::new();
+    let mut client_registry = ClientRegistry::new();
+    let _ =
+        client_registry.attach_client(build_test_client_from_parts(client_id, TabId::new(), None));
+
+    assert_eq!(
+        client_registry.take_changed_client_ids(),
+        BTreeSet::from([client_id])
+    );
+    assert_eq!(client_registry.take_changed_client_ids(), BTreeSet::new());
+}
+
+#[test]
+fn view_and_focus_updates_record_a_view_change_only_for_a_real_change() {
+    let tab_id = TabId::new();
+    let other_tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let other_pane_id = PaneId::new();
+    let focus_pane = |client: &mut Client| {
+        let _ = client.update_focused_pane(tab_id, pane_id);
+    };
+    let zoom = |client: &mut Client| client.zoom_pane(tab_id, pane_id);
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+
+    assert!(is_view_change_recorded(tab_id, |_| {}, zoom));
+    assert!(!is_view_change_recorded(tab_id, zoom, zoom));
+    assert!(is_view_change_recorded(tab_id, zoom, |client| client.clear_zoom(tab_id)));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| client.clear_zoom(tab_id)
+    ));
+    assert!(is_view_change_recorded(tab_id, zoom, |client| client.clear_zoom_of_pane(pane_id)));
+    assert!(!is_view_change_recorded(tab_id, zoom, |client| {
+        client.clear_zoom_of_pane(other_pane_id);
+    }));
+    assert!(is_view_change_recorded(tab_id, |_| {}, focus_pane));
+    assert!(!is_view_change_recorded(tab_id, focus_pane, focus_pane));
+    assert!(is_view_change_recorded(tab_id, focus_pane, |client| {
+        client.remove_pane_from_focus_history(tab_id, pane_id);
+    }));
+    assert!(!is_view_change_recorded(tab_id, focus_pane, |client| {
+        client.remove_pane_from_focus_history(tab_id, other_pane_id);
+    }));
+    assert!(is_view_change_recorded(tab_id, focus_pane, |client| {
+        client.clear_focus_history(tab_id);
+    }));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.clear_focus_history(tab_id);
+        }
+    ));
+    assert!(is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_active_tab_id(other_tab_id);
+        }
+    ));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_active_tab_id(tab_id);
+        }
+    ));
+    assert!(is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_viewport_size(Size {
+                column_count: 100,
+                row_count: 30,
+            });
+        }
+    ));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_viewport_size(viewport_size);
+        }
+    ));
+    assert!(is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_pane_area(Some(PaneArea::Starving));
+        }
+    ));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_pane_area(None);
+        }
+    ));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_cell_size(PixelCellSize::from_pixel_dimensions(8, 16));
+        }
+    ));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.update_origin(ClientOrigin::Remote);
+        }
+    ));
+}
+
+#[test]
+fn scroll_selection_lock_and_command_updates_record_a_view_change_only_for_a_real_change() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let command_id = CommandId::new();
+    let scroll = |client: &mut Client| client.set_scroll_offset(pane_id, 3);
+    let select = |client: &mut Client| client.set_selection(pane_id, build_test_selection());
+    let lock = |client: &mut Client| client.update_lock_mode(LockMode::Locked);
+    let record_lock_command =
+        |client: &mut Client| client.set_last_applied_lock_command_id(command_id);
+    let record_move_command =
+        |client: &mut Client| client.set_last_applied_floating_pane_move_command_id(command_id);
+    let record_placement_command =
+        |client: &mut Client| client.set_last_applied_placement_command_id(command_id);
+
+    assert!(is_view_change_recorded(tab_id, |_| {}, scroll));
+    assert!(!is_view_change_recorded(tab_id, scroll, scroll));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            client.set_scroll_offset(pane_id, 0);
+        }
+    ));
+    assert!(is_view_change_recorded(tab_id, |_| {}, select));
+    assert!(!is_view_change_recorded(tab_id, select, select));
+    assert!(is_view_change_recorded(tab_id, select, |client| client.clear_selection(pane_id)));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| client.clear_selection(pane_id)
+    ));
+    assert!(is_view_change_recorded(tab_id, |_| {}, lock));
+    assert!(!is_view_change_recorded(tab_id, lock, lock));
+    assert!(is_view_change_recorded(tab_id, |_| {}, record_lock_command));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        record_lock_command,
+        record_lock_command
+    ));
+    assert!(is_view_change_recorded(tab_id, |_| {}, record_move_command));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        record_move_command,
+        record_move_command
+    ));
+    assert!(is_view_change_recorded(
+        tab_id,
+        |_| {},
+        record_placement_command
+    ));
+    assert!(!is_view_change_recorded(
+        tab_id,
+        record_placement_command,
+        record_placement_command
+    ));
+    assert!(is_view_change_recorded(
+        tab_id,
+        |_| {},
+        |client| {
+            let _ = client.toggle_mouse_selection();
+        }
+    ));
+}
+
+#[test]
+fn floating_view_updates_record_a_view_change_only_when_a_shown_pane_changes() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let other_pane_id = PaneId::new();
+    let add_view = |client: &mut Client| {
+        client.add_floating_pane_view(pane_id, FloatingPanePosition::Default);
+    };
+    let show = |client: &mut Client| {
+        add_view(client);
+        let _ = client.focus_floating_pane(pane_id);
+    };
+    let pin = |client: &mut Client| {
+        show(client);
+        client.pin_floating_pane(pane_id, Point { column: 2, row: 3 });
+    };
+    let moved_cell = Point { column: 5, row: 6 };
+
+    assert!(!is_view_change_recorded(tab_id, |_| {}, add_view));
+    assert!(is_view_change_recorded(tab_id, add_view, |client| {
+        let _ = client.focus_floating_pane(pane_id);
+    }));
+    assert!(!is_view_change_recorded(tab_id, show, |client| {
+        let _ = client.focus_floating_pane(pane_id);
+    }));
+    assert!(is_view_change_recorded(tab_id, show, |client| {
+        let _ = client.minimize_floating_pane(pane_id);
+    }));
+    assert!(!is_view_change_recorded(tab_id, add_view, |client| {
+        let _ = client.minimize_floating_pane(pane_id);
+    }));
+    assert!(is_view_change_recorded(tab_id, show, |client| {
+        let _ = client.minimize_shown_floating_panes();
+    }));
+    assert!(!is_view_change_recorded(tab_id, add_view, |client| {
+        let _ = client.minimize_shown_floating_panes();
+    }));
+    assert!(is_view_change_recorded(tab_id, show, |client| {
+        let _ = client.set_floating_pane_position(pane_id, moved_cell);
+    }));
+    assert!(!is_view_change_recorded(tab_id, add_view, |client| {
+        let _ = client.set_floating_pane_position(pane_id, moved_cell);
+    }));
+    assert!(is_view_change_recorded(tab_id, show, |client| {
+        client.pin_floating_pane(pane_id, moved_cell);
+    }));
+    assert!(!is_view_change_recorded(tab_id, add_view, |client| {
+        client.pin_floating_pane(pane_id, moved_cell);
+    }));
+    assert!(is_view_change_recorded(tab_id, pin, |client| {
+        client.unpin_floating_pane(pane_id);
+    }));
+    assert!(!is_view_change_recorded(tab_id, show, |client| {
+        client.unpin_floating_pane(pane_id);
+    }));
+    assert!(is_view_change_recorded(tab_id, show, |client| {
+        client.remove_floating_pane_view(pane_id);
+    }));
+    assert!(!is_view_change_recorded(tab_id, add_view, |client| {
+        client.remove_floating_pane_view(pane_id);
+    }));
+    assert!(!is_view_change_recorded(tab_id, show, |client| {
+        let saved_floating_pane_views = client.list_floating_pane_views().clone();
+        let saved_shown_floating_pane_ids = client.list_shown_floating_pane_ids().to_vec();
+        client.replace_floating_view(
+            &saved_floating_pane_views,
+            &saved_shown_floating_pane_ids,
+            &[pane_id, other_pane_id],
+        );
+    }));
+    assert!(is_view_change_recorded(tab_id, show, |client| {
+        client.replace_floating_view(&HashMap::new(), &[], &[pane_id]);
+    }));
 }

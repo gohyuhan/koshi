@@ -7,14 +7,12 @@
 //!
 //! Two kinds of panes are never candidates: zero-area panes (suppressed, or
 //! hidden under a fullscreen pane), and collapsed stack members, whose only
-//! visible rect is their one-row header strip. A collapsed member expands
-//! through [`activate_stack_member`], not through focus repair.
+//! visible rect is their one-row header strip.
 
-use koshi_core::geometry::{Rect, SplitDirection};
+use koshi_core::geometry::Rect;
 use koshi_core::ids::PaneId;
 
 use crate::solver::{is_content_visible, StackHeader};
-use crate::tree::SplitNode;
 
 /// Focus targets after a removal, for the caller to rank against its own
 /// focus history.
@@ -103,31 +101,6 @@ fn compute_doubled_center(pane_rect: Rect) -> (u32, u32) {
         2 * u32::from(pane_rect.origin.column) + u32::from(pane_rect.size.column_count),
         2 * u32::from(pane_rect.origin.row) + u32::from(pane_rect.size.row_count),
     )
-}
-
-/// Expand the stack member holding `pane_id`, which collapses every other
-/// member. A collapsed member is a valid target, and the member may be a
-/// subtree.
-///
-/// Returns `true` when the active member changed. Returns `false`, with
-/// `stack_node` unchanged, when `stack_node` is not a stack, when `pane_id` is not in
-/// it, or when the member holding `pane_id` is already the active member.
-pub fn activate_stack_member(stack_node: &mut SplitNode, pane_id: PaneId) -> bool {
-    if stack_node.direction != SplitDirection::Stacked {
-        return false;
-    }
-    let Some(target_stack_member_index) = stack_node
-        .children
-        .iter()
-        .position(|child| child.has_pane(pane_id))
-    else {
-        return false;
-    };
-    if target_stack_member_index == stack_node.get_active_child_index() {
-        return false;
-    }
-    stack_node.active_child_index = target_stack_member_index;
-    true
 }
 
 #[cfg(test)]

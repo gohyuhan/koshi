@@ -14,7 +14,9 @@
 //! [`place_floating_pane_in_tab`] puts a pane that no tree holds into a tab
 //! by an insertion or a stack.
 //!
-//! A pane that lands inside a stack becomes that stack's expanded member.
+//! No placement changes which member of a stack is active: a pane stacked onto
+//! a target is the stack's last member and is not active, and a swapped pane
+//! takes the other leaf's position, active or not.
 //! Every failure returns a typed [`PlacementError`] and the caller's trees are
 //! unchanged.
 //!
@@ -25,16 +27,16 @@ use std::collections::{HashMap, HashSet};
 
 use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, RequiredSize, Size, SplitDirection};
-use koshi_core::ids::PaneId;
+use koshi_core::ids::{PaneId, TabId};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::edit::{add_pane_to_stack, remove_leaf, PaneRemovalStatus};
-use crate::focus::activate_stack_member;
 use crate::neighbor::{compute_bottom_edge, compute_right_edge};
 use crate::normalize::normalize_layout_tree;
 use crate::solver::{
-    compute_minimum_size, is_content_visible, is_layout_within_rect, LayoutSolve, PaneSizing,
-    StackHeader,
+    compute_minimum_size, is_content_visible, is_layout_within_rect, solve_layout_with_sizing,
+    LayoutSolve, PaneSizing, StackHeader,
 };
 use crate::tree::{compute_split_direction, LayoutNode, SplitNode};
 
@@ -56,8 +58,8 @@ pub enum PlacementTarget {
         direction: Direction,
     },
     /// Remove the source leaf and add it to the innermost stack holding
-    /// `target_pane_id` as its last and expanded member. A target under no
-    /// stack becomes a stack of the target, then the source.
+    /// `target_pane_id` as its last member. A target under no stack becomes a
+    /// stack of the target, then the source, with the target active.
     Stack {
         /// The pane whose stack receives the source.
         target_pane_id: PaneId,
@@ -145,6 +147,94 @@ pub struct CrossTabPlacement {
     pub destination_tree: LayoutNode,
 }
 
+/// The tab sizes one placement is checked and solved at, once the clients it
+/// moves have switched tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementTabSizes {
+    /// The destination tab's size. `None` when no client that then views the
+    /// destination tab has a pane area: the placement is refused.
+    pub destination_tab_size: Option<Size>,
+    /// The source tab's size after the pane leaves it. `None` for a placement
+    /// within one tab, a floating source pane, a source tab that closes, or a
+    /// source tab that no client with a pane area then views: the source tab
+    /// is not checked.
+    pub source_tab_size: Option<Size>,
+}
+
+/// The tab sizes of a swap with one destination pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapTabSizes {
+    /// The destination pane the source pane swaps with.
+    pub target_pane_id: PaneId,
+    /// The tab sizes that swap is checked and solved at.
+    pub tab_sizes: PlacementTabSizes,
+}
+
+/// One tab as a client draws it once a placement put a pane in it: the tab,
+/// the tab size it is solved at, and the solve
+/// ([`solve_placed_tab`]). A viewer confirms a placement with the layout it
+/// previews, and the session commits only a placement that gives the same
+/// layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedTabLayout {
+    /// The tab that receives the placed pane.
+    pub tab_id: TabId,
+    /// The tab size the tab is solved at.
+    pub tab_size: Size,
+    /// The tab's solve, as the placing client draws it.
+    pub layout_solve: LayoutSolve,
+}
+
+/// The solve a client draws a tab with once a placement put a pane in the
+/// tab's tree and the client focuses that pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedTabSolve {
+    /// The client's focus history in the tab, newest first: the placed pane,
+    /// then each other pane of the earlier history that the tree holds.
+    pub focus_history: Vec<PaneId>,
+    /// The tree with each stack showing the member `focus_history` gives
+    /// ([`LayoutNode::build_shown_layout_tree`]), solved over the tab.
+    pub layout_solve: LayoutSolve,
+}
+
+/// Solve `layout_tree`, a tab's tree that holds `placed_pane_id`, as the client
+/// whose focus history in the tab is `focus_history` draws it after it
+/// focuses `placed_pane_id`: tiled, over a `tab_size` rectangle at the origin,
+/// with `pane_sizing`.
+///
+/// The history keeps only panes that `layout_tree` holds. The stack
+/// `[vim, htop]` with `vim` active, `htop` placed, and the history `[vim]`
+/// gives the history `[htop, vim]` and a solve with `htop` open.
+#[must_use]
+pub fn solve_placed_tab(
+    layout_tree: &LayoutNode,
+    placed_pane_id: PaneId,
+    focus_history: &[PaneId],
+    tab_size: Size,
+    pane_sizing: PaneSizing,
+) -> PlacedTabSolve {
+    let leaf_pane_ids: HashSet<PaneId> = layout_tree.list_leaf_pane_ids().into_iter().collect();
+    let placed_focus_history: Vec<PaneId> = std::iter::once(placed_pane_id)
+        .chain(
+            focus_history
+                .iter()
+                .copied()
+                .filter(|pane_id| *pane_id != placed_pane_id),
+        )
+        .filter(|pane_id| leaf_pane_ids.contains(pane_id))
+        .collect();
+    let shown_layout_tree = layout_tree.build_shown_layout_tree(&placed_focus_history);
+    let layout_solve = solve_layout_with_sizing(
+        shown_layout_tree.as_ref().unwrap_or(layout_tree),
+        Rect::from_size_at_origin(tab_size),
+        pane_sizing,
+    );
+    PlacedTabSolve {
+        focus_history: placed_focus_history,
+        layout_solve,
+    }
+}
+
 /// Place `source_pane_id` at `placement_target` inside its own tab.
 ///
 /// `layout_tree` is the tab's tree, `tab_rect` the rectangle it solves into
@@ -156,7 +246,7 @@ pub struct CrossTabPlacement {
 ///
 /// `H[A, V[B, H[C, D]]]` with D swapped with B gives `H[A, V[D, H[C, B]]]`,
 /// every weight in place. `H[A, B]` with A stacked onto B gives `B` and `A` in
-/// one stack, `A` expanded.
+/// one stack, `B` active.
 ///
 /// # Errors
 ///
@@ -190,7 +280,7 @@ pub fn place_pane_within_tab(
                 LayoutNode::Pane(*target_pane_id);
             *swapped_layout_tree.get_node_at_path_mut(&target_pane_path) =
                 LayoutNode::Pane(source_pane_id);
-            expand_stacks_and_check_fit(swapped_layout_tree, source_pane_id, tab_rect, pane_sizing)
+            validate_layout_fit(swapped_layout_tree, tab_rect, pane_sizing)
         }
         PlacementTarget::Insert {
             anchor: placement_anchor,
@@ -209,7 +299,7 @@ pub fn place_pane_within_tab(
                 placement_anchor,
                 *direction,
             );
-            expand_stacks_and_check_fit(inserted_layout_tree, source_pane_id, tab_rect, pane_sizing)
+            validate_layout_fit(inserted_layout_tree, tab_rect, pane_sizing)
         }
         PlacementTarget::Stack { target_pane_id } => {
             if *target_pane_id == source_pane_id {
@@ -227,7 +317,7 @@ pub fn place_pane_within_tab(
             };
             let stacked_layout_tree =
                 stack_pane_onto_target(&removed_layout_tree, source_pane_id, *target_pane_id)?;
-            expand_stacks_and_check_fit(stacked_layout_tree, source_pane_id, tab_rect, pane_sizing)
+            validate_layout_fit(stacked_layout_tree, tab_rect, pane_sizing)
         }
     }
 }
@@ -249,6 +339,50 @@ pub fn is_same_tab_placement_noop(
         pane_sizing,
     )
     .is_ok_and(|proposed_layout_tree| proposed_layout_tree == *layout_tree)
+}
+
+/// The pane a [`PlacementTarget::Stack`] names to place a pane into the node
+/// of `layout_tree` that `placement_anchor` names: `Pane(p)` names leaf `p`,
+/// `Group(pane_ids)` the node whose leaf set is `pane_ids`, and `Tab` the
+/// root.
+///
+/// - A leaf gives its own pane.
+/// - A stack gives the member it shows open for `focus_history`
+///   ([`SplitNode::get_shown_child_index`]).
+/// - `None` when no node matches, when the node is a directional split, and
+///   when the shown member is not a pane.
+///
+/// `H[P, stack(A, B active)]`: `Group([A, B])` with the history `[]` gives
+/// `B`, and with `[A]` gives `A`. `Tab` names a horizontal split and gives
+/// `None`. `stack(A, B active)` alone: `Tab` gives `B`. `Pane(A)` alone: `Tab`
+/// gives `A`.
+#[must_use]
+pub fn find_stack_target_pane_id(
+    layout_tree: &LayoutNode,
+    placement_anchor: &PanePlacementAnchor,
+    focus_history: &[PaneId],
+) -> Option<PaneId> {
+    let anchor_path = match placement_anchor {
+        PanePlacementAnchor::Pane(anchor_pane_id) => layout_tree.find_pane_path(*anchor_pane_id)?,
+        PanePlacementAnchor::Group(group_pane_ids) => {
+            find_split_path_by_leaf_set(layout_tree, group_pane_ids)?
+        }
+        PanePlacementAnchor::Tab => Vec::new(),
+    };
+    let stack_node = match layout_tree.get_node_at_path(&anchor_path) {
+        LayoutNode::Pane(anchor_pane_id) => return Some(*anchor_pane_id),
+        LayoutNode::Split(split_node) if split_node.direction == SplitDirection::Stacked => {
+            split_node
+        }
+        LayoutNode::Split(_) => return None,
+    };
+    match stack_node
+        .children
+        .get(stack_node.get_shown_child_index(focus_history))?
+    {
+        LayoutNode::Pane(shown_pane_id) => Some(*shown_pane_id),
+        LayoutNode::Split(_) => None,
+    }
 }
 
 /// Place `source_pane_id`, a leaf of `source_tree`, at `placement_target` in
@@ -306,12 +440,8 @@ pub fn place_pane_across_tabs(
             let mut swapped_destination_tree = destination_tree.clone();
             *swapped_destination_tree.get_node_at_path_mut(&target_pane_path) =
                 LayoutNode::Pane(source_pane_id);
-            let destination_tree = expand_stacks_and_check_fit(
-                swapped_destination_tree,
-                source_pane_id,
-                destination_tab_rect,
-                pane_sizing,
-            )?;
+            let destination_tree =
+                validate_layout_fit(swapped_destination_tree, destination_tab_rect, pane_sizing)?;
             Ok(CrossTabPlacement {
                 source_tree: Some(swapped_source_tree),
                 destination_tree,
@@ -329,12 +459,8 @@ pub fn place_pane_across_tabs(
                 placement_anchor,
                 *direction,
             );
-            let destination_tree = expand_stacks_and_check_fit(
-                inserted_layout_tree,
-                source_pane_id,
-                destination_tab_rect,
-                pane_sizing,
-            )?;
+            let destination_tree =
+                validate_layout_fit(inserted_layout_tree, destination_tab_rect, pane_sizing)?;
             Ok(CrossTabPlacement {
                 source_tree: remaining_source_tree,
                 destination_tree,
@@ -344,12 +470,8 @@ pub fn place_pane_across_tabs(
             let stacked_layout_tree =
                 stack_pane_onto_target(destination_tree, source_pane_id, *target_pane_id)?;
             let remaining_source_tree = remove_source_leaf(source_tree, source_pane_id);
-            let destination_tree = expand_stacks_and_check_fit(
-                stacked_layout_tree,
-                source_pane_id,
-                destination_tab_rect,
-                pane_sizing,
-            )?;
+            let destination_tree =
+                validate_layout_fit(stacked_layout_tree, destination_tab_rect, pane_sizing)?;
             Ok(CrossTabPlacement {
                 source_tree: remaining_source_tree,
                 destination_tree,
@@ -364,11 +486,11 @@ pub fn place_pane_across_tabs(
 /// `tab_rect` is the rectangle `layout_tree` solves into and `pane_sizing` the
 /// caller's own [`PaneSizing`]. An insertion splits the anchor so the pane
 /// sits on its `direction` side, and a stack adds the pane to the target's
-/// stack. Either way the pane is the expanded member of every stack above it.
+/// stack as its last member ([`add_pane_to_stack`]).
 ///
 /// `H[A, B]` with `F` inserted `Right` of `Pane(B)` gives `H[A, B, F]`;
-/// `S[S1, S2]` with `F` stacked onto `S2` gives `S[S1, S2, F]` with `F`
-/// expanded.
+/// `S[S1, S2]` with `S2` active and `F` stacked onto `S2` gives
+/// `S[S1, S2, F]` with `S2` active.
 ///
 /// # Errors
 ///
@@ -418,7 +540,7 @@ pub fn place_floating_pane_in_tab(
             stack_pane_onto_target(layout_tree, floating_pane_id, *target_pane_id)?
         }
     };
-    expand_stacks_and_check_fit(placed_layout_tree, floating_pane_id, tab_rect, pane_sizing)
+    validate_layout_fit(placed_layout_tree, tab_rect, pane_sizing)
 }
 
 /// `source_tree` without the leaf `source_pane_id`, normalized, or `None` when
@@ -433,8 +555,9 @@ fn remove_source_leaf(source_tree: &LayoutNode, source_pane_id: PaneId) -> Optio
 }
 
 /// Add `source_pane_id` to the innermost stack holding `target_pane_id` in
-/// `layout_tree`, as its last and expanded member, or form a stack of
-/// `target_pane_id`, then `source_pane_id`, when no stack holds the target.
+/// `layout_tree`, as its last member, or form a stack of `target_pane_id`,
+/// then `source_pane_id`, when no stack holds the target
+/// ([`add_pane_to_stack`]).
 /// Then normalize the whole tree once. `layout_tree` does not hold
 /// `source_pane_id`.
 ///
@@ -595,45 +718,23 @@ fn normalize_all_leaves(layout_tree: &LayoutNode) -> LayoutNode {
     normalize_layout_tree(layout_tree, &live_pane_ids).expect("the tree holds a leaf")
 }
 
-/// Expand every stack above `source_pane_id` in `destination_tree`, then
-/// check the tree fits `destination_tab_rect`.
+/// `layout_tree` itself when it fits `tab_rect` ([`is_layout_within_rect`]).
 ///
 /// # Errors
 ///
-/// [`PlacementError::DestinationTooSmall`] when
-/// [`is_layout_within_rect`] is false for the expanded tree.
-fn expand_stacks_and_check_fit(
-    mut destination_tree: LayoutNode,
-    source_pane_id: PaneId,
-    destination_tab_rect: Rect,
+/// [`PlacementError::DestinationTooSmall`] when it does not fit.
+fn validate_layout_fit(
+    layout_tree: LayoutNode,
+    tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, PlacementError> {
-    expand_stacks_holding_pane(&mut destination_tree, source_pane_id);
-    if !is_layout_within_rect(&destination_tree, destination_tab_rect, pane_sizing) {
+    if !is_layout_within_rect(&layout_tree, tab_rect, pane_sizing) {
         return Err(PlacementError::DestinationTooSmall {
-            required_size: compute_minimum_size(&destination_tree, pane_sizing),
-            available_size: destination_tab_rect.size,
+            required_size: compute_minimum_size(&layout_tree, pane_sizing),
+            available_size: tab_rect.size,
         });
     }
-    Ok(destination_tree)
-}
-
-/// Make the member holding `pane_id` the active member of every stack on the
-/// path from the root to `pane_id`, outermost first. A pane under no stack
-/// leaves the tree unchanged.
-fn expand_stacks_holding_pane(layout_tree: &mut LayoutNode, pane_id: PaneId) {
-    let Some(pane_path) = layout_tree.find_pane_path(pane_id) else {
-        return;
-    };
-    for stack_depth in 0..pane_path.len() {
-        let LayoutNode::Split(split) = layout_tree.get_node_at_path_mut(&pane_path[..stack_depth])
-        else {
-            unreachable!("every prefix of a pane path ends at a split");
-        };
-        if split.direction == SplitDirection::Stacked {
-            activate_stack_member(split, pane_id);
-        }
-    }
+    Ok(layout_tree)
 }
 
 /// The path of the shallowest node in `layout_tree` whose leaf set, as a

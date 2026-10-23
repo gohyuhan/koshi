@@ -474,7 +474,6 @@ fn a_stack_reduced_to_one_member_normalizes_to_a_plain_leaf() {
 fn a_non_active_stack_member_keeps_its_header_and_stays_selectable() {
     use std::collections::HashSet;
 
-    use crate::focus::activate_stack_member;
     use crate::normalize::normalize_layout_tree;
 
     let (active_pane_id, inactive_pane_id) = (PaneId::new(), PaneId::new());
@@ -485,22 +484,19 @@ fn a_non_active_stack_member_keeps_its_header_and_stays_selectable() {
 
     // Both panes are in the live set, so normalization keeps the whole stack.
     let live_pane_ids: HashSet<PaneId> = [active_pane_id, inactive_pane_id].into_iter().collect();
-    let mut normalized = normalize_layout_tree(&layout_tree, &live_pane_ids).unwrap();
+    let normalized = normalize_layout_tree(&layout_tree, &live_pane_ids).unwrap();
     assert_eq!(
         normalized.list_leaf_pane_ids(),
         [active_pane_id, inactive_pane_id]
     );
 
-    // The non-active member's header is still drawn, and it can be activated.
+    // The non-active member's header is still drawn, and a view whose focus
+    // history holds it shows it.
     let layout_result = solve_layout(&normalized, build_cell_rect(0, 0, 80, 24));
     assert_eq!(layout_result.stack_headers.len(), 1);
     assert_eq!(layout_result.stack_headers[0].pane_id, inactive_pane_id);
-
-    let stack = normalized
-        .find_containing_stack_mut(inactive_pane_id)
-        .unwrap();
-    assert!(activate_stack_member(stack, inactive_pane_id));
-    assert_eq!(stack.active_child_index, 1);
+    assert!(normalized.is_pane_collapsed(inactive_pane_id, &[]));
+    assert!(!normalized.is_pane_collapsed(inactive_pane_id, &[inactive_pane_id]));
 }
 
 #[test]
@@ -708,7 +704,7 @@ fn removing_a_missing_pane_is_rejected_and_the_input_is_unchanged() {
 }
 
 #[test]
-fn stacking_onto_a_plain_pane_creates_a_stack_with_the_new_pane_active() {
+fn stacking_onto_a_plain_pane_creates_a_stack_with_the_target_active() {
     let (left_pane_id, target_pane_id, new_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree =
         build_equal_split_node(SplitDirection::Horizontal, left_pane_id, target_pane_id);
@@ -725,20 +721,20 @@ fn stacking_onto_a_plain_pane_creates_a_stack_with_the_new_pane_active() {
         panic!("the target pane's slot must become a stack");
     };
     assert_eq!(stack_split_node.direction, SplitDirection::Stacked);
-    assert_eq!(stack_split_node.active_child_index, 1);
+    assert_eq!(stack_split_node.active_child_index, 0);
     let collapsed_child_flags: Vec<bool> = (0..stack_split_node.children.len())
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, false]);
+    assert_eq!(collapsed_child_flags, [false, true]);
 }
 
 #[test]
-fn stacking_onto_a_stack_member_appends_to_that_stack() {
+fn stacking_onto_a_stack_member_appends_to_that_stack_and_keeps_its_active_member() {
     let (first_pane_id, second_pane_id, new_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![first_pane_id, second_pane_id],
-        0,
+        1,
     ));
 
     let stacked_tree = add_pane_to_stack(&layout_tree, first_pane_id, new_pane_id).unwrap();
@@ -747,7 +743,7 @@ fn stacking_onto_a_stack_member_appends_to_that_stack() {
     };
     assert_eq!(stack_split_node.children.len(), 3);
     assert_eq!(stack_split_node.weights.len(), 3);
-    assert_eq!(stack_split_node.active_child_index, 2);
+    assert_eq!(stack_split_node.active_child_index, 1);
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [first_pane_id, second_pane_id, new_pane_id]
@@ -755,7 +751,7 @@ fn stacking_onto_a_stack_member_appends_to_that_stack() {
     let collapsed_child_flags: Vec<bool> = (0..stack_split_node.children.len())
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, true, false]);
+    assert_eq!(collapsed_child_flags, [true, false, true]);
 }
 
 #[test]
@@ -777,14 +773,14 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
     });
 
     // The right nested pane is a leaf of the second member; the new pane becomes a third
-    // member of the stack, beside that split, and takes the active slot.
+    // member of the stack, beside that split, and the first member stays active.
     let stacked_tree = add_pane_to_stack(&layout_tree, right_nested_pane_id, new_pane_id).unwrap();
     let LayoutNode::Split(stack_split_node) = &stacked_tree else {
         panic!("stack must survive");
     };
     assert_eq!(stack_split_node.children.len(), 3);
     assert_eq!(stack_split_node.weights.len(), 3);
-    assert_eq!(stack_split_node.active_child_index, 2);
+    assert_eq!(stack_split_node.active_child_index, 0);
     assert_eq!(
         stack_split_node.children[1],
         build_equal_split_node(
@@ -797,7 +793,7 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
     let collapsed_child_flags: Vec<bool> = (0..stack_split_node.children.len())
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, true, false]);
+    assert_eq!(collapsed_child_flags, [false, true, true]);
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [
@@ -835,12 +831,12 @@ fn stacking_onto_a_member_of_a_nested_stack_joins_the_innermost_stack() {
         panic!("the inner stack must survive");
     };
     assert_eq!(inner_split_node.children.len(), 3);
-    assert_eq!(inner_split_node.active_child_index, 2);
+    assert_eq!(inner_split_node.active_child_index, 0);
     assert_eq!(inner_split_node.children[2], LayoutNode::Pane(new_pane_id));
     let collapsed_child_flags: Vec<bool> = (0..inner_split_node.children.len())
         .map(|child_index| inner_split_node.is_child_collapsed(child_index))
         .collect();
-    assert_eq!(collapsed_child_flags, [true, true, false]);
+    assert_eq!(collapsed_child_flags, [false, true, true]);
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [

@@ -76,7 +76,7 @@ impl Default for PaneSizing {
 
 /// The solved placement for one tree over one tab rectangle. The default is
 /// the solve of no pane: every list empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutSolve {
     /// Every leaf pane exactly once, in layout order, with its solved
     /// rectangle. A collapsed stack member's rect is its one-row header
@@ -113,11 +113,11 @@ impl LayoutSolve {
 /// A member is collapsed when it is not the stack's active member (the
 /// stack's `active_child_index`, clamped into bounds). The strip is a
 /// Koshi-owned region: the renderer draws it and mouse routing hit-tests it, and a click on it
-/// activates the member instead of reaching a PTY.
+/// focuses the member instead of reaching a PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackHeader {
     /// The collapsed pane this header represents; clicking the strip
-    /// activates it.
+    /// focuses it.
     pub pane_id: PaneId,
     /// The strip itself: one row spanning the stack's width.
     pub header_rect: Rect,

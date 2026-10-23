@@ -1311,7 +1311,7 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         Vec::<Vec<u8>>::new(),
         "a pane in no mouse mode receives nothing"
     );
-    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     // Normal tracking with SGR encoding: the press is written.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
@@ -1329,7 +1329,7 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the press reached the program"
     );
-    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     // The pane refuses the bytes: nothing is recorded.
     server.show_session_recovery_notice(session_id);
@@ -1348,7 +1348,7 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the refused press left no record"
     );
-    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible());
 }
 
 /// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
@@ -1828,7 +1828,7 @@ fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
         vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
         "wheel up becomes three up-arrows under default cursor keys"
     );
-    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible);
+    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     dispatch_mouse_input(
         &mut server,
@@ -3140,11 +3140,6 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
 
     // A move to the cell the client already stores changes nothing, and the
     // next frame still names it.
-    let client_revision_before_the_repeat = server
-        .build_snapshot(client_id)
-        .expect("render snapshot")
-        .client_snapshot
-        .client_revision;
     let repeated_command_id = CommandId::new();
     server.run_client_mouse(
         client_id,
@@ -3159,12 +3154,8 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         Some(repeated_command_id)
     );
     assert_eq!(
-        server
-            .build_snapshot(client_id)
-            .expect("render snapshot")
-            .client_snapshot
-            .client_revision,
-        client_revision_before_the_repeat
+        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        moved_outer_rect
     );
 
     // A move from the client's own key bindings comes from its own
@@ -3831,7 +3822,7 @@ fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
         "the left release goes out at the cell of the last drag"
     );
     assert!(
-        server.list_sessions()[&session_id].is_recovery_notice_visible,
+        server.list_sessions()[&session_id].is_recovery_notice_visible(),
         "the release koshi writes itself leaves the recovery notice up"
     );
 
@@ -3939,6 +3930,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             SystemTime::UNIX_EPOCH,
             true,
             60,
+            None,
         )
         .expect("the first dial attaches");
     forward_mouse_at(
@@ -3960,6 +3952,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             SystemTime::UNIX_EPOCH,
             true,
             60,
+            None,
         )
         .expect("the second dial attaches");
 

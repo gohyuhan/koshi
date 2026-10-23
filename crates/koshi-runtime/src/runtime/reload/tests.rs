@@ -4,6 +4,7 @@
 
 use super::*;
 
+use std::collections::BTreeSet;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
@@ -16,6 +17,7 @@ use koshi_config::types::RgbColor;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_layout::solver::PaneSizing;
+use koshi_session::session::state::SessionViewChanges;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 fn build_test_server() -> (Server, ClientId) {
@@ -222,6 +224,11 @@ fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
 fn a_reload_solves_every_tab_of_a_live_session_with_the_new_pane_sizing() {
     let (mut runtime, _client_id) = build_test_server();
     let session_id = get_only_session_id(&runtime);
+    let _ = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session exists")
+        .take_view_changes();
 
     let reloaded_events = runtime.reload_app_config(PartialKoshiConfig {
         pane: Some(PartialPaneConfig {
@@ -247,6 +254,46 @@ fn a_reload_solves_every_tab_of_a_live_session_with_the_new_pane_sizing() {
     assert_eq!(
         reloaded_events,
         vec![Event::ConfigReloaded(ConfigReloaded { session_id })]
+    );
+    let view_changes = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session exists")
+        .take_view_changes();
+    assert!(view_changes.is_pane_sizing_changed);
+    assert_eq!(
+        view_changes.layout_changed_tab_ids,
+        BTreeSet::new(),
+        "the one pane fills its tab at a gap of 0 cells and of 1 cell"
+    );
+}
+
+#[test]
+fn a_reload_that_keeps_the_pane_sizing_changes_no_view() {
+    let (mut runtime, _client_id) = build_test_server();
+    let session_id = get_only_session_id(&runtime);
+    let _ = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session exists")
+        .take_view_changes();
+
+    let _ = runtime.reload_app_config(PartialKoshiConfig {
+        scrollback: Some(PartialScrollbackConfig {
+            maximum_line_count: None,
+            maximum_byte_count: None,
+            should_scroll_to_input: Some(false),
+        }),
+        ..PartialKoshiConfig::default()
+    });
+
+    assert_eq!(
+        runtime
+            .session_by_id
+            .get_mut(&session_id)
+            .expect("the session exists")
+            .take_view_changes(),
+        SessionViewChanges::default()
     );
 }
 

@@ -39,12 +39,13 @@ fn build_client(client_id: ClientId, active_tab_id: TabId) -> Client {
 fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     let tab_id = TabId::new();
     let other_tab_id = TabId::new();
-    let focused_pane_id = PaneId::new();
+    let (earlier_focused_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
     let zoomed_pane_id = PaneId::new();
     let scrolled_pane_id = PaneId::new();
     let (minimized_floating_pane_id, focused_floating_pane_id) = (PaneId::new(), PaneId::new());
 
     let mut client = build_client(ClientId::new(), tab_id);
+    client.update_focused_pane(tab_id, earlier_focused_pane_id);
     client.update_focused_pane(tab_id, focused_pane_id);
     client.update_focused_pane(other_tab_id, zoomed_pane_id);
     client.zoom_pane(other_tab_id, zoomed_pane_id);
@@ -65,8 +66,11 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
         .expect("the filed view");
     assert_eq!(saved_view.active_tab_id, tab_id);
     assert_eq!(
-        saved_view.focused_pane_id_by_tab_id,
-        HashMap::from([(tab_id, focused_pane_id), (other_tab_id, zoomed_pane_id)])
+        saved_view.focus_history_by_tab_id,
+        HashMap::from([
+            (tab_id, vec![focused_pane_id, earlier_focused_pane_id]),
+            (other_tab_id, vec![zoomed_pane_id]),
+        ])
     );
     assert_eq!(
         saved_view.zoomed_pane_id_by_tab_id,
@@ -303,7 +307,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
         saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(101)),
         Some(SavedView {
             active_tab_id: tab_id,
-            focused_pane_id_by_tab_id: HashMap::new(),
+            focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
             floating_pane_view_by_pane_id: HashMap::new(),

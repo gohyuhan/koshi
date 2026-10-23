@@ -264,7 +264,6 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
                 placement_target: PanePlacementTarget::Floating {
                     top_left_cell: None,
                 },
-                expected_placement_revision: None,
             }),
         ),
         (

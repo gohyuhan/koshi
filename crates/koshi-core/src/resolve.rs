@@ -188,7 +188,6 @@ fn resolve_core_action(
             placement_target: PanePlacementTarget::Floating {
                 top_left_cell: None,
             },
-            expected_placement_revision: None,
         }),
         "pin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
             pane_id: None,

@@ -217,27 +217,25 @@ fn the_highest_paint_report_waits_until_it_is_taken() {
     let first_reported_at = Instant::now();
     let second_reported_at = first_reported_at + Duration::from_millis(5);
 
-    let build_report =
-        |update_sequence, shown_placement_request_id, reported_at| PaintedUpdateReport {
-            update_sequence,
-            shown_placement_request_id,
-            reported_at,
-        };
+    let build_report = |update_sequence, reported_at| PaintedUpdateReport {
+        update_sequence,
+        reported_at,
+    };
 
-    paint_reporter.report_painted_update(build_report(7, Some(2), first_reported_at));
-    paint_reporter.report_painted_update(build_report(5, None, second_reported_at));
+    paint_reporter.report_painted_update(build_report(7, first_reported_at));
+    paint_reporter.report_painted_update(build_report(5, second_reported_at));
 
     assert_eq!(
         delivery_receiver.take_painted_update_report(),
-        Some(build_report(7, Some(2), first_reported_at))
+        Some(build_report(7, first_reported_at))
     );
     assert_eq!(delivery_receiver.take_painted_update_report(), None);
 
-    paint_reporter.report_painted_update(build_report(8, None, first_reported_at));
-    paint_reporter.report_painted_update(build_report(9, Some(4), second_reported_at));
+    paint_reporter.report_painted_update(build_report(8, first_reported_at));
+    paint_reporter.report_painted_update(build_report(9, second_reported_at));
     assert_eq!(
         delivery_receiver.take_painted_update_report(),
-        Some(build_report(9, Some(4), second_reported_at))
+        Some(build_report(9, second_reported_at))
     );
 }
 
@@ -273,7 +271,6 @@ fn a_paced_receive_holds_a_frame_and_everything_behind_it_until_a_frame_may_go()
     let reporting_thread = thread::spawn(move || {
         paint_reporter.report_painted_update(PaintedUpdateReport {
             update_sequence: 1,
-            shown_placement_request_id: None,
             reported_at,
         });
     });
@@ -282,7 +279,6 @@ fn a_paced_receive_holds_a_frame_and_everything_behind_it_until_a_frame_may_go()
         delivery_receiver.recv_paced(Some(report_deadline), false, &ending_notice),
         PacedReceive::PaintedUpdateReported(PaintedUpdateReport {
             update_sequence: 1,
-            shown_placement_request_id: None,
             reported_at,
         })
     );

@@ -785,10 +785,10 @@ fn inserting_beside_a_whole_stack_keeps_the_stack_intact() {
     );
 }
 
-// ── stack expansion ─────────────────────────────────────────────────────
+// ── stack active member ─────────────────────────────────────────────────
 
 #[test]
-fn a_pane_swapped_onto_a_collapsed_member_becomes_the_active_member() {
+fn a_pane_swapped_onto_a_collapsed_member_stays_collapsed() {
     let [pane_a, pane_b, pane_c, pane_d] = build_sorted_pane_ids();
     let stack_tree = build_horizontal_split(
         vec![
@@ -816,7 +816,7 @@ fn a_pane_swapped_onto_a_collapsed_member_becomes_the_active_member() {
             destination_tree: build_horizontal_split(
                 vec![
                     build_pane_leaf(pane_a),
-                    build_stack(vec![pane_b, pane_d], 1)
+                    build_stack(vec![pane_b, pane_d], 0)
                 ],
                 &[1, 1]
             ),
@@ -825,7 +825,7 @@ fn a_pane_swapped_onto_a_collapsed_member_becomes_the_active_member() {
 }
 
 #[test]
-fn a_pane_swapped_into_a_nested_stack_expands_every_stack_above_it() {
+fn a_pane_swapped_into_a_nested_stack_keeps_every_active_member() {
     let [pane_a, pane_b, pane_c, _] = build_sorted_pane_ids();
     let inner_stack = build_stack(vec![pane_b, pane_c], 0);
     let outer_stack = LayoutNode::Split(SplitNode {
@@ -850,10 +850,10 @@ fn a_pane_swapped_into_a_nested_stack_expands_every_stack_above_it() {
             direction: SplitDirection::Stacked,
             children: vec![
                 build_pane_leaf(pane_c),
-                build_stack(vec![pane_b, pane_a], 1)
+                build_stack(vec![pane_b, pane_a], 0)
             ],
             weights: vec![build_flex_weight(1), build_flex_weight(1)],
-            active_child_index: 1,
+            active_child_index: 0,
         })
     );
 }
@@ -1284,6 +1284,115 @@ fn an_insertion_that_restores_the_source_layout_is_a_noop() {
         )
         .expect("the insertion is valid"),
         fixture_tree
+    );
+}
+
+#[test]
+fn a_stack_target_for_a_group_names_the_member_that_stack_shows_open() {
+    let [pane_p, pane_c, pane_a, pane_b] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![
+            build_vertical_split(
+                vec![build_pane_leaf(pane_p), build_pane_leaf(pane_c)],
+                &[1, 1],
+            ),
+            build_stack(vec![pane_a, pane_b], 1),
+        ],
+        &[1, 1],
+    );
+    let find_group_stack_target_pane_id = |group_pane_ids: &[PaneId], focus_history: &[PaneId]| {
+        find_stack_target_pane_id(
+            &layout_tree,
+            &PanePlacementAnchor::Group(group_pane_ids.to_vec()),
+            focus_history,
+        )
+    };
+
+    assert_eq!(
+        find_group_stack_target_pane_id(&[pane_a, pane_b], &[]),
+        Some(pane_b)
+    );
+    assert_eq!(
+        find_group_stack_target_pane_id(&[pane_b, pane_a], &[pane_c, pane_a]),
+        Some(pane_a)
+    );
+    assert_eq!(
+        find_group_stack_target_pane_id(&[pane_p, pane_c], &[]),
+        None
+    );
+    assert_eq!(
+        find_group_stack_target_pane_id(&[pane_p, pane_c, pane_a, pane_b], &[]),
+        None
+    );
+    assert_eq!(
+        find_group_stack_target_pane_id(&[pane_a], &[]),
+        Some(pane_a)
+    );
+    assert_eq!(
+        find_group_stack_target_pane_id(&[pane_a, pane_c], &[]),
+        None
+    );
+    assert_eq!(find_group_stack_target_pane_id(&[], &[]), None);
+}
+
+#[test]
+fn a_stack_target_for_a_pane_names_that_pane_and_for_the_tab_names_what_fills_the_tab() {
+    let [pane_p, pane_c, pane_a, pane_b] = build_sorted_pane_ids();
+    let split_tree = build_horizontal_split(
+        vec![
+            build_pane_leaf(pane_p),
+            build_stack(vec![pane_a, pane_b], 1),
+        ],
+        &[1, 1],
+    );
+    let stack_tree = build_stack(vec![pane_a, pane_b], 1);
+    let nested_stack_tree = build_split(
+        SplitDirection::Stacked,
+        vec![
+            build_horizontal_split(
+                vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+                &[1, 1],
+            ),
+            build_pane_leaf(pane_c),
+        ],
+        &[1, 1],
+    );
+
+    assert_eq!(
+        find_stack_target_pane_id(&split_tree, &PanePlacementAnchor::Pane(pane_p), &[]),
+        Some(pane_p)
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&split_tree, &PanePlacementAnchor::Pane(pane_a), &[]),
+        Some(pane_a)
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&split_tree, &PanePlacementAnchor::Pane(pane_c), &[]),
+        None
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&split_tree, &PanePlacementAnchor::Tab, &[]),
+        None
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&stack_tree, &PanePlacementAnchor::Tab, &[]),
+        Some(pane_b)
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&stack_tree, &PanePlacementAnchor::Tab, &[pane_a]),
+        Some(pane_a)
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&build_pane_leaf(pane_a), &PanePlacementAnchor::Tab, &[]),
+        Some(pane_a)
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&nested_stack_tree, &PanePlacementAnchor::Tab, &[]),
+        None
+    );
+    assert_eq!(
+        find_stack_target_pane_id(&nested_stack_tree, &PanePlacementAnchor::Tab, &[pane_c]),
+        Some(pane_c)
     );
 }
 
@@ -1739,7 +1848,7 @@ fn build_stack_target(target_pane_id: PaneId) -> PlacementTarget {
 }
 
 #[test]
-fn stacking_a_onto_b_in_a_row_gives_a_stack_of_b_then_a_with_a_expanded() {
+fn stacking_a_onto_b_in_a_row_gives_a_stack_of_b_then_a_with_b_active() {
     let [pane_a, pane_b, _, _] = build_sorted_pane_ids();
     let layout_tree = build_horizontal_split(
         vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
@@ -1755,7 +1864,7 @@ fn stacking_a_onto_b_in_a_row_gives_a_stack_of_b_then_a_with_a_expanded() {
     )
     .expect("the stack fits");
 
-    assert_eq!(placed_layout_tree, build_stack(vec![pane_b, pane_a], 1));
+    assert_eq!(placed_layout_tree, build_stack(vec![pane_b, pane_a], 0));
 }
 
 #[test]
@@ -1779,7 +1888,7 @@ fn stacking_d_onto_b_turns_b_into_a_stack_and_collapses_the_emptied_split() {
                 build_pane_leaf(pane_a),
                 build_vertical_split(
                     vec![
-                        build_stack(vec![pane_b, pane_d], 1),
+                        build_stack(vec![pane_b, pane_d], 0),
                         build_pane_leaf(pane_c)
                     ],
                     &[1, 1],
@@ -1791,12 +1900,12 @@ fn stacking_d_onto_b_turns_b_into_a_stack_and_collapses_the_emptied_split() {
 }
 
 #[test]
-fn stacking_onto_a_stack_member_appends_the_source_as_the_expanded_last_member() {
+fn stacking_onto_a_member_appends_the_source_last_and_keeps_the_active_member() {
     let [pane_a, first_stack_pane_id, second_stack_pane_id, _] = build_sorted_pane_ids();
     let layout_tree = build_horizontal_split(
         vec![
             build_pane_leaf(pane_a),
-            build_stack(vec![first_stack_pane_id, second_stack_pane_id], 0),
+            build_stack(vec![first_stack_pane_id, second_stack_pane_id], 1),
         ],
         &[1, 1],
     );
@@ -1812,7 +1921,7 @@ fn stacking_onto_a_stack_member_appends_the_source_as_the_expanded_last_member()
 
     assert_eq!(
         placed_layout_tree,
-        build_stack(vec![first_stack_pane_id, second_stack_pane_id, pane_a], 2)
+        build_stack(vec![first_stack_pane_id, second_stack_pane_id, pane_a], 1)
     );
 }
 
@@ -1899,7 +2008,7 @@ fn a_cross_tab_stack_removes_the_leaf_and_stacks_it_onto_the_target() {
                             build_pane_leaf(pane_b),
                             build_horizontal_split(
                                 vec![
-                                    build_stack(vec![pane_c, pane_x], 1),
+                                    build_stack(vec![pane_c, pane_x], 0),
                                     build_pane_leaf(pane_d)
                                 ],
                                 &[1, 1],
@@ -1948,9 +2057,9 @@ fn a_floating_pane_inserted_right_of_b_joins_the_row_with_exact_shares() {
 }
 
 #[test]
-fn a_floating_pane_stacked_onto_a_member_is_the_expanded_last_member() {
+fn a_floating_pane_stacked_onto_a_member_is_the_last_member_and_the_active_member_stays() {
     let [first_stack_pane_id, second_stack_pane_id, floating_pane_id, _] = build_sorted_pane_ids();
-    let layout_tree = build_stack(vec![first_stack_pane_id, second_stack_pane_id], 0);
+    let layout_tree = build_stack(vec![first_stack_pane_id, second_stack_pane_id], 1);
 
     let placed_layout_tree = place_floating_pane_in_tab(
         &layout_tree,
@@ -1965,7 +2074,7 @@ fn a_floating_pane_stacked_onto_a_member_is_the_expanded_last_member() {
         placed_layout_tree,
         build_stack(
             vec![first_stack_pane_id, second_stack_pane_id, floating_pane_id],
-            2
+            1
         )
     );
 }

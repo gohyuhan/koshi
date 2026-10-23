@@ -2070,6 +2070,7 @@ fn build_cli_action_with_resolved_tab(
             &ResolvedTargets {
                 session_id: None,
                 tab_id: Some(resolved_tab_id),
+                pane_id: None,
             },
             Direction::Right,
         )
@@ -2114,7 +2115,6 @@ fn place_pane_stack_onto_builds_a_stack_target_with_no_tab() {
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
                     target_pane_id: stack_pane_id,
                 }),
-                expected_placement_revision: None,
             }),
         )
     );
@@ -2142,7 +2142,6 @@ fn place_pane_without_a_pane_places_the_focused_pane() {
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Down,
                 }),
-                expected_placement_revision: None,
             }),
         )
     );
@@ -2185,7 +2184,6 @@ fn undock_pane_floats_the_named_or_focused_pane_at_an_optional_cell() {
                 placement_target: PanePlacementTarget::Floating {
                     top_left_cell: None,
                 },
-                expected_placement_revision: None,
             }),
         )
     );
@@ -2207,7 +2205,6 @@ fn undock_pane_floats_the_named_or_focused_pane_at_an_optional_cell() {
                 placement_target: PanePlacementTarget::Floating {
                     top_left_cell: Some(Point { column: 5, row: 3 }),
                 },
-                expected_placement_revision: None,
             }),
         )
     );
@@ -2240,7 +2237,6 @@ fn dock_pane_with_no_tab_is_bare_and_lands_on_its_right_side() {
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Right,
                 }),
-                expected_placement_revision: None,
             }),
         )
     );
@@ -2281,7 +2277,6 @@ fn dock_pane_with_a_tab_or_a_stack_target_is_not_bare() {
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Up,
                 }),
-                expected_placement_revision: None,
             }),
         ))
     );
@@ -2298,7 +2293,6 @@ fn dock_pane_with_a_tab_or_a_stack_target_is_not_bare() {
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
                     target_pane_id: stack_pane_id,
                 }),
-                expected_placement_revision: None,
             }),
         ))
     );
@@ -3463,7 +3457,6 @@ fn action_subcommands_map_to_their_exact_commands() {
                     anchor: PanePlacementAnchor::Tab,
                     direction: Direction::Left,
                 }),
-                expected_placement_revision: None,
             }),
         ),
         (
@@ -4023,6 +4016,7 @@ fn a_resolved_tab_target_wins_over_a_tab_flag_given_as_an_id() {
     let resolved_targets = ResolvedTargets {
         session_id: None,
         tab_id: Some(resolved_tab_id),
+        pane_id: None,
     };
 
     let (_, mapped_command) = parse_cli_command(&["koshi", "close-tab", "--tab", &tab_flag])
@@ -4053,6 +4047,105 @@ fn a_resolved_tab_target_wins_over_a_tab_flag_given_as_an_id() {
             client_id: None,
         })
     );
+}
+
+/// A pane verb given no `--pane` acts on the default pane the routing layer
+/// resolved. A `--pane` flag wins over it, and `--all` names no pane.
+#[test]
+fn a_pane_verb_given_no_pane_flag_acts_on_the_resolved_default_pane() {
+    let flag_pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = format!("pane-{}", build_fixed_test_uuid());
+    let default_pane_id = PaneId::new();
+    assert_ne!(flag_pane_id, default_pane_id);
+    let resolved_targets = ResolvedTargets {
+        session_id: None,
+        tab_id: None,
+        pane_id: Some(default_pane_id),
+    };
+    let expected_commands = [
+        (
+            vec!["koshi", "resize-pane", "--direction", "left"],
+            Command::ResizePane(ResizePaneArgs {
+                pane_id: Some(default_pane_id),
+                direction: Direction::Left,
+                resize_amount_cells: 1,
+            }),
+        ),
+        (
+            vec!["koshi", "scroll-pane", "--lines", "3"],
+            Command::ScrollPane(ScrollPaneArgs {
+                pane_id: Some(default_pane_id),
+                scroll_line_count: 3,
+            }),
+        ),
+        (
+            vec!["koshi", "move-pane", "--direction", "up"],
+            Command::MovePane(MovePaneArgs {
+                pane_id: Some(default_pane_id),
+                direction: Direction::Up,
+            }),
+        ),
+        (
+            vec!["koshi", "place-pane", "--stack-onto", &pane_flag],
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: Some(default_pane_id),
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                    target_pane_id: flag_pane_id,
+                }),
+            }),
+        ),
+        (
+            vec!["koshi", "undock-pane"],
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: Some(default_pane_id),
+                placement_target: PanePlacementTarget::Floating {
+                    top_left_cell: None,
+                },
+            }),
+        ),
+        (
+            vec!["koshi", "dock-pane", "--stack-onto", &pane_flag],
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: Some(default_pane_id),
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                    target_pane_id: flag_pane_id,
+                }),
+            }),
+        ),
+        (
+            vec!["koshi", "pin-pane"],
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: Some(default_pane_id),
+                is_pinned: true,
+            }),
+        ),
+        (
+            vec!["koshi", "unpin-pane", "--pane", &pane_flag],
+            Command::SetPanePinned(SetPanePinnedArgs {
+                pane_id: Some(flag_pane_id),
+                is_pinned: false,
+            }),
+        ),
+        (
+            vec!["koshi", "minimize-pane"],
+            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+                pane_id: Some(default_pane_id),
+                is_minimized: true,
+            }),
+        ),
+        (
+            vec!["koshi", "restore-pane", "--all"],
+            Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
+                is_minimized: false,
+            }),
+        ),
+    ];
+    for (argument_values, expected_command) in expected_commands {
+        let (_, mapped_command) = parse_cli_command(&argument_values)
+            .build_action_command(&resolved_targets, Direction::Right)
+            .expect("every listed verb is an action");
+        assert_eq!(mapped_command, expected_command, "for {argument_values:?}");
+    }
 }
 
 // --- Discovery scope ---
@@ -4537,6 +4630,7 @@ fn move_tab_and_focus_tab_carry_their_tab_id_into_the_command() {
     let resolved_targets = ResolvedTargets {
         session_id: None,
         tab_id: Some(tab_id),
+        pane_id: None,
     };
     assert_eq!(
         parse_cli_command(&["koshi", "move-tab", "--index", "2", "--tab", "logs"])
@@ -4585,6 +4679,7 @@ fn place_pane_with_a_named_tab_is_classified_before_routing_resolves_the_tab() {
             &ResolvedTargets {
                 session_id: None,
                 tab_id: Some(destination_tab_id),
+                pane_id: None,
             },
             Direction::Right,
         )
@@ -4598,7 +4693,6 @@ fn place_pane_with_a_named_tab_is_classified_before_routing_resolves_the_tab() {
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Left,
             }),
-            expected_placement_revision: None,
         })
     );
 }

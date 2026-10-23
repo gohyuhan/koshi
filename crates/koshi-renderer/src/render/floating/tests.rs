@@ -73,7 +73,6 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
         is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
-            session_revision: 0,
             session_name: "s".to_string(),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -103,7 +102,6 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
         pane_snapshots: vec![build_pane_snapshot(tiled_pane_id)],
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
-            client_revision: 0,
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: Some(tiled_pane_id),
@@ -112,7 +110,9 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
+            last_applied_placement_command_id: None,
         },
+        placement_preview: None,
     }
 }
 

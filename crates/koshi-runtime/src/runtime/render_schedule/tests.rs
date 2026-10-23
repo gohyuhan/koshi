@@ -14,7 +14,9 @@ use crate::server::Server;
 /// The frame interval at the default 60 frames a second.
 pub(crate) const DEFAULT_FRAME_INTERVAL_DURATION: Duration = Duration::from_nanos(16_666_667);
 
-/// Subscribe `client_id` at 60 frames a second, push the frame it is owed at
+/// Subscribe `client_id` at 60 frames a second, mark the views that the
+/// state built before the subscription changed
+/// ([`Server::mark_changed_views`]), push the frame `client_id` is owed at
 /// `current_time`, and hand back its queue, which must stay alive for the
 /// subscription to stay. The frame pushed at `current_time` stays on the
 /// queue.
@@ -24,21 +26,27 @@ pub(crate) fn subscribe_and_push_first_frame(
     current_time: Instant,
 ) -> DeliveryReceiver {
     let (delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60);
+    server.mark_changed_views();
     server.push_frames(current_time);
-    assert_eq!(get_frame_wait(server, client_id, current_time), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(server, client_id, current_time),
+        None
+    );
     delivery_receiver
 }
 
-/// How long until the frame of the first subscriber that views `client_id` is
+/// Mark the views that changed ([`Server::mark_changed_views`]), then return
+/// how long until the frame of the first subscriber that views `client_id` is
 /// due at `current_time`, as [`FramePace::compute_frame_wait`] reads it.
 ///
 /// # Panics
 /// When no subscriber views `client_id`.
-pub(crate) fn get_frame_wait(
-    server: &Server,
+pub(crate) fn mark_changed_views_then_compute_frame_wait(
+    server: &mut Server,
     client_id: ClientId,
     current_time: Instant,
 ) -> Option<Duration> {
+    server.mark_changed_views();
     server
         .subscriptions
         .iter()

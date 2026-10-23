@@ -29,7 +29,9 @@ use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::runtime::delivery_queue::DeliveryReceiver;
-use crate::runtime::render_schedule::tests::{get_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION};
+use crate::runtime::render_schedule::tests::{
+    mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
+};
 
 use super::*;
 
@@ -125,7 +127,7 @@ fn build_viewed_pane_server(
     attach_client_record(&mut session, client);
     runtime.session_by_id.insert(session.session_id, session);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
-    runtime.push_frames(first_frame_time);
+    runtime.push_due_frames(first_frame_time);
     assert_eq!(
         delivery_receiver.try_recv(),
         Ok(Delivery::Frame(Box::new(
@@ -211,7 +213,7 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
                     row_count: 40,
                 },
             },
-            None,
+            &[],
         )
         .expect("the floating set is empty");
     // alice attaches first and views `db` with 10x20 px cells; bob views
@@ -355,7 +357,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
                     row_count: 20,
                 },
             },
-            None,
+            &[],
         )
         .expect("the floating set is empty");
     // web shows the floating pane; db holds it minimized.
@@ -368,15 +370,15 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
     let _db_deliveries = runtime.subscribe(db_client_id, 60);
     let _web_deliveries = runtime.subscribe(web_client_id, 60);
     let first_frame_time = Instant::now();
-    runtime.push_frames(first_frame_time);
+    runtime.push_due_frames(first_frame_time);
 
     runtime.handle_pty_output(db_pane_id, b"hi");
     assert_eq!(
-        get_frame_wait(&runtime, db_client_id, first_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, first_frame_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
     assert_eq!(
-        get_frame_wait(&runtime, web_client_id, first_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, web_client_id, first_frame_time),
         None
     );
 
@@ -384,22 +386,22 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
     runtime.push_frames(second_frame_time);
     runtime.handle_pty_output(floating_pane_id, b"hi");
     assert_eq!(
-        get_frame_wait(&runtime, db_client_id, second_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, second_frame_time),
         None
     );
     assert_eq!(
-        get_frame_wait(&runtime, web_client_id, second_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, web_client_id, second_frame_time),
         Some(Duration::ZERO)
     );
 
     runtime.push_frames(second_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
     runtime.handle_pty_output(PaneId::new(), b"hi");
     assert_eq!(
-        get_frame_wait(&runtime, db_client_id, second_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, second_frame_time),
         None
     );
     assert_eq!(
-        get_frame_wait(&runtime, web_client_id, second_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, web_client_id, second_frame_time),
         None
     );
 }
@@ -435,7 +437,10 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
         Vec::<Vec<u8>>::new()
     );
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
-    assert_eq!(get_frame_wait(&runtime, client_id, old_frame_time), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, old_frame_time),
+        None
+    );
 
     runtime.handle_pty_output(pane_id, b"\x1b[?2026l");
 
@@ -455,7 +460,7 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
         ))]
     );
     assert_eq!(
-        get_frame_wait(&runtime, client_id, old_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, old_frame_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
 }
@@ -481,8 +486,8 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
     );
     runtime.advance_due_pane_renders(current_time + Duration::from_millis(149));
     assert_eq!(
-        get_frame_wait(
-            &runtime,
+        mark_changed_views_then_compute_frame_wait(
+            &mut runtime,
             client_id,
             current_time + Duration::from_millis(149)
         ),
@@ -503,8 +508,8 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
     );
     runtime.advance_due_pane_renders(current_time + Duration::from_millis(150));
     assert_eq!(
-        get_frame_wait(
-            &runtime,
+        mark_changed_views_then_compute_frame_wait(
+            &mut runtime,
             client_id,
             current_time + Duration::from_millis(150)
         ),
@@ -666,7 +671,7 @@ fn a_failed_reply_write_is_dropped_and_output_still_lands() {
     // failed write left no record.
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'x');
     assert_eq!(
-        get_frame_wait(&runtime, client_id, first_frame_time),
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, first_frame_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
     );
     assert_eq!(
@@ -687,7 +692,10 @@ fn bytes_for_a_pane_with_no_engine_are_ignored() {
     // No engine changed, no engine was created, and no view was marked.
     assert_eq!(get_pane_cell_character(&runtime, live_pane_id, 0, 0), ' ');
     assert_eq!(runtime.list_terminal_engines().len(), 1);
-    assert_eq!(get_frame_wait(&runtime, client_id, first_frame_time), None);
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, first_frame_time),
+        None
+    );
 }
 
 #[test]

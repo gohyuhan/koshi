@@ -19,8 +19,8 @@
 //! application-cursor-keys on gets `ESC O A` for the very next `<Up>`.
 //!
 //! **A press reaches only a pane the client can see.** A focused pane the tab
-//! draws no content for — suppressed for want of space, hidden behind a
-//! fullscreen pane, collapsed to a stack header — takes nothing. The pane a
+//! draws no content for — suppressed for want of space, or hidden behind a
+//! fullscreen pane — takes nothing. The pane a
 //! press may reach is the one `Server::find_typed_pane` names; when it names
 //! none, the press is dropped.
 
@@ -48,10 +48,7 @@ impl Server {
     /// Hide the recovery notice after a successful user write to a pane in its session.
     pub(crate) fn clear_session_recovery_notice_after_pane_input(&mut self, pane_id: PaneId) {
         if let Some(session) = self.get_session_for_pane_mut(pane_id) {
-            if session.is_recovery_notice_visible {
-                session.is_recovery_notice_visible = false;
-                self.mark_every_view_changed();
-            }
+            session.set_recovery_notice_visible(false);
         }
     }
 
@@ -142,9 +139,9 @@ impl Server {
     /// ([`find_content_rect`], the rect the renderer fills) in the solve the
     /// session holds for this client's layout mode
     /// ([`Session::compute_client_solve`]). A pane suppressed for want of
-    /// space, hidden behind a pane this client has zoomed, or collapsed to a
-    /// stack header yields `None`: shrink the terminal until the focused pane
-    /// is suppressed, type `l`, and the shell inside it stays untouched.
+    /// space, or hidden behind a pane this client has zoomed, yields `None`:
+    /// shrink the terminal until the focused pane is suppressed, type `l`, and
+    /// the shell inside it stays untouched.
     /// Another client's zoom never silences this client's keys.
     ///
     /// [`Session::can_client_draw_floating_panes`]: koshi_session::session::state::Session::can_client_draw_floating_panes
@@ -160,8 +157,7 @@ impl Server {
         }
 
         let tab_id = attached_client.get_active_tab_id();
-        let client_solve =
-            session.compute_client_solve(tab_id, attached_client.get_layout_mode(tab_id))?;
+        let client_solve = session.compute_client_solve(attached_client, tab_id)?;
         find_content_rect(&client_solve, pane_id).map(|_| pane_id)
     }
 
