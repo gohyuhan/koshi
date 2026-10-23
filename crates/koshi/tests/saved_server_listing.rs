@@ -84,7 +84,7 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
              koshi: mill: the certificate {reinstalled_server_address} presented is not the \
              expected one: expected {saved_certificate_fingerprint}, presented \
              {reinstalled_server_certificate_fingerprint}. the secret was not sent. if that \
-             machine's certificate changed on purpose, `koshi share grant` there prints the new \
+             machine's certificate changed on purpose, `koshi share open` there prints the new \
              fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for \
              a saved server. its sessions are not listed\n"
         )

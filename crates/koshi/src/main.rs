@@ -209,7 +209,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         // this machine's own socket. A run outside every pane is never
         // refused. A run in a pane is refused while anyone is attached to that
         // pane's session from another machine.
-        return share::run_share_command(command, InSessionContext::from_env()?.as_ref());
+        return share::run_share_command(
+            command,
+            InSessionContext::from_env()?.as_ref(),
+            config_directory.as_deref(),
+        );
     }
 
     if let Some(CliCommand::Remote { command }) = &cli.command {

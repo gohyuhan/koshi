@@ -1045,3 +1045,38 @@ fn a_switch_left_to_the_file_is_read_from_the_config_directory_on_every_call() {
         "an absent file turns the switch off"
     );
 }
+
+#[test]
+fn a_server_config_file_gives_the_remote_listen_address_it_names() {
+    let config_directory = tempfile::tempdir().expect("a config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        "version 2\nremote-listen \"127.0.0.1:7654\"\n",
+    )
+    .expect("the koshi.kdl is written");
+
+    assert_eq!(
+        load_server_config_file(&app_config_path).remote_listen_address,
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 7654)))
+    );
+}
+
+#[test]
+fn an_absent_or_unparseable_server_config_file_gives_the_built_in_defaults() {
+    let config_directory = tempfile::tempdir().expect("a config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+
+    assert_eq!(
+        load_server_config_file(&app_config_path),
+        ServerConfig::default(),
+        "an absent file"
+    );
+
+    fs::write(&app_config_path, "version 2\nremote-listen {\n").expect("the koshi.kdl is written");
+    assert_eq!(
+        load_server_config_file(&app_config_path),
+        ServerConfig::default(),
+        "a file that does not parse"
+    );
+}

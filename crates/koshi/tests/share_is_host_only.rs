@@ -15,8 +15,9 @@ mod common;
 use common::{build_koshi_command_under_home, build_short_test_directory};
 
 /// Every `share` verb, without the `--remote` flag.
-const SHARE_COMMAND_ARGUMENTS: [&[&str]; 3] = [
+const SHARE_COMMAND_ARGUMENTS: [&[&str]; 4] = [
     &["share", "grant", "bob"],
+    &["share", "open"],
     &["share", "revoke", "bob"],
     &["share", "list"],
 ];

@@ -180,8 +180,8 @@ fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
         rendered_error,
         format!(
             "{server_address} refused the connection: nothing is listening on that port. \
-             if remote access is not enabled on that machine, run `koshi share grant` \
-             there and answer yes to the offer to open the port"
+             if remote access is not enabled on that machine, run `koshi share open` \
+             there to open the port"
         )
     );
 }

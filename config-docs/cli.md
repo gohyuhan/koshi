@@ -816,6 +816,7 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 | Command | Result |
 |---|---|
 | `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
+| `koshi share open` | Open the port remote clients connect to, and print the commands that connect |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>] [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
@@ -826,7 +827,7 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
 
-The three `share` verbs run on the machine holding the sessions. The rest run
+The four `share` verbs run on the machine holding the sessions. The rest run
 on the machine connecting to it.
 
 The `--session` of a `share` verb names one of your own sessions. A session
@@ -927,8 +928,28 @@ turn it on and open 0.0.0.0:7654? [y/N]
 ```
 
 A typed `y` opens the port, and it opens again on every start after that. Any
-other answer leaves it shut and still prints the token. With no address in
-`koshi.kdl` there is nothing to offer, and the grant says to add one.
+other answer leaves it shut, still prints the token, and names `koshi share
+open`, which opens the port at any time without a new token. With no address in
+`koshi.kdl` there is nothing to offer, and the grant names the line to add.
+
+The router reads `remote-listen` when it starts. When the address it read is
+not the one `koshi.kdl` names now, the grant asks nothing. It prints the token,
+names both addresses, and names `koshi restart-servers`, as `remote-listen` in
+`koshi.md` states:
+
+```text
+/home/user/.config/koshi/koshi.kdl names the remote listen address 127.0.0.1:7654, and the running router read no remote listen address from it when it started. Run `koshi restart-servers` so the router reads it again, then run `koshi share open`. This token cannot be used to connect until the port opens.
+```
+
+A port the router cannot open prints the router's own reason, and whether
+remote access is on:
+
+```text
+remote access stays off, and the port did not open: the remote listener could not open 192.0.2.20:7654: Address already in use (os error 48). Run `koshi share open` once that is fixed. This token cannot be used to connect until the port opens.
+```
+
+A token stands from the moment it is minted, whatever the port does. It
+connects as soon as the port opens.
 
 With the port open, the grant prints the command that connects to this
 machine. Each command carries `--certificate-fingerprint` with the fingerprint
@@ -948,7 +969,10 @@ lowercase hex characters. The address in that command depends on
 - A loopback address, such as `127.0.0.1:7654`, gives one command with that
   address, under `connect from this machine:`. A line then says that no other
   machine can connect to it, and names `0.0.0.0:7654` as a `remote-listen`
-  value that lets another machine connect.
+  value that lets another machine connect after `koshi restart-servers`.
+
+The address is the one the router listens on. When `koshi.kdl` names another
+address now, a last line names both, and `koshi restart-servers`.
 
 An IPv4-mapped IPv6 address counts as its IPv4 form: `[::ffff:192.0.2.20]:7654`
 gives the same command as `192.0.2.20:7654`.
@@ -963,6 +987,23 @@ set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.
 Use the command with an address the other machine can reach. For example, a
 laptop on the same Wi-Fi uses the `en0` address, and a laptop on a VPN uses the
 `utun3` address.
+
+`koshi share open` opens the port without a question and mints no token. It
+prints the same connect commands as a grant, with the same fingerprint and no
+`--save-as`. Its secret line names the secret `koshi share grant` printed in
+place of the secret above. On a port that is already open it
+opens nothing and prints the commands again, so it is also how to read the
+fingerprint again. A port that does not open prints the reason on standard
+error, as the grant does, and the command exits 1. Example, after a grant whose
+`y` was not typed:
+
+```text
+koshi share open
+connect from another machine:
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 [SESSION]
+set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when asked.
+this machine accepts connections on 192.0.2.20 only; the other machine must connect to that address.
+```
 
 `koshi share revoke alice` ends the connections alice's tokens opened, at once,
 attached to a session or not. Her connection stops and no further frame reaches
@@ -1011,8 +1052,8 @@ environment variable `KOSHI_REMOTE_SECRET`, and with that unset asks for it at
 the terminal without printing what is typed. No flag takes a secret.
 
 The fingerprint is the sha256 of the server's certificate, as 64 lowercase hex
-characters. `koshi share grant` on the serving machine prints it in each
-connect command. Both machines speak TLS 1.3 only, and a peer that offers
+characters. `koshi share grant` and `koshi share open` on the serving machine
+print it in each connect command. Both machines speak TLS 1.3 only, and a peer that offers
 TLS 1.2 alone is refused during the handshake.
 
 koshi 0.5.0 and older print no fingerprint, so a first connection from this
@@ -1029,7 +1070,7 @@ the secret is not sent, and the refusal names the address and both
 fingerprints:
 
 ```text
-koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share grant` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
 ```
 
 An address that is not saved needs `--certificate-fingerprint`. Without it,
@@ -1041,7 +1082,7 @@ koshi: invalid arguments: laptop.local:7654 is not saved, so the fingerprint of 
 
 A saved server refuses `--certificate-fingerprint`, and
 `koshi remote edit <SERVER>` changes the fingerprint it expects. If the
-serving machine's certificate changes on purpose, `koshi share grant` there
+serving machine's certificate changes on purpose, `koshi share open` there
 prints the new fingerprint, and `koshi remote edit` stores it.
 
 A first connection saves the address, the secret, the fingerprint, and the
@@ -1083,7 +1124,7 @@ fingerprint that was typed:
 
 ```text
 checking laptop.local:7654 …
-koshi: IPC unavailable: laptop.local:7654 refused the connection: nothing is listening on that port. if remote access is not enabled on that machine, run `koshi share grant` there and answer yes to the offer to open the port
+koshi: IPC unavailable: laptop.local:7654 refused the connection: nothing is listening on that port. if remote access is not enabled on that machine, run `koshi share open` there to open the port
 save it anyway? [y/N]: y
 saved work at laptop.local:7654.
 ```
@@ -1329,6 +1370,7 @@ log directory       ok       /home/you/.local/state/koshi/logs is writable and l
 router              ok       no koshi is running                                                                 -
 session directory   ok       sessions are advertised in /tmp/koshi-1000 (mode 700), which only you may reach     -
 remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants  -
+remote listener     ok       no koshi is running, so nothing is listening                                        -
 remote connections  ok       no koshi is running, so nothing from another machine is connected                   -
 ```
 
@@ -1355,6 +1397,7 @@ The checks run in this order:
 | `router` | Whether a router answers on its control socket within 5 seconds |
 | `session directory` | Where sessions are advertised, and who may reach that directory |
 | `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
+| `remote listener` | The address the running router read when it started, whether it serves on it, the fingerprint of the certificate it presents, and whether `koshi.kdl` names that address now |
 | `remote connections` | How many open connections the running router holds from another machine |
 
 The `session directory` and `remote connections` rows report facts and rate
@@ -1365,14 +1408,36 @@ creates no directory. The `log directory` row writes one empty file in the log
 directory and removes it again, which is how it reports whether that directory
 can be written.
 
-The `router` row is the only row that rates the running router. A router whose
+The `router` row rates whether the running router answers. A router whose
 build has no such question is `warn`, and its help reads `run: koshi
 restart-servers`. A router that koshi 0.2.0 to 0.4.0 started is `fail`: `the
 running router runs koshi 0.4.0 or older, which this koshi cannot talk to`,
 and its help reads `run: koshi restart-servers`. Any other router that is
 listening and does not answer is `fail`. In each of these cases the `remote
-connections` row reads `the running router did not answer, so this is not
-known`.
+listener` and `remote connections` rows read `the running router did not
+answer, so this is not known`.
+
+The `remote listener` row rates the remote listener of the router that
+answered. It never reads `fail`. Its reasons:
+
+| Reason | Verdict | Help |
+|---|---|---|
+| `the router serves 0.0.0.0:7654 with the certificate fingerprint 3f6a…` | `ok` | - |
+| ``remote access is off, so nothing is listening; `koshi share open` opens 0.0.0.0:7654`` | `ok` | - |
+| `the router read no remote listen address when it started, so nothing is listening` | `ok` | - |
+| `remote access is on, and nothing is listening on 0.0.0.0:7654: the router could not open it when it started` | `warn` | `run: koshi share open` |
+| `the router serves 0.0.0.0:7654 and names no certificate fingerprint`, from a koshi 0.5.0 router | `warn` | `run: koshi restart-servers` |
+
+The fingerprint is the one `koshi share grant` prints in its connect commands,
+so the row reads it again without a new grant. When `koshi.kdl` names another
+address than the one the router read when it started, the row is `warn`. Its
+reason names the file and both addresses, after the fingerprint while the
+router serves. Example: `/home/user/.config/koshi/koshi.kdl names the remote
+listen address 127.0.0.1:7654, and the running router read no remote listen
+address from it when it started`, with the help `run: koshi restart-servers`.
+When the router reads another `koshi.kdl` than `koshi doctor`, the reason
+names both files, and the help reads `set remote-listen in <the router's
+file>, then run: koshi restart-servers`.
 
 A row whose `reason` is shortened to fit the table carries the whole text in a
 `detail` field, which `--format json` prints and the table leaves out. Every

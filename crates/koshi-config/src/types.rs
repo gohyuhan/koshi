@@ -73,8 +73,9 @@ pub struct ServerConfig {
     /// Nothing reads it on Windows.
     pub should_allow_other_users: bool,
     /// The IP address and port the remote listener binds, such as
-    /// `0.0.0.0:7654`. Setting it opens nothing; `koshi share grant` switches
-    /// remote access on.
+    /// `0.0.0.0:7654`. Setting it opens nothing; `koshi share open`, or a yes
+    /// to the offer `koshi share grant` makes, switches remote access on. The
+    /// router reads it when it starts.
     pub remote_listen_address: Option<SocketAddr>,
     /// The directory the session sockets other users reach live in. `None`
     /// takes `/tmp/koshi`. Nothing reads it on Windows.

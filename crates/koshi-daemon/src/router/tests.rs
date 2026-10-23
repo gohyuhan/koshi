@@ -2048,6 +2048,7 @@ fn a_due_restart_answers_each_request_already_queued_and_refuses_the_next_ones()
         status_receiver.try_recv(),
         Ok(RouterResult::RemoteStatus {
             remote_listen_address: None,
+            config_file_path: None,
             is_remote_access_enabled: false,
             is_listening: false,
             certificate_fingerprint: None,
@@ -2183,6 +2184,7 @@ fn a_lookup_waiting_on_a_silent_session_leaves_the_loop_serving_other_requests()
             .expect("the status is answered while the lookup waits"),
         RouterResult::RemoteStatus {
             remote_listen_address: None,
+            config_file_path: None,
             is_remote_access_enabled: false,
             is_listening: false,
             certificate_fingerprint: None,
@@ -5548,7 +5550,7 @@ fn a_request_that_would_wait_is_refused_while_a_restart_is_pending() {
             &mut remote_state,
             RouterRequestKind::RemoteStatus
         ),
-        Ok(build_remote_status_result(&remote_state)),
+        Ok(build_remote_status_result(&remote_state, None)),
         "a request that needs no wait is answered"
     );
     let (endpoint_sender, endpoint_receiver) = mpsc::channel();
@@ -8864,8 +8866,8 @@ fn a_connection_that_ends_makes_room_for_the_next_one() {
 
 #[test]
 fn switching_remote_access_on_with_no_listen_address_is_refused() {
-    // With no `remote-listen` address in `koshi.kdl`, the refusal names the
-    // line to add.
+    // A router that read no `remote-listen` address when it started names
+    // the line to set and the restart that makes the router read it.
     let (router_events_sender, _router_events_receiver) = mpsc::channel();
     let mut remote_state = build_no_remote_state();
 
@@ -8878,7 +8880,8 @@ fn switching_remote_access_on_with_no_listen_address_is_refused() {
     assert_eq!(
         enable_result,
         build_expected_refusal(
-            "no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl"
+            "this router read no remote listen address from koshi.kdl when it started; set \
+             `remote-listen \"<ip>:<port>\"` in koshi.kdl, then run `koshi restart-servers`"
         )
     );
     assert_eq!(
@@ -9250,7 +9253,7 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
         is_listening,
         certificate_fingerprint,
         ..
-    } = build_remote_status_result(&remote_state)
+    } = build_remote_status_result(&remote_state, None)
     else {
         panic!("a status request is answered with a status");
     };
@@ -9263,11 +9266,12 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
 }
 
 #[test]
-fn the_status_names_the_served_certificate_and_how_many_connections_it_holds() {
+fn the_status_names_the_served_certificate_the_connection_count_and_the_config_file() {
     // The listener serves the certificate whose fingerprint is 64 `a`
     // characters, and no certificate file exists: the status names that
-    // fingerprint and the count of admitted connections. No remote access
-    // record reports `is_remote_access_enabled` as `false`.
+    // fingerprint, the count of admitted connections, and the `koshi.kdl` in
+    // the config directory. No remote access record reports
+    // `is_remote_access_enabled` as `false`.
     let runtime_directory = build_test_runtime_directory();
     let data_directory = runtime_directory.path().join("data");
     let mut remote_state = RemoteState {
@@ -9294,9 +9298,10 @@ fn the_status_names_the_served_certificate_and_how_many_connections_it_holds() {
         .collect();
 
     assert_eq!(
-        build_remote_status_result(&remote_state),
+        build_remote_status_result(&remote_state, Some(Path::new("/home/user/.config/koshi"))),
         RouterResult::RemoteStatus {
             remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
+            config_file_path: Some(PathBuf::from("/home/user/.config/koshi/koshi.kdl")),
             is_remote_access_enabled: false,
             is_listening: true,
             certificate_fingerprint: Some("a".repeat(64)),

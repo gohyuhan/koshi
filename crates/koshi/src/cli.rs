@@ -829,7 +829,8 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Grant, revoke and list remote access tokens.
+    /// Grant, revoke and list remote access tokens, and open the port remote
+    /// clients connect to.
     Share {
         /// What to do with the tokens.
         #[command(subcommand)]
@@ -1036,7 +1037,8 @@ pub enum ConfigCommand {
 }
 
 /// The `koshi share` subcommands: the remote access tokens this machine has
-/// granted. Every verb asks the router, which owns the token store.
+/// granted, and the port remote clients connect to. Every verb asks the
+/// router, which owns the token store and the port.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum ShareCommand {
     /// Hand one identity a fresh token and print it once.
@@ -1058,6 +1060,9 @@ pub enum ShareCommand {
         )]
         token_expiry: Expiry,
     },
+    /// Open the port remote clients connect to, on the address the router read
+    /// from koshi.kdl, and print the commands that connect. Mints no token.
+    Open,
     /// Stop the tokens one identity holds.
     Revoke {
         /// Whose tokens stop working.

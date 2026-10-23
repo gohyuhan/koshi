@@ -14,6 +14,14 @@
 //! the moment it is minted. Its secret is printed once, whatever the offer
 //! does, and nothing prints it again.
 //!
+//! `koshi share open` opens the port with no question and mints no token, then
+//! prints the connect commands a grant prints. On a port that is already open
+//! it opens nothing and prints the same commands, fingerprint included.
+//!
+//! The router reads `remote-listen` when it starts. Both verbs compare that
+//! address with the one `koshi.kdl` names now, and name the step that makes
+//! the router read the file again when the two differ.
+//!
 //! A verb run outside every pane is never refused, the revoke that cuts a live
 //! connection included. A verb run in a pane is refused while any client is
 //! attached to that pane's session from another machine.
@@ -24,7 +32,7 @@
 
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use koshi_core::client::ClientOrigin;
@@ -38,10 +46,12 @@ use koshi_ipc::router::{RouterRequestKind, RouterResult};
 use koshi_ipc::wire::WireName;
 
 use crate::cli::{Expiry, SessionReference, ShareCommand};
-use crate::output::RemoteReady;
+use crate::output::{ConfigMismatch, RemoteReady};
 use crate::{output, prompt, targeting};
+use koshi_link::config::load_server_config_file;
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
+use koshi_link::router_client::RemoteAccessStatus;
 use koshi_link::{ipc_client, router_client};
 
 #[cfg(test)]
@@ -104,12 +114,20 @@ fn refuse_while_watched_from_another_machine(
 /// A grant with no `--session` reaches every session on this machine; a
 /// revoke or a listing with no `--session` covers every scope. A router that
 /// refuses the request is [`CliError::Runtime`] carrying the router's own
-/// message.
+/// message. `config_directory` holds the `koshi.kdl` a grant and an open
+/// compare with the address the router read; `None` names no file.
+///
+/// An open that leaves the port shut prints nothing on standard output and is
+/// [`CliError::Runtime`] carrying the block [`output::render_remote_ready`]
+/// gives, without its last newline.
 pub fn run_share_command(
     command: &ShareCommand,
     in_session_context: Option<&InSessionContext>,
+    config_directory: Option<&Path>,
 ) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let config_file_path: Option<PathBuf> =
+        config_directory.map(|config_directory| config_directory.join("koshi.kdl"));
     if let Some(in_session_context) = in_session_context {
         // The pane's own session advertises in this user's runtime directory.
         refuse_while_watched_from_another_machine(in_session_context, |session_id| {
@@ -153,6 +171,7 @@ pub fn run_share_command(
                         has_replaced_active_grant,
                         || {
                             resolve_remote_ready_or_unknown(resolve_remote_access_ready(
+                                config_file_path.as_deref(),
                                 prompt::read_yes_answer,
                                 |router_request_kind| {
                                     router_client::submit_router_request(
@@ -168,6 +187,30 @@ pub fn run_share_command(
                     })
                 }
                 unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
+            }
+        }
+        ShareCommand::Open => {
+            // The offer is answered yes, and no question is printed.
+            let remote_ready = resolve_remote_access_ready(
+                config_file_path.as_deref(),
+                |_| true,
+                |router_request_kind| {
+                    router_client::submit_router_request(&runtime_directory, router_request_kind)
+                },
+            )?;
+            let rendered_remote_ready = output::render_remote_ready(None, &remote_ready);
+            match remote_ready {
+                RemoteReady::On { .. } => {
+                    print!("{rendered_remote_ready}");
+                    Ok(())
+                }
+                RemoteReady::NoAddress
+                | RemoteReady::Off
+                | RemoteReady::Unknown
+                | RemoteReady::Blocked { .. }
+                | RemoteReady::ConfigMismatched { .. } => Err(CliError::Runtime {
+                    detail: rendered_remote_ready.trim_end().to_string(),
+                }),
             }
         }
         ShareCommand::Revoke {
@@ -361,7 +404,7 @@ fn write_share_grant<Writer: Write>(
     write!(
         output_writer,
         "{}",
-        output::render_remote_ready(identity, &remote_ready)
+        output::render_remote_ready(Some(identity), &remote_ready)
     )
 }
 
@@ -383,14 +426,18 @@ fn resolve_remote_ready_or_unknown(
 
 /// What a fresh grant can reach, and the offer that changes the answer.
 ///
-/// Asks the router for the listen address, whether remote access is switched
-/// on, whether the port is held right now, and the fingerprint of the
-/// certificate the listener presents, then:
+/// Asks the router for the listen address it read when it started, the
+/// `koshi.kdl` it read it from, whether remote access is switched on, whether
+/// the port is held right now, and the fingerprint of the certificate the
+/// listener presents. Then compares that address with the one the `koshi.kdl`
+/// at `config_file_path` names now, as [`find_config_mismatch`] does, and:
 ///
+/// - on and listening — [`RemoteReady::On`] carrying that fingerprint and the
+///   mismatch, if any, nothing asked; a router that names no fingerprint then
+///   is a [`CliError::Runtime`];
+/// - a mismatch, the port shut — [`RemoteReady::ConfigMismatched`], nothing
+///   asked;
 /// - no address — [`RemoteReady::NoAddress`], nothing asked;
-/// - on and listening — [`RemoteReady::On`] carrying that fingerprint, nothing
-///   asked; a router that names no fingerprint then is a
-///   [`CliError::Runtime`];
 /// - otherwise asks `confirm_enable`, and a yes sends
 ///   [`RouterRequestKind::EnableRemote`]. With remote access off, the question
 ///   reads `remote access is off.` then `turn it on and open <address>? [y/N]`;
@@ -399,11 +446,14 @@ fn resolve_remote_ready_or_unknown(
 ///
 /// A yes that opens the port is [`RemoteReady::On`] carrying the fingerprint
 /// the enable answer names. A no is [`RemoteReady::Off`] when remote access
-/// was off, and [`RemoteReady::Blocked`] when it was on. A refused enable is
-/// [`RemoteReady::Blocked`].
+/// was off, and [`RemoteReady::Blocked`] with no refusal when it was on. A
+/// refused enable is [`RemoteReady::Blocked`] carrying the router's sentence
+/// and whether remote access was on before the request. A refused enable
+/// writes no record and leaves that answer as it was.
 ///
-/// `confirm_enable` is asked at most once, with the question to print; the
-/// command passes `prompt::read_yes_answer`, which prints it on standard error.
+/// `confirm_enable` is asked at most once, with the question to print; a grant
+/// passes `prompt::read_yes_answer`, which prints it on standard error, and
+/// `share open` passes a function that answers yes and prints nothing.
 /// `request_router` carries one control-plane request to the router and hands
 /// back its answer; the command passes
 /// [`router_client::submit_router_request`].
@@ -414,34 +464,39 @@ fn resolve_remote_ready_or_unknown(
 /// [`CliError::IpcUnavailable`] when an answer names a result its request
 /// cannot produce.
 fn resolve_remote_access_ready(
+    config_file_path: Option<&Path>,
     confirm_enable: impl FnOnce(&str) -> bool,
     mut request_router: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
 ) -> Result<RemoteReady, CliError> {
-    let remote_status_response = request_router(RouterRequestKind::RemoteStatus)?;
-    let (
-        remote_listen_address,
+    let remote_access_status =
+        RemoteAccessStatus::from_router_result(request_router(RouterRequestKind::RemoteStatus)?)
+            .map_err(|unexpected_router_result| build_router_refusal(&unexpected_router_result))?;
+    let configured_address = config_file_path.and_then(|config_file_path| {
+        load_server_config_file(config_file_path).remote_listen_address
+    });
+    let config_mismatch = find_config_mismatch(
+        remote_access_status.remote_listen_address,
+        remote_access_status.config_file_path.as_deref(),
+        config_file_path,
+        configured_address,
+    );
+    let RemoteAccessStatus {
+        remote_listen_address: router_listen_address,
         is_remote_access_enabled,
-        is_remote_listener_active,
-        served_certificate_fingerprint,
-    ) = match remote_status_response {
-        RouterResult::RemoteStatus {
-            remote_listen_address,
-            is_remote_access_enabled,
-            is_listening,
-            certificate_fingerprint,
-            ..
-        } => (
-            remote_listen_address,
-            is_remote_access_enabled,
-            is_listening,
-            certificate_fingerprint,
-        ),
-        unexpected_router_result => return Err(build_router_refusal(&unexpected_router_result)),
+        is_listening,
+        certificate_fingerprint: served_certificate_fingerprint,
+        ..
+    } = remote_access_status;
+    let Some(remote_listen_address) = router_listen_address else {
+        return Ok(match config_mismatch {
+            Some(config_mismatch) => RemoteReady::ConfigMismatched {
+                router_listen_address: None,
+                config_mismatch,
+            },
+            None => RemoteReady::NoAddress,
+        });
     };
-    let Some(remote_listen_address) = remote_listen_address else {
-        return Ok(RemoteReady::NoAddress);
-    };
-    if is_remote_access_enabled && is_remote_listener_active {
+    if is_remote_access_enabled && is_listening {
         let Some(certificate_fingerprint) = served_certificate_fingerprint else {
             return Err(CliError::Runtime {
                 detail: format!(
@@ -457,6 +512,13 @@ fn resolve_remote_access_ready(
             ),
             remote_listen_address,
             certificate_fingerprint,
+            config_mismatch,
+        });
+    }
+    if let Some(config_mismatch) = config_mismatch {
+        return Ok(RemoteReady::ConfigMismatched {
+            router_listen_address: Some(remote_listen_address),
+            config_mismatch,
         });
     }
     let prompt_text = if is_remote_access_enabled {
@@ -471,6 +533,8 @@ fn resolve_remote_access_ready(
         return Ok(if is_remote_access_enabled {
             RemoteReady::Blocked {
                 remote_listen_address,
+                is_remote_access_enabled,
+                open_refusal: None,
             }
         } else {
             RemoteReady::Off
@@ -487,12 +551,75 @@ fn resolve_remote_access_ready(
             ),
             remote_listen_address,
             certificate_fingerprint,
+            config_mismatch: None,
         }),
-        RouterResult::Error(_) => Ok(RemoteReady::Blocked {
+        RouterResult::Error(refusal_payload) => Ok(RemoteReady::Blocked {
             remote_listen_address,
+            is_remote_access_enabled,
+            open_refusal: Some(refusal_payload.message),
         }),
         unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
     }
+}
+
+/// Why the listen address the running router read when it started is not the
+/// one `koshi.kdl` names now, or `None` when they agree.
+///
+/// `router_listen_address` and `router_config_file_path` are what the router
+/// answered: the address it read and the `koshi.kdl` it read it from.
+/// `config_file_path` is the `koshi.kdl` this koshi reads, and
+/// `configured_address` the address that file names now.
+///
+/// 1. The router's file is this koshi's file: a `configured_address` that
+///    differs is [`ConfigMismatch::FileChanged`].
+/// 2. The router names another file: that file is read now, and an address
+///    that differs from the router's is [`ConfigMismatch::FileChanged`]
+///    naming that file. Else a `configured_address` that differs is
+///    [`ConfigMismatch::OtherFile`].
+/// 3. The router names no file: a `configured_address` that differs is
+///    [`ConfigMismatch::OtherFile`] with no router file.
+///
+/// A file that is absent, unreadable, or unparseable names no address, as
+/// [`load_server_config_file`] reads it.
+///
+/// Example: a router that read no address from
+/// `/home/user/.config/koshi/koshi.kdl`, which now names `127.0.0.1:7654`,
+/// gives `FileChanged` naming that file and `127.0.0.1:7654`.
+pub(crate) fn find_config_mismatch(
+    router_listen_address: Option<SocketAddr>,
+    router_config_file_path: Option<&Path>,
+    config_file_path: Option<&Path>,
+    configured_address: Option<SocketAddr>,
+) -> Option<ConfigMismatch> {
+    let Some(router_config_file_path) = router_config_file_path else {
+        if configured_address == router_listen_address {
+            return None;
+        }
+        return Some(ConfigMismatch::OtherFile {
+            router_config_file_path: None,
+            config_file_path: config_file_path.map(Path::to_path_buf),
+            configured_address,
+        });
+    };
+    let router_configured_address = if config_file_path == Some(router_config_file_path) {
+        configured_address
+    } else {
+        load_server_config_file(router_config_file_path).remote_listen_address
+    };
+    if router_configured_address != router_listen_address {
+        return Some(ConfigMismatch::FileChanged {
+            config_file_path: router_config_file_path.to_path_buf(),
+            configured_address: router_configured_address,
+        });
+    }
+    if configured_address == router_listen_address {
+        return None;
+    }
+    Some(ConfigMismatch::OtherFile {
+        router_config_file_path: Some(router_config_file_path.to_path_buf()),
+        config_file_path: config_file_path.map(Path::to_path_buf),
+        configured_address,
+    })
 }
 
 /// The addresses of this machine a client on another machine can connect to

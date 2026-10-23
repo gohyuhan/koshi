@@ -1,7 +1,7 @@
 //! Rendering for CLI answers: created ids from applied commands, discovery (`list-*`, `inspect`),
 //! action introspection (`actions list`, `actions explain`), keymap introspection (the `keys`
 //! queries), the `debug` dumps and the `debug events` listing, the two version answers (`version`,
-//! `server-version`), the three `share` answers, the three `remote` answers, the `kill-session`
+//! `server-version`), the four `share` answers, the three `remote` answers, the `kill-session`
 //! ending line, and the `doctor` answer. Read-only queries print as aligned columns
 //! (`--format table`, the default) or JSON (`--format json`).
 //!
@@ -12,9 +12,9 @@
 //! renders one table row per remembered event. `version`
 //! prints the one line `--version` prints, and `server-version` renders one
 //! table row per koshi server. `share list` renders one table row per grant
-//! and `remote list` one per saved server; `share grant`, `share revoke`,
-//! `remote forget` and `remote set-secret` report one outcome as plain lines
-//! and carry no `--format` flag. `kill-session` prints one line on how the
+//! and `remote list` one per saved server; `share grant`, `share open`,
+//! `share revoke`, `remote forget` and `remote set-secret` report one outcome
+//! as plain lines and carry no `--format` flag. `kill-session` prints one line on how the
 //! session ended, and nothing for a session that quit and left no process
 //! running. `doctor` renders one table row per check.
 //! JSON output is

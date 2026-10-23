@@ -162,8 +162,8 @@ pub enum IpcError {
     /// Nothing accepted the TCP connection at `server_address`.
     #[error(
         "{server_address} refused the connection: nothing is listening on that port. \
-         if remote access is not enabled on that machine, run `koshi share grant` \
-         there and answer yes to the offer to open the port"
+         if remote access is not enabled on that machine, run `koshi share open` \
+         there to open the port"
     )]
     ConnectRefused { server_address: String },
     /// The TCP connection to `server_address` was still unanswered when the
@@ -187,7 +187,7 @@ pub enum IpcError {
         "the certificate {server_address} presented is not the expected one: expected \
          {expected_certificate_fingerprint}, presented {presented_certificate_fingerprint}. the \
          secret was not sent. if that machine's certificate changed on purpose, `koshi share \
-         grant` there prints the new fingerprint: give it with --certificate-fingerprint, or \
+         open` there prints the new fingerprint: give it with --certificate-fingerprint, or \
          with `koshi remote edit` for a saved server."
     )]
     CertificateMismatch {

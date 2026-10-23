@@ -504,7 +504,7 @@ fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a
         format!(
             "the certificate desk.local:7654 presented is not the expected one: expected {}, \
              presented {}. the secret was not sent. if that machine's certificate changed on \
-             purpose, `koshi share grant` there prints the new fingerprint: give it with \
+             purpose, `koshi share open` there prints the new fingerprint: give it with \
              --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
             "aa".repeat(32),
             "bb".repeat(32)

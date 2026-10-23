@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::{TokenRecord, TokenScope};
+use koshi_link::router_client::RemoteAccessStatus;
 use tempfile::TempDir;
 
 use super::*;
@@ -33,7 +34,23 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         remote_listen_address: None,
         is_logging_enabled: false,
         standing_grant_count: Ok(0),
-        router_connections: RemoteConnections::NotRunning,
+        router_remote_status: RunningRouterRemoteStatus::NotRunning,
+        remote_config_mismatch: None,
+    }
+}
+
+/// A remote access status a running router answers: `127.0.0.1:7654` read from
+/// `/home/user/.config/koshi/koshi.kdl`, remote access on, listening with the
+/// fingerprint of 64 `a` characters, and `remote_connection_count`
+/// connections from another machine.
+fn build_remote_access_status(remote_connection_count: usize) -> RemoteAccessStatus {
+    RemoteAccessStatus {
+        remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
+        config_file_path: Some(PathBuf::from("/home/user/.config/koshi/koshi.kdl")),
+        is_remote_access_enabled: true,
+        is_listening: true,
+        certificate_fingerprint: Some("a".repeat(64)),
+        remote_connection_count,
     }
 }
 
@@ -529,17 +546,17 @@ fn runtime_directory_says_nothing_about_the_router() {
         detail: None,
     };
 
-    for router_connections in [
-        RemoteConnections::Answered(0),
-        RemoteConnections::NotRunning,
-        RemoteConnections::OlderBuild,
-        RemoteConnections::PreviousRelease,
-        RemoteConnections::NoAnswer {
+    for router_remote_status in [
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(0)),
+        RunningRouterRemoteStatus::NotRunning,
+        RunningRouterRemoteStatus::OlderBuild,
+        RunningRouterRemoteStatus::PreviousRelease,
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "connection refused".to_string(),
             router_process_id: Some(5000),
         },
     ] {
-        doctor_context.router_connections = router_connections;
+        doctor_context.router_remote_status = router_remote_status;
         assert_eq!(
             check_runtime_directory(&doctor_context),
             expected_runtime_directory_outcome
@@ -616,7 +633,8 @@ fn runtime_directory_names_the_data_directory_rule() {
 fn router_is_ok_when_one_answered() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::Answered(2);
+    doctor_context.router_remote_status =
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(2));
 
     assert_eq!(
         check_router(&doctor_context),
@@ -633,7 +651,7 @@ fn router_is_ok_when_one_answered() {
 fn router_is_ok_when_none_runs() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::NotRunning;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::NotRunning;
 
     assert_eq!(
         check_router(&doctor_context),
@@ -650,7 +668,7 @@ fn router_is_ok_when_none_runs() {
 fn router_warns_on_an_older_build_and_does_not_fail_the_run() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::OlderBuild;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::OlderBuild;
 
     assert_eq!(
         check_router(&doctor_context),
@@ -667,7 +685,7 @@ fn router_warns_on_an_older_build_and_does_not_fail_the_run() {
 fn router_fails_on_a_router_of_koshi_0_4_0_and_names_restart_servers() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::PreviousRelease;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::PreviousRelease;
 
     assert_eq!(
         check_router(&doctor_context),
@@ -685,7 +703,7 @@ fn router_fails_on_a_router_of_koshi_0_4_0_and_names_restart_servers() {
 fn router_fails_when_a_listening_router_did_not_answer_and_names_the_command_ending_it() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::NoAnswer {
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::NoAnswer {
         error_detail: "connection refused".to_string(),
         router_process_id: Some(5000),
     };
@@ -713,7 +731,7 @@ fn router_fails_when_a_listening_router_did_not_answer_and_names_the_command_end
 fn router_fails_when_a_listening_router_did_not_answer_and_its_process_id_is_unknown() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::NoAnswer {
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::NoAnswer {
         error_detail: "connection refused".to_string(),
         router_process_id: None,
     };
@@ -1174,13 +1192,243 @@ fn doctor_counts_previous_grants_without_changing_the_file() {
     );
 }
 
+// ------------------------------------------------------- remote listener
+
+/// The path the router's `koshi.kdl` has in [`build_remote_access_status`].
+fn build_router_config_file_path() -> PathBuf {
+    PathBuf::from("/home/user/.config/koshi/koshi.kdl")
+}
+
+#[test]
+fn remote_listener_names_the_served_address_and_its_fingerprint() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    doctor_context.router_remote_status =
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(0));
+
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: format!(
+                "the router serves 127.0.0.1:7654 with the certificate fingerprint {}",
+                "a".repeat(64)
+            ),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn remote_listener_warns_when_the_file_changed_since_the_router_started() {
+    // The router read no address; koshi.kdl names 127.0.0.1:7654 now.
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let mut remote_access_status = build_remote_access_status(0);
+    remote_access_status.remote_listen_address = None;
+    remote_access_status.is_remote_access_enabled = false;
+    remote_access_status.is_listening = false;
+    remote_access_status.certificate_fingerprint = None;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::Answered(remote_access_status);
+    doctor_context.remote_config_mismatch = Some(ConfigMismatch::FileChanged {
+        config_file_path: build_router_config_file_path(),
+        configured_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
+    });
+
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: format!(
+                "{} names the remote listen address 127.0.0.1:7654, and the running router read \
+                 no remote listen address from it when it started",
+                build_router_config_file_path().display()
+            ),
+            help: Some("run: koshi restart-servers".to_string()),
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn remote_listener_keeps_the_fingerprint_beside_a_change_the_serving_router_has_not_read() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    doctor_context.router_remote_status =
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(1));
+    doctor_context.remote_config_mismatch = Some(ConfigMismatch::FileChanged {
+        config_file_path: build_router_config_file_path(),
+        configured_address: Some(SocketAddr::from(([0, 0, 0, 0], 7654))),
+    });
+
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: format!(
+                "the router serves 127.0.0.1:7654 with the certificate fingerprint {}; {} names \
+                 the remote listen address 0.0.0.0:7654, and the running router read the remote \
+                 listen address 127.0.0.1:7654 from it when it started",
+                "a".repeat(64),
+                build_router_config_file_path().display()
+            ),
+            help: Some("run: koshi restart-servers".to_string()),
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn remote_listener_names_both_files_when_the_router_reads_another_one() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let mut remote_access_status = build_remote_access_status(0);
+    remote_access_status.is_listening = false;
+    remote_access_status.is_remote_access_enabled = false;
+    remote_access_status.certificate_fingerprint = None;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::Answered(remote_access_status);
+    let config_file_path = test_directory.path().join("config").join("koshi.kdl");
+    doctor_context.remote_config_mismatch = Some(ConfigMismatch::OtherFile {
+        router_config_file_path: Some(build_router_config_file_path()),
+        config_file_path: Some(config_file_path.clone()),
+        configured_address: Some(SocketAddr::from(([0, 0, 0, 0], 7654))),
+    });
+
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: format!(
+                "the running router reads {}, which names the remote listen address \
+                 127.0.0.1:7654, and this koshi reads {}, which names the remote listen address \
+                 0.0.0.0:7654",
+                build_router_config_file_path().display(),
+                config_file_path.display()
+            ),
+            help: Some(format!(
+                "set remote-listen in {}, then run: koshi restart-servers",
+                build_router_config_file_path().display()
+            )),
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn remote_listener_rates_each_state_of_a_router_with_no_mismatch() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+
+    let mut no_address_status = build_remote_access_status(0);
+    no_address_status.remote_listen_address = None;
+    no_address_status.is_listening = false;
+    no_address_status.certificate_fingerprint = None;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::Answered(no_address_status);
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: "the router read no remote listen address when it started, so nothing is \
+                     listening"
+                .to_string(),
+            help: None,
+            detail: None,
+        }
+    );
+
+    let mut off_status = build_remote_access_status(0);
+    off_status.is_remote_access_enabled = false;
+    off_status.is_listening = false;
+    off_status.certificate_fingerprint = None;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::Answered(off_status);
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: "remote access is off, so nothing is listening; `koshi share open` opens \
+                     127.0.0.1:7654"
+                .to_string(),
+            help: None,
+            detail: None,
+        }
+    );
+
+    let mut blocked_status = build_remote_access_status(0);
+    blocked_status.is_listening = false;
+    blocked_status.certificate_fingerprint = None;
+    doctor_context.router_remote_status = RunningRouterRemoteStatus::Answered(blocked_status);
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: "remote access is on, and nothing is listening on 127.0.0.1:7654: the router \
+                     could not open it when it started"
+                .to_string(),
+            help: Some("run: koshi share open".to_string()),
+            detail: None,
+        }
+    );
+
+    let mut unnamed_fingerprint_status = build_remote_access_status(0);
+    unnamed_fingerprint_status.certificate_fingerprint = None;
+    doctor_context.router_remote_status =
+        RunningRouterRemoteStatus::Answered(unnamed_fingerprint_status);
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: "the router serves 127.0.0.1:7654 and names no certificate fingerprint"
+                .to_string(),
+            help: Some("run: koshi restart-servers".to_string()),
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn remote_listener_reports_no_router_and_an_unanswered_router_without_rating_them() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+
+    assert_eq!(
+        check_remote_listener(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: "no koshi is running, so nothing is listening".to_string(),
+            help: None,
+            detail: None,
+        }
+    );
+    for router_remote_status in [
+        RunningRouterRemoteStatus::OlderBuild,
+        RunningRouterRemoteStatus::PreviousRelease,
+        RunningRouterRemoteStatus::NoAnswer {
+            error_detail: "connection refused".to_string(),
+            router_process_id: Some(5000),
+        },
+    ] {
+        doctor_context.router_remote_status = router_remote_status;
+        assert_eq!(
+            check_remote_listener(&doctor_context),
+            DoctorOutcome {
+                verdict: Verdict::Ok,
+                reason: "the running router did not answer, so this is not known".to_string(),
+                help: None,
+                detail: None,
+            }
+        );
+    }
+}
+
 // ---------------------------------------------------- remote connections
 
 #[test]
 fn remote_connections_counts_what_the_router_answered() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::Answered(0);
+    doctor_context.router_remote_status =
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(0));
 
     assert_eq!(
         check_remote_connections(&doctor_context),
@@ -1192,7 +1440,8 @@ fn remote_connections_counts_what_the_router_answered() {
         }
     );
 
-    doctor_context.router_connections = RemoteConnections::Answered(1);
+    doctor_context.router_remote_status =
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(1));
     assert_eq!(
         check_remote_connections(&doctor_context),
         DoctorOutcome {
@@ -1231,15 +1480,15 @@ fn remote_connections_reports_not_known_and_never_rates_a_router_that_did_not_an
         detail: None,
     };
 
-    for router_connections in [
-        RemoteConnections::OlderBuild,
-        RemoteConnections::PreviousRelease,
-        RemoteConnections::NoAnswer {
+    for router_remote_status in [
+        RunningRouterRemoteStatus::OlderBuild,
+        RunningRouterRemoteStatus::PreviousRelease,
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "connection refused".to_string(),
             router_process_id: Some(5000),
         },
     ] {
-        doctor_context.router_connections = router_connections;
+        doctor_context.router_remote_status = router_remote_status;
         assert_eq!(
             check_remote_connections(&doctor_context),
             expected_unknown_connection_outcome
@@ -1286,18 +1535,18 @@ fn no_session_or_remote_access_check_ever_fails() {
         }
     }
 
-    for router_connections in [
-        RemoteConnections::Answered(3),
-        RemoteConnections::NotRunning,
-        RemoteConnections::OlderBuild,
-        RemoteConnections::PreviousRelease,
-        RemoteConnections::NoAnswer {
+    for router_remote_status in [
+        RunningRouterRemoteStatus::Answered(build_remote_access_status(3)),
+        RunningRouterRemoteStatus::NotRunning,
+        RunningRouterRemoteStatus::OlderBuild,
+        RunningRouterRemoteStatus::PreviousRelease,
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: "connection refused".to_string(),
             router_process_id: Some(5000),
         },
     ] {
         let mut doctor_context = build_doctor_context(test_directory.path());
-        doctor_context.router_connections = router_connections;
+        doctor_context.router_remote_status = router_remote_status;
         assert_eq!(
             check_remote_connections(&doctor_context).verdict,
             Verdict::Ok
@@ -1434,6 +1683,7 @@ fn build_doctor_check_rows_runs_every_check_in_print_order() {
             "router",
             "session directory",
             "remote access",
+            "remote listener",
             "remote connections",
         ]
     );

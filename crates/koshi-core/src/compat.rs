@@ -190,6 +190,10 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 /// router's process image, which a restart into a new image changes. A
 /// `v0.5.0` router leaves it out, and a `v0.5.0` caller ignores it.
 ///
+/// The `RemoteStatus` answer carries `config_file_path`: the `koshi.kdl` the
+/// answering router read when it started. A `v0.5.0` router leaves it out,
+/// which reads as `None`, and a `v0.5.0` caller ignores it.
+///
 /// A request the router reads and refuses, other than one naming a session it
 /// does not have, is answered with the `RequestFailed` code. A `v0.5.0-pr.1`
 /// router, which also speaks 3, and a `v0.4.0` router answer it with the
