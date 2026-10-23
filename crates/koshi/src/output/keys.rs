@@ -31,9 +31,8 @@ struct KeyBindingSummary {
     key_sequence: String,
     /// The action reference the key fires.
     action_reference: String,
-    /// The layer that authored the winning entry: `defaults`, `user`,
-    /// `session`, or `layout` — or `defaults (unbound)` for a shipped
-    /// binding a user surface displaced.
+    /// The layer that authored the winning entry: `defaults` or `user` — or
+    /// `defaults (unbound)` for a shipped binding the user displaced.
     binding_source: String,
 }
 
@@ -77,7 +76,7 @@ struct KeyBindingDetail {
 /// `keys validate` answer.
 #[derive(Serialize)]
 struct ConflictFinding {
-    /// The finding's weight: `warning`, `collision`, or `fatal`.
+    /// The finding's weight: `warning` or `fatal`.
     severity: String,
     /// The user-facing message.
     finding_message: String,
@@ -87,8 +86,7 @@ struct ConflictFinding {
 #[derive(Serialize)]
 struct KeysConflicts {
     /// What a client does with the user keybinding file when it attaches:
-    /// `apply`, `revert-to-defaults`, or `reject`. `apply` when no file
-    /// exists.
+    /// `apply` or `reject`. `apply` when no file exists.
     verdict: String,
     /// Why the user keybinding file was ignored (it could not be read or
     /// parsed), `null` when it loaded. When set, the verdict is `reject`.
@@ -481,7 +479,6 @@ fn format_conflict_severity_label(
 ) -> &'static str {
     match conflict_severity {
         koshi_config::conflict::ConflictSeverity::Warning => "warning",
-        koshi_config::conflict::ConflictSeverity::Collision => "collision",
         koshi_config::conflict::ConflictSeverity::Fatal => "fatal",
     }
 }
@@ -492,7 +489,6 @@ fn format_keymap_verdict_label(
 ) -> &'static str {
     match keymap_verdict {
         koshi_config::conflict::KeymapVerdict::Apply => "apply",
-        koshi_config::conflict::KeymapVerdict::RevertToDefaults => "revert-to-defaults",
         koshi_config::conflict::KeymapVerdict::Reject => "reject",
     }
 }

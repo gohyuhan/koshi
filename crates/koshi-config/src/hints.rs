@@ -49,10 +49,6 @@ pub struct KeymapHints {
     /// Every key a user surface removed in the current mode. A removal under
     /// a labeled prefix voids that label.
     pub removed_key_sequences: Arc<BTreeSet<KeySequence>>,
-    /// True when the user keymap was reverted to defaults over a key
-    /// collision: the bar shows a conflict marker, and the hints listed are
-    /// the reverted-to defaults.
-    pub is_reverted_to_defaults: bool,
 }
 
 /// One binding the hint bar can show: a key sequence, the display name of the
@@ -91,12 +87,6 @@ pub struct KeymapHintCatalog {
     removed_key_sequences_by_mode_name: BTreeMap<ModeName, Arc<BTreeSet<KeySequence>>>,
     /// Display labels for the default table's prefix chords.
     prefix_labels: Arc<BTreeMap<KeyChord, String>>,
-    /// True when the user keymap was reverted to defaults over a key
-    /// collision.
-    /// [`from_keymap_layers_config_and_registry`](Self::from_keymap_layers_config_and_registry)
-    /// builds it `false`; [`mark_reverted_to_defaults`](Self::mark_reverted_to_defaults)
-    /// sets it.
-    is_reverted_to_defaults: bool,
 }
 
 impl KeymapHintCatalog {
@@ -193,17 +183,7 @@ impl KeymapHintCatalog {
             hint_bindings_by_mode_name,
             removed_key_sequences_by_mode_name,
             prefix_labels: Arc::new(build_default_prefix_labels(keybindings_config.leader)),
-            is_reverted_to_defaults: false,
         }
-    }
-
-    /// Mark this catalog as the built-in defaults standing in for a user
-    /// keymap that a key collision reverted. The hint bar draws the revert
-    /// marker for a catalog marked this way.
-    #[must_use]
-    pub fn mark_reverted_to_defaults(mut self) -> Self {
-        self.is_reverted_to_defaults = true;
-        self
     }
 
     /// Resolve one pending sequence in a built-in mode.
@@ -260,8 +240,7 @@ impl KeymapHintCatalog {
     }
 
     /// The hint-bar data one frame is painted from: the bindings and removals
-    /// of `lock_mode` shared by reference, plus the prefix labels and the
-    /// revert flag.
+    /// of `lock_mode` shared by reference, plus the prefix labels.
     ///
     /// Every entry labelled [`MOUSE_SELECT_HINT`] reads [`MOUSE_UNSELECT_HINT`]
     /// while `is_mouse_selection_enabled` is `true`. Every entry labelled
@@ -302,7 +281,6 @@ impl KeymapHintCatalog {
                 .get(mode_name)
                 .map(Arc::clone)
                 .unwrap_or_default(),
-            is_reverted_to_defaults: self.is_reverted_to_defaults,
         }
     }
 }

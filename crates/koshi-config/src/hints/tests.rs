@@ -310,30 +310,6 @@ fn a_rebound_leader_moves_the_prefix_labels() {
 }
 
 #[test]
-fn default_hint_catalog_is_not_marked_reverted_to_defaults() {
-    assert!(
-        !build_default_hint_catalog()
-            .build_frame_hints(LockMode::Normal, false, false)
-            .is_reverted_to_defaults
-    );
-}
-
-#[test]
-fn mark_reverted_to_defaults_marks_every_mode_hint() {
-    let hint_catalog = build_default_hint_catalog().mark_reverted_to_defaults();
-    assert!(
-        hint_catalog
-            .build_frame_hints(LockMode::Normal, false, false)
-            .is_reverted_to_defaults
-    );
-    assert!(
-        hint_catalog
-            .build_frame_hints(LockMode::Locked, false, false)
-            .is_reverted_to_defaults
-    );
-}
-
-#[test]
 fn frames_share_the_per_mode_data_by_reference() {
     let hint_catalog = build_default_hint_catalog();
     let first_hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
@@ -476,10 +452,6 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
     assert_eq!(
         mouse_selection_disabled_hints.removed_key_sequences,
         mouse_selection_enabled_hints.removed_key_sequences
-    );
-    assert_eq!(
-        mouse_selection_disabled_hints.is_reverted_to_defaults,
-        mouse_selection_enabled_hints.is_reverted_to_defaults
     );
 }
 
@@ -687,42 +659,6 @@ fn the_chord_timeout_carries_the_configured_milliseconds_at_both_bounds() {
     assert_eq!(
         maximum_timeout_hint_catalog.get_chord_timeout(),
         Duration::from_millis(4_294_967_295)
-    );
-}
-
-#[test]
-fn mark_reverted_to_defaults_changes_only_the_flag() {
-    let base_hint_catalog = build_default_hint_catalog();
-    let reverted_hint_catalog = base_hint_catalog.clone().mark_reverted_to_defaults();
-    let base_hints = base_hint_catalog.build_frame_hints(LockMode::Normal, false, false);
-    let reverted_hints = reverted_hint_catalog.build_frame_hints(LockMode::Normal, false, false);
-
-    assert!(!base_hints.is_reverted_to_defaults);
-    assert!(reverted_hints.is_reverted_to_defaults);
-    assert!(Arc::ptr_eq(
-        &base_hints.hint_bindings,
-        &reverted_hints.hint_bindings
-    ));
-    assert!(Arc::ptr_eq(
-        &base_hints.removed_key_sequences,
-        &reverted_hints.removed_key_sequences
-    ));
-    assert!(Arc::ptr_eq(
-        &base_hints.prefix_labels,
-        &reverted_hints.prefix_labels
-    ));
-    assert_eq!(
-        reverted_hint_catalog.get_unlock_chord(),
-        base_hint_catalog.get_unlock_chord()
-    );
-    assert_eq!(
-        reverted_hint_catalog.get_chord_timeout(),
-        base_hint_catalog.get_chord_timeout()
-    );
-    let quit_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'q');
-    assert_eq!(
-        reverted_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence),
-        base_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence)
     );
 }
 

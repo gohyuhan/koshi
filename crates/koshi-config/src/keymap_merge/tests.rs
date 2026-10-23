@@ -243,34 +243,6 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
 }
 
 #[test]
-fn a_layout_layer_is_user_authored_and_carries_its_own_attribution() {
-    let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'w');
-    let merged_keymap = merge_test_keymaps(&[
-        build_default_keymap_layer(),
-        build_keymap_layer(
-            LayerOrigin::Layout,
-            "normal",
-            vec![(key_sequence.clone(), build_bound_action("lock"))],
-        ),
-    ]);
-
-    assert_eq!(
-        merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")],
-        MergedModeKeymap {
-            user_bindings_by_key_sequence: BTreeMap::from([(
-                key_sequence,
-                MergedBinding {
-                    bound_action: build_bound_action("lock"),
-                    layer_origin: LayerOrigin::Layout,
-                },
-            )]),
-            default_bindings_by_key_sequence: list_default_bound_actions("normal"),
-            ..MergedModeKeymap::default()
-        }
-    );
-}
-
-#[test]
 fn one_key_bound_in_two_modes_merges_independently() {
     let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'w');
     let merged_keymap = merge_test_keymaps(&[
@@ -350,35 +322,6 @@ fn user_binding_steals_a_defaulted_key() {
 }
 
 #[test]
-fn higher_precedence_user_layer_wins_the_key_and_its_attribution() {
-    // Two user-authored layers bind one key to the same action. The
-    // higher-precedence layer's entry wins, and `layer_origin` names it.
-    let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'w');
-    let merged_keymap = merge_test_keymaps(&[
-        build_default_keymap_layer(),
-        build_keymap_layer(
-            LayerOrigin::User,
-            "normal",
-            vec![(key_sequence.clone(), build_bound_action("lock"))],
-        ),
-        build_keymap_layer(
-            LayerOrigin::Session,
-            "normal",
-            vec![(key_sequence.clone(), build_bound_action("lock"))],
-        ),
-    ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
-
-    assert_eq!(
-        normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
-        MergedBinding {
-            bound_action: build_bound_action("lock"),
-            layer_origin: LayerOrigin::Session,
-        }
-    );
-}
-
-#[test]
 fn remove_clears_a_default_and_records_both_sides() {
     let key_sequence = build_default_fullscreen_key_sequence();
     let merged_keymap = merge_test_keymaps(&[
@@ -418,46 +361,6 @@ fn remove_clears_a_default_and_records_both_sides() {
 }
 
 #[test]
-fn remove_then_rebind_moves_a_key_between_user_layers() {
-    // The session layer removes the user layer's key and binds the key
-    // itself.
-    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
-    let merged_keymap = merge_test_keymaps(&[
-        build_default_keymap_layer(),
-        build_keymap_layer(
-            LayerOrigin::User,
-            "normal",
-            vec![(key_sequence.clone(), build_bound_action("new-tab"))],
-        ),
-        build_keymap_layer_with_removed_key_sequences(
-            LayerOrigin::Session,
-            "normal",
-            vec![(key_sequence.clone(), build_bound_action("lock"))],
-            vec![key_sequence.clone()],
-        ),
-    ]);
-    let normal_mode_keymap = &merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
-
-    // The session layer's bind survives its own remove. The user layer's
-    // entry is dropped.
-    assert_eq!(
-        normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
-        MergedBinding {
-            bound_action: build_bound_action("lock"),
-            layer_origin: LayerOrigin::Session,
-        }
-    );
-    assert_eq!(
-        normal_mode_keymap.removed_key_sequences,
-        BTreeSet::from([key_sequence])
-    );
-    assert_eq!(
-        normal_mode_keymap.unbound_default_bindings_by_key_sequence,
-        BTreeMap::new()
-    );
-}
-
-#[test]
 fn remove_below_does_not_void_a_higher_binding() {
     let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let merged_keymap = merge_test_keymaps(&[
@@ -469,7 +372,7 @@ fn remove_below_does_not_void_a_higher_binding() {
             vec![key_sequence.clone()],
         ),
         build_keymap_layer(
-            LayerOrigin::Session,
+            LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
@@ -480,7 +383,7 @@ fn remove_below_does_not_void_a_higher_binding() {
         normal_mode_keymap.user_bindings_by_key_sequence[&key_sequence],
         MergedBinding {
             bound_action: build_bound_action("lock"),
-            layer_origin: LayerOrigin::Session,
+            layer_origin: LayerOrigin::User,
         }
     );
     assert_eq!(
@@ -540,27 +443,27 @@ fn remove_and_rebind_of_a_defaulted_key_in_one_layer_records_both_sides() {
 
 #[test]
 fn removed_keys_accumulate_across_layers() {
-    let user_removed_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'x');
-    let session_removed_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'y');
+    let lower_removed_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'x');
+    let higher_removed_key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'y');
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
         build_keymap_layer_with_removed_key_sequences(
             LayerOrigin::User,
             "normal",
             Vec::new(),
-            vec![user_removed_key_sequence.clone()],
+            vec![lower_removed_key_sequence.clone()],
         ),
         build_keymap_layer_with_removed_key_sequences(
-            LayerOrigin::Session,
+            LayerOrigin::User,
             "normal",
             Vec::new(),
-            vec![session_removed_key_sequence.clone()],
+            vec![higher_removed_key_sequence.clone()],
         ),
     ]);
 
     assert_eq!(
         merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")].removed_key_sequences,
-        BTreeSet::from([user_removed_key_sequence, session_removed_key_sequence])
+        BTreeSet::from([lower_removed_key_sequence, higher_removed_key_sequence])
     );
 }
 
@@ -652,7 +555,7 @@ fn removed_user_binding_vanishes_silently() {
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
         build_keymap_layer_with_removed_key_sequences(
-            LayerOrigin::Session,
+            LayerOrigin::User,
             "normal",
             Vec::new(),
             vec![key_sequence.clone()],
@@ -709,9 +612,9 @@ fn dead_user_binding_leaves_the_default_beneath_live() {
 
 #[test]
 fn a_dead_user_binding_above_a_live_one_leaves_the_lower_layer_winning() {
-    // The session layer names an unregistered action on a key the user layer
-    // already took. The dead entry changes nothing: `layer_origin` stays
-    // `User`.
+    // The higher user layer names an unregistered action on a key the lower
+    // user layer already took. The dead entry changes nothing: the lower
+    // layer's `core:lock` keeps the key.
     let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'w');
     let merged_keymap = merge_test_keymaps(&[
         build_default_keymap_layer(),
@@ -721,7 +624,7 @@ fn a_dead_user_binding_above_a_live_one_leaves_the_lower_layer_winning() {
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
         build_keymap_layer(
-            LayerOrigin::Session,
+            LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("does-not-exist"))],
         ),

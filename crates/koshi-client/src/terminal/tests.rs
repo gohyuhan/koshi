@@ -4988,7 +4988,10 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
             frame_inputs.theme.ramp_start = (1, 2, 3);
         }),
         ("the hint bar", |frame_inputs| {
-            frame_inputs.keymap_hints.is_reverted_to_defaults = true;
+            frame_inputs.keymap_hints.prefix_labels = Arc::new(BTreeMap::from([(
+                KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
+                "PANE".to_string(),
+            )]));
         }),
         ("an open key sequence", |frame_inputs| {
             frame_inputs.pending_key_sequence = Some(KeySequence::from(KeyChord::from_parts(

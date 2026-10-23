@@ -27,7 +27,6 @@ use crate::render::{compute_bar_style, get_line_width, set_line_clipped};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
-const REVERT_MARKER: &str = " keys! ";
 const RECOVERY_NOTICE: &str =
     "Restore failed: new shell; previous panes unavailable. Input clears notice. ";
 
@@ -39,15 +38,12 @@ const RECOVERY_NOTICE: &str =
 /// 1. Blanks the row, then fills it with the theme's bar background.
 /// 2. When `is_recovery_notice_visible`, draws the session recovery notice
 ///    across the row and stops.
-/// 3. Draws the ` keys! ` marker at the right edge when the user
-///    keymap was reverted. The marker holds its edge, and every hint below
-///    stops short of it.
-/// 4. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
+/// 3. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
 ///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
 ///    chord's prefix label, and only when bindings sit under it.
-/// 5. Draws each modifier group left to right: its ` Ctrl + ` header, then one
+/// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
-/// 6. Draws a `…` marker where the row ran out of room, and stops there.
+/// 5. Draws a `…` marker where the row ran out of room, and stops there.
 pub(crate) fn draw_statusline(
     statusline_inputs: StatuslineInputs<'_>,
     theme: &Theme,
@@ -82,22 +78,7 @@ pub(crate) fn draw_statusline(
     }
 
     let pending_chords = pending_key_sequence.map_or(&[][..], KeySequence::list_chords);
-    let mut right_edge_column = statusline_area.right();
-    if keymap_hints.is_reverted_to_defaults {
-        let revert_marker_line = Line::from(Span::styled(REVERT_MARKER, compute_warning_style()));
-        let revert_marker_width = get_line_width(&revert_marker_line);
-        let revert_marker_start_column = right_edge_column
-            .saturating_sub(revert_marker_width)
-            .max(statusline_area.x);
-        set_line_clipped(
-            screen_buffer,
-            revert_marker_start_column,
-            statusline_area.y,
-            &revert_marker_line,
-            right_edge_column - revert_marker_start_column,
-        );
-        right_edge_column = revert_marker_start_column;
-    }
+    let right_edge_column = statusline_area.right();
 
     let mut current_column = statusline_area.x;
     if !pending_chords.is_empty() {
@@ -120,7 +101,6 @@ pub(crate) fn draw_statusline(
                     theme,
                     current_column,
                     statusline_area.y,
-                    statusline_area.x,
                     right_edge_column,
                 );
                 return;
@@ -140,7 +120,6 @@ pub(crate) fn draw_statusline(
                 theme,
                 current_column,
                 statusline_area.y,
-                statusline_area.x,
                 right_edge_column,
             );
             return;
@@ -185,7 +164,6 @@ pub(crate) fn draw_statusline(
                 theme,
                 current_column,
                 statusline_area.y,
-                statusline_area.x,
                 right_edge_column,
             );
             return;
@@ -213,7 +191,6 @@ pub(crate) fn draw_statusline(
                     theme,
                     current_column,
                     statusline_area.y,
-                    statusline_area.x,
                     right_edge_column,
                 );
                 return;
@@ -224,21 +201,14 @@ pub(crate) fn draw_statusline(
 
 /// Mark dropped trailing hints with `…`. Painted at the current cursor, or
 /// over the row's last cell when the hints consumed the full width.
-///
-/// The column is held inside `left_edge_column..right_edge_column`: a
-/// `right_edge_column` the revert marker pulled down to `left_edge_column`
-/// paints on `left_edge_column`, never one column left of it.
 fn draw_overflow_marker(
     screen_buffer: &mut Buffer,
     theme: &Theme,
     current_column: u16,
     row_index: u16,
-    left_edge_column: u16,
     right_edge_column: u16,
 ) {
-    let marker_start_column = current_column
-        .min(right_edge_column.saturating_sub(1))
-        .max(left_edge_column);
+    let marker_start_column = current_column.min(right_edge_column.saturating_sub(1));
     let overflow_marker_line = Line::from(Span::styled("…", compute_overflow_style(theme)));
     set_line_clipped(
         screen_buffer,
@@ -617,7 +587,7 @@ fn compute_overflow_style(theme: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// The warning colors used for a reverted keymap or a failed session restore.
+/// The warning colors used for a failed session restore.
 fn compute_warning_style() -> Style {
     Style::default()
         .fg(Color::White)
