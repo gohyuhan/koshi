@@ -390,6 +390,28 @@ dock-pane`, `koshi move-pane --x --y`, and `koshi restore-pane --pane`. A key
 bound to one of them loads with an unresolvable-arguments warning and sends
 nothing when pressed.
 
+`<leader>p <Tab>` (`core:focus-next-floating-pane`) and `<leader>p <S-Tab>`
+(`core:focus-previous-floating-pane`) step through every floating pane of the
+session, in the order the panes became floating, and wrap at the ends:
+
+- Each step shows the pane it lands on above this client's other floating
+  panes and gives it this client's input. A minimized pane is shown again.
+- The panes a step passes stay shown.
+- From a tiled or stacked pane, `<Tab>` lands on the first floating pane and
+  `<S-Tab>` on the last.
+- The prefix stays open, so each further `<Tab>` or `<S-Tab>` takes one more
+  step.
+
+Example: `htop` and then `logs` became floating, this client minimized both,
+and its input is on the tiled pane `A`. `<C-p> <Tab>` shows and focuses
+`htop`. `<Tab>` again shows `logs` on top, and `htop` stays shown.
+
+With no floating pane in the session, both are refused with `the session holds
+no floating pane`. A client that cannot draw floating panes refuses both with
+`no floating pane can be drawn on this client`: its pane area is smaller than
+`5x6`, or its tab shows `Terminal too small — enlarge window` in place of every
+pane.
+
 ## The pane move chooser
 
 `<leader>p m` opens the chooser when this client draws at least one floating
