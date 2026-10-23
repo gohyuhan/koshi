@@ -40,8 +40,12 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{KillPolicy, PtySize};
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::layout::{FloatingPaneClientView, FloatingPaneLayout, FloatingPaneVisibility};
+use koshi_ipc::layout::{
+    FloatingPaneClientView, FloatingPaneLayout, FloatingPaneVisibility, SessionLayout,
+};
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
+use koshi_layout::edit::split_leaf;
+use koshi_layout::tree::LayoutNode;
 use koshi_link::error::CliError;
 use koshi_test_support::fixtures::{build_test_runtime_directory, send_committed_request};
 
@@ -689,6 +693,101 @@ fn new_tab_with_a_client_flag_switches_that_client_onto_the_new_tab() {
     assert_eq!(get_active_tab_id(named_client.client_id), new_tab_id);
     // The client that typed the command stays where it was.
     assert_eq!(get_active_tab_id(issuer_client.client_id), first_tab_id);
+}
+
+#[test]
+fn new_pane_from_outside_koshi_with_a_client_flag_splits_that_clients_focused_pane() {
+    let session = RunningSession::start_session();
+    let issuer_client = attach_test_client(&session);
+    let named_client = attach_test_client(&session);
+    assert_ne!(issuer_client.client_id, named_client.client_id);
+    let root_pane_id = session.list_pane_ids()[0];
+    let first_tab_id = get_only_tab_id(&session);
+    let named_client_id_text = named_client.client_id.to_string();
+    let fetch_session_layout = || {
+        koshi_link::ipc_client::fetch_layout(
+            session.runtime_directory.path(),
+            None,
+            session.session_id,
+            None,
+        )
+        .expect("the session describes its layout")
+    };
+    let find_client_focus = |session_layout: &SessionLayout, client_id: ClientId| {
+        session_layout
+            .clients
+            .iter()
+            .find(|client_focus| client_focus.client_id == client_id)
+            .map(|client_focus| (client_focus.active_tab_id, client_focus.focused_pane_id))
+            .expect("the client is attached to the session")
+    };
+    let find_tab_layout_tree = |session_layout: &SessionLayout, tab_id: TabId| {
+        session_layout
+            .tabs
+            .iter()
+            .find(|tab_layout| tab_layout.tab_id == tab_id)
+            .map(|tab_layout| tab_layout.layout_tree.clone())
+            .expect("the session holds the tab")
+    };
+
+    // The named client moves onto a tab of its own and focuses its one pane.
+    let (_, new_tab_exit_code) = run_cli_invocation(
+        &session,
+        &issuer_client,
+        root_pane_id,
+        &["koshi", "new-tab", "--client", &named_client_id_text],
+    );
+    assert_eq!(new_tab_exit_code, CliExitCode::Success);
+    let (new_tab_id, new_tab_pane_id) =
+        match find_client_focus(&fetch_session_layout(), named_client.client_id) {
+            (new_tab_id, Some(new_tab_pane_id)) => (new_tab_id, new_tab_pane_id),
+            unexpected_focus => panic!("the named client focuses no pane: {unexpected_focus:?}"),
+        };
+    assert_ne!(new_tab_id, first_tab_id);
+
+    let (command_result, exit_code) = run_external_cli_invocation(
+        &session,
+        &[
+            "koshi",
+            "new-pane",
+            "--direction",
+            "right",
+            "--client",
+            &named_client_id_text,
+        ],
+    );
+
+    assert_eq!(exit_code, CliExitCode::Success);
+    let new_pane_id = match list_emitted_events(&command_result) {
+        [Event::PaneCreated(created_pane), ..] => {
+            assert_eq!(created_pane.tab_id, Some(new_tab_id));
+            created_pane.pane_id
+        }
+        unexpected_events => panic!("expected a pane to be created, got {unexpected_events:?}"),
+    };
+    let session_layout = fetch_session_layout();
+    assert_eq!(
+        find_tab_layout_tree(&session_layout, new_tab_id),
+        split_leaf(
+            &LayoutNode::Pane(new_tab_pane_id),
+            new_tab_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the named client's pane splits")
+    );
+    assert_eq!(
+        find_tab_layout_tree(&session_layout, first_tab_id),
+        LayoutNode::Pane(root_pane_id)
+    );
+    assert_eq!(
+        find_client_focus(&session_layout, named_client.client_id),
+        (new_tab_id, Some(new_pane_id))
+    );
+    assert_eq!(
+        find_client_focus(&session_layout, issuer_client.client_id),
+        (first_tab_id, Some(root_pane_id))
+    );
 }
 
 #[test]

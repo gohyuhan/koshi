@@ -235,8 +235,9 @@ impl Rejection {
 
 /// The resolved concrete target of a [`Command::NewPane`]: the session and tab
 /// the new pane joins, the command source pane it splits from, and the client to
-/// auto-focus it for (when one applies). All fields are `Copy`: the target
-/// holds no borrow into the session map.
+/// auto-focus it for: the client the command names, else its issuer while
+/// attached, else none. All fields are `Copy`: the target holds no borrow into
+/// the session map.
 struct NewPaneTarget {
     session_id: SessionId,
     source_pane_id: PaneId,
