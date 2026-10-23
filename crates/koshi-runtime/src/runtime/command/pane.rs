@@ -14,16 +14,21 @@ impl Server {
     /// is spawned, and only on success is the pane registered, the
     /// tree swapped in, the sibling PTYs reflowed, and the handle parked. A launch
     /// failure commits nothing and rejects; no pane is registered without its
-    /// process. A client is designated to view and focus the new pane — an
-    /// explicit `--client` target (which wins even over the issuer, and rejects
-    /// outright if not attached), else the in-session issuer, else (an external
-    /// command source, tab unviewed) the session's sole client; a session with several
-    /// attached clients and no named target is rejected as ambiguous, and one with
-    /// no attached client at all is rejected. The designated client is switched
-    /// onto the tab (if not already there) and the tab it left is reflowed. That
-    /// client's zoom drops at the commit, and the new pane shows in the tiled
-    /// view it was sized against; any other client's zoom is left alone. All events
-    /// seal in one transaction.
+    /// process. The source pane and the client that views and focuses the new
+    /// pane come from [`Self::resolve_new_pane_source`]: an external command
+    /// naming `--client` and no `--pane` or `--tab` splits the pane that takes
+    /// that client's input. A client is designated to view and focus the new
+    /// pane — an explicit `--client` target (which wins even over the issuer,
+    /// and rejects outright if not attached), else the attached issuer, else
+    /// (an external command source, tab unviewed) the session's sole client; a
+    /// session with several attached clients and no named target is rejected as
+    /// ambiguous, and one with no attached client at all is rejected. An
+    /// external command source naming no client on a tab a client already
+    /// views designates no client, and no client's focus moves. The designated
+    /// client is switched onto the tab (if not already there) and the tab it
+    /// left is reflowed. That client's zoom drops at the commit, and the new
+    /// pane shows in the tiled view it was sized against; any other client's
+    /// zoom is left alone. All events seal in one transaction.
     ///
     /// A [`NewPanePlacement::Floating`] placement goes to
     /// [`Self::handle_new_floating_pane`].
@@ -59,8 +64,13 @@ impl Server {
             }
         };
         let acting_session = self.resolve_acting_session(command_source)?;
-        let new_pane_target =
-            self.resolve_new_pane_source(source_pane_id, tab_id, command_source, acting_session)?;
+        let new_pane_target = self.resolve_new_pane_source(
+            source_pane_id,
+            tab_id,
+            command_args.client_id,
+            command_source,
+            acting_session,
+        )?;
 
         // The shared backend is cloned before the session is borrowed; spawn
         // and resize run on the clone while `&mut Session` is held.
@@ -119,7 +129,6 @@ impl Server {
             new_pane_target.tab_id,
             &candidate_layout_tree,
             new_pane_target.focus_client_id,
-            command_args.client_id,
             pane_sizing,
         )?;
 
@@ -404,8 +413,12 @@ impl Server {
         command_args: &ClosePaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            acting_session,
+        )?;
         let Some(tab_id) = pane_target.tab_id else {
             return self.handle_close_floating_pane(
                 command_id,
@@ -742,8 +755,12 @@ impl Server {
         command_args: &ResizePaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            acting_session,
+        )?;
         let Some(tab_id) = pane_target.tab_id else {
             let floating_pane_resize =
                 self.resolve_floating_pane_resize(command_args, command_source, &pane_target)?;
@@ -1957,8 +1974,12 @@ impl Server {
         command_args: &WriteToPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            acting_session,
+        )?;
         if self
             .get_pty_backend()
             .write_pane_input(pane_target.pane_id, &command_args.pane_input_bytes)
@@ -1986,18 +2007,18 @@ impl Server {
     /// client — the one that will view the tab and focus the new pane, `None`
     /// when the tab is already viewed and no client was named.
     ///
-    /// A designated client is an explicit `target_client_id` (the command's
-    /// named `--client`, which wins even over an in-session issuer) or, when none is
-    /// named, the issuing client (`focus_client_id`). When one is designated, the
-    /// split is sized to the smallest of the tab's current viewers *and* that
-    /// client, and fits every client that shows it; the caller switches the client
-    /// onto the tab if it is not already there.
+    /// The designated client is `focus_client_id` when set: the client the
+    /// command names, else its issuer while attached
+    /// ([`Self::resolve_new_pane_source`]). The split is then sized to the
+    /// smallest of the tab's current viewers *and* that client, and fits every
+    /// client that shows it; the caller switches the client onto the tab if it
+    /// is not already there.
     ///
-    /// With no designated client (an external command source that names no target):
-    /// an already-viewed tab sizes to its current viewers and designates no one
-    /// (the pane just appears, no view moves); an unviewed tab defaults to the
-    /// session's sole client, and a session with several attached clients is
-    /// [`RejectReason::TargetAmbiguous`].
+    /// With no `focus_client_id` (an external command source that names no
+    /// client): an already-viewed tab sizes to its current viewers and
+    /// designates no one (the pane just appears, no view moves); an unviewed
+    /// tab defaults to the session's sole client, and a session with several
+    /// attached clients is [`RejectReason::TargetAmbiguous`].
     ///
     /// Each client contributes [`Client::get_pane_area`]; a designated client
     /// reporting [`PaneArea::Starving`] contributes nothing, and is rejected
@@ -2006,18 +2027,14 @@ impl Server {
     ///
     /// `candidate_layout_tree` is the post-split tree fit is judged against. Fails
     /// [`RejectReason::MinimumSize`] when the split cannot fit the chosen tab size,
-    /// [`RejectReason::TargetNotFound`] when the designated client (a named
-    /// `target_client_id`, or the issuer) is not attached here — a wrong explicit
-    /// target is rejected outright, never falling back — and
-    /// [`RejectReason::InvalidState`] when the tab has no viewer and the session
-    /// has no attached client at all. A bystander client is never switched to
-    /// satisfy a command that named none.
+    /// and [`RejectReason::InvalidState`] when the tab has no viewer and the
+    /// session has no attached client at all. A bystander client is never
+    /// switched to satisfy a command that named none.
     fn resolve_new_pane_tab_size(
         session: &Session,
         tab_id: TabId,
         candidate_layout_tree: &LayoutNode,
-        issuing_client_id: Option<ClientId>,
-        target_client_id: Option<ClientId>,
+        focus_client_id: Option<ClientId>,
         pane_sizing: PaneSizing,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
         let build_no_room_rejection = || {
@@ -2041,18 +2058,10 @@ impl Server {
         };
         let existing_tab_size = session.get_tab_size(tab_id);
 
-        // An explicit `--client` target wins over the issuing client — a caller
-        // that names a client is honored even in-session — and must be valid: a
-        // wrong target is rejected outright, never falling back to the issuer. With
-        // no explicit target, the in-session issuer is used.
-        if let Some(client_id) = target_client_id.or(issuing_client_id) {
-            let designated_client =
-                session.clients.get_client_by_id(client_id).ok_or_else(|| {
-                    Rejection::from_reason_and_help(
-                        RejectReason::TargetNotFound,
-                        "target client not attached to the session",
-                    )
-                })?;
+        // The focus client is designated: the client the command names, else
+        // its attached issuer.
+        if let Some(client_id) = focus_client_id {
+            let designated_client = Self::require_client(session, client_id)?;
             // The smaller of the tab's current size and the designated
             // client's pane area; a starving designated client adds no size.
             let tab_size = match (existing_tab_size, designated_client.get_pane_area()) {

@@ -644,6 +644,24 @@ outside koshi closes `htop`, and the keys return to the shell.
 Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 `git status` at that pane's prompt without running it.
 
+Without `--pane` or `--tab`, `new-pane` and `run` split one pane. Inside a koshi
+pane, they split that pane. Outside koshi, they split the pane that takes the
+keys of the client `--client` names, else of the session's only attached
+client. With several attached clients and no `--client`, the command fails
+with `several clients are attached; name the target client`.
+
+The client that `--client` names shows and focuses the new pane. If that client
+views another tab, it moves onto the tab of the new pane first. Without
+`--client`, the client of the pane the command runs in does this. Outside koshi
+without `--client`, the new pane takes no client's focus on a tab that a client
+already views. On a tab that no client views, the session's only attached
+client moves onto the tab and focuses the new pane.
+
+Example: terminal `client-1a2b…` views tab `logs`, and terminal `client-3c4d…`
+views tab `build`. `koshi new-pane --direction right --client client-3c4d…`,
+typed outside koshi, splits the pane that `client-3c4d…` focuses in `build`.
+`client-3c4d…` then focuses the new pane, and `client-1a2b…` stays on `logs`.
+
 ### Floating panes
 
 `koshi new-pane --floating` and `koshi run --floating -- <COMMAND>...` open a

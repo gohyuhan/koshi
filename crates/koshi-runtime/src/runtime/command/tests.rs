@@ -5334,6 +5334,322 @@ fn new_pane_external_unattached_target_client_is_not_found() {
     );
 }
 
+/// A session with two tabs of one pane each and two attached clients:
+/// `first_client_id` views `first_tab_id` with `first_pane_id` focused, and
+/// `second_client_id` views `second_tab_id` with `second_pane_id` focused.
+struct TwoViewedTabsFixture {
+    runtime: Server,
+    session_id: SessionId,
+    first_client_id: ClientId,
+    first_tab_id: TabId,
+    first_pane_id: PaneId,
+    second_client_id: ClientId,
+    second_tab_id: TabId,
+    second_pane_id: PaneId,
+}
+
+/// Build a [`TwoViewedTabsFixture`].
+fn build_two_viewed_tabs_fixture() -> TwoViewedTabsFixture {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let first_client_id = ClientId::new();
+    let second_client_id = ClientId::new();
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let mut session = build_bare_session(SessionId::new());
+    register_pane_record(&mut session, first_pane_id);
+    register_pane_record(&mut session, second_pane_id);
+    register_session_tab(&mut session, first_tab_id, first_pane_id);
+    register_session_tab(&mut session, second_tab_id, second_pane_id);
+    attach_client(
+        &mut session,
+        first_client_id,
+        first_tab_id,
+        Some(first_pane_id),
+    );
+    attach_client(
+        &mut session,
+        second_client_id,
+        second_tab_id,
+        Some(second_pane_id),
+    );
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+    TwoViewedTabsFixture {
+        runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    }
+}
+
+#[test]
+fn new_pane_external_named_client_splits_that_clients_focused_pane() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi new-pane --direction right --client <second>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            client_id: Some(second_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[first_pane_id, second_pane_id]);
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&second_tab_id].get_layout_tree(),
+        &split_leaf(
+            &LayoutNode::Pane(second_pane_id),
+            second_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the second pane splits")
+    );
+    assert_eq!(
+        session.tabs[&first_tab_id].get_layout_tree(),
+        &LayoutNode::Pane(first_pane_id)
+    );
+    let second_client = session.clients.get_client_by_id(second_client_id).unwrap();
+    assert_eq!(second_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(new_pane_id)
+    );
+    let first_client = session.clients.get_client_by_id(first_client_id).unwrap();
+    assert_eq!(first_client.get_active_tab_id(), first_tab_id);
+    assert_eq!(
+        first_client.get_active_focused_pane_id(),
+        Some(first_pane_id)
+    );
+}
+
+#[test]
+fn new_pane_stacked_external_named_client_stacks_onto_that_clients_focused_pane() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi new-pane --stacked --client <second>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: None,
+                tab_id: None,
+            },
+            client_id: Some(second_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[first_pane_id, second_pane_id]);
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&second_tab_id].get_layout_tree(),
+        &add_pane_to_stack(
+            &LayoutNode::Pane(second_pane_id),
+            second_pane_id,
+            new_pane_id
+        )
+        .expect("the second pane takes a stack")
+    );
+    assert_eq!(
+        session.tabs[&first_tab_id].get_layout_tree(),
+        &LayoutNode::Pane(first_pane_id)
+    );
+    let second_client = session.clients.get_client_by_id(second_client_id).unwrap();
+    assert_eq!(second_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(new_pane_id)
+    );
+    let first_client = session.clients.get_client_by_id(first_client_id).unwrap();
+    assert_eq!(first_client.get_active_tab_id(), first_tab_id);
+    assert_eq!(
+        first_client.get_active_focused_pane_id(),
+        Some(first_pane_id)
+    );
+}
+
+#[test]
+fn new_pane_external_naming_no_client_and_no_pane_with_two_clients_is_ambiguous() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        ..
+    } = build_two_viewed_tabs_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+
+    // `koshi new-pane --direction right` typed outside koshi: no pane, no tab
+    // and no client named.
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(build_new_pane_args()),
+    );
+    let command_id = command_envelope.command_id;
+
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("several clients are attached; name the target client".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn new_pane_external_unattached_named_client_is_not_found_for_every_anchor() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        second_tab_id,
+        second_pane_id,
+        ..
+    } = build_two_viewed_tabs_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+    let unattached_client_id = ClientId::new();
+
+    // The named client's focused pane, a named tab and a named pane: each
+    // anchor refuses a client that is not attached, and nothing changes.
+    for (source_pane_id, tab_id) in [
+        (None, None),
+        (None, Some(second_tab_id)),
+        (Some(second_pane_id), None),
+    ] {
+        let command_envelope = build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), None),
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Split {
+                    source_pane_id,
+                    tab_id,
+                    direction: Direction::Right,
+                },
+                client_id: Some(unattached_client_id),
+                ..build_new_pane_args()
+            }),
+        );
+        let command_id = command_envelope.command_id;
+
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: Some("target client not attached to the session".to_string()),
+            }
+        );
+        assert_eq!(serialize_session_records(&runtime), session_records_before);
+    }
+}
+
+#[test]
+fn new_pane_external_tab_and_named_client_moves_that_client_onto_the_tab() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi new-pane --tab <second> --client <first>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: Some(second_tab_id),
+                direction: Direction::Right,
+            },
+            client_id: Some(first_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "TabFocused",
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[first_pane_id, second_pane_id]);
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&second_tab_id].get_layout_tree(),
+        &split_leaf(
+            &LayoutNode::Pane(second_pane_id),
+            second_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the second pane splits")
+    );
+    let first_client = session.clients.get_client_by_id(first_client_id).unwrap();
+    assert_eq!(first_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(first_client.get_active_focused_pane_id(), Some(new_pane_id));
+    assert_eq!(
+        first_client.get_focused_pane_id(first_tab_id),
+        Some(first_pane_id)
+    );
+    let second_client = session.clients.get_client_by_id(second_client_id).unwrap();
+    assert_eq!(second_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(second_pane_id)
+    );
+}
+
 #[test]
 fn new_pane_explicit_client_wins_over_the_in_session_issuer() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
@@ -20163,6 +20479,90 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
+    );
+}
+
+#[test]
+fn new_pane_external_named_client_splits_the_pane_that_takes_its_keys() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, bob_client_id).get_active_focused_pane_id(),
+        Some(tiled_pane_id)
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    // alice's keys go to the floating pane, which has no split to divide.
+    let alice_command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            client_id: Some(alice_client_id),
+            ..build_new_pane_args()
+        }),
+    );
+    let alice_command_id = alice_command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(alice_command_envelope),
+        CommandResult::Rejected {
+            command_id: alice_command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{floating_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    // bob's keys go to the tiled pane, which divides.
+    runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            client_id: Some(bob_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id, floating_pane_id]);
+    assert_eq!(
+        runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
+        &split_leaf(
+            &LayoutNode::Pane(tiled_pane_id),
+            tiled_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the tiled pane splits")
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, bob_client_id).get_active_focused_pane_id(),
+        Some(new_pane_id)
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
+        Some(floating_pane_id)
     );
 }
 

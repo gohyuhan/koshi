@@ -365,8 +365,12 @@ pub struct NewPaneFlags {
         conflicts_with = "pane_id"
     )]
     tab_reference: Option<TabReference>,
-    /// Client that shows and focuses the new pane; defaults to the
-    /// issuing client, else the session's only attached one.
+    /// Client that shows and focuses the new pane. Outside koshi with no
+    /// `--pane` or `--tab`, the new pane splits that client's focused pane.
+    /// Without it, the issuing client shows and focuses the new pane. Outside
+    /// koshi without it, the new pane moves no focus on a tab that a client
+    /// already shows, and the session's only attached client shows and
+    /// focuses it on a tab that no client shows.
     #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
     client_id: Option<ClientId>,
 }

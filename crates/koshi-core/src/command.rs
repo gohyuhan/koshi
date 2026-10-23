@@ -182,10 +182,16 @@ pub struct NewPaneArgs {
     /// - `Some(client)`: that client is targeted, even over an in-session
     ///   issuer. A client not attached to the target session is rejected;
     ///   there is no fallback.
-    /// - `None`: the issuing client; for a source with no client, the
-    ///   session's sole client. A session with several attached clients and
-    ///   no named target is rejected. A floating pane created while no client
-    ///   is attached has no designated client.
+    /// - `None`: the issuing client while it is attached, else the session's
+    ///   sole client. A session with several attached clients and no named
+    ///   target is rejected. A floating pane created while no client is
+    ///   attached has no designated client.
+    ///
+    /// A split or stack that names no pane and no tab, from any source but an
+    /// in-session CLI, divides the pane that takes this client's input. A
+    /// split or stack with `None` and no attached issuer, on a tab that a
+    /// client already views, designates no client: no client's focus moves,
+    /// and several attached clients are not rejected.
     pub client_id: Option<ClientId>,
 }
 
@@ -195,7 +201,10 @@ pub enum NewPanePlacement {
     /// Split a tiled leaf: the anchor leaf divides along `direction` and the
     /// new pane takes one half.
     Split {
-        /// Pane to split from; `None` uses the focused pane.
+        /// Pane to split from. `None` uses the in-session CLI's own pane,
+        /// else the focused pane of the client [`NewPaneArgs::client_id`]
+        /// names, else of the issuing client, else of the session's sole
+        /// client.
         source_pane_id: Option<PaneId>,
         /// Tab the new pane joins when `source_pane_id` names none: the split
         /// anchor is that tab's most recently focused pane (its first pane in
@@ -210,7 +219,8 @@ pub enum NewPanePlacement {
     /// Join the anchor's stack, creating a stack when the anchor has none;
     /// the new pane becomes the stack's open member.
     Stacked {
-        /// Pane to stack onto; `None` uses the focused pane.
+        /// Pane to stack onto; `None` picks the pane as
+        /// [`NewPanePlacement::Split`]'s `source_pane_id` does.
         source_pane_id: Option<PaneId>,
         /// Tab the new pane joins when `source_pane_id` names none, read
         /// exactly as [`NewPanePlacement::Split`]'s `tab_id`.
