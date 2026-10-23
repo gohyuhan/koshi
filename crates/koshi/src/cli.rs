@@ -21,6 +21,7 @@ use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
@@ -35,6 +36,7 @@ use koshi_core::geometry::{
 };
 use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionId};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
 
 /// A parsed `koshi` invocation.
@@ -1196,10 +1198,6 @@ pub enum KeymapScope {
     Default,
     /// The user's keybinding file.
     User,
-    /// Per-named-session overrides.
-    Session,
-    /// Bindings a layout file declares.
-    Layout,
 }
 
 /// The `koshi keys` subcommands: read-only keymap introspection. Every verb
@@ -1208,8 +1206,12 @@ pub enum KeymapScope {
 pub enum KeysCommand {
     /// List effective keybindings per mode.
     List {
-        /// Limit the listing to one input mode.
-        #[arg(long = "mode", value_name = "MODE")]
+        /// Limit the listing to one built-in input mode.
+        #[arg(
+            long = "mode",
+            value_name = "MODE",
+            value_parser = PossibleValuesParser::new(LockMode::ALL.map(LockMode::get_keymap_name))
+        )]
         input_mode_name: Option<String>,
         /// Limit the listing to bindings authored by one layer.
         #[arg(long, value_enum, value_name = "SCOPE")]
@@ -1223,7 +1225,8 @@ pub enum KeysCommand {
         )]
         output_format: OutputFormat,
     },
-    /// Describe a key sequence: its action, source layer, and metadata.
+    /// Describe the binding on a key sequence and every longer binding that
+    /// starts with it: action, source layer, and metadata.
     Describe {
         /// The key sequence, in the angle grammar (`"<C-p> n"`).
         #[arg(value_name = "KEY_SEQUENCE")]

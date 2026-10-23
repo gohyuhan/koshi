@@ -10,6 +10,8 @@
 //! connection with the frames a test gives it.
 //! [`write_saved_server_store`] writes the saved-server store under a test
 //! home, and [`list_saved_server_records`] reads it.
+//! [`run_koshi_under_home`] runs one `koshi` command to its end and returns
+//! what it printed and its exit code.
 //!
 //! Every test binary declaring `mod common;` compiles all of it. No single
 //! binary uses every helper, and an unused helper is allowed here.
@@ -442,6 +444,35 @@ pub fn build_koshi_command_at(binary_path: &Path, home_directory: &Path) -> Comm
 /// [`build_koshi_command_at`], run from the binary this build produced.
 pub fn build_koshi_command_under_home(home_directory: &Path) -> Command {
     build_koshi_command_at(Path::new(env!("CARGO_BIN_EXE_koshi")), home_directory)
+}
+
+/// What one `koshi` run printed, and the code it exited with.
+#[derive(Debug, PartialEq, Eq)]
+pub struct KoshiRunOutput {
+    pub standard_output: String,
+    pub standard_error: String,
+    pub exit_code: Option<i32>,
+}
+
+/// Run `koshi <arguments>` under `home_directory` and collect its output.
+pub fn run_koshi_under_home(home_directory: &Path, arguments: &[&str]) -> KoshiRunOutput {
+    let process_output = build_koshi_command_under_home(home_directory)
+        .args(arguments)
+        .output()
+        .expect("run koshi");
+    KoshiRunOutput {
+        standard_output: String::from_utf8(process_output.stdout).expect("UTF-8 stdout"),
+        standard_error: String::from_utf8(process_output.stderr).expect("UTF-8 stderr"),
+        exit_code: process_output.status.code(),
+    }
+}
+
+/// The `keybinding.kdl` path a `koshi` under `home_directory` reads, with its
+/// config directory created.
+pub fn create_keybinding_file_path(home_directory: &Path) -> PathBuf {
+    let config_directory = resolve_config_directory_under_home(home_directory);
+    std::fs::create_dir_all(&config_directory).expect("create config directory");
+    config_directory.join("keybinding.kdl")
 }
 
 /// Start one session's server under `home_directory`, serving

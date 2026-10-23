@@ -463,8 +463,8 @@ session id.
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported bindable actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action and its targets |
-| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout]` | List active shortcuts |
-| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source |
+| `koshi keys list [--mode <MODE>] [--scope default\|user]` | List active shortcuts |
+| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source, or each shortcut it starts |
 | `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a keybinding file without applying it |
 

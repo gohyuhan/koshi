@@ -19,7 +19,8 @@ pub enum CliError {
     /// Arguments were missing or invalid for the chosen command.
     #[error("invalid arguments: {detail}")]
     InvalidArgs { detail: String },
-    /// The described key sequence is not bound in any mode.
+    /// No binding in any mode is the described key sequence or starts with
+    /// it.
     #[error("nothing is bound on `{key_sequence_text}` in any mode")]
     UnboundKey { key_sequence_text: String },
     /// A keybinding file dry-run found problems.
