@@ -109,6 +109,39 @@ pub fn build_server_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>, Sen
     (server, fake_pty_backend, runtime_event_sender)
 }
 
+/// Seed a session named [`TEST_SESSION_NAME`] on `server`, holding one tab with
+/// one shell pane, as the session server does, then attach a fresh local
+/// client to that tab with a [`TEST_VIEWPORT_SIZE`] terminal. Returns the
+/// client's id.
+pub fn create_session_with_attached_client(server: &mut Server) -> ClientId {
+    let session_id = SessionId::new();
+    server
+        .bootstrap_session(
+            session_id,
+            TEST_SESSION_NAME.to_string(),
+            TEST_VIEWPORT_SIZE,
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("seed the session");
+    let tab_id = *server.list_sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the seeded tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        tab_id,
+        None,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
+    client_id
+}
+
 /// Apply `startup_config` (`None` keeps the built-in defaults), seed a headless
 /// session under a fake PTY backend, serve its control socket from a directory
 /// named for `session_label`, and start `run_exchange` against that socket on
@@ -149,7 +182,6 @@ pub fn start_test_session<ExchangeResult: Send + 'static>(
             TEST_SESSION_NAME.to_string(),
             TEST_VIEWPORT_SIZE,
             SystemTime::UNIX_EPOCH,
-            None,
         )
         .expect("seed the session");
     let ipc_server = IpcServer::start(

@@ -15,8 +15,10 @@ use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
 use koshi_core::event::{Event, InputModeChanged, PaneFocused};
 use koshi_core::geometry::{Direction, SplitDirection};
+use koshi_core::ids::ClientId;
 use koshi_core::lock::LockMode;
 use koshi_ipc::protocol::ConnectionToken;
+use koshi_session::client::Client;
 use koshi_session::session::lifecycle::SessionLifecycle;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -370,19 +372,20 @@ fn profile_launch_error_display_names_each_cause() {
 }
 
 #[test]
-fn bootstrap_local_injects_the_in_session_identity_env() {
+fn bootstrap_session_injects_the_in_session_identity_env() {
     let (mut server, fake_pty_backend) = build_test_runtime();
     let session_id = SessionId::new();
-    let client_id = server
-        .bootstrap_local(
+    server
+        .bootstrap_session(
             session_id,
+            "S-example".to_string(),
             build_test_viewport_size(),
             SystemTime::UNIX_EPOCH,
         )
         .expect("bootstrap");
 
-    // The root shell's spec carries the identity vars naming the session, the
-    // genesis client, and the root pane.
+    // The root shell's spec carries the identity vars naming the session and
+    // the root pane, and no client.
     let session = server.session_by_id.values().next().expect("one session");
     let tab = session.tabs.values().next().expect("one tab");
     let pane_id = tab.get_layout_tree().list_leaf_pane_ids()[0];
@@ -390,7 +393,7 @@ fn bootstrap_local_injects_the_in_session_identity_env() {
     add_koshi_environment(
         &mut expected_shell_spec.environment_variables,
         session_id,
-        Some(client_id),
+        None,
         pane_id,
         koshi_paths::resolve_runtime_directory().as_deref(),
         false,
@@ -402,11 +405,11 @@ fn bootstrap_local_injects_the_in_session_identity_env() {
 }
 
 #[test]
-fn bootstrap_local_named_uses_the_supplied_id_and_name() {
+fn bootstrap_session_uses_the_supplied_id_and_name() {
     let (mut server, _fake_pty_backend) = build_test_runtime();
     let session_id = SessionId::new();
-    let _client_id = server
-        .bootstrap_local_named(
+    server
+        .bootstrap_session(
             session_id,
             "S-example".to_string(),
             build_test_viewport_size(),
@@ -431,7 +434,6 @@ fn a_session_seeded_without_a_client_holds_none_and_still_reaches_running() {
             "S-example".to_string(),
             build_test_viewport_size(),
             SystemTime::UNIX_EPOCH,
-            None,
         )
         .expect("bootstrap");
 
@@ -871,51 +873,15 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
 }
 
 #[test]
-fn bootstrap_local_attaches_its_client_to_the_seeded_tab_and_root_pane() {
-    let (mut server, _fake_pty_backend) = build_test_runtime();
-    let client_id = server
-        .bootstrap_local(
-            SessionId::new(),
-            build_test_viewport_size(),
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
-
-    let session = server.session_by_id.values().next().expect("one session");
-    let (tab_id, tab) = session.tabs.iter().next().expect("one tab");
-    let root_pane_id = tab.get_layout_tree().list_leaf_pane_ids()[0];
-    assert_eq!(
-        session.clients.count_clients(),
-        1,
-        "the genesis client alone"
-    );
-    let attached_client = session
-        .clients
-        .get_client_by_id(client_id)
-        .expect("the genesis client");
-    assert_eq!(attached_client.get_active_tab_id(), *tab_id);
-    assert_eq!(
-        attached_client.get_focused_pane_id(*tab_id),
-        Some(root_pane_id)
-    );
-    assert_eq!(attached_client.get_origin(), ClientOrigin::Local);
-    assert_eq!(attached_client.get_color_index(), 0);
-    assert_eq!(attached_client.get_lock_mode(), LockMode::Normal);
-    assert_eq!(
-        attached_client.get_viewport_size(),
-        build_test_viewport_size()
-    );
-}
-
-#[test]
-fn bootstrap_local_sizes_the_root_pane_to_the_pane_region() {
+fn bootstrap_session_sizes_the_root_pane_to_the_pane_region() {
     // The chrome takes one row above and one below the pane region, and the
     // pane's border one cell on each side, so an 80x24 viewport gives the root
     // pane 78x20 of content. Genesis resizes it no further.
     let (mut server, fake_pty_backend) = build_test_runtime();
-    let _client_id = server
-        .bootstrap_local(
+    server
+        .bootstrap_session(
             SessionId::new(),
+            "S-example".to_string(),
             build_test_viewport_size(),
             SystemTime::UNIX_EPOCH,
         )
@@ -947,9 +913,10 @@ fn a_one_row_viewport_seeds_the_root_pane_at_the_minimum_row_count() {
     // The pane region of a one-row viewport saturates to zero rows, and the PTY
     // size floors each axis at 2x1.
     let (mut server, _fake_pty_backend) = build_test_runtime();
-    let _client_id = server
-        .bootstrap_local(
+    server
+        .bootstrap_session(
             SessionId::new(),
+            "S-example".to_string(),
             Size {
                 column_count: 80,
                 row_count: 1,
@@ -980,8 +947,9 @@ fn a_genesis_shell_that_fails_to_spawn_commits_nothing_and_surfaces_the_error() 
     });
 
     let spawn_error = server
-        .bootstrap_local(
+        .bootstrap_session(
             SessionId::new(),
+            "S-example".to_string(),
             build_test_viewport_size(),
             SystemTime::UNIX_EPOCH,
         )

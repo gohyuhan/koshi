@@ -543,7 +543,6 @@ fn build_server_with_seeded_session() -> (Server, Arc<InboxSink>, Arc<FakePtyBac
                 row_count: 24,
             },
             std::time::SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];

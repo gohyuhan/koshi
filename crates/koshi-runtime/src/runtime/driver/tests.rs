@@ -26,6 +26,7 @@ use koshi_test_support::fixtures::build_key_input_for_chord;
 
 use crate::runtime::command::tests::{
     attach_second_client, build_floating_new_pane_args, create_floating_pane,
+    create_session_with_attached_client,
 };
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::event::RuntimeEvent;
@@ -65,16 +66,16 @@ fn build_test_runtime_with_inbox_sender(
 /// Starts `session_id` on `server` with one 80x24 local client at timestamp
 /// `0`. Returns that client's id and the id of the session's one pane.
 fn bootstrap_test_session(server: &mut Server, session_id: SessionId) -> (ClientId, PaneId) {
-    let client_id = server
-        .bootstrap_local(
-            session_id,
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        server,
+        session_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
     (client_id, pane_id)
 }

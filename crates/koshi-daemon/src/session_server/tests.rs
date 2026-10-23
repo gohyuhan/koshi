@@ -143,7 +143,6 @@ fn seed_test_session(server: &mut Server) {
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 }
@@ -201,7 +200,6 @@ fn the_session_answers_discovery_with_the_id_and_name_it_was_started_with() {
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 
@@ -236,7 +234,6 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 
@@ -456,7 +453,6 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
@@ -611,14 +607,30 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
     let resume_file_path = runtime_directory_fixture.path().join("session.resume");
     let (mut server, fake_pty_backend, _runtime_event_sender) = build_test_server();
     let session_id = SessionId::new();
-    let client_id = server
-        .bootstrap_local_named(
+    server
+        .bootstrap_session(
             session_id,
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::UNIX_EPOCH,
         )
         .expect("the session is seeded");
+    let first_tab_id = *server.list_sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the seeded tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        STARTING_VIEWPORT,
+        None,
+        first_tab_id,
+        None,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
     let open_second_tab_command_id = CommandId::new();
     let command_envelope = CommandEnvelope::from_parts(
         open_second_tab_command_id,
@@ -3347,7 +3359,6 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 
@@ -3603,7 +3614,6 @@ fn a_last_carried_pane_exit_keeps_a_new_stream_live_and_a_carried_quit_ending() 
                 session_start.session_name.clone(),
                 STARTING_VIEWPORT,
                 SystemTime::now(),
-                None,
             )
             .expect("the previous session has one pane");
         let previous_client_id = attach_test_client(&mut previous_server).client_id;

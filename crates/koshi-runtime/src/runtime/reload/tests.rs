@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::command::tests::{
+    attach_client_to_only_tab, create_session_with_attached_client,
+};
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::layer::{
     PartialColorPalette, PartialKeybindingsConfig, PartialPaneConfig, PartialScrollbackConfig,
@@ -22,16 +25,16 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 fn build_test_server() -> (Server, ClientId) {
     let mut server = build_test_server_without_sessions();
-    let client_id = server
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     (server, client_id)
 }
 
@@ -144,17 +147,24 @@ fn a_reload_notifies_every_live_session_in_session_id_order() {
     let first_session_id = SessionId::new();
     let second_session_id = SessionId::new();
     for (session_id, session_name) in [(first_session_id, "alpha"), (second_session_id, "beta")] {
+        let viewport_size = Size {
+            column_count: 80,
+            row_count: 24,
+        };
         runtime
-            .bootstrap_local_named(
+            .bootstrap_session(
                 session_id,
                 session_name.to_owned(),
-                Size {
-                    column_count: 80,
-                    row_count: 24,
-                },
+                viewport_size,
                 SystemTime::UNIX_EPOCH,
             )
             .expect("bootstrap");
+        attach_client_to_only_tab(
+            &mut runtime,
+            session_id,
+            viewport_size,
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     let reloaded_events = runtime.reload_app_config(PartialKoshiConfig::default());

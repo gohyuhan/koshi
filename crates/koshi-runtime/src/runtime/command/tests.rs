@@ -292,6 +292,59 @@ pub(crate) fn attach_client_through_server(
     attached_client_id
 }
 
+/// Seed one session under `session_id` with a generated name, one tab and one
+/// shell pane, as the session server does ([`Server::bootstrap_session`]),
+/// then attach a fresh local client to it with a `viewport_size` terminal at
+/// `attached_at` ([`attach_client_to_only_tab`]). Returns the client's id.
+///
+/// # Errors
+/// Returns the [`PtyError`] of a shell that fails to spawn. No session is
+/// committed then.
+pub(crate) fn create_session_with_attached_client(
+    server: &mut Server,
+    session_id: SessionId,
+    viewport_size: Size,
+    attached_at: SystemTime,
+) -> Result<ClientId, PtyError> {
+    let session_name = generate_name(NameKind::Session, |_| false);
+    server.bootstrap_session(session_id, session_name, viewport_size, attached_at)?;
+    Ok(attach_client_to_only_tab(
+        server,
+        session_id,
+        viewport_size,
+        attached_at,
+    ))
+}
+
+/// Attach a fresh local client to the one tab of `session_id` through
+/// [`Server::handle_client_attach`], with a `viewport_size` terminal that
+/// reports no pane area and no cell size, at `attached_at`. Drops the events
+/// of the attach and returns the client's id.
+pub(crate) fn attach_client_to_only_tab(
+    server: &mut Server,
+    session_id: SessionId,
+    viewport_size: Size,
+    attached_at: SystemTime,
+) -> ClientId {
+    let tab_id = *server.session_by_id[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the session holds a tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        viewport_size,
+        None,
+        tab_id,
+        None,
+        attached_at,
+        false,
+    );
+    client_id
+}
+
 /// Attach a client with [`ClientOrigin::Local`] viewing `tab_id` and reporting
 /// `pane_area`, optionally with `focused_pane_id` recorded there.
 fn attach_client_with_reported_pane_area(
@@ -13729,9 +13782,13 @@ fn client_attach_records_the_view_of_the_joining_client_only() {
         column_count: 80,
         row_count: 24,
     };
-    let bootstrap_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let bootstrap_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
@@ -13781,9 +13838,13 @@ fn client_detach_removes_the_client_and_records_its_view() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
@@ -14016,8 +14077,8 @@ fn child_exit_by_signal_reports_the_signal_and_the_quit_it_causes_carries_it() {
     );
 }
 
-/// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
-/// of each. Panics unless the runtime holds a single session with a single tab
+/// The `(session, tab, pane)` of a runtime [`create_session_with_attached_client`]
+/// built: exactly one of each. Panics unless the runtime holds a single session with a single tab
 /// and a single pane.
 fn get_only_session_slot(runtime: &Server) -> (SessionId, TabId, PaneId) {
     assert_eq!(runtime.session_by_id.len(), 1, "exactly one session");
@@ -14049,9 +14110,13 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
         column_count: 40,
         row_count: 24,
     };
-    let bootstrap_client_id = runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let bootstrap_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_attach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -14144,8 +14209,8 @@ fn build_sixty_percent_floating_pane_size() -> FloatingPaneSize {
     }
 }
 
-/// A session seeded by [`Server::bootstrap_local`] for alice, attached at
-/// `UNIX_EPOCH` with a `120x42` viewport: pane area `120x40`, tiled pane PTY
+/// A session seeded by [`create_session_with_attached_client`] for alice,
+/// attached at `UNIX_EPOCH` with a `120x42` viewport: pane area `120x40`, tiled pane PTY
 /// `118x38`. It also holds one live floating pane asking for 60% by 60%,
 /// solved for alice alone: outer `72x24`, PTY `70x20`.
 fn build_floating_pane_fixture() -> FloatingPaneFixture {
@@ -14769,9 +14834,13 @@ fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
         column_count: 80,
         row_count: 24,
     };
-    let _bootstrap_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let _bootstrap_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let cell_size = PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
     let measured_client_id = ClientId::new();
@@ -14820,9 +14889,13 @@ fn accepting_cell_measurement_marks_the_view_changed() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (_session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     let cell_size = PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
 
@@ -14848,9 +14921,13 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
         column_count: 100,
         row_count: 30,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), initial_viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        initial_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (_session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     let emitted_events = runtime.handle_client_resize(client_id, resized_viewport_size, None, None);
@@ -14898,9 +14975,13 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), small_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        small_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_attach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -14953,7 +15034,6 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
             "seeded-with-no-client".to_string(),
             viewport_size,
             SystemTime::now(),
-            None,
         )
         .expect("bootstrap a session holding no client");
     let (_, tab_id, pane_id) = get_only_session_slot(&runtime);
@@ -15006,9 +15086,13 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _) = get_only_session_slot(&runtime);
 
     // Attach once to take the tab's first pane, then point the client's focus
@@ -15064,9 +15148,13 @@ fn attaching_passes_over_a_focus_history_entry_collapsed_to_a_stack_header() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, collapsed_pane_id) = get_only_session_slot(&runtime);
     let expanded_pane_id = PaneId::new();
     let session = runtime
@@ -15145,9 +15233,13 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
         column_count: 40,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // Two clients view the tab; the smaller one holds it at 40x24.
@@ -15204,9 +15296,13 @@ fn client_detach_records_the_leaving_client_and_no_other_view() {
         column_count: 80,
         row_count: 24,
     };
-    let remaining_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let remaining_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let leaving_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -15244,9 +15340,13 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_last_detach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -15278,16 +15378,16 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
 #[test]
 fn a_client_leaving_does_not_end_the_session_by_default() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // `auto-close-session` defaults off, so the session and its pane outlive the
@@ -15312,9 +15412,13 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15343,16 +15447,16 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
 #[test]
 fn auto_close_ends_the_session_when_the_last_client_leaves() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     runtime.config.should_auto_close_session = true;
 
     runtime.handle_client_detach(client_id);
@@ -15366,16 +15470,16 @@ fn auto_close_ends_the_session_when_the_last_client_leaves() {
 #[test]
 fn a_quit_command_tears_down_without_the_graceful_window() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
 
     runtime.request_quit();
 
@@ -15390,9 +15494,13 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
     runtime.handle_client_attach(
@@ -15436,9 +15544,13 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.handle_client_attach(
         session_id,
@@ -15482,7 +15594,6 @@ fn auto_close_leaves_a_headless_session_with_no_clients_running() {
                 row_count: 24,
             },
             SystemTime::now(),
-            None,
         )
         .expect("bootstrap the headless session");
     assert!(!runtime.is_quit_requested());
@@ -15496,16 +15607,16 @@ fn auto_close_leaves_a_headless_session_with_no_clients_running() {
 #[test]
 fn a_detach_command_ends_the_session_under_auto_close() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15530,16 +15641,16 @@ fn a_detach_command_ends_the_session_under_auto_close() {
 #[test]
 fn quit_from_a_client_detaches_it_and_leaves_the_session_running() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // `auto-close-session` is off, so quit removes the client and nothing else:
@@ -15576,9 +15687,13 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
     let additional_client_id = ClientId::new();
@@ -15620,16 +15735,16 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
 #[test]
 fn quit_from_the_last_client_ends_the_session_under_auto_close() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15653,16 +15768,16 @@ fn quit_from_the_last_client_ends_the_session_under_auto_close() {
 #[test]
 fn quit_from_a_client_that_already_left_is_refused() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15722,9 +15837,13 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_unknown_tab_attach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -15767,9 +15886,13 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         column_count: 40,
         row_count: 24,
     };
-    let first_client_id = runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let first_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, first_tab_id, first_pane_id) = get_only_session_slot(&runtime);
 
     // A second live tab: `NewTab` moves the first client onto it, and leaves
@@ -15900,16 +16023,16 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 #[test]
 fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let genesis_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let genesis_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let now = Instant::now();
@@ -15940,16 +16063,16 @@ fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged()
 #[test]
 fn client_detach_marks_the_view_of_every_other_subscriber() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
 
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let remaining_client_id = ClientId::new();
@@ -16084,16 +16207,16 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
 #[test]
 fn dispatched_command_marks_the_view_changed() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
@@ -16134,9 +16257,13 @@ fn same_session_reattach_preserves_client_view_state() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), initial_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        initial_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // The client accumulated per-tab focus.
@@ -16183,15 +16310,23 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
         row_count: 24,
     };
 
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("first session");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("first session");
     let (first_session_id, _first_tab_id, first_pane_id) = get_only_session_slot(&runtime);
 
     // A second, independent session with its own live pane.
-    runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("second session");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("second session");
     let second_session_id = *runtime
         .session_by_id
         .keys()
@@ -16368,21 +16503,21 @@ fn new_pane_split_rewraps_the_sibling_grid_content() {
     );
 }
 
-// The genesis root pane goes through `bootstrap_local`, not the new-pane
+// The genesis root pane goes through `bootstrap_session`, not the new-pane
 // handler; its first split must still re-wrap the root's grid content.
 #[test]
 fn bootstrap_root_pane_rewraps_on_first_split() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, root_pane_id) = get_only_session_slot(&runtime);
     let wide_pane_pty_size = runtime.pty_size_by_pane_id[&root_pane_id];
     let written_line: String = "A".repeat(wide_pane_pty_size.column_count as usize - 2);
@@ -16672,9 +16807,13 @@ fn the_snapshot_carries_the_gap_and_leaves_it_between_two_side_by_side_panes() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(build_new_pane_args()),
@@ -18365,16 +18504,16 @@ fn new_tab_with_no_working_directory_opens_in_the_focused_panes_directory() {
 #[test]
 fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18421,9 +18560,13 @@ fn detach_all_takes_every_attached_client() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let additional_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -18484,16 +18627,16 @@ fn detach_all_takes_every_attached_client() {
 #[test]
 fn detach_naming_a_client_that_is_not_attached_is_not_found() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let attached_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let attached_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let command_envelope = build_command_envelope(
@@ -18528,9 +18671,13 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let additional_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -18578,16 +18725,16 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
 #[test]
 fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let only_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let only_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(only_client_id, 60);
 
@@ -18721,16 +18868,16 @@ fn detach_all_only_detaches_clients_of_the_acting_session() {
 #[test]
 fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
     let target_session_id = SessionId::new();
@@ -18772,16 +18919,16 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
 #[test]
 fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18813,16 +18960,16 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
 #[test]
 fn a_switch_to_another_users_session_with_this_sessions_id_is_queued() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18859,16 +19006,16 @@ fn a_switch_to_another_users_session_with_this_sessions_id_is_queued() {
 #[test]
 fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let stranger_client_id = ClientId::new();
 
@@ -18895,16 +19042,16 @@ fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
 #[test]
 fn a_client_that_switched_away_ends_the_session_under_auto_close() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
     // An attach registers the client and its subscriber together, so a client
@@ -18942,16 +19089,16 @@ fn a_client_that_switched_away_ends_the_session_under_auto_close() {
 #[test]
 fn a_switch_moves_the_client_it_names_with_several_attached() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let initial_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let additional_client_id = ClientId::new();
     attach_client(
@@ -19004,16 +19151,16 @@ fn a_switch_moves_the_client_it_names_with_several_attached() {
 #[test]
 fn a_switch_is_refused_when_the_clients_queue_is_full() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -19050,9 +19197,13 @@ fn a_client_the_router_bridged_from_another_machine_is_recorded_remote() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let joining_client_id = ClientId::new();
@@ -19087,9 +19238,13 @@ fn a_client_that_reached_this_machine_directly_is_recorded_local() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let joining_client_id = ClientId::new();
@@ -19124,9 +19279,13 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let client_id = ClientId::new();
@@ -19184,9 +19343,13 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let client_id = ClientId::new();
@@ -19381,9 +19544,13 @@ fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, first_pane_id) = get_only_session_slot(&runtime);
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -19446,9 +19613,13 @@ fn a_resize_reporting_a_zero_pane_area_resizes_no_pty() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, _tab_id, first_pane_id) = get_only_session_slot(&runtime);
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -19505,9 +19676,13 @@ fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, first_pane_id) = get_only_session_slot(&runtime);
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -19620,9 +19795,13 @@ fn a_resize_reporting_starving_leaves_the_tab_sizes_unchanged() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (_session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let pane_sizes_before_starving_resize =
         fake_pty_backend.list_pane_sizes(pane_id).expect("resizes");
@@ -19646,9 +19825,13 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
 
     let reported_pane_size = PaneArea::Reported(Size {
@@ -19813,13 +19996,18 @@ fn build_floating_command_fixture() -> FloatingCommandFixture {
     })
 }
 
-/// A session seeded by [`Server::bootstrap_local`] for alice, attached at
-/// `UNIX_EPOCH` with a `viewport_size` viewport, holding one tiled pane.
+/// A session seeded by [`create_session_with_attached_client`] for alice,
+/// attached at `UNIX_EPOCH` with a `viewport_size` viewport, holding one tiled
+/// pane.
 fn bootstrap_alice_session(viewport_size: Size) -> FloatingCommandFixture {
     let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let alice_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::UNIX_EPOCH)
-        .expect("bootstrap alice");
+    let alice_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap alice");
     let (session_id, tab_id, tiled_pane_id) = get_only_session_slot(&runtime);
     FloatingCommandFixture {
         runtime,
@@ -23101,16 +23289,16 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
         ..
     } = build_floating_command_fixture();
     let other_session_id = SessionId::new();
-    let carol_client_id = runtime
-        .bootstrap_local(
-            other_session_id,
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap carol");
+    let carol_client_id = create_session_with_attached_client(
+        &mut runtime,
+        other_session_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap carol");
     let other_session = &runtime.session_by_id[&other_session_id];
     let other_tab_id = *other_session
         .tabs

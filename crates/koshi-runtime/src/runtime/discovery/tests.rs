@@ -9,7 +9,9 @@ use std::time::SystemTime;
 
 use koshi_layout::tree::LayoutNode;
 
-use crate::runtime::command::tests::{build_tab, get_command_outcome};
+use crate::runtime::command::tests::{
+    build_tab, create_session_with_attached_client, get_command_outcome,
+};
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPanePlacement};
@@ -49,9 +51,9 @@ fn bootstrapped_session_reports_its_exact_rows() {
     let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let creation_time = SystemTime::UNIX_EPOCH;
-    let client_id = server
-        .bootstrap_local(session_id, VIEWPORT_SIZE, creation_time)
-        .expect("bootstrap");
+    let client_id =
+        create_session_with_attached_client(&mut server, session_id, VIEWPORT_SIZE, creation_time)
+            .expect("bootstrap");
 
     let overview = server.build_overview().expect("one session is running");
     let session = &server.list_sessions()[&session_id];
@@ -93,9 +95,13 @@ fn bootstrapped_session_reports_its_exact_rows() {
 fn a_command_pane_reports_its_argv_program_first() {
     let mut server = build_test_runtime();
     let session_id = SessionId::new();
-    let client_id = server
-        .bootstrap_local(session_id, VIEWPORT_SIZE, SystemTime::UNIX_EPOCH)
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        session_id,
+        VIEWPORT_SIZE,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let root_pane_id = server.list_sessions()[&session_id]
         .tabs
         .values()
@@ -160,9 +166,13 @@ fn a_command_pane_reports_its_argv_program_first() {
 fn a_pane_reports_the_title_its_child_set_and_no_argv_for_a_shell() {
     let mut server = build_test_runtime();
     let session_id = SessionId::new();
-    server
-        .bootstrap_local(session_id, VIEWPORT_SIZE, SystemTime::UNIX_EPOCH)
-        .expect("bootstrap");
+    create_session_with_attached_client(
+        &mut server,
+        session_id,
+        VIEWPORT_SIZE,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let pane_id = server.list_sessions()[&session_id]
         .tabs
         .values()
@@ -189,9 +199,13 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
     let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let attachment_time = SystemTime::UNIX_EPOCH;
-    let seeded_client_id = server
-        .bootstrap_local(session_id, VIEWPORT_SIZE, attachment_time)
-        .expect("bootstrap");
+    let seeded_client_id = create_session_with_attached_client(
+        &mut server,
+        session_id,
+        VIEWPORT_SIZE,
+        attachment_time,
+    )
+    .expect("bootstrap");
     let tab_id = server.list_sessions()[&session_id]
         .tabs
         .keys()
@@ -224,9 +238,13 @@ fn the_overview_reports_where_each_client_connected_from() {
     let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let attachment_time = SystemTime::UNIX_EPOCH;
-    let local_client_id = server
-        .bootstrap_local(session_id, VIEWPORT_SIZE, attachment_time)
-        .expect("bootstrap");
+    let local_client_id = create_session_with_attached_client(
+        &mut server,
+        session_id,
+        VIEWPORT_SIZE,
+        attachment_time,
+    )
+    .expect("bootstrap");
     let tab_id = server.list_sessions()[&session_id]
         .tabs
         .keys()
@@ -273,9 +291,13 @@ fn discovery_reports_the_raw_pane_area() {
     let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let attachment_time = SystemTime::UNIX_EPOCH;
-    let seeded_client_id = server
-        .bootstrap_local(session_id, VIEWPORT_SIZE, attachment_time)
-        .expect("bootstrap");
+    let seeded_client_id = create_session_with_attached_client(
+        &mut server,
+        session_id,
+        VIEWPORT_SIZE,
+        attachment_time,
+    )
+    .expect("bootstrap");
     let tab_id = server.list_sessions()[&session_id]
         .tabs
         .keys()

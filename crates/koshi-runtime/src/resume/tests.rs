@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
 
+use crate::runtime::command::tests::attach_client_to_only_tab;
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::saved_view::SavedView;
@@ -998,14 +999,20 @@ fn build_populated_server() -> PopulatedServer {
     let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
 
     let session_id = SessionId::new();
-    let first_client_id = server
-        .bootstrap_local_named(
+    server
+        .bootstrap_session(
             session_id,
             "carried".to_string(),
             FIRST_CLIENT_VIEWPORT_SIZE,
             SystemTime::UNIX_EPOCH,
         )
         .expect("bootstrap the session");
+    let first_client_id = attach_client_to_only_tab(
+        &mut server,
+        session_id,
+        FIRST_CLIENT_VIEWPORT_SIZE,
+        SystemTime::UNIX_EPOCH,
+    );
     let first_tab_id = *server.session_by_id[&session_id]
         .tabs
         .keys()

@@ -1,11 +1,8 @@
-//! Genesis: seed the first session, tab, root pane, and client in code.
+//! Genesis: seed the first session of a per-session server process in code.
 //!
-//! The single-process local start assembles the first session with one tab
-//! holding one shell pane, viewed by one client, directly through the
-//! session-layer ops, then parks the pane's PTY like any other.
-//!
-//! The per-session server process seeds the same session and tab with no
-//! client at all; the first attach adds one.
+//! A plain start seeds one session with one tab holding one shell pane,
+//! directly through the session-layer ops, then parks the pane's PTY like any
+//! other. The session holds no client; the first attach adds one.
 //!
 //! A `--profile` start seeds one session holding every tab the profile file
 //! defines, each with its own tree of panes.
@@ -15,13 +12,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::naming::{generate_name, NameKind};
+use koshi_core::ids::{PaneId, SessionId, TabId};
 use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::template::{ProfileTemplate, TemplateError, TerminalTemplate};
 use koshi_layout::tree::LayoutNode;
 use koshi_pty::error::PtyError;
-use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin, ClientRegistry};
+use koshi_session::client::{compute_default_pane_area_size, ClientRegistry};
 use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
@@ -37,53 +33,10 @@ use crate::server::Server;
 mod tests;
 
 impl Server {
-    /// Seed the first session/tab/root-pane/client for a local single-process
-    /// start and return the client's id. Same start as
-    /// [`bootstrap_local_named`](Self::bootstrap_local_named), with the
-    /// session's display name generated here.
-    pub fn bootstrap_local(
-        &mut self,
-        session_id: SessionId,
-        viewport_size: Size,
-        session_started_at: SystemTime,
-    ) -> Result<ClientId, PtyError> {
-        // This is the first session, so no existing name can collide.
-        let session_name = generate_name(NameKind::Session, |_| false);
-        self.bootstrap_local_named(session_id, session_name, viewport_size, session_started_at)
-    }
-
-    /// Seed the first session/tab/root-pane/client under a caller-chosen id and
-    /// display name, and return the client's id. The session is registered
-    /// under the caller's `session_id` and carries `session_name`. The root pane
-    /// runs the default shell, sized to the middle pane region of `viewport_size`;
-    /// `session_started_at` stamps the session and its first client.
-    ///
-    /// The child is spawned before any state is committed, so a failed launch
-    /// leaves no session behind and surfaces as `Err`.
-    pub fn bootstrap_local_named(
-        &mut self,
-        session_id: SessionId,
-        session_name: String,
-        viewport_size: Size,
-        session_started_at: SystemTime,
-    ) -> Result<ClientId, PtyError> {
-        let client_id = ClientId::new();
-        self.bootstrap_session(
-            session_id,
-            session_name,
-            viewport_size,
-            session_started_at,
-            Some(client_id),
-        )?;
-        Ok(client_id)
-    }
-
-    /// Seed the first session/tab/root-pane under a caller-chosen id and
-    /// display name, optionally viewed by `client_id`. `Some` attaches that
-    /// client to the new tab, focuses it on the root pane, and names it in the
-    /// pane's identity vars; `None` seeds the session with no client, and a
-    /// subsequent attach joins the headless start. Every other argument means what it
-    /// does in [`bootstrap_local_named`](Self::bootstrap_local_named).
+    /// Seed one session under `session_id` and `session_name`, holding one tab
+    /// with one pane that runs the default shell and no client. The pane is
+    /// sized to the pane region of `viewport_size`; `session_started_at`
+    /// stamps the session. The first attach adds a client.
     ///
     /// The child is spawned before any state is committed, so a failed launch
     /// leaves no session behind and surfaces as `Err`.
@@ -93,7 +46,6 @@ impl Server {
         session_name: String,
         viewport_size: Size,
         session_started_at: SystemTime,
-        client_id: Option<ClientId>,
     ) -> Result<(), PtyError> {
         let pty_backend = Arc::clone(self.get_pty_backend());
 
@@ -111,15 +63,14 @@ impl Server {
         add_koshi_environment(
             &mut spawn_spec.environment_variables,
             session_id,
-            client_id,
+            None,
             pane_id,
             koshi_paths::resolve_runtime_directory().as_deref(),
             self.config.pane_clipboard_writes.should_allow_writes,
         );
         pty_backend.spawn_pane(pane_id, spawn_spec, root_pane_pty_size)?;
 
-        // Assemble the session with its client, if any, viewing the tab created
-        // below, then commit the tab + root pane and focus the client on it.
+        // Assemble the session, then commit the tab + root pane.
         let mut session = Session::from_identity_and_client_registry(
             session_id,
             session_name,
@@ -127,13 +78,6 @@ impl Server {
             ClientRegistry::new(),
         );
         let _ = session.update_pane_sizing(self.get_pane_sizing());
-        attach_first_client(
-            &mut session,
-            client_id,
-            viewport_size,
-            tab_id,
-            session_started_at,
-        );
 
         let tab_name = generate_tab_name(&session);
         let new_pane_spec = NewPaneSpec {
@@ -145,7 +89,7 @@ impl Server {
             tab_id,
             pane_id,
             tab_name,
-            client_id,
+            None,
             new_pane_spec,
             pane_area_size,
         );
@@ -346,39 +290,6 @@ impl Server {
 
         Ok(())
     }
-}
-
-/// Attach `client_id` to a freshly seeded `session` as its only client,
-/// viewing `tab_id`, sized to `viewport_size`, stamped `session_started_at`, with a generated
-/// client label, colour `0`, and origin [`ClientOrigin::Local`]. A `None`
-/// `client_id` attaches nobody and leaves `session` untouched.
-///
-/// The client is recorded with no pane area report; its pane area resolves to
-/// the viewport minus two rows. Emits no event.
-fn attach_first_client(
-    session: &mut Session,
-    client_id: Option<ClientId>,
-    viewport_size: Size,
-    tab_id: TabId,
-    session_started_at: SystemTime,
-) {
-    let Some(client_id) = client_id else {
-        return;
-    };
-    // The session holds no other client, so no existing label can collide.
-    let client_label = generate_name(NameKind::Client, |_| false);
-    let client = Client::from_attachment(
-        client_id,
-        session.session_id,
-        session_started_at,
-        viewport_size,
-        None,
-        tab_id,
-        ClientOrigin::Local,
-        client_label,
-        0,
-    );
-    session.attach_client(client);
 }
 
 /// One profile tab's pane ids, layout tree, spawn requests, pane records, and focus.

@@ -9,6 +9,7 @@
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::command::tests::create_session_with_attached_client;
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::types::PaneClipboardWriteConfig;
 use koshi_core::geometry::Size;
@@ -266,9 +267,13 @@ fn build_clipboard_routing_fixture(
     let mut server = build_test_runtime();
     server.config.pane_clipboard_writes = pane_clipboard_writes;
     let session_id = SessionId::new();
-    let local_client_id = server
-        .bootstrap_local(session_id, viewport_size, SystemTime::UNIX_EPOCH)
-        .expect("bootstrap");
+    let local_client_id = create_session_with_attached_client(
+        &mut server,
+        session_id,
+        viewport_size,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
     let active_tab_id = server.session_by_id[&session_id]
         .clients
