@@ -30,8 +30,8 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
     list_pane_slots, ClientSnapshot, PaneSlot, PlacementPreview, PlacementSnapshot,
-    PlacementSource, PlacementTabSnapshot, RenderSnapshot, SessionSnapshot, TabMetadata,
-    TabSnapshot,
+    PlacementSource, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 
 use super::*;
@@ -2451,12 +2451,12 @@ fn a_frame_keeps_a_tab_strip_peek_made_on_the_tab_it_names() {
 }
 
 #[test]
-fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
+fn the_link_status_shows_on_the_chrome_the_viewer_paints() {
     let mut client = build_test_client();
     let active_tab_id = TabId::new();
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).reconnecting,
-        None,
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::Linked,
         "a joined viewer is linked"
     );
 
@@ -2466,19 +2466,21 @@ fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
     };
     client.set_link_status(LinkStatus::Redialing(reconnecting_state));
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).reconnecting,
-        Some(reconnecting_state)
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::Redialing(reconnecting_state)
     );
 
     client.set_link_status(LinkStatus::AwaitingRestartedSession);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).reconnecting,
-        None,
-        "a restart rejoin draws no tag"
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::AwaitingRestartedSession
     );
 
     client.set_link_status(LinkStatus::Linked);
-    assert_eq!(client.build_viewer_chrome(active_tab_id).reconnecting, None);
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::Linked
+    );
 }
 
 #[test]

@@ -322,7 +322,9 @@ The default leader is Ctrl.
 In locked mode, `<C-l>`, `<C-g>`, and `<C-q>` keep their actions, and every
 other key goes to the program in the focused pane.
 
-Drag a pane's handle in normal or locked mode to swap it with another pane.
+Hover a pane's top border to show its handle `⠿⠿⠿` beside the top-left
+corner. Drag the handle in normal or locked mode to swap the pane with another
+pane.
 After the drop, the client stays in normal or locked mode, and the keys you
 type go where they went before the drag. In pane placement mode, dragging a
 pane onto another also swaps them. To insert,

@@ -9,8 +9,8 @@
 //! holds it, a pane with no content cells clamps to its own origin, a stack
 //! header wins the cells it covers, a tiled pane's handle takes the three
 //! cells after its top-left corner and its title the cells after them at
-//! every width, a shown handle hits only those three cells and a pane four
-//! columns wide has none, the tab strip reports its first visible tab, two
+//! every width, a shown handle hits only those three cells, a hidden handle or
+//! one under pane placement hits none, and a pane four columns wide has none, the tab strip reports its first visible tab, two
 //! clients of different sizes hit-test independently, degenerate
 //! frames are safe, and floating panes hit front to back over the tiled layer
 //! and the letterbox margin, with their content, border, titlebar and controls
@@ -29,7 +29,8 @@ use koshi_test_support::fixtures::build_cell_rect;
 use crate::render::tests::compute_version_badge_column_count;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, FloatingPaneMoveDraft, FloatingPaneSlot, MouseFrame,
-    PaneSlot, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    PaneSlot, PlacementHandleHover, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
+    ViewerChrome,
 };
 
 fn build_screen_point(screen_column: u16, screen_row: u16) -> Point {
@@ -1083,7 +1084,9 @@ fn a_tiled_top_border_never_puts_the_handle_and_the_title_on_one_cell() {
 }
 
 /// A tiled pane whose handle shows hits the handle on the three cells after
-/// its top-left corner and its top border on every title cell after them.
+/// its top-left corner and its top border on every title cell after them. A
+/// hidden handle, and a handle while pane placement shows, hit no handle
+/// cell.
 #[test]
 fn a_shown_tiled_handle_hits_its_three_cells_and_the_title_cells_hit_the_top_border() {
     let pane_id = PaneId::new();
@@ -1102,7 +1105,7 @@ fn a_shown_tiled_handle_hits_its_three_cells_and_the_title_cells_hit_the_top_bor
         &[],
     );
     let viewer_chrome = ViewerChrome {
-        placement_handle_pane_id: Some(pane_id),
+        placement_handle_hover: Some(PlacementHandleHover::TiledTopBorder { pane_id }),
         ..ViewerChrome::default()
     };
 
@@ -1134,6 +1137,27 @@ fn a_shown_tiled_handle_hits_its_three_cells_and_the_title_cells_hit_the_top_bor
         corner_horizontal_side: Some(Direction::Up),
     });
     assert_eq!(top_row_hit_regions, expected_hit_regions);
+    for hidden_handle_viewer_chrome in [
+        ViewerChrome::default(),
+        ViewerChrome {
+            placement_handle_hover: Some(PlacementHandleHover::TiledHandle {
+                pane_id: PaneId::new(),
+            }),
+            ..ViewerChrome::default()
+        },
+    ] {
+        assert_eq!(
+            resolve_hit_region(
+                render_snapshot.build_frame_layout(hidden_handle_viewer_chrome),
+                build_screen_point(3, 2),
+            ),
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            }
+        );
+    }
 }
 
 /// A tiled pane four columns wide draws no handle, so its top border has no
@@ -1156,7 +1180,7 @@ fn a_tiled_pane_too_narrow_for_the_handle_has_no_handle_cell() {
         &[],
     );
     let viewer_chrome = ViewerChrome {
-        placement_handle_pane_id: Some(pane_id),
+        placement_handle_hover: Some(PlacementHandleHover::TiledHandle { pane_id }),
         ..ViewerChrome::default()
     };
 

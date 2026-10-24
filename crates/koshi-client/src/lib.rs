@@ -57,8 +57,8 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::placement::{PlacedPreview, PlacementPreviewError};
 use koshi_renderer::region::solve_core_regions;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, PlacementPreview, PlacementSnapshot, Reconnecting, RenderSnapshot,
-    SessionSnapshot,
+    ClientSnapshot, LinkStatus, PlacementHandleHover, PlacementPreview, PlacementSnapshot,
+    RenderSnapshot, SessionSnapshot,
 };
 use koshi_renderer::theme::Theme;
 
@@ -274,20 +274,6 @@ pub(crate) struct ViewerRestorePoint {
     dock_undock_mode: Option<DockUndockMode>,
 }
 
-/// Whether a viewer holds a link to its session, and how it is getting one back
-/// when it does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LinkStatus {
-    /// The viewer's requests reach the session, and its frames arrive.
-    Linked,
-    /// The session is replacing its own process image, and the viewer waits
-    /// to join its new image. The tabline draws no tag.
-    AwaitingRestartedSession,
-    /// The link to a session on a server dropped, and the viewer dials that
-    /// server again. The tabline draws the tag this value describes.
-    Redialing(Reconnecting),
-}
-
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
 /// of the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,8 +416,9 @@ pub struct Client {
     /// or off every pane. The renderer draws an unfocused hovered pane in the
     /// hover color.
     hovered_pane_id: Option<PaneId>,
-    /// The pane whose top border currently exposes the placement handle.
-    placement_handle_pane_id: Option<PaneId>,
+    /// Where this viewer's pointer rests on a pane's placement handle or on
+    /// the tiled top border that shows it, or `None` off both.
+    placement_handle_hover: Option<PlacementHandleHover>,
     /// Whether this viewer holds a link to its session, and how it is getting
     /// one back when it does not. The tabline draws
     /// `RECONNECTING (attempt 4, retry in 8s)` while it holds
@@ -500,7 +487,7 @@ impl Client {
             tabline_peek: None,
             selection_scroll_origin_row_index: None,
             hovered_pane_id: None,
-            placement_handle_pane_id: None,
+            placement_handle_hover: None,
             link_status: LinkStatus::Linked,
             placement_state: PlacementState::default(),
             active_tab_id: None,

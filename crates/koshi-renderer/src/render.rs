@@ -53,7 +53,7 @@ use crate::images::{
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, GridView, KeymapHints, PanePlacementPresentation, PaneSnapshot,
-    Reconnecting, RenderSnapshot, SelectionSpans, ViewerChrome,
+    PlacementHandleHover, Reconnecting, RenderSnapshot, SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
@@ -656,15 +656,17 @@ pub fn get_cursor_style(render_snapshot: &RenderSnapshot) -> Option<CursorStyle>
 /// focused pane's border (and an unfocused hovered pane's), writing its title
 /// into the top border, and drawing its scroll position when it is scrolled back.
 ///
-/// Each border takes [`compute_pane_border_style`], with every pane
-/// `placement_target` names as a placement target. The title ` <title> ` is
+/// Each border takes [`compute_pane_border_style`], with the placement hover
+/// style for every pane `placement_target` names as a placement target and for
+/// the pane whose `viewer_chrome.placement_handle_hover` is
+/// [`TiledHandle`](PlacementHandleHover::TiledHandle). The title ` <title> ` is
 /// cut to the label cells [`compute_tiled_pane_top_border`] gives. The top
-/// border of the pane whose placement handle the pointer rests on
-/// ([`is_placement_handle_hovered`]) shows the handle `⠿⠿⠿` on the handle
-/// cells that function gives, so `user@host` reads `┌⠿⠿⠿ user@host ─┐`. While
-/// `viewer_chrome.is_pane_placement_visible` is `true`, the pointer colors and
-/// the handle are not drawn: hovering `pane-123` does not change its border
-/// color. `layout_origin` shifts each pane into the centered content rect. A
+/// border of the pane that shows its placement handle
+/// ([`is_placement_handle_shown`]) draws the handle `⠿⠿⠿` on the handle cells
+/// that function gives, so `user@host` reads `┌⠿⠿⠿ user@host ─┐`. While
+/// `viewer_chrome.is_pane_placement_visible` is `true`, the pointer hover color
+/// is not drawn: hovering `pane-123` does not change its border color.
+/// `layout_origin` shifts each pane into the centered content rect. A
 /// box that covers no row `drawn_rows` draws is not drawn. The title, the
 /// handle and the scroll position are drawn only when `drawn_rows` draws
 /// their row.
@@ -687,12 +689,16 @@ fn draw_panes(
         if !pane_slot.is_visible || !drawn_rows.is_area_drawn(pane_rect) {
             continue;
         }
-        let is_placement_target =
-            is_placement_target_pane(pane_slot.pane_id, displayed_tab_id, placement_target);
+        let is_placement_hovered =
+            is_placement_target_pane(pane_slot.pane_id, displayed_tab_id, placement_target)
+                || viewer_chrome.placement_handle_hover
+                    == Some(PlacementHandleHover::TiledHandle {
+                        pane_id: pane_slot.pane_id,
+                    });
         let border_style = compute_pane_border_style(
             render_snapshot,
             pane_slot.pane_id,
-            is_placement_target,
+            is_placement_hovered,
             viewer_chrome,
             theme,
         );
@@ -720,7 +726,7 @@ fn draw_panes(
             }
         }
 
-        if is_top_border_drawn && is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome) {
+        if is_top_border_drawn && is_placement_handle_shown(pane_slot.pane_id, viewer_chrome) {
             if let Some(handle_rect) = top_border.placement_handle_rect {
                 let handle_area = place_cell_rect(handle_rect, layout_origin);
                 screen_buffer.set_string(
@@ -789,15 +795,14 @@ fn draw_pane_border(
 ///
 /// 1. The focus style, when `pane_id` is `viewer_chrome.placement_source_pane_id`,
 ///    or, with no placement source, the client's `focused_pane_id`.
-/// 2. The placement hover style, when `is_placement_target` is `true` or the
-///    pointer rests on the pane's placement handle ([`is_placement_handle_hovered`]).
+/// 2. The placement hover style, when `is_placement_hovered` is `true`.
 /// 3. The hover style, when `viewer_chrome.hovered_pane_id` is `pane_id` and
 ///    `viewer_chrome.is_pane_placement_visible` is `false`.
 /// 4. The unfocused style.
 fn compute_pane_border_style(
     render_snapshot: &RenderSnapshot,
     pane_id: PaneId,
-    is_placement_target: bool,
+    is_placement_hovered: bool,
     viewer_chrome: ViewerChrome,
     theme: &Theme,
 ) -> Style {
@@ -806,7 +811,7 @@ fn compute_pane_border_style(
         .or(render_snapshot.client_snapshot.focused_pane_id);
     if Some(pane_id) == focused_pane_id {
         compute_focused_border_style(theme)
-    } else if is_placement_target || is_placement_handle_hovered(pane_id, viewer_chrome) {
+    } else if is_placement_hovered {
         compute_placement_hover_border_style(theme)
     } else if !viewer_chrome.is_pane_placement_visible
         && Some(pane_id) == viewer_chrome.hovered_pane_id
@@ -817,12 +822,14 @@ fn compute_pane_border_style(
     }
 }
 
-/// Whether the viewer's pointer rests on the placement handle of `pane_id`:
-/// `viewer_chrome.placement_handle_pane_id` is `pane_id` and
-/// `viewer_chrome.is_pane_placement_visible` is `false`.
-fn is_placement_handle_hovered(pane_id: PaneId, viewer_chrome: ViewerChrome) -> bool {
-    !viewer_chrome.is_pane_placement_visible
-        && Some(pane_id) == viewer_chrome.placement_handle_pane_id
+/// Whether the tiled pane `pane_id` shows its placement handle:
+/// `viewer_chrome.placement_handle_hover` is
+/// [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) or
+/// [`TiledHandle`](PlacementHandleHover::TiledHandle) of `pane_id`.
+pub(crate) fn is_placement_handle_shown(pane_id: PaneId, viewer_chrome: ViewerChrome) -> bool {
+    viewer_chrome.placement_handle_hover == Some(PlacementHandleHover::TiledTopBorder { pane_id })
+        || viewer_chrome.placement_handle_hover
+            == Some(PlacementHandleHover::TiledHandle { pane_id })
 }
 
 /// Write the scroll position of a pane scrolled back into the bottom border of
@@ -884,9 +891,10 @@ pub fn is_placement_target_pane(
     }
 }
 
-/// Tint the content of the pane whose placement handle the pointer rests on
-/// ([`is_placement_handle_hovered`]), on each row `drawn_rows` draws. Nothing
-/// is tinted while `viewer_chrome.is_pane_placement_visible` is `true`.
+/// Tint the content of the tiled pane whose
+/// `viewer_chrome.placement_handle_hover` is
+/// [`TiledHandle`](PlacementHandleHover::TiledHandle), on each row
+/// `drawn_rows` draws.
 fn draw_placement_hover_tints(
     render_snapshot: &RenderSnapshot,
     viewer_chrome: ViewerChrome,
@@ -899,7 +907,11 @@ fn draw_placement_hover_tints(
         .active_tab_snapshot
         .pane_slots
     {
-        if !pane_slot.is_visible || !is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome) {
+        let is_handle_hovered = viewer_chrome.placement_handle_hover
+            == Some(PlacementHandleHover::TiledHandle {
+                pane_id: pane_slot.pane_id,
+            });
+        if !pane_slot.is_visible || !is_handle_hovered {
             continue;
         }
         let Some(content_rect) = pane_slot.content_rect else {
