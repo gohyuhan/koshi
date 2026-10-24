@@ -409,6 +409,12 @@ or printed id. A value that reads as an id is always the id — it never falls
 back to a name lookup. A name several targets share is refused, and the error
 lists every matching id. Pane and client flags use printed ids.
 
+An id that no running session holds is refused with `no running session has
+tab tab-3f2a…`. With `--session`, and inside a pane, an id that the session
+does not hold is refused with the id and the session, such as ``tab tab-3f2a…
+is not in session `work` `` or ``client client-1a2b… is not attached to session
+`work` ``. Both refusals exit 1.
+
 A session that another user of this machine started also takes the form
 `<user id>/<session id>`, as `koshi list-sessions` prints it in its `owner`
 column. Example: `koshi attach 1001/session-3f2a…` looks for that session only

@@ -508,9 +508,9 @@ const COMMAND_VARIANT_COUNT: usize = 25;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
-/// id no runtime holds, `MoveFloatingPane` names a pane id no runtime holds, and
-/// `SetPanePinned` and `SetPaneMinimized` name no pane, so each resolves the same way on
-/// every runtime.
+/// id no runtime holds, `MoveFloatingPane` names the same pane id on every runtime, one
+/// no runtime holds, and `SetPanePinned` and `SetPaneMinimized` name no pane, so each
+/// resolves the same way on every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),
@@ -573,7 +573,7 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             scroll_line_count: 3,
         }),
         Command::MoveFloatingPane(MoveFloatingPaneArgs {
-            pane_id: PaneId::new(),
+            pane_id: PaneId::from_uuid(uuid::uuid!("019bb2ba-0007-7000-8000-000000000001")),
             top_left_cell: Point { column: 4, row: 2 },
         }),
         Command::SetPanePinned(SetPanePinnedArgs {
@@ -889,7 +889,9 @@ fn a_command_naming_a_client_of_another_session_is_refused_and_changes_nothing()
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {second_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -2057,11 +2059,12 @@ fn new_pane_stacked_with_a_missing_source_is_not_found() {
 
     // A stacked request naming a pane that does not exist resolves its target
     // like any other new-pane and rejects `TargetNotFound`.
+    let missing_pane_id = PaneId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             placement: NewPanePlacement::Stacked {
-                source_pane_id: Some(PaneId::new()),
+                source_pane_id: Some(missing_pane_id),
                 tab_id: None,
             },
             ..build_new_pane_args()
@@ -2073,7 +2076,7 @@ fn new_pane_stacked_with_a_missing_source_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("pane {missing_pane_id} is not in session `s`")),
         }
     );
 }
@@ -3855,6 +3858,7 @@ fn focus_explicit_client_wins_over_the_issuer() {
 fn focus_unattached_explicit_client_is_rejected_without_fallback() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
@@ -3869,7 +3873,7 @@ fn focus_unattached_explicit_client_is_rejected_without_fallback() {
         CommandSource::from_key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
             focus_target: FocusTarget::Pane(pane_id),
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -3878,7 +3882,9 @@ fn focus_unattached_explicit_client_is_rejected_without_fallback() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     let session = &runtime.session_by_id[&session_id];
@@ -4654,7 +4660,7 @@ fn focus_target_with_removed_registry_record_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("pane {pane_id} is not in session `s`")),
         }
     );
 }
@@ -5376,7 +5382,9 @@ fn new_pane_external_unattached_target_client_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -5632,7 +5640,9 @@ fn new_pane_external_unattached_named_client_is_not_found_for_every_anchor() {
             CommandResult::Rejected {
                 command_id,
                 reason: RejectReason::TargetNotFound,
-                help: Some("target client not attached to the session".to_string()),
+                help: Some(format!(
+                    "client {unattached_client_id} is not attached to session `s`"
+                )),
             }
         );
         assert_eq!(serialize_session_records(&runtime), session_records_before);
@@ -5777,7 +5787,9 @@ fn new_pane_explicit_unattached_client_is_rejected_even_with_an_issuer() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -10922,6 +10934,7 @@ fn new_tab_explicit_client_wins_over_the_issuer() {
 fn new_tab_with_an_unattached_explicit_client_is_rejected() {
     let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let first_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
@@ -10934,7 +10947,7 @@ fn new_tab_with_an_unattached_explicit_client_is_rejected() {
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewTab(NewTabArgs {
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
             ..NewTabArgs::default()
         }),
     );
@@ -10944,7 +10957,9 @@ fn new_tab_with_an_unattached_explicit_client_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(runtime.session_by_id[&session_id].tabs.len(), 1);
@@ -11488,10 +11503,11 @@ fn close_tab_with_an_unknown_explicit_tab_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::CloseTab(CloseTabArgs {
-            tab_id: Some(TabId::new()),
+            tab_id: Some(unknown_tab_id),
             should_force_close: false,
             should_kill_process_tree: false,
         }),
@@ -11502,7 +11518,7 @@ fn close_tab_with_an_unknown_explicit_tab_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
     assert_eq!(runtime.session_by_id[&session_id].tabs.len(), 1);
@@ -11905,10 +11921,11 @@ fn move_tab_with_an_unknown_tab_is_rejected() {
 
     // An unknown tab is refused before its index is read: index 99 is past
     // the last slot too.
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::MoveTab(MoveTabArgs {
-            tab_id: Some(TabId::new()),
+            tab_id: Some(unknown_tab_id),
             target_tab_index: 99,
         }),
     );
@@ -11918,7 +11935,7 @@ fn move_tab_with_an_unknown_tab_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
     // A rejected move mutates nothing.
@@ -12091,6 +12108,116 @@ fn focus_tab_on_the_already_active_tab_is_ok_with_no_events() {
 }
 
 #[test]
+fn an_unknown_id_named_in_or_outside_a_pane_is_refused_naming_it_and_the_session() {
+    let unknown_pane_id = PaneId::from_uuid(uuid::uuid!("019bb2ba-0006-7000-8000-000000000001"));
+    let unknown_tab_id = TabId::from_uuid(uuid::uuid!("019bb2ba-0006-7000-8000-000000000002"));
+    let unknown_client_id =
+        ClientId::from_uuid(uuid::uuid!("019bb2ba-0006-7000-8000-000000000003"));
+    let pane_help = "pane pane-019bb2ba-0006-7000-8000-000000000001 is not in session `amber-fox`";
+    let tab_help = "tab tab-019bb2ba-0006-7000-8000-000000000002 is not in session `amber-fox`";
+    let client_help =
+        "client client-019bb2ba-0006-7000-8000-000000000003 is not attached to session `amber-fox`";
+    let commands_and_helps = [
+        (
+            Command::ClosePane(ClosePaneArgs {
+                pane_id: Some(unknown_pane_id),
+                ..ClosePaneArgs::default()
+            }),
+            pane_help,
+        ),
+        (
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Pane(unknown_pane_id),
+                client_id: None,
+            }),
+            pane_help,
+        ),
+        (
+            Command::CloseTab(CloseTabArgs {
+                tab_id: Some(unknown_tab_id),
+                ..CloseTabArgs::default()
+            }),
+            tab_help,
+        ),
+        (
+            Command::MoveTab(MoveTabArgs {
+                tab_id: Some(unknown_tab_id),
+                target_tab_index: 0,
+            }),
+            tab_help,
+        ),
+        (
+            Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Id(unknown_tab_id),
+                client_id: None,
+            }),
+            tab_help,
+        ),
+        (
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: Some(unknown_tab_id),
+                    direction: Direction::Right,
+                },
+                ..build_new_pane_args()
+            }),
+            tab_help,
+        ),
+        (
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                    destination_tab_id: unknown_tab_id,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Right,
+                }),
+            }),
+            tab_help,
+        ),
+        (
+            Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Next,
+                client_id: Some(unknown_client_id),
+            }),
+            client_help,
+        ),
+    ];
+    for (command, expected_help) in commands_and_helps {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let tab_id = TabId::new();
+        let pane_id = PaneId::new();
+        let mut session = build_bare_session(SessionId::new());
+        session.session_name = "amber-fox".to_string();
+        register_pane_record(&mut session, pane_id);
+        register_session_tab(&mut session, tab_id, pane_id);
+        attach_client(&mut session, client_id, tab_id, Some(pane_id));
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+        let session_records_before = serialize_session_records(&runtime);
+
+        for command_source in [
+            build_in_session_source(session_id, Some(client_id), pane_id),
+            CommandSource::from_external_cli(Some(session_id), None),
+        ] {
+            let command_envelope = build_command_envelope(command_source, command.clone());
+            let command_id = command_envelope.command_id;
+            assert_eq!(
+                runtime.dispatch(command_envelope),
+                CommandResult::Rejected {
+                    command_id,
+                    reason: RejectReason::TargetNotFound,
+                    help: Some(expected_help.to_string()),
+                },
+                "{command:?}"
+            );
+        }
+        assert_eq!(serialize_session_records(&runtime), session_records_before);
+    }
+}
+
+#[test]
 fn focus_tab_with_an_unknown_id_is_not_found() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
@@ -12103,10 +12230,11 @@ fn focus_tab_with_an_unknown_id_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::FocusTab(FocusTabArgs {
-            focus_target: TabTarget::Id(TabId::new()),
+            focus_target: TabTarget::Id(unknown_tab_id),
             client_id: None,
         }),
     );
@@ -12116,7 +12244,7 @@ fn focus_tab_with_an_unknown_id_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
     assert_eq!(
@@ -12248,6 +12376,7 @@ fn focus_tab_explicit_client_wins_over_the_issuer() {
 fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let first_tab_id = TabId::new();
     let second_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
@@ -12265,7 +12394,7 @@ fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
         CommandSource::from_key_binding(client_id),
         Command::FocusTab(FocusTabArgs {
             focus_target: TabTarget::Id(second_tab_id),
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -12274,7 +12403,9 @@ fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -17121,10 +17252,11 @@ fn a_rejected_command_leaves_state_intact_and_the_next_command_works() {
     let (mut runtime, _runtime_event_sender, client_id, session_id) = build_lock_fixture();
 
     // Close a pane that does not exist: rejected, nothing changed.
+    let missing_pane_id = PaneId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::ClosePane(ClosePaneArgs {
-            pane_id: Some(PaneId::new()),
+            pane_id: Some(missing_pane_id),
             should_force_close: false,
             should_kill_process_tree: false,
         }),
@@ -17135,7 +17267,7 @@ fn a_rejected_command_leaves_state_intact_and_the_next_command_works() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("pane {missing_pane_id} is not in session `s`")),
         }
     );
     assert_eq!(
@@ -17809,7 +17941,9 @@ fn an_explicit_client_that_is_not_attached_never_falls_back() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -18154,12 +18288,13 @@ fn new_pane_with_an_unknown_tab_target_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             placement: NewPanePlacement::Split {
                 source_pane_id: None,
-                tab_id: Some(TabId::new()),
+                tab_id: Some(unknown_tab_id),
                 direction: Direction::Right,
             },
             working_directory: None,
@@ -18173,7 +18308,7 @@ fn new_pane_with_an_unknown_tab_target_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
 }
@@ -18255,6 +18390,7 @@ fn toggle_lock_with_an_explicit_client_flips_that_client() {
 fn lock_with_an_unattached_explicit_client_is_not_found() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let issuer_client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let tab_id = TabId::new();
     let root_pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
@@ -18270,7 +18406,7 @@ fn lock_with_an_unattached_explicit_client_is_not_found() {
         CommandSource::from_key_binding(issuer_client_id),
         Command::SetLockMode(LockModeArgs {
             is_locked: true,
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -18279,7 +18415,9 @@ fn lock_with_an_unattached_explicit_client_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -18748,10 +18886,12 @@ fn detach_naming_a_client_that_is_not_attached_is_not_found() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
 
+    let unattached_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
         Command::Detach(DetachArgs {
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -18761,7 +18901,9 @@ fn detach_naming_a_client_that_is_not_attached_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
     assert_eq!(
@@ -19127,6 +19269,7 @@ fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let stranger_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -19143,7 +19286,9 @@ fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
 }
@@ -21794,9 +21939,11 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
             help: Some("several clients are attached; name the target client".to_string()),
         }
     );
+    let stranger_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
-        CommandSource::from_external_cli(Some(session_id), Some(ClientId::new())),
+        CommandSource::from_external_cli(Some(session_id), Some(stranger_client_id)),
         tiled_pane_id,
         Direction::Right,
         1,
@@ -21806,7 +21953,9 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
 
@@ -23358,10 +23507,12 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
         alice_record_before
     );
 
+    let stranger_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let session_records_before = serialize_session_records(&runtime);
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
-        CommandSource::from_external_cli(Some(session_id), Some(ClientId::new())),
+        CommandSource::from_external_cli(Some(session_id), Some(stranger_client_id)),
         floating_pane_id,
         Point { column: 4, row: 2 },
     );
@@ -23370,7 +23521,9 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
     let (command_id, command_result) = dispatch_set_pane_pinned(

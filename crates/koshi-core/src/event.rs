@@ -446,6 +446,36 @@ impl std::fmt::Display for RejectReason {
     }
 }
 
+/// A tab, pane, or client that a command names by its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMemberId {
+    /// A tab of the session.
+    Tab(TabId),
+    /// A tiled or floating pane of the session.
+    Pane(PaneId),
+    /// A client attached to the session.
+    Client(ClientId),
+}
+
+/// The help a [`RejectReason::TargetNotFound`] carries when `member_id` names
+/// no member of the session `session_name`.
+///
+/// For session `work`: ``tab tab-<uuid> is not in session `work` ``,
+/// ``pane pane-<uuid> is not in session `work` ``, and
+/// ``client client-<uuid> is not attached to session `work` ``.
+#[must_use]
+pub fn format_member_not_in_session_help(member_id: SessionMemberId, session_name: &str) -> String {
+    match member_id {
+        SessionMemberId::Tab(tab_id) => format!("tab {tab_id} is not in session `{session_name}`"),
+        SessionMemberId::Pane(pane_id) => {
+            format!("pane {pane_id} is not in session `{session_name}`")
+        }
+        SessionMemberId::Client(client_id) => {
+            format!("client {client_id} is not attached to session `{session_name}`")
+        }
+    }
+}
+
 // ============================================================================
 // Selection and copy
 // ============================================================================

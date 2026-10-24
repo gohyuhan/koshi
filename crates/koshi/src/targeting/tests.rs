@@ -537,7 +537,7 @@ fn pane_in_no_session_is_not_found() {
 fn explicit_session_with_a_pane_from_another_session_refuses() {
     let named_session_id = SessionId::new();
     let other_tab_id = TabId::new();
-    let foreign_pane_id = PaneId::new();
+    let foreign_pane_id = PaneId::from_uuid(uuid!("019bb2ba-0006-7000-8000-000000000001"));
     let discovered_sessions = build_complete_discovery([
         build_session_overview("amber-fox", named_session_id, &[], &[], &[]),
         build_session_overview(
@@ -560,6 +560,12 @@ fn explicit_session_with_a_pane_from_another_session_refuses() {
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetNotFound
+    );
+    // The session answers an in-session `--pane` it does not hold with the
+    // same text.
+    assert_eq!(
+        read_rejection_help(&selection_error),
+        "pane pane-019bb2ba-0006-7000-8000-000000000001 is not in session `amber-fox`"
     );
 }
 
@@ -615,7 +621,7 @@ fn detached_client_is_not_found_anywhere() {
 fn a_client_from_another_session_is_not_retargeted() {
     let named_session_id = SessionId::new();
     let other_tab_id = TabId::new();
-    let foreign_client_id = ClientId::new();
+    let foreign_client_id = ClientId::from_uuid(uuid!("019bb2ba-0006-7000-8000-000000000003"));
     let discovered_sessions = build_complete_discovery([
         build_session_overview("amber-fox", named_session_id, &[], &[], &[]),
         build_session_overview(
@@ -638,6 +644,12 @@ fn a_client_from_another_session_is_not_retargeted() {
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetNotFound
+    );
+    // The session answers an in-session `--client` it does not hold with the
+    // same text.
+    assert_eq!(
+        read_rejection_help(&selection_error),
+        "client client-019bb2ba-0006-7000-8000-000000000003 is not attached to session `amber-fox`"
     );
 }
 
@@ -973,12 +985,19 @@ fn tab_id_outside_the_session_is_not_found() {
         &[],
         &[],
     );
+    let foreign_tab_id = TabId::from_uuid(uuid!("019bb2ba-0006-7000-8000-000000000002"));
     let tab_resolution_error =
-        resolve_target_tab(&session_overview, &TabReference::TabId(TabId::new()))
+        resolve_target_tab(&session_overview, &TabReference::TabId(foreign_tab_id))
             .expect_err("foreign tab");
     assert_eq!(
         read_rejection_reason(&tab_resolution_error),
         RejectReason::TargetNotFound
+    );
+    // The session answers an in-session `--tab` it does not hold with the
+    // same text.
+    assert_eq!(
+        read_rejection_help(&tab_resolution_error),
+        "tab tab-019bb2ba-0006-7000-8000-000000000002 is not in session `amber-fox`"
     );
 }
 
