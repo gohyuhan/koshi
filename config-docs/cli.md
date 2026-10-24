@@ -624,7 +624,7 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi new-pane` | `--direction`, `--stacked`, `--floating`, `--pane`, `--tab`, `--session`, `--client` | Open a shell pane |
 | `koshi run -- <COMMAND>...` | Same placement flags as `new-pane` | Open a pane running the command |
 | `koshi close-pane` | `--pane`, `--force` | Close a pane |
-| `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border by signed cell count |
+| `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border up to a signed cell count |
 | `koshi move-pane` | `--direction` and `--pane`, or `--pane`, `--x`, `--y` and `--client` | Swap a tiled pane with its visible neighbor in one step, or move a floating pane |
 | `koshi place-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--client` | Insert a pane at one side of a tab's tiled layout, or into a stack |
 | `koshi undock-pane` | `--pane`, `--x`, `--y`, `--client` | Float a tiled pane up where it is drawn |
@@ -637,15 +637,38 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi input "<TEXT>"` | `--pane`, `--no-enter` | Type text; Enter follows unless held back |
 
 Directions: `right`, `down`, `left`, `up`. A positive resize grows toward the
-direction; a negative resize shrinks from that side. On a floating pane,
-`--client` names the client whose view keeps the edge opposite the moved border
-in place. With no `--client`, the issuing client acts, else the session's only
-attached client. With several attached clients and no `--client`, the resize is
-refused. A floating pane grows only up to that client's pane area edge on the
-moved side: a 40-column pane at column 20 of 80 columns, grown right by 30,
-becomes 60 columns wide. A pane that client pinned keeps its pinned cell. On a
-tiled pane, the resize ends the fullscreen view of the client `--client` names.
-A positive `scroll-pane --lines` moves toward history.
+direction; a negative resize shrinks from that side. A pane at the tab edge on
+that side moves its opposite border the same way instead. The border moves up
+to `--size` cells, as far as minimum sizes allow. In a tab of two 40-column
+panes, `resize-pane --direction left --size 100` on the right pane grows it by
+36 columns, and the left pane keeps its 4-column minimum. A border that cannot
+move one cell is refused, and nothing changes:
+
+```text
+koshi: below minimum size
+  pane-0192f0c1-… cannot grow left here; the pane next to it has no room to give
+```
+
+The pane that gives the cells has no room to give when it is at its minimum
+size or hidden for lack of room. A shrink is refused as `<pane> cannot shrink
+from the left here; it has no room to give`. A border that the layout holds in
+place is refused as `invalid in the current state`, with `<pane> cannot grow
+left here; the layout holds this border in place`. The layout holds a border in
+three cases: a pane in the same split keeps the `preferred` size a profile
+gives it; the pane that takes the cells holds its minimum size with cells a
+third pane lends it; or the pane that takes the cells is hidden for lack of
+room. In an 80-column tab whose left pane has `preferred 20`, the border
+between the two panes stays at column 20.
+
+On a floating pane, `--client` names the client whose view keeps the edge
+opposite the moved border in place. With no `--client`, the issuing client
+acts, else the session's only attached client. With several attached clients
+and no `--client`, the resize is refused. A floating pane grows only up to that
+client's pane area edge on the moved side: a 40-column pane at column 20 of 80
+columns, grown right by 30, becomes 60 columns wide. A pane that client pinned
+keeps its pinned cell. On a tiled pane, the resize ends the fullscreen view of
+the client `--client` names. A positive `scroll-pane --lines` moves toward
+history.
 
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.

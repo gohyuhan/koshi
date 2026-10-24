@@ -994,11 +994,28 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
 
         // The whole answer, not only whether it was refused: a refusal matches
         // reason and help text, and a success matches the emitted events one
-        // for one, in order.
-        let local_outcome = get_command_outcome(&local_command_result);
+        // for one, in order. A help text that names the remote side's pane,
+        // tab or client is compared with those ids read as the local ones.
+        let local_outcome = get_command_outcome(&local_command_result)
+            .map_err(|(reject_reason, help)| (reject_reason, help.map(str::to_string)));
+        let local_id_by_remote_id = [
+            (remote_pane_id.to_string(), local_pane_id.to_string()),
+            (remote_tab_id.to_string(), local_tab_id.to_string()),
+            (remote_client_id.to_string(), local_client_id.to_string()),
+        ];
+        let remote_outcome =
+            get_command_outcome(&remote_command_result).map_err(|(reject_reason, help)| {
+                let help_with_local_ids = help.map(|help| {
+                    local_id_by_remote_id
+                        .iter()
+                        .fold(help.to_string(), |help_text, (remote_id, local_id)| {
+                            help_text.replace(remote_id, local_id)
+                        })
+                });
+                (reject_reason, help_with_local_ids)
+            });
         assert_eq!(
-            get_command_outcome(&remote_command_result),
-            local_outcome,
+            remote_outcome, local_outcome,
             "{command_name} answered a remote client differently from a local one"
         );
 
@@ -10151,132 +10168,431 @@ fn resize_pane_explicit_target_resolves_its_owning_session() {
     );
 }
 
+/// The content column count of each pane in `session_id`'s only tab, in
+/// layout order; `None` for a pane with no content rect.
+fn list_content_column_counts(
+    runtime: &Server,
+    session_id: SessionId,
+) -> Vec<(PaneId, Option<u16>)> {
+    Server::compute_tab_content_rects(
+        &runtime.session_by_id[&session_id],
+        get_only_tab_id(runtime, session_id),
+    )
+    .into_iter()
+    .map(|(pane_id, content_rect)| {
+        (
+            pane_id,
+            content_rect.map(|content_rect| content_rect.size.column_count),
+        )
+    })
+    .collect()
+}
+
 #[test]
-fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
+fn resize_pane_past_the_neighbors_minimum_moves_the_border_to_that_minimum() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        split_pane_pty_size,
+        ..
+    } = build_resize_fixture();
+
+    // At 80 columns the donor root holds 40; its border-inclusive floor is 4
+    // (the 2-column content minimum plus the 1-cell border on each side), so
+    // it can give 36. Asking for 100 moves exactly those 36.
+    let (_, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        100,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(2)), (split_pane_id, Some(74))]
+    );
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&split_pane_id],
+        PtySize {
+            column_count: split_pane_pty_size.column_count + 36,
+            row_count: split_pane_pty_size.row_count,
+        }
+    );
+}
+
+#[test]
+fn resize_pane_at_the_neighbors_minimum_is_refused_naming_the_pane_and_direction() {
     let ResizeFixture {
         mut runtime,
         fake_pty_backend,
         session_id,
         client_id,
         split_pane_id,
-        split_pane_pty_size,
         ..
     } = build_resize_fixture();
-    let rects_before = Server::compute_tab_content_rects(
-        &runtime.session_by_id[&session_id],
-        get_only_tab_id(&runtime, session_id),
+    let _ = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        100,
     );
-    let resize_count_before_rejection = fake_pty_backend
+    let content_column_counts_before = list_content_column_counts(&runtime, session_id);
+    let pty_size_before = runtime.pty_size_by_pane_id[&split_pane_id];
+    let resize_count_before = fake_pty_backend
         .list_pane_sizes(split_pane_id)
         .unwrap()
         .len();
 
-    // At 80 columns the donor root holds 40; its border-inclusive floor is 4
-    // (the 2-column content minimum plus the 1-cell border on each side), so
-    // it can give exactly 36. Asking for 100 rejects and leaves everything
-    // untouched.
-    let command_envelope = build_command_envelope(
+    // The root pane is at its minimum: not one more column moves, and nothing
+    // changes.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
         CommandSource::from_key_binding(client_id),
-        Command::ResizePane(ResizePaneArgs {
-            pane_id: None,
-            direction: Direction::Left,
-            resize_amount_cells: 100,
-        }),
+        split_pane_id,
+        Direction::Left,
+        1,
     );
-    let command_id = command_envelope.command_id;
     assert_eq!(
-        runtime.dispatch(command_envelope),
+        command_result,
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinimumSize,
-            help: Some("the donating pane has only 36 spare cells to give".to_string()),
+            help: Some(format!(
+                "{split_pane_id} cannot grow left here; the pane next to it has no room to give"
+            )),
         }
     );
-
-    let rects_after = Server::compute_tab_content_rects(
-        &runtime.session_by_id[&session_id],
-        get_only_tab_id(&runtime, session_id),
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        content_column_counts_before
     );
-    assert_eq!(rects_after, rects_before);
+    assert_eq!(runtime.pty_size_by_pane_id[&split_pane_id], pty_size_before);
     assert_eq!(
         fake_pty_backend
             .list_pane_sizes(split_pane_id)
             .unwrap()
             .len(),
-        resize_count_before_rejection
-    );
-    assert_eq!(
-        runtime.pty_size_by_pane_id[&split_pane_id],
-        split_pane_pty_size
+        resize_count_before
     );
 }
 
 #[test]
-fn dispatch_reporting_spare_hands_back_the_donors_spare_cells() {
+fn resize_pane_shrink_past_the_panes_own_minimum_stops_there_then_is_refused() {
     let ResizeFixture {
         mut runtime,
+        session_id,
         client_id,
+        root_pane_id,
+        split_pane_id,
         ..
     } = build_resize_fixture();
 
-    // The donor root holds 40 of the 80 columns and can give 36 before its own
-    // floor. Asking for 100 refuses and hands that 36 back beside the result.
+    // On a shrink the split pane donates: 40 columns above its floor of 4
+    // leave 36.
+    let (_, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        -100,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(74)), (split_pane_id, Some(2))]
+    );
+
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        -1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{split_pane_id} cannot shrink from the left here; it has no room to give"
+            )),
+        }
+    );
+}
+
+#[test]
+fn resize_pane_at_the_tab_edge_moves_the_opposite_border_to_the_minimum_then_names_it() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+
+    // The split pane touches the tab's right edge: its left border moves
+    // right instead, and the split pane shrinks to its floor.
+    let (_, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Right,
+        100,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(74)), (split_pane_id, Some(2))]
+    );
+
+    // The refusal names the left border, the one that moves.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Right,
+        1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{split_pane_id} cannot shrink from the left here; it has no room to give"
+            )),
+        }
+    );
+}
+
+#[test]
+fn a_vertical_resize_past_the_minimum_stops_there_and_names_up_and_the_bottom_border() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(split_pane_id),
+                tab_id: None,
+                direction: Direction::Down,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+            "PtyResized"
+        ])
+    );
+    let bottom_pane_id = find_other_pane_id(&runtime, session_id, &[root_pane_id, split_pane_id]);
+    let top_pty_size = runtime.pty_size_by_pane_id[&split_pane_id];
+    let bottom_pty_size = runtime.pty_size_by_pane_id[&bottom_pane_id];
+
+    // The top pane's content keeps its 1-row minimum: every row above it
+    // moves.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::ResizePane(ResizePaneArgs {
-            pane_id: None,
-            direction: Direction::Left,
+            pane_id: Some(bottom_pane_id),
+            direction: Direction::Up,
             resize_amount_cells: 100,
         }),
     );
-    let command_id = command_envelope.command_id;
+    let (command_result, moved_cell_count) =
+        runtime.dispatch_reporting_moved_cells(command_envelope);
     assert_eq!(
-        runtime.dispatch_reporting_spare(command_envelope),
-        (
-            CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::MinimumSize,
-                help: Some("the donating pane has only 36 spare cells to give".to_string()),
-            },
-            Some(36)
-        )
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized", "PtyResized"])
+    );
+    assert_eq!(moved_cell_count, Some(top_pty_size.row_count - 1));
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&bottom_pane_id],
+        PtySize {
+            column_count: bottom_pty_size.column_count,
+            row_count: bottom_pty_size.row_count + top_pty_size.row_count - 1,
+        }
+    );
+
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        bottom_pane_id,
+        Direction::Up,
+        1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{bottom_pane_id} cannot grow up here; the pane next to it has no room to give"
+            )),
+        }
+    );
+
+    // The top pane at its minimum gives no row to a shrink of its own bottom
+    // border.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Down,
+        -1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{split_pane_id} cannot shrink from the bottom here; it has no room to give"
+            )),
+        }
     );
 }
 
 #[test]
-fn dispatch_reporting_spare_reports_no_spare_for_an_applied_resize() {
+fn resize_pane_against_a_preferred_size_is_refused_as_held_and_changes_nothing() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    // The root pane aims for 20 of the 80 columns, as `preferred 20` in a
+    // profile gives it.
+    let tab_id = get_only_tab_id(&runtime, session_id);
+    let session = runtime.session_by_id.get_mut(&session_id).expect("session");
+    let mut preferred_layout_tree = session.tabs[&tab_id].get_layout_tree().clone();
+    let LayoutNode::Split(preferred_split) = &mut preferred_layout_tree else {
+        unreachable!("the fixture tab is a split");
+    };
+    preferred_split.weights[0].preferred_cell_count = Some(20);
+    let _ = session.update_tab_layout(tab_id, preferred_layout_tree);
+    let content_column_counts_before = list_content_column_counts(&runtime, session_id);
+    assert_eq!(
+        content_column_counts_before,
+        vec![(root_pane_id, Some(18)), (split_pane_id, Some(58))]
+    );
+
+    let held_resizes = [
+        (
+            split_pane_id,
+            Direction::Left,
+            5,
+            format!("{split_pane_id} cannot grow left here; the layout holds this border in place"),
+        ),
+        (
+            root_pane_id,
+            Direction::Right,
+            -5,
+            format!(
+                "{root_pane_id} cannot shrink from the right here; the layout holds this border in place"
+            ),
+        ),
+    ];
+    for (resized_pane_id, direction, resize_amount_cells, expected_help) in held_resizes {
+        let (command_id, command_result) = dispatch_resize_pane(
+            &mut runtime,
+            CommandSource::from_key_binding(client_id),
+            resized_pane_id,
+            direction,
+            resize_amount_cells,
+        );
+        assert_eq!(
+            command_result,
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some(expected_help),
+            }
+        );
+    }
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        content_column_counts_before
+    );
+}
+
+#[test]
+fn dispatch_reporting_moved_cells_hands_back_the_cells_the_border_moved() {
     let ResizeFixture {
         mut runtime,
         client_id,
+        split_pane_id,
         ..
     } = build_resize_fixture();
 
-    // A resize the layout grants carries no spare: the second half is `None`
-    // for every outcome but a border refused at a pane minimum.
+    // Within the donor's room the whole request moves; past it, the room.
+    for (resize_amount_cells, expected_moved_cell_count) in [(5, 5), (100, 31)] {
+        let command_envelope = build_command_envelope(
+            CommandSource::from_key_binding(client_id),
+            Command::ResizePane(ResizePaneArgs {
+                pane_id: None,
+                direction: Direction::Left,
+                resize_amount_cells,
+            }),
+        );
+        let (command_result, moved_cell_count) =
+            runtime.dispatch_reporting_moved_cells(command_envelope);
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Ok(vec!["LayoutChanged", "PtyResized"])
+        );
+        assert_eq!(moved_cell_count, Some(expected_moved_cell_count));
+    }
+
+    // A refusal hands back nothing.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::ResizePane(ResizePaneArgs {
             pane_id: None,
             direction: Direction::Left,
-            resize_amount_cells: 5,
+            resize_amount_cells: 1,
         }),
     );
-    let command_id = command_envelope.command_id;
-    let (command_result, spare_cell_count) = runtime.dispatch_reporting_spare(command_envelope);
-    match command_result {
-        CommandResult::Ok {
-            command_id: ok_command_id,
-            emitted_events,
-        } => {
-            assert_eq!(ok_command_id, command_id);
-            assert_eq!(
-                list_event_names(&emitted_events),
-                ["LayoutChanged", "PtyResized"]
-            );
-        }
-        unexpected_result => panic!("expected Ok, got {unexpected_result:?}"),
-    }
-    assert_eq!(spare_cell_count, None);
+    let (command_result, moved_cell_count) =
+        runtime.dispatch_reporting_moved_cells(command_envelope);
+    let expected_help =
+        format!("{split_pane_id} cannot grow left here; the pane next to it has no room to give");
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Err((RejectReason::MinimumSize, Some(expected_help.as_str())))
+    );
+    assert_eq!(moved_cell_count, None);
 }
 
 #[test]
@@ -10284,27 +10600,35 @@ fn a_border_refused_at_the_pane_minimum_writes_no_log_line() {
     let ResizeFixture {
         mut runtime,
         client_id,
+        split_pane_id,
         ..
     } = build_resize_fixture();
+    let _ = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        100,
+    );
     let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
 
-    // A resize refused at a pane minimum is the one rejection that is not
+    // A border that cannot move one cell is the one rejection that is not
     // logged, so the capture stays empty.
-    let command_envelope = build_command_envelope(
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
         CommandSource::from_key_binding(client_id),
-        Command::ResizePane(ResizePaneArgs {
-            pane_id: None,
-            direction: Direction::Left,
-            resize_amount_cells: 100,
-        }),
+        split_pane_id,
+        Direction::Left,
+        1,
     );
-    let command_id = command_envelope.command_id;
     assert_eq!(
-        runtime.dispatch(command_envelope),
+        command_result,
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinimumSize,
-            help: Some("the donating pane has only 36 spare cells to give".to_string()),
+            help: Some(format!(
+                "{split_pane_id} cannot grow left here; the pane next to it has no room to give"
+            )),
         }
     );
     assert_eq!(captured_logs.contents(), "");
@@ -10406,7 +10730,9 @@ fn resize_pane_with_no_border_on_the_axis_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("pane has no border to move on that axis".to_string()),
+            help: Some(format!(
+                "{split_pane_id} has no top or bottom border to move"
+            )),
         }
     );
     assert_eq!(
@@ -21820,7 +22146,7 @@ fn a_floating_pane_resize_past_the_minimum_or_the_cap_is_refused() {
             command_id,
             reason: RejectReason::MinimumSize,
             help: Some(format!(
-                "{smallest_pane_id} is at its minimum size on that axis"
+                "{smallest_pane_id} cannot shrink from the left here; it is at its minimum size"
             )),
         }
     );

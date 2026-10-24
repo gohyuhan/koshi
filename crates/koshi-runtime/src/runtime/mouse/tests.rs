@@ -2950,8 +2950,8 @@ fn a_client_with_no_subscription_is_answered_nothing() {
 fn a_two_cell_drag_moves_the_border_as_far_as_two_one_cell_drags_do() {
     // Five stacked panes on a 40-row viewport, on the stock 1-row pane
     // minimum. The donating pane's solved height does not change on the first
-    // of the two cells: the layout still has a cell to give after it, and only
-    // the second cell moves the border.
+    // cell of offset: the layout still has a cell to give after it, and the
+    // second cell moves the border one row. The donor is then at its floor.
     let (mut server, _fake_pty_backend, client_id) = build_sized_runtime(Size {
         column_count: 80,
         row_count: 40,
@@ -2969,7 +2969,10 @@ fn a_two_cell_drag_moves_the_border_as_far_as_two_one_cell_drags_do() {
     let applied_cell_count =
         server.drag_resize(client_id, initial_pane_sizes[3].0, Direction::Up, 1, 2);
 
-    assert_eq!(applied_cell_count, 2, "both cells of the drag were taken");
+    assert_eq!(
+        applied_cell_count, 1,
+        "the border moved one row on screen before the donor reached its floor"
+    );
     assert_eq!(
         list_pane_row_counts(&list_stacked_pane_sizes(&server, client_id)),
         vec![19, 9, 3, 3, 4],
@@ -3011,6 +3014,23 @@ fn a_negative_step_moves_the_border_the_other_way() {
         get_pane_column_count(&server, client_id, pane_id),
         initial_column_count - 4,
         "a step of -1 shrinks the grabbed pane"
+    );
+}
+
+#[test]
+fn a_step_above_one_moves_the_border_only_the_cells_asked_for() {
+    let (mut server, _fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
+    let pane_id = get_only_pane_id(&server);
+    split_focused_pane(&mut server, client_id);
+    let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
+
+    let applied_cell_count = server.drag_resize(client_id, pane_id, Direction::Right, 3, 2);
+
+    assert_eq!(applied_cell_count, 2, "the two cells asked for were taken");
+    assert_eq!(
+        get_pane_column_count(&server, client_id, pane_id),
+        initial_column_count + 2,
+        "a step of 3 grows the grabbed pane like a step of 1"
     );
 }
 

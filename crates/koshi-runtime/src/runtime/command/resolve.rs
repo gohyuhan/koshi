@@ -22,7 +22,7 @@ impl Server {
     /// Returns the first failure, or `Ok(())` when the command is well-formed
     /// against current state.
     ///
-    /// [`Server::dispatch_reporting_spare`] is the only caller and runs this
+    /// [`Server::dispatch_reporting_moved_cells`] is the only caller and runs this
     /// before any handler, so every command crosses this gate.
     pub(super) fn validate_command(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
         // 1. CLI admission: a CLI command source may submit only the commands
@@ -1225,7 +1225,8 @@ impl Server {
     ///   [`RejectReason::InvalidState`] `<pane> is pinned; unpin it to move
     ///   its left or top edge`;
     /// - a shrink of an axis at the floating minimum:
-    ///   [`RejectReason::MinimumSize`] with no spare cells;
+    ///   [`RejectReason::MinimumSize`], unlogged, `<pane> cannot shrink from
+    ///   the <side> here; it is at its minimum size`;
     /// - a growth of an axis at the floating cap, 90% of the shared floating
     ///   viewport rounding down ([`compute_floating_pane_size_cap`]):
     ///   [`RejectReason::InvalidState`] `<pane> already spans 90% of the
@@ -1312,19 +1313,18 @@ impl Server {
             );
         if clamped_cell_count == i32::from(current_cell_count) {
             if command_args.resize_amount_cells < 0 {
-                return Err(Rejection {
-                    reason: RejectReason::MinimumSize,
-                    help: Some(format!("{pane_id} is at its minimum size on that axis")),
-                    spare_cell_count: Some(0),
-                });
+                return Err(Rejection::from_unmovable_border(
+                    RejectReason::MinimumSize,
+                    Self::format_unmovable_border_help(
+                        pane_id,
+                        direction,
+                        false,
+                        "it is at its minimum size",
+                    ),
+                ));
             }
             if current_cell_count < cap_cell_count {
-                let side_name = match direction {
-                    Direction::Right => "right",
-                    Direction::Down => "bottom",
-                    Direction::Left => "left",
-                    Direction::Up => "top",
-                };
+                let side_name = format_side_name(direction);
                 return Err(Rejection::from_reason_and_help(
                     RejectReason::InvalidState,
                     &format!("{pane_id} already reaches the {side_name} edge of the pane area"),
