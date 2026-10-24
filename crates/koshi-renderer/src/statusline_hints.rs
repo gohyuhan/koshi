@@ -3,6 +3,8 @@
 //!
 //! Idle view groups every top-level hint under one human modifier header such
 //! as `Ctrl +` or `Alt +`; keys with the same action label fold into one ribbon.
+//! One-character key names in a ribbon join with nothing (`←↓↑→`, `hjkl`); a
+//! ribbon that holds a longer name puts `|` between every two (`ENTER|f`).
 //! A modifier-less key (bare `Tab`) is its own opener and wears the header
 //! style itself.
 //! Pending view paints the pressed prefix as an accent breadcrumb, then shows
@@ -440,16 +442,30 @@ fn build_chord_ribbon(theme: &Theme, chord: KeyChord, prefix_label: Option<&str>
     Line::from(ribbon_spans)
 }
 
+/// The key block, then the label block, of one action ribbon.
+///
+/// The key block holds every key name of the ribbon. When each name is one
+/// character, the names join with nothing: `←↓↑→`, `hjkl`. When any name is
+/// longer, a `|` separates every two names: `ENTER` and `f` read `ENTER|f`.
 fn build_action_ribbon(
     action_ribbon: &ActionRibbon,
     key_style: Style,
     label_style: Style,
 ) -> Line<'static> {
-    let key_text: String = action_ribbon
+    let key_names: Vec<String> = action_ribbon
         .keys
         .iter()
         .map(|key| format_key_name(*key))
         .collect();
+    let is_every_key_name_one_character = key_names
+        .iter()
+        .all(|key_name| key_name.chars().count() == 1);
+    let key_name_separator = if is_every_key_name_one_character {
+        ""
+    } else {
+        "|"
+    };
+    let key_text = key_names.join(key_name_separator);
     Line::from(vec![
         Span::styled(format!(" {key_text} "), key_style),
         Span::styled(format!(" {} ", action_ribbon.action_label), label_style),
