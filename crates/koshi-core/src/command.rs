@@ -268,6 +268,14 @@ pub struct ResizePaneArgs {
     /// donates the cells; negative moves it inward — the pane shrinks and
     /// that neighbor gains the cells. Zero is rejected at dispatch.
     ///
+    /// The border moves at most this many cells on screen and stops where
+    /// the pane giving up the cells reaches its minimum size, or where the
+    /// layout holds it, such as beside a pane at its `preferred` size. A
+    /// border that cannot move one cell is rejected with
+    /// [`RejectReason::MinimumSize`] at a minimum size and
+    /// [`RejectReason::InvalidState`] when held. In an `80`-column tab split
+    /// `40`/`40`, the right pane resized `Left` by `100` grows by `36`.
+    ///
     /// A floating pane has no neighbor: its own size changes, and the acting
     /// client's drawn position keeps the border opposite `direction` in
     /// place. A `40`-column floating pane drawn at column `20`, resized

@@ -228,7 +228,7 @@ fn apply_layout_operation(
             direction,
             resize_cell_count,
         } => {
-            if let Ok(next_layout_tree) = resize_layout_with_sizing(
+            if let Ok((next_layout_tree, _)) = resize_layout_with_sizing(
                 layout_tree,
                 tab_rect,
                 select_leaf_pane_id(target_leaf_index),

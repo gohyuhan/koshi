@@ -497,7 +497,8 @@ pub enum CliCommand {
         /// Which of the pane's borders moves.
         #[arg(long, value_enum, value_name = "DIRECTION")]
         direction: DirectionArgument,
-        /// Signed number of cells the border moves; defaults to 1.
+        /// Signed number of cells the border moves, up to where a pane reaches its
+        /// minimum size; defaults to 1.
         #[arg(
             long = "size",
             value_name = "SIZE",

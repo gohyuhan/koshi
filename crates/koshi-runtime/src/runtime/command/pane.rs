@@ -725,13 +725,17 @@ impl Server {
         emitted_events
     }
 
-    /// Move one border of a pane by an exact signed cell count, then resize
-    /// the affected PTYs.
+    /// Move one border of a pane by up to a signed cell count, then resize
+    /// the affected PTYs. Returns the result and, for a tiled pane, the cells
+    /// the border moved; `None` for a floating pane.
     ///
     /// The border that moves is resolved by the layout crate's resize
     /// transaction: a positive `command_args.resize_amount_cells` grows the pane toward
     /// `command_args.direction` with the adjacent sibling donating the cells, a
-    /// negative one shrinks it with that sibling gaining them. A pane with no
+    /// negative one shrinks it with that sibling gaining them. The border
+    /// moves as far as the donor's minimum size allows: in an `80`-column tab
+    /// split `40`/`40`, the right pane grown left by `100` grows by `36`, and
+    /// its neighbor keeps the `4` columns of its minimum. A pane with no
     /// border on the named side — it touches the tab edge there — moves its
     /// opposite border in the same visual direction instead. The target pane's
     /// tab must be viewed by at least one attached client: the tab is solved
@@ -745,6 +749,11 @@ impl Server {
     /// ([`CommandSource::get_target_client_id`]), else the issuing client. Any
     /// other client's zoom stands.
     ///
+    /// A border that cannot move one cell changes nothing: it is
+    /// [`RejectReason::MinimumSize`] when the donor holds no cell above its
+    /// minimum size, and [`RejectReason::InvalidState`] when the layout holds
+    /// the border in place ([`Self::resize_rejection`]).
+    ///
     /// A floating pane has no sibling: it resizes through
     /// [`Self::resolve_floating_pane_resize`] and
     /// [`Self::handle_resize_floating_pane`].
@@ -753,7 +762,7 @@ impl Server {
         command_id: CommandId,
         command_source: &CommandSource,
         command_args: &ResizePaneArgs,
-    ) -> Result<CommandResult, Rejection> {
+    ) -> Result<(CommandResult, Option<u16>), Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target = self.resolve_pane_target(
             command_args.pane_id,
@@ -764,7 +773,9 @@ impl Server {
         let Some(tab_id) = pane_target.tab_id else {
             let floating_pane_resize =
                 self.resolve_floating_pane_resize(command_args, command_source, &pane_target)?;
-            return self.handle_resize_floating_pane(command_id, floating_pane_resize);
+            return self
+                .handle_resize_floating_pane(command_id, floating_pane_resize)
+                .map(|command_result| (command_result, None));
         };
 
         let pty_backend = Arc::clone(self.get_pty_backend());
@@ -781,7 +792,7 @@ impl Server {
         // The resize transaction returns a new tree and leaves the tab's
         // untouched on rejection. When the pane touches the tab edge on the
         // named side, the opposite border moves in the same visual direction.
-        let resized_layout_tree = resize_layout_with_sizing(
+        let (resized_layout_tree, moved_cell_count) = resize_layout_with_sizing(
             tab_state.get_layout_tree(),
             tab_rect,
             pane_target.pane_id,
@@ -826,10 +837,9 @@ impl Server {
             &mut emitted_events,
         );
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
+        Ok((
+            Self::commit_events(&mut self.event_bus, command_id, emitted_events),
+            Some(moved_cell_count),
         ))
     }
 
@@ -1646,25 +1656,94 @@ impl Server {
         }
     }
 
-    /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
-    /// a missing pane is [`RejectReason::TargetNotFound`], a pane with no
-    /// neighbor on the requested side is [`RejectReason::InvalidState`], and
-    /// a donor below its floor is [`RejectReason::MinimumSize`] carrying the spare
-    /// cell count in both the hint and the rejection's own field, which the
-    /// mouse layer reads to ask again for exactly those cells.
+    /// Map a layout [`ResizeError`] onto the command vocabulary's rejection,
+    /// naming the pane and the border of the last resize tried:
+    /// - a missing pane is [`RejectReason::TargetNotFound`];
+    /// - a pane with no neighbor on either side of the axis is
+    ///   [`RejectReason::InvalidState`] `<pane> has no left or right border to
+    ///   move`, or `top or bottom` for `Up` and `Down`;
+    /// - a border whose donor holds no cell above its minimum size, at that
+    ///   size or suppressed for lack of room, is
+    ///   [`RejectReason::MinimumSize`], unlogged: `<pane> cannot grow left
+    ///   here; the pane next to it has no room to give` on a grow, `<pane>
+    ///   cannot shrink from the left here; it has no room to give` on a
+    ///   shrink;
+    /// - a border the layout holds in place is [`RejectReason::InvalidState`],
+    ///   unlogged: `<pane> cannot grow left here; the layout holds this border
+    ///   in place`, or `<pane> cannot shrink from the left here; the layout
+    ///   holds this border in place`.
+    ///
+    /// A grow names the direction (`left`, `right`, `up`, `down`), a shrink
+    /// the border (`left`, `right`, `top`, `bottom`).
     fn resize_rejection(resize_error: &ResizeError) -> Rejection {
-        match resize_error {
+        match *resize_error {
             ResizeError::PaneNotFound { .. } => {
                 Rejection::from_reason(RejectReason::TargetNotFound)
             }
-            ResizeError::NoAdjacentBorder { .. } => Rejection::from_reason_and_help(
+            ResizeError::NoAdjacentBorder { pane_id, direction } => {
+                let axis_border_names = match direction {
+                    Direction::Left | Direction::Right => "left or right",
+                    Direction::Up | Direction::Down => "top or bottom",
+                };
+                Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    &format!("{pane_id} has no {axis_border_names} border to move"),
+                )
+            }
+            ResizeError::DonorAtMinimumSize {
+                pane_id,
+                direction,
+                is_pane_growing,
+            } => {
+                let cause = if is_pane_growing {
+                    "the pane next to it has no room to give"
+                } else {
+                    "it has no room to give"
+                };
+                Rejection::from_unmovable_border(
+                    RejectReason::MinimumSize,
+                    Self::format_unmovable_border_help(pane_id, direction, is_pane_growing, cause),
+                )
+            }
+            ResizeError::BorderHeld {
+                pane_id,
+                direction,
+                is_pane_growing,
+            } => Rejection::from_unmovable_border(
                 RejectReason::InvalidState,
-                "pane has no border to move on that axis",
+                Self::format_unmovable_border_help(
+                    pane_id,
+                    direction,
+                    is_pane_growing,
+                    "the layout holds this border in place",
+                ),
             ),
-            ResizeError::MinimumSizeExceeded {
-                spare_cell_count, ..
-            } => Rejection::from_minimum_size(*spare_cell_count),
         }
+    }
+
+    /// The hint for a border of `pane_id` that cannot move one cell:
+    /// `<pane> cannot grow <direction> here; <cause>` when `is_pane_growing`,
+    /// else `<pane> cannot shrink from the <side> here; <cause>`. `Left`
+    /// growing with `the pane next to it has no room to give` gives
+    /// `pane-… cannot grow left here; the pane next to it has no room to
+    /// give`.
+    pub(super) fn format_unmovable_border_help(
+        pane_id: PaneId,
+        direction: Direction,
+        is_pane_growing: bool,
+        cause: &str,
+    ) -> String {
+        if !is_pane_growing {
+            let side_name = format_side_name(direction);
+            return format!("{pane_id} cannot shrink from the {side_name} here; {cause}");
+        }
+        let direction_name = match direction {
+            Direction::Left => "left",
+            Direction::Right => "right",
+            Direction::Up => "up",
+            Direction::Down => "down",
+        };
+        format!("{pane_id} cannot grow {direction_name} here; {cause}")
     }
 
     /// Handle [`Command::FocusPane`]: move the target client's focus to the

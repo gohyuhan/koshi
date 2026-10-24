@@ -13,8 +13,8 @@
 //!   program holds pressed;
 //! - [`write_alternate_scroll_arrows`](Server::write_alternate_scroll_arrows) sends cursor
 //!   arrows for the alternate-scroll translation of a wheel tick;
-//! - [`drag_resize`](Server::drag_resize) moves one pane border a number of
-//!   cells and reports how many cells the pane's size changed.
+//! - [`drag_resize`](Server::drag_resize) moves one pane border up to a number
+//!   of cells and reports how many cells it moved.
 //!
 //! A client that leaves the session gets a release written for every button
 //! it still holds (`Server::release_client_mouse_buttons`). Carrying the
@@ -67,8 +67,9 @@ pub(crate) struct HeldMouseButton {
 
 impl Server {
     /// Envelope `mouse_command` under `command_id`, attributed to `client_id`'s
-    /// mouse, and dispatch it, returning the runtime's result and the cells a
-    /// resize refused at a pane minimum can still take.
+    /// mouse, and dispatch it, returning the runtime's result and, for an
+    /// applied resize of a tiled pane, the cells its border moved
+    /// ([`Server::dispatch_reporting_moved_cells`]).
     fn dispatch_mouse_command(
         &mut self,
         client_id: ClientId,
@@ -80,7 +81,7 @@ impl Server {
             CommandSource::from_mouse(client_id),
             mouse_command,
         );
-        self.dispatch_reporting_spare(mouse_command_envelope)
+        self.dispatch_reporting_moved_cells(mouse_command_envelope)
     }
 
     /// Dispatch a selection command attributed to `client_id`'s mouse, through
@@ -93,55 +94,25 @@ impl Server {
         );
     }
 
-    /// Ask for `pane_id`'s `border_side` border to move `requested_cell_count` cells in `resize_step`'s
-    /// direction. `Err` carries the cells the donating pane can still give: `0`
-    /// when it is already at its minimum size, and `0` for every rejection that
-    /// is not a minimum-size refusal.
-    fn ask_border_move(
-        &mut self,
-        client_id: ClientId,
-        pane_id: PaneId,
-        border_side: Direction,
-        resize_step: i16,
-        requested_cell_count: u16,
-    ) -> Result<(), u16> {
-        // `resize_step * requested_cell_count` outside ±`i16::MAX` is clamped to it.
-        let resize_cell_count = (i32::from(resize_step) * i32::from(requested_cell_count))
-            .clamp(-i32::from(i16::MAX), i32::from(i16::MAX))
-            as i16;
-        let resize_command = Command::ResizePane(ResizePaneArgs {
-            pane_id: Some(pane_id),
-            direction: border_side,
-            resize_amount_cells: resize_cell_count,
-        });
-        match self.dispatch_mouse_command(client_id, CommandId::new(), resize_command) {
-            (CommandResult::Ok { .. }, _) => Ok(()),
-            (_, available_donor_cell_count) => Err(available_donor_cell_count.unwrap_or(0)),
-        }
-    }
-
     /// Move `pane_id`'s `border_side` border `requested_cell_count` cells and report how many were
-    /// actually taken. `resize_step` is the direction: `1` grows `pane_id`, `-1` shrinks
-    /// it.
+    /// actually taken. The sign of `resize_step` is the direction: positive grows `pane_id`,
+    /// negative shrinks it, and `0` moves nothing.
     ///
     /// The whole distance travels in one [`Command::ResizePane`], which is
-    /// asked for `resize_step * requested_cell_count`. A refusal at a pane minimum names the cells
-    /// the donating pane can still give, and the next round asks for exactly
-    /// those. The layout re-measures that spare from the freshly solved rects
-    /// on every call. The rounds stop when one takes the whole remainder, or
-    /// when a refusal names a spare that is not below what that round asked
-    /// for.
-    ///
-    /// Each round either takes cells or lowers what the next round asks for.
-    /// The returned count never passes `requested_cell_count`.
+    /// asked for `requested_cell_count` cells in that direction, at most
+    /// `i16::MAX`, and moves the border as far as the donating pane's minimum
+    /// size and the layout allow. A tiled pane returns the cells that command
+    /// moved its border on screen, and `0` when the session refuses it. The
+    /// returned count never passes `requested_cell_count`, and a
+    /// `requested_cell_count` of `0` sends no command and returns `0`. A step
+    /// of `3` asking for `2` cells moves the border `2` cells.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     ///
-    /// A floating pane takes one [`Command::ResizePane`], and the returned
-    /// count is how many cells its outer size changed on the axis
-    /// `border_side` moves along: its width for `Left` and `Right`, its height
-    /// for `Up` and `Down`. The count is `0` when the session refuses the
-    /// resize. A `40`-column float with `10` columns of room, dragged `15`
+    /// A floating pane returns how many cells its outer size changed on the
+    /// axis `border_side` moves along: its width for `Left` and `Right`, its
+    /// height for `Up` and `Down`. The count is `0` when the session refuses
+    /// the resize. A `40`-column float with `10` columns of room, dragged `15`
     /// cells wider, returns `10`. A `40`-column float pinned at column `20` and
     /// drawn at column `10` of a `50`-column pane area, dragged `3` cells
     /// narrower from its right border, is drawn `37` columns wide at column
@@ -154,49 +125,29 @@ impl Server {
         resize_step: i16,
         requested_cell_count: u16,
     ) -> u16 {
-        if let Some(previous_cell_count) =
-            self.find_floating_pane_axis_cell_count(client_id, pane_id, border_side)
-        {
-            let _ = self.ask_border_move(
-                client_id,
-                pane_id,
-                border_side,
-                resize_step,
-                requested_cell_count,
-            );
-            return self
-                .find_floating_pane_axis_cell_count(client_id, pane_id, border_side)
-                .map_or(0, |cell_count| previous_cell_count.abs_diff(cell_count));
+        if requested_cell_count == 0 {
+            return 0;
         }
-        let mut applied_cell_count: u16 = 0;
-        // What this round asks for: the whole remaining distance, or the cells
-        // the last round was told the donating pane can still give.
-        let mut requested_round_cell_count = requested_cell_count;
-        while requested_round_cell_count > 0 {
-            match self.ask_border_move(
-                client_id,
-                pane_id,
-                border_side,
-                resize_step,
-                requested_round_cell_count,
-            ) {
-                Ok(()) => {
-                    applied_cell_count =
-                        applied_cell_count.saturating_add(requested_round_cell_count);
-                    requested_round_cell_count =
-                        requested_cell_count.saturating_sub(applied_cell_count);
-                }
-                // `available_donor_cell_count` is what the donating pane has left above its minimum
-                // size, always short of what this round asked for.
-                Err(available_donor_cell_count)
-                    if available_donor_cell_count < requested_round_cell_count =>
-                {
-                    requested_round_cell_count = available_donor_cell_count;
-                }
-                Err(_) => break,
-            }
-        }
-        applied_cell_count
+        let previous_floating_cell_count =
+            self.find_floating_pane_axis_cell_count(client_id, pane_id, border_side);
+        // `requested_cell_count` signed by `resize_step`, clamped to ±`i16::MAX`.
+        let resize_cell_count = (i32::from(resize_step.signum()) * i32::from(requested_cell_count))
+            .clamp(-i32::from(i16::MAX), i32::from(i16::MAX))
+            as i16;
+        let resize_command = Command::ResizePane(ResizePaneArgs {
+            pane_id: Some(pane_id),
+            direction: border_side,
+            resize_amount_cells: resize_cell_count,
+        });
+        let (_, moved_cell_count) =
+            self.dispatch_mouse_command(client_id, CommandId::new(), resize_command);
+        let Some(previous_floating_cell_count) = previous_floating_cell_count else {
+            return moved_cell_count.unwrap_or(0);
+        };
+        self.find_floating_pane_axis_cell_count(client_id, pane_id, border_side)
+            .map_or(0, |cell_count| {
+                previous_floating_cell_count.abs_diff(cell_count)
+            })
     }
 
     /// The outer cell count of the floating pane `pane_id` from its last size

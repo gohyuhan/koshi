@@ -1507,7 +1507,8 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          - left:  Leftward\n          \
          - up:    Upward\n\n      \
          --size <SIZE>\n          \
-         Signed number of cells the border moves; defaults to 1\n          \n          \
+         Signed number of cells the border moves, up to where a pane reaches its minimum \
+         size; defaults to 1\n          \n          \
          [default: 1]\n\n      \
          --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n      \
          --client <CLIENT_ID>\n          \

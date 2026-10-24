@@ -1887,9 +1887,9 @@ impl Client {
     }
 
     /// Advance the border drag's anchor over the `applied_cell_count` cells the session
-    /// changed `pane_id`'s size by, for a move of its `border_side` border asked for in
-    /// direction `resize_step`. The anchor stops where the resize stopped, and a reverse
-    /// drag resizes the pane the instant the pointer crosses back.
+    /// moved `pane_id`'s `border_side` border by, for a move asked for in direction
+    /// `resize_step`. The anchor stops where the resize stopped, and a reverse drag
+    /// resizes the pane the instant the pointer crosses back.
     ///
     /// Nothing moves unless the drag now held is the one `pane_id` names and
     /// grabbed `border_side`: an answer for a border the viewer has let go of,
