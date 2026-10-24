@@ -1104,10 +1104,18 @@ on its first connection.
 koshi compares the fingerprint during the TLS handshake, before the secret is
 sent. If the server presents another certificate, the connection is refused,
 the secret is not sent, and the refusal names the address and both
-fingerprints:
+fingerprints. A first connection, and the check that `koshi remote new` and
+`koshi remote edit` run, end in both ways to give the new fingerprint:
 
 ```text
 koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+```
+
+A connection to a saved server names that server, by its name or else its
+address:
+
+```text
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with `koshi remote edit work`.
 ```
 
 An address that is not saved needs `--certificate-fingerprint`. Without it,
@@ -1151,6 +1159,20 @@ The store lives on the connecting machine and is readable only by its owner.
 each saved server, and never a secret. Once the serving machine grants a fresh
 secret, `koshi remote set-secret <SERVER>` replaces the saved one; it reads the
 new secret the same way a connection does.
+
+A saved server presents the secret it saved. If `KOSHI_REMOTE_SECRET` gives a
+secret that no saved server holds, a `--remote` connection to a saved server
+is refused before it opens, and the saved secret stays:
+
+```text
+koshi: invalid arguments: work holds a saved secret, and KOSHI_REMOTE_SECRET gives one that no saved server holds; run `koshi remote set-secret work` to replace the saved secret with it, or unset KOSHI_REMOTE_SECRET to dial with the saved one
+```
+
+`koshi remote set-secret work` reads that secret from `KOSHI_REMOTE_SECRET`
+and saves it. A value that a saved server holds, an empty value, and an unset
+variable connect with the secret the named server saved. A bare
+`koshi list-sessions` and a bare `koshi attach` present each saved server's own
+secret, and do not read `KOSHI_REMOTE_SECRET`.
 
 `koshi remote new` saves a server without attaching to one of its sessions. It
 asks four questions in turn — the name, the address, the fingerprint of the
@@ -1275,7 +1297,7 @@ hidden. It prints the same sentence that `koshi attach --remote work` prints,
 which names what to do:
 
 ```text
-koshi: work: the server 192.0.2.10:7654 did not admit the connection. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or revoked: re-grant it on that machine with `koshi share grant`, then store the new secret with `koshi remote set-secret` for a saved server, or give it when the next dial asks
+koshi: work: the server 192.0.2.10:7654 did not admit the connection. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or revoked: re-grant it on that machine with `koshi share grant`, then store the new secret with `koshi remote set-secret work`
 ```
 
 A machine that runs koshi 0.3.0 or 0.4.0 prints its own sentence for a saved

@@ -116,6 +116,46 @@ fn an_action_verb_reaches_an_unsaved_server_and_saves_it_holding_the_fingerprint
 }
 
 #[test]
+fn an_unsaved_server_whose_certificate_is_not_the_one_given_is_refused_and_not_saved() {
+    let (server_address, presented_certificate_fingerprint) =
+        spawn_stand_in_remote_server(vec![RemoteServerFrame::Welcome {
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION,
+        }]);
+    let given_certificate_fingerprint = "0".repeat(64);
+    let home_directory = build_short_test_directory();
+
+    let listing_output = build_koshi_command_under_home(home_directory.path())
+        .args([
+            "list-sessions",
+            "--remote",
+            &server_address,
+            "--certificate-fingerprint",
+            &given_certificate_fingerprint,
+        ])
+        .env("KOSHI_REMOTE_SECRET", "test-secret")
+        .output()
+        .expect("the koshi binary runs");
+
+    assert_eq!(
+        String::from_utf8_lossy(&listing_output.stderr),
+        format!(
+            "koshi: IPC unavailable: the certificate {server_address} presented is not the \
+             expected one: expected {given_certificate_fingerprint}, presented \
+             {presented_certificate_fingerprint}. the secret was not sent. if that machine's \
+             certificate changed on purpose, `koshi share open` there prints the new \
+             fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` \
+             for a saved server.\n"
+        )
+    );
+    assert_eq!(String::from_utf8_lossy(&listing_output.stdout), "");
+    assert_eq!(
+        listing_output.status.code(),
+        Some(CliExitCode::IpcUnavailable.get_exit_code())
+    );
+    assert_eq!(list_saved_server_records(home_directory.path()), Vec::new());
+}
+
+#[test]
 fn a_session_in_this_machines_shared_directory_is_refused_with_the_remote_flag() {
     let owned_session_text = format!("1001/{}", SessionId::new());
     let home_directory = build_short_test_directory();
@@ -254,8 +294,7 @@ fn attach_save_as_leaves_a_saved_server_unnamed_when_its_certificate_is_not_the_
              expected one: expected {saved_certificate_fingerprint}, presented \
              {presented_certificate_fingerprint}. the secret was not sent. if that machine's \
              certificate changed on purpose, `koshi share open` there prints the new \
-             fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` \
-             for a saved server.\n"
+             fingerprint: give it with `koshi remote edit {server_address}`.\n"
         )
     );
     assert_eq!(String::from_utf8_lossy(&attach_output.stdout), "");

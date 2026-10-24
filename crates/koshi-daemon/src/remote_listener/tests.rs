@@ -2112,6 +2112,7 @@ mod bridge_round_trip {
         remote_client::connect_remote_server(
             server_address,
             &ConnectionToken::from_secret("testSecret"),
+            None,
             &test_remote_listener.certificate_fingerprint,
             Duration::from_secs(5),
             None,

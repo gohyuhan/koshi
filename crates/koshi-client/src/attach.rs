@@ -2292,8 +2292,9 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// when the certificate it presents is not the expected one.
 /// [`CliError::InvalidArgs`] when a server reached for the first time comes
 /// with no fingerprint or a malformed one, when a saved server is given a
-/// fingerprint other than the one it holds, when it holds none, and when it
-/// holds a name other than `save_as`.
+/// fingerprint other than the one it holds, when it holds none, when it
+/// holds a name other than `save_as`, and when `KOSHI_REMOTE_SECRET` holds a
+/// secret no saved server holds.
 pub fn attach_remote_session(
     server: &str,
     certificate_fingerprint: Option<&str>,
@@ -2331,7 +2332,9 @@ pub fn attach_remote_session(
 /// The saved servers are asked through
 /// [`list_saved_server_session_rows`](remote_client::list_saved_server_session_rows),
 /// which prints one stderr line for each server whose sessions it does not
-/// list, such as a server that refused or did not answer.
+/// list, such as a server that refused or did not answer. A picked remote row
+/// is joined through the saved server that listed it, which presents the
+/// secret it holds. `KOSHI_REMOTE_SECRET` is not read.
 ///
 /// `config_directory` holds the `koshi.kdl` that names the shared directory
 /// other users' sessions are listed from, and the config the attachment reads.
@@ -2378,7 +2381,7 @@ fn attach_selected_session_from_listing(
     };
     attach_home(
         Home::Remote {
-            server: remote_client::resolve_server(server_label, None)?,
+            server: remote_client::resolve_listed_server(server_label)?,
         },
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,

@@ -11,7 +11,10 @@
 //! The secret from a grant never arrives as a command-line argument.
 //! [`resolve_server_connection_token`] reads it from
 //! `KOSHI_REMOTE_SECRET`, or asks for it at the terminal without printing
-//! what is typed.
+//! what is typed. A saved server presents the secret it holds, and
+//! [`resolve_server`] refuses it when `KOSHI_REMOTE_SECRET` holds a secret no
+//! saved server holds. The sweep of every saved server does not read
+//! `KOSHI_REMOTE_SECRET`.
 //!
 //! [`connect_remote_server`] opens the TLS stream, checks the certificate
 //! against the fingerprint it was given, presents the secret, and hands back a
@@ -30,6 +33,7 @@
 //! sessions, secrets, addresses and certificate fingerprints, and never a
 //! frame.
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -437,6 +441,11 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 /// machine has not saved needs it. A saved one takes it when it equals the
 /// fingerprint the record holds, and refuses any other.
 ///
+/// A saved one is refused when `KOSHI_REMOTE_SECRET`, with its surrounding
+/// whitespace trimmed, holds a secret that no saved server holds, or bytes that
+/// are not UTF-8. An unset variable, an empty value, and a value any saved
+/// server holds pass, and the saved one presents the secret it holds.
+///
 /// Example — `work` matches the record the user named `work`, and
 /// `laptop.local:7654` with no matching record and a fingerprint given is
 /// [`ServerReference::New`].
@@ -447,19 +456,94 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector matches no record and is not an
 /// address, when it matches more than one, when it matches a saved server and
-/// a fingerprint other than the one that record holds is given, when a given
-/// fingerprint is not 64 lowercase hex characters, and when it is an address
-/// no record holds and the fingerprint is missing.
+/// a fingerprint other than the one that record holds is given, when it
+/// matches a saved server and `KOSHI_REMOTE_SECRET` holds a secret no saved
+/// server holds, when a given fingerprint is not 64 lowercase hex characters,
+/// and when it is an address no record holds and the fingerprint is missing.
+/// [`CliError::IpcUnavailable`] when the saved-server store cannot be read.
 pub fn resolve_server(
     server_selector_text: &str,
     certificate_fingerprint: Option<&str>,
 ) -> Result<ServerReference, CliError> {
     let (_, saved_server_store) = load_saved_server_store()?;
-    resolve_server_reference(
+    let server_reference = resolve_server_reference(
         saved_server_store.find_saved_server(server_selector_text),
         server_selector_text,
         certificate_fingerprint,
+    )?;
+    if let ServerReference::Saved(saved_server) = &server_reference {
+        validate_environment_secret(
+            &saved_server_store.saved_servers,
+            saved_server,
+            std::env::var_os(SECRET_ENVIRONMENT_VARIABLE).as_deref(),
+        )?;
+    }
+    Ok(server_reference)
+}
+
+/// The saved server that a row of [`list_saved_server_session_rows`] names by
+/// `server_label`, its saved name or else its address, as
+/// [`resolve_server`] resolves it with no `--certificate-fingerprint`.
+/// `KOSHI_REMOTE_SECRET` is not read.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when no single saved server answers to
+/// `server_label`. [`CliError::IpcUnavailable`] when the saved-server store
+/// cannot be read.
+pub fn resolve_listed_server(server_label: &str) -> Result<ServerReference, CliError> {
+    let (_, saved_server_store) = load_saved_server_store()?;
+    resolve_server_reference(
+        saved_server_store.find_saved_server(server_label),
+        server_label,
+        None,
     )
+}
+
+/// Refuse a dial to `saved_server` when `environment_secret`, the value of
+/// `KOSHI_REMOTE_SECRET`, holds a secret that no server in `saved_servers`
+/// holds.
+///
+/// The value is compared with its surrounding whitespace trimmed. An unset
+/// variable, and a value that is empty once trimmed, give no secret, and pass.
+/// A value that is not UTF-8 is refused.
+///
+/// Example — with `work` holding `aaaa` and `desk` holding `bbbb`, the values
+/// `aaaa`, `bbbb`, and `aaaa` followed by a line break pass for `work`, and
+/// `cccc` is refused.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] naming `saved_server` and `koshi remote
+/// set-secret` when the value holds a secret no saved server holds.
+fn validate_environment_secret(
+    saved_servers: &[SavedServer],
+    saved_server: &SavedServer,
+    environment_secret: Option<&OsStr>,
+) -> Result<(), CliError> {
+    let Some(environment_secret) = environment_secret else {
+        return Ok(());
+    };
+    if let Some(environment_secret_text) = environment_secret.to_str() {
+        let trimmed_secret_text = environment_secret_text.trim();
+        if trimmed_secret_text.is_empty() {
+            return Ok(());
+        }
+        let environment_token = ConnectionToken::from_secret(trimmed_secret_text);
+        if saved_servers
+            .iter()
+            .any(|listed_server| listed_server.connection_token == environment_token)
+        {
+            return Ok(());
+        }
+    }
+    let saved_server_label = format_saved_server_label(saved_server);
+    Err(CliError::InvalidArgs {
+        detail: format!(
+            "{saved_server_label} holds a saved secret, and {SECRET_ENVIRONMENT_VARIABLE} gives \
+             one that no saved server holds; run `koshi remote set-secret {saved_server_label}` \
+             to replace the saved secret with it, or unset {SECRET_ENVIRONMENT_VARIABLE} to dial \
+             with the saved one"
+        ),
+    })
 }
 
 /// Which server the selector names, given what the store said about it and
@@ -775,9 +859,18 @@ fn build_input_ended_error() -> CliError {
 
 /// Open a connection to `server_address` and present `connection_token`.
 ///
+/// `saved_server_label` is the name, else the address, of the saved server
+/// whose secret `connection_token` is, or `None` for a secret given to this
+/// dial. When the server does not admit the secret, the last step of the
+/// refusal names `koshi remote set-secret <saved_server_label>`. With `None`
+/// it names `koshi remote set-secret` for a saved server, or the secret given
+/// when the next dial asks.
+///
 /// `expected_certificate_fingerprint` is the fingerprint the server's
 /// certificate must have. A server presenting another certificate is refused
-/// before `connection_token` is sent.
+/// before `connection_token` is sent. The last step of that refusal names
+/// `koshi remote edit <saved_server_label>`. With `None` it names
+/// `--certificate-fingerprint`, or `koshi remote edit` for a saved server.
 ///
 /// `dial_timeout` bounds the connect, the TLS handshake and the secret exchange
 /// together. The name lookup before them is the operating system's own and
@@ -793,6 +886,7 @@ fn build_input_ended_error() -> CliError {
 pub fn connect_remote_server(
     server_address: &str,
     connection_token: &ConnectionToken,
+    saved_server_label: Option<&str>,
     expected_certificate_fingerprint: &str,
     dial_timeout: Duration,
     reply_timeout: Option<Duration>,
@@ -811,8 +905,8 @@ pub fn connect_remote_server(
         dial_timeout,
         reply_timeout,
     )
-    .map_err(classify_dial_failure)?;
-    validate_remote_server_answer(server_address, &remote_server_answer)?;
+    .map_err(|ipc_error| classify_dial_failure(ipc_error, saved_server_label))?;
+    validate_remote_server_answer(server_address, saved_server_label, &remote_server_answer)?;
     Ok(RemoteLink {
         frame_reader,
         frame_writer,
@@ -820,14 +914,23 @@ pub fn connect_remote_server(
 }
 
 /// How one dial's transport failure classifies: a certificate that is not the
-/// expected one is [`DialError::Refused`], every other transport failure is
-/// [`DialError::Unreachable`]. The message is
+/// expected one is [`DialError::Refused`], naming `saved_server_label` as the
+/// saved server whose fingerprint `koshi remote edit` changes. Every other
+/// transport failure is [`DialError::Unreachable`]. The message is
 /// [`build_ipc_unavailable_error`]'s either way.
-fn classify_dial_failure(ipc_error: IpcError) -> DialError {
+fn classify_dial_failure(ipc_error: IpcError, saved_server_label: Option<&str>) -> DialError {
     match ipc_error {
-        IpcError::CertificateMismatch { .. } => {
-            DialError::Refused(build_ipc_unavailable_error(ipc_error))
-        }
+        IpcError::CertificateMismatch {
+            server_address,
+            expected_certificate_fingerprint,
+            presented_certificate_fingerprint,
+            ..
+        } => DialError::Refused(build_ipc_unavailable_error(IpcError::CertificateMismatch {
+            server_address,
+            expected_certificate_fingerprint,
+            presented_certificate_fingerprint,
+            saved_server_label: saved_server_label.map(str::to_string),
+        })),
         _ => DialError::Unreachable(build_ipc_unavailable_error(ipc_error)),
     }
 }
@@ -842,8 +945,10 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
 ///
 /// - The server runs koshi 0.3.0 or 0.4.0: update koshi on that machine.
 /// - The token was rejected or revoked: run `koshi share grant` on that
-///   machine, then store the new secret with `koshi remote set-secret` for a
-///   saved server, or give it when the next dial asks.
+///   machine, then store the new secret with `koshi remote set-secret
+///   <saved_server_label>` when `saved_server_label` is `Some`. With `None`
+///   the step reads: store the new secret with `koshi remote set-secret` for
+///   a saved server, or give it when the next dial asks.
 ///
 /// Any other refusal message is the server's own sentence, filtered by
 /// [`sanitize_reported_text`], with `server_address` after it.
@@ -858,6 +963,7 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
 /// A frame carrying `"\u{1b}[2Jgone"` reads `"gone (server desk.local:7654)"`.
 fn validate_remote_server_answer(
     server_address: &str,
+    saved_server_label: Option<&str>,
     remote_server_frame: &RemoteServerFrame,
 ) -> Result<(), DialError> {
     match remote_server_frame {
@@ -880,13 +986,20 @@ fn validate_remote_server_answer(
         RemoteServerFrame::Refused {
             message: refusal_message,
         } if refusal_message == remote_wire::REMOTE_REFUSED => {
+            let new_secret_step = match saved_server_label {
+                Some(saved_server_label) => {
+                    format!("`koshi remote set-secret {saved_server_label}`")
+                }
+                None => "`koshi remote set-secret` for a saved server, or give it when the next \
+                         dial asks"
+                    .to_string(),
+            };
             Err(DialError::Refused(CliError::Runtime {
                 detail: format!(
                     "the server {server_address} did not admit the connection. if that machine \
                      runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was \
                      rejected or revoked: re-grant it on that machine with `koshi share grant`, \
-                     then store the new secret with `koshi remote set-secret` for a saved \
-                     server, or give it when the next dial asks"
+                     then store the new secret with {new_secret_step}"
                 ),
             }))
         }
@@ -1001,6 +1114,7 @@ pub fn connect_saved_server(
             let remote_link = connect_remote_server(
                 server_address,
                 &connection_token,
+                None,
                 certificate_fingerprint,
                 DIAL_TIMEOUT_DURATION,
                 reply_timeout,
@@ -1081,9 +1195,9 @@ fn name_saved_server(
 
 /// Open a connection to the saved server `saved_server_record` names,
 /// presenting the secret its record holds and expecting the fingerprint its
-/// record holds, as [`connect_remote_server`] does with
-/// [`DIAL_TIMEOUT_DURATION`] and `reply_timeout`. The saved-server store is
-/// not read or written.
+/// record holds, as [`connect_remote_server`] does with the record's name,
+/// else its address, [`DIAL_TIMEOUT_DURATION`] and `reply_timeout`. The
+/// saved-server store is not read or written.
 ///
 /// # Errors
 /// [`DialError::Refused`] carrying [`CliError::InvalidArgs`] when the record
@@ -1105,6 +1219,7 @@ fn dial_saved_server(
     connect_remote_server(
         &saved_server_record.server_address,
         &saved_server_record.connection_token,
+        Some(&format_saved_server_label(saved_server_record)),
         saved_certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         reply_timeout,
@@ -1474,6 +1589,9 @@ fn run_remote_session_exchange<ExchangeAnswer>(
 /// beside the label of the server serving it: its saved name, else its
 /// address. The rows come in the order of the server labels.
 ///
+/// Each saved server presents the secret it holds. `KOSHI_REMOTE_SECRET` is
+/// not read.
+///
 /// At most 16 saved servers are asked, all at once. When the store holds more,
 /// one line on standard error names the count, and the rest add no row:
 /// ``koshi: asking the first 16 of <count> saved servers; name one with
@@ -1537,7 +1655,8 @@ pub fn list_saved_server_session_rows() -> Vec<(String, RemoteSessionRow)> {
 /// At most 16 records are asked. The rest are named on stderr and left out.
 ///
 /// A record holding no certificate fingerprint is [`Reach::Unchecked`], and no
-/// secret is presented to it.
+/// secret is presented to it. Every other record presents the secret it holds.
+/// `KOSHI_REMOTE_SECRET` is not read.
 ///
 /// A server that answered with a refusal is [`Reach::Refused`]. A server that
 /// presented a certificate other than the one its record holds the fingerprint
@@ -1641,7 +1760,9 @@ fn complete_reach_results(
     received_reaches
 }
 
-/// Ask one saved server for its sessions.
+/// Ask one saved server for its sessions, presenting the secret its record
+/// holds as [`connect_remote_server`] does with the record's name, else its
+/// address.
 ///
 /// A record holding no certificate fingerprint is [`Reach::Unchecked`] and is
 /// not dialled.
@@ -1667,6 +1788,7 @@ fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant
     let mut remote_link = match connect_remote_server(
         &saved_server_record.server_address,
         &saved_server_record.connection_token,
+        Some(&server_label),
         saved_certificate_fingerprint,
         remaining_wait_duration,
         Some(remaining_wait_duration),

@@ -78,15 +78,13 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
              koshi: gate: the server {refusing_server_address} did not admit the connection. if \
              that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was \
              rejected or revoked: re-grant it on that machine with `koshi share grant`, then \
-             store the new secret with `koshi remote set-secret` for a saved server, or give it \
-             when the next dial asks\n\
+             store the new secret with `koshi remote set-secret gate`\n\
              koshi: lab did not answer; its sessions are not listed\n\
              koshi: mill: the certificate {reinstalled_server_address} presented is not the \
              expected one: expected {saved_certificate_fingerprint}, presented \
              {reinstalled_server_certificate_fingerprint}. the secret was not sent. if that \
              machine's certificate changed on purpose, `koshi share open` there prints the new \
-             fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for \
-             a saved server. its sessions are not listed\n"
+             fingerprint: give it with `koshi remote edit mill`. its sessions are not listed\n"
         )
     );
     assert_eq!(

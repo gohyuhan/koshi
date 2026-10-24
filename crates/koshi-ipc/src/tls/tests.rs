@@ -755,6 +755,7 @@ fn a_server_presenting_another_certificate_than_the_expected_one_is_refused() {
         server_address: named_server_address,
         expected_certificate_fingerprint: named_expected_certificate_fingerprint,
         presented_certificate_fingerprint,
+        saved_server_label,
     } = ipc_error
     else {
         panic!("another certificate is its own refusal, not a transport failure");
@@ -765,6 +766,7 @@ fn a_server_presenting_another_certificate_than_the_expected_one_is_refused() {
         expected_certificate_fingerprint
     );
     assert_eq!(presented_certificate_fingerprint, certificate_fingerprint);
+    assert_eq!(saved_server_label, None);
     let _ = server_thread.join();
 }
 

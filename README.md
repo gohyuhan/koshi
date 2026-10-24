@@ -487,7 +487,9 @@ Every other verb refuses it. A server this machine has not saved also needs
 the global `--certificate-fingerprint <FINGERPRINT>` flag, with the
 fingerprint `koshi share grant` prints on that machine. A saved server
 takes that flag when it gives the fingerprint the server was saved with, and
-refuses any other fingerprint.
+refuses any other fingerprint. A saved server presents the secret it saved,
+and refuses a `KOSHI_REMOTE_SECRET` that holds a secret no saved server holds;
+`koshi remote set-secret <SERVER>` saves that secret in place of the old one.
 
 | Command | Result |
 |---|---|

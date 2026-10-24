@@ -7,7 +7,9 @@
 //! process. [`session_connection`] speaks to a session server either way.
 //! [`RunningClient`] holds a `koshi` client the test started, and the waits
 //! below read what it did. [`spawn_stand_in_remote_server`] answers each remote
-//! connection with the frames a test gives it.
+//! connection with the frames a test gives it, and
+//! [`spawn_scripted_remote_server`] answers each connection with frames of its
+//! own.
 //! [`write_saved_server_store`] writes the saved-server store under a test
 //! home, and [`list_saved_server_records`] reads it.
 //! [`run_koshi_under_home`] runs one `koshi` command to its end and returns
@@ -386,9 +388,10 @@ pub fn write_test_config(home_directory: &Path, config_text: &str) {
 
 /// The `koshi` binary at `binary_path`, set to keep its files under
 /// `home_directory` rather than in the developer's own directories, and stripped
-/// of the pane identity so it runs as a CLI outside any session. Standard input
-/// is closed, and both output streams are pipes the test reads. The runtime
-/// directory the child serves is [`resolve_runtime_directory_under_home`].
+/// of the pane identity so it runs as a CLI outside any session, and of
+/// `KOSHI_REMOTE_SECRET`. Standard input is closed, and both output streams are
+/// pipes the test reads. The runtime directory the child serves is
+/// [`resolve_runtime_directory_under_home`].
 ///
 /// `HOME` and `USERPROFILE` name `home_directory`. On Unix other than macOS,
 /// `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR`
@@ -419,6 +422,9 @@ pub fn build_koshi_command_at(binary_path: &Path, home_directory: &Path) -> Comm
         .env_remove("KOSHI_CLIENT_ID")
         .env_remove("KOSHI_PANE_ID")
         .env_remove("KOSHI_SOCKET")
+        // The child gets no `KOSHI_REMOTE_SECRET` from the developer's
+        // environment.
+        .env_remove("KOSHI_REMOTE_SECRET")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -766,6 +772,21 @@ pub fn read_client_output_text(running_client: &mut RunningClient) -> String {
 ///
 /// Returns the server's address and the fingerprint of its certificate.
 pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (String, String) {
+    spawn_scripted_remote_server(std::iter::repeat(answer_frames))
+}
+
+/// Start a TLS server on a loopback port as [`spawn_stand_in_remote_server`]
+/// does, and answer the connection it accepts at position `N` with the answer
+/// frames at position `N` of `answer_frames_by_connection`. The thread ends
+/// after the last list, or when an accept fails.
+///
+/// Example — `vec![vec![Welcome], vec![Refused]].into_iter()` answers the
+/// first Hello with `Welcome` and the second with `Refused`.
+///
+/// Returns the server's address and the fingerprint of its certificate.
+pub fn spawn_scripted_remote_server(
+    answer_frames_by_connection: impl Iterator<Item = Vec<RemoteServerFrame>> + Send + 'static,
+) -> (String, String) {
     let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .expect("the test certificate is generated");
     let certificate_der_bytes = generated_certificate.cert.der().to_vec();
@@ -789,7 +810,10 @@ pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (S
 
     let server_config = Arc::new(server_config);
     std::thread::spawn(move || {
-        while let Ok((socket, _)) = server_listener.accept() {
+        for answer_frames in answer_frames_by_connection {
+            let Ok((socket, _)) = server_listener.accept() else {
+                return;
+            };
             serve_stand_in_connection(socket, &server_config, &answer_frames);
         }
     });

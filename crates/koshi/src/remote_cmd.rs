@@ -389,6 +389,7 @@ fn check_saved_server_connection(
     match remote_client::connect_remote_server(
         server_address,
         connection_token,
+        None,
         expected_certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         Some(REPLY_TIMEOUT_DURATION),
