@@ -290,7 +290,7 @@ fn validate_keybinding_file_reports_parse_failures_and_accepts_clean_files() {
         KeymapValidationOutcome::ParseFailed(keybinding_parse_error_messages) => {
             assert_eq!(
                 keybinding_parse_error_messages,
-                vec!["invalid key `<C-`: missing closing `>`".to_string()]
+                vec!["line 3, column 10: invalid key `<C-`: missing closing `>`".to_string()]
             );
         }
         KeymapValidationOutcome::Checked(_) => panic!("expected a parse failure"),

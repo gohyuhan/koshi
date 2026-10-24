@@ -478,6 +478,94 @@ fn check_collects_errors_from_all_files() {
     );
 }
 
+/// Runs `koshi config check` on a new config directory whose only files are
+/// the profiles in `profile_texts_by_file_name`. Returns the directory and the
+/// check's error text.
+fn run_config_check_on_profiles(profile_texts_by_file_name: &[(&str, &str)]) -> (TempDir, String) {
+    let config_directory = TempDir::new().unwrap();
+    let profile_directory = config_directory.path().join("profile");
+    fs::create_dir(&profile_directory).unwrap();
+    for (profile_file_name, profile_text) in profile_texts_by_file_name {
+        fs::write(profile_directory.join(profile_file_name), profile_text).unwrap();
+    }
+    let config_error = check_config_directory(config_directory.path())
+        .unwrap_err()
+        .to_string();
+    (config_directory, config_error)
+}
+
+#[test]
+fn check_prints_one_profile_problem_exactly_once() {
+    let (config_directory, config_error) =
+        run_config_check_on_profiles(&[("a.kdl", "version 2\ntab { pane { size 30 } }\n")]);
+
+    let profile_directory = config_directory.path().join("profile");
+    assert_eq!(
+        config_error,
+        format!(
+            "config failed: invalid config file {}: line 2, column 14: sizing applies only to \
+             children of `horizontal` or `vertical`",
+            profile_directory.join("a.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_names_the_location_of_one_profile_problem_repeated_on_two_nodes() {
+    let (config_directory, config_error) =
+        run_config_check_on_profiles(&[("a.kdl", "version 2\ntab { pane { size 30; min 5 } }\n")]);
+
+    let profile_directory = config_directory.path().join("profile");
+    assert_eq!(
+        config_error,
+        format!(
+            "config failed: invalid config file {}: line 2, column 14: sizing applies only to \
+             children of `horizontal` or `vertical`; line 2, column 23: sizing applies only to \
+             children of `horizontal` or `vertical`",
+            profile_directory.join("a.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_prints_two_different_profile_problems_once_each_in_file_order() {
+    let (config_directory, config_error) = run_config_check_on_profiles(&[(
+        "a.kdl",
+        "version 2\ntab { horizontal { size 30; pane \"x\"; pane } }\n",
+    )]);
+
+    let profile_directory = config_directory.path().join("profile");
+    assert_eq!(
+        config_error,
+        format!(
+            "config failed: invalid config file {}: line 2, column 20: sizing applies only to \
+             children of `horizontal` or `vertical`; line 2, column 29: `pane` takes no \
+             arguments or properties; its configuration goes in the children block",
+            profile_directory.join("a.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_prints_the_same_profile_problem_once_per_file() {
+    let (config_directory, config_error) = run_config_check_on_profiles(&[
+        ("a.kdl", "version 2\ntab { pane { size 30 } }\n"),
+        ("b.kdl", "version 2\ntab { pane { size 30 } }\n"),
+    ]);
+
+    let profile_directory = config_directory.path().join("profile");
+    assert_eq!(
+        config_error,
+        format!(
+            "config failed: invalid config file {}: line 2, column 14: sizing applies only to \
+             children of `horizontal` or `vertical`\ninvalid config file {}: line 2, column 14: \
+             sizing applies only to children of `horizontal` or `vertical`",
+            profile_directory.join("a.kdl").display(),
+            profile_directory.join("b.kdl").display(),
+        )
+    );
+}
+
 #[test]
 fn check_rejects_a_config_path_that_is_not_a_regular_file() {
     let config_directory = TempDir::new().unwrap();

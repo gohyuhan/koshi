@@ -613,8 +613,8 @@ fn every_keybinding_schema_problem_lands_in_one_invalid_error() {
         migration_error,
         MigrationError::Invalid {
             config_path: "keybinding.kdl".to_string(),
-            validation_error_detail: "unknown key `keybindings`; did you mean `version`?; \
-                      unknown key `unbind`; did you mean `bind`?"
+            validation_error_detail: "line 2, column 1: unknown key `keybindings`; did you mean \
+                      `version`?; line 3, column 17: unknown key `unbind`; did you mean `bind`?"
                 .to_string(),
         }
     );
@@ -651,7 +651,8 @@ fn a_profile_schema_problem_becomes_an_invalid_error() {
         migration_error,
         MigrationError::Invalid {
             config_path: "profile/dev.kdl".to_string(),
-            validation_error_detail: "profile file must define at least one `tab`".to_string(),
+            validation_error_detail:
+                "line 1, column 1: profile file must define at least one `tab`".to_string(),
         }
     );
 }

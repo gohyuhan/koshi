@@ -891,11 +891,12 @@ whole answer, then exits 0 when a client applies the file and 2 when a client
 refuses it. A client refuses a file that it cannot read, a file that does not
 parse, and a file with a `fatal` finding. It then uses the built-in shortcuts.
 
-For example, a `keybinding.kdl` that sets `unlock_alternative "<A-u>"` makes
-`koshi keys conflicts` print this answer and exit 2:
+For example, a `keybinding.kdl` that holds `version 2` on line 1 and
+`unlock_alternative "<A-u>"` on line 2 makes `koshi keys conflicts` print this
+answer and exit 2:
 
 ```text
-file: ignored (unknown key `unlock_alternative`; did you mean `unlock-alternative`?)
+file: ignored (line 2, column 1: unknown key `unlock_alternative`; did you mean `unlock-alternative`?)
 verdict: reject
 ```
 

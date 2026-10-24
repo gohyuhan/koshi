@@ -560,7 +560,8 @@ fn loading_an_absent_keybinding_file_is_none_without_a_warning() {
 #[test]
 fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
     // `keybinding.kdl` is all-or-nothing: any parse error drops the file. The
-    // warning names every schema problem, joined by `; `.
+    // warning names every schema problem with its line and column, joined by
+    // `; `.
     let keybinding_source = "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n";
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("keybinding.kdl");
@@ -573,8 +574,9 @@ fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "keybinding.kdl not applied ({}): keybinding file must declare `version`; \
-             invalid key `<C-`: missing closing `>`; using defaults",
+            "keybinding.kdl not applied ({}): line 1, column 1: keybinding file must \
+             declare `version`; line 2, column 10: invalid key `<C-`: missing closing `>`; \
+             using defaults",
             config_file_path.display()
         )]
     );

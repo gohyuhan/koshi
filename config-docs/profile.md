@@ -16,7 +16,7 @@ This reads `profile/dev.kdl` instead of opening one shell pane.
 
 **If anything is wrong, the whole profile is dropped.** Koshi starts one shell
 instead. A missing named profile uses the same fallback. `koshi config check`
-validates every saved profile.
+validates every saved profile and names each problem with its line and column.
 
 ## Structure
 
@@ -49,6 +49,8 @@ launch from `/home/me/proj` + `pane` results in that pane starting in
 
 Each child of a split may carry sizing. Without any, children share the space
 equally. `size` and `weight` are the same slot: give one of the two, once.
+Every sizing node anywhere else, such as on a stack member or on the one node
+of a `tab`, is a problem of its own.
 
 | Key | Value / type | Since |
 |---|---|---|
