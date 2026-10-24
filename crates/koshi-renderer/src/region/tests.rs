@@ -10,8 +10,8 @@ use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, Reconnecting, RenderSnapshot, SessionSnapshot, TabMetadata,
-    TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, LinkStatus, Reconnecting, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot, ViewerChrome,
 };
 
 /// A frame of one session named `one`, holding one tab named `first` with no
@@ -210,7 +210,7 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
     render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
     render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
     let viewer_chrome = ViewerChrome {
-        reconnecting: Some(Reconnecting {
+        link_status: LinkStatus::Redialing(Reconnecting {
             attempt: 3,
             retry_in_seconds: Some(8),
         }),

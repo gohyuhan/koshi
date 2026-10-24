@@ -22,8 +22,8 @@ use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
-    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
-    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, PlacementHandleHover,
+    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -397,7 +397,9 @@ fn a_shown_tiled_handle_paints_and_hits_the_three_cells_before_the_title() {
     let (mut render_snapshot, left_pane_id, ..) = build_tiled_frame();
     render_snapshot.pane_snapshots[0].pane_title = Some("user@host".to_string());
     let viewer_chrome = ViewerChrome {
-        placement_handle_pane_id: Some(left_pane_id),
+        placement_handle_hover: Some(PlacementHandleHover::TiledTopBorder {
+            pane_id: left_pane_id,
+        }),
         ..ViewerChrome::default()
     };
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);

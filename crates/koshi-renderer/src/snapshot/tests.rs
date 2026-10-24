@@ -442,15 +442,174 @@ fn committed_regions_carries_the_exact_solve_it_was_built_from() {
 }
 
 #[test]
+fn a_tiled_hover_shows_only_while_linked_in_a_mode_whose_handle_press_starts_a_drag() {
+    let pane_id = PaneId::new();
+    for (active_input_mode, is_dock_undock_command_pending, is_shown) in [
+        (LockMode::Normal, false, true),
+        (LockMode::Locked, false, true),
+        (LockMode::PaneMoveChoice, false, true),
+        (LockMode::DockUndock, false, true),
+        (LockMode::DockUndock, true, false),
+        (LockMode::PanePlacement, false, false),
+        (LockMode::FloatingPaneMove, false, false),
+    ] {
+        for tiled_hover in [
+            PlacementHandleHover::TiledTopBorder { pane_id },
+            PlacementHandleHover::TiledHandle { pane_id },
+        ] {
+            assert_eq!(
+                find_shown_placement_handle_hover(
+                    Some(tiled_hover),
+                    active_input_mode,
+                    LinkStatus::Linked,
+                    false,
+                    is_dock_undock_command_pending,
+                    false,
+                ),
+                is_shown.then_some(tiled_hover),
+                "{tiled_hover:?} in {active_input_mode:?} with a pending dock/undock \
+                 {is_dock_undock_command_pending}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_floating_hover_shows_only_in_a_mode_whose_grab_handle_press_starts_a_drag() {
+    let pane_id = PaneId::new();
+    for (
+        active_input_mode,
+        is_pinned,
+        is_dock_undock_command_pending,
+        is_floating_pane_move_waiting,
+        is_shown,
+    ) in [
+        (LockMode::Normal, false, false, false, true),
+        (LockMode::Normal, true, false, false, false),
+        (LockMode::Normal, false, false, true, false),
+        (LockMode::Locked, false, false, false, true),
+        (LockMode::Locked, true, false, false, false),
+        (LockMode::Locked, false, false, true, false),
+        (LockMode::PaneMoveChoice, false, false, false, true),
+        (LockMode::PaneMoveChoice, true, false, false, false),
+        (LockMode::PaneMoveChoice, false, false, true, false),
+        (LockMode::FloatingPaneMove, false, false, false, true),
+        (LockMode::FloatingPaneMove, true, false, false, false),
+        (LockMode::FloatingPaneMove, false, false, true, false),
+        (LockMode::DockUndock, false, false, false, true),
+        (LockMode::DockUndock, true, false, false, true),
+        (LockMode::DockUndock, false, true, false, false),
+        (LockMode::DockUndock, true, true, false, false),
+        (LockMode::DockUndock, false, false, true, false),
+        (LockMode::PanePlacement, false, false, false, false),
+    ] {
+        let floating_hover = PlacementHandleHover::FloatingHandle { pane_id, is_pinned };
+        assert_eq!(
+            find_shown_placement_handle_hover(
+                Some(floating_hover),
+                active_input_mode,
+                LinkStatus::Linked,
+                false,
+                is_dock_undock_command_pending,
+                is_floating_pane_move_waiting,
+            ),
+            is_shown.then_some(floating_hover),
+            "{floating_hover:?} in {active_input_mode:?} with a pending dock/undock \
+             {is_dock_undock_command_pending} and a waiting floating pane move \
+             {is_floating_pane_move_waiting}"
+        );
+    }
+}
+
+#[test]
+fn no_hover_shows_while_pane_placement_shows_or_the_link_is_down() {
+    let pane_id = PaneId::new();
+    let hidden_link_statuses = [
+        LinkStatus::AwaitingRestartedSession,
+        LinkStatus::Redialing(Reconnecting {
+            attempt: 1,
+            retry_in_seconds: None,
+        }),
+    ];
+    for pointer_hover in [
+        PlacementHandleHover::TiledTopBorder { pane_id },
+        PlacementHandleHover::TiledHandle { pane_id },
+        PlacementHandleHover::FloatingHandle {
+            pane_id,
+            is_pinned: false,
+        },
+    ] {
+        for active_input_mode in LockMode::ALL {
+            assert_eq!(
+                find_shown_placement_handle_hover(
+                    Some(pointer_hover),
+                    active_input_mode,
+                    LinkStatus::Linked,
+                    true,
+                    false,
+                    false,
+                ),
+                None,
+                "{pointer_hover:?} in {active_input_mode:?} while pane placement shows"
+            );
+            for link_status in hidden_link_statuses {
+                assert_eq!(
+                    find_shown_placement_handle_hover(
+                        Some(pointer_hover),
+                        active_input_mode,
+                        link_status,
+                        false,
+                        false,
+                        false,
+                    ),
+                    None,
+                    "{pointer_hover:?} in {active_input_mode:?} while {link_status:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        find_shown_placement_handle_hover(
+            None,
+            LockMode::Normal,
+            LinkStatus::Linked,
+            false,
+            false,
+            false
+        ),
+        None
+    );
+}
+
+#[test]
+fn tabline_inputs_carry_no_reconnect_tag_while_linked_or_awaiting_a_restarted_session() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    for link_status in [LinkStatus::Linked, LinkStatus::AwaitingRestartedSession] {
+        let viewer_chrome = ViewerChrome {
+            link_status,
+            ..ViewerChrome::default()
+        };
+        assert_eq!(
+            render_snapshot
+                .build_frame_layout(viewer_chrome)
+                .get_tabline_inputs()
+                .reconnecting,
+            None,
+            "{link_status:?}"
+        );
+    }
+}
+
+#[test]
 fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
     assert_eq!(
         ViewerChrome::default(),
         ViewerChrome {
             hovered_pane_id: None,
-            placement_handle_pane_id: None,
+            placement_handle_hover: None,
             active_input_mode: None,
             tabline_offset: None,
-            reconnecting: None,
+            link_status: LinkStatus::Linked,
             is_pane_placement_visible: false,
             placement_source_pane_id: None,
             floating_pane_move_draft: None,
@@ -463,10 +622,10 @@ fn render_snapshot_frame_layout_borrows_the_frame_without_committed_regions() {
     let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     let viewer_chrome = ViewerChrome {
         hovered_pane_id: Some(render_snapshot.pane_snapshots[0].pane_id),
-        placement_handle_pane_id: None,
+        placement_handle_hover: None,
         active_input_mode: None,
         tabline_offset: Some(3),
-        reconnecting: Some(Reconnecting {
+        link_status: LinkStatus::Redialing(Reconnecting {
             attempt: 4,
             retry_in_seconds: Some(8),
         }),
@@ -539,10 +698,10 @@ fn tabline_inputs_borrow_session_client_and_viewer_fields() {
     };
     let viewer_chrome = ViewerChrome {
         hovered_pane_id: None,
-        placement_handle_pane_id: None,
+        placement_handle_hover: None,
         active_input_mode: None,
         tabline_offset: Some(2),
-        reconnecting: Some(reconnecting),
+        link_status: LinkStatus::Redialing(reconnecting),
         ..ViewerChrome::default()
     };
 

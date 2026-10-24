@@ -33,7 +33,8 @@ use ratatui::layout::Rect as RatatuiRect;
 
 use crate::floating_pane_chrome::compute_floating_pane_titlebar;
 use crate::render::{
-    compute_content_rect, compute_pane_area, find_region_area, solve_tabline_layout,
+    compute_content_rect, compute_pane_area, find_region_area, is_placement_handle_shown,
+    solve_tabline_layout,
 };
 use crate::snapshot::{FloatingPaneSlot, FrameLayout};
 
@@ -199,7 +200,7 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
             continue;
         };
         if border_side == Direction::Up
-            && frame_layout.viewer_chrome.placement_handle_pane_id == Some(pane_slot.pane_id)
+            && is_placement_handle_shown(pane_slot.pane_id, frame_layout.viewer_chrome)
             && compute_tiled_pane_top_border(pane_slot.outer_rect)
                 .placement_handle_rect
                 .is_some_and(|handle_rect| handle_rect.is_point_inside(layout_point))

@@ -22,8 +22,10 @@
 //! also covers how a typed value reads as a session id or as a display name,
 //! and that a termination signal puts a quit on the loop's channel and is
 //! recorded unless this process ignores it. These tests also check that an
-//! accepted Enter swap updates the shown pane rectangles without a resize and
-//! that placement messages describe both panes inside the preview.
+//! accepted Enter swap updates the shown pane rectangles without a resize,
+//! that placement messages describe both panes inside the preview, and that a
+//! pointer moving along a top border draws again only when the shown or marked
+//! handle changes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -37,6 +39,7 @@ use ratatui::layout::{Position, Size as RatatuiSize};
 
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
+use koshi_core::action::ClientActionKind;
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, CloseTabArgs, FocusTabArgs, GridPosition, NewTabArgs,
     PanePlacementAnchor, PanePlacementTarget, Selection, SelectionKind, SetSelectionArgs,
@@ -76,8 +79,9 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
-    GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot, PlacementSnapshot,
-    PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
+    GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot, PlacementHandleHover,
+    PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 use koshi_terminal::graphics::{
@@ -3668,7 +3672,7 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
     let pane_id = PaneId::new();
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    client.placement_handle_pane_id = Some(pane_id);
+    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
     let painted_mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let active_tab_id = painted_mouse_frame.client_snapshot.active_tab_id;
     let mouse_frame = MouseFrame {
@@ -7898,6 +7902,41 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
 }
 
 #[test]
+fn a_pointer_moving_along_a_top_border_repaints_only_when_the_handle_changes() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(PaneId::new())]);
+    let mut pending_mouse_actions = Vec::new();
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+
+    // The pane's top border is screen row 1, and its handle cells are columns
+    // 1 to 3: the title, the title again, the handle, the handle again, and
+    // the title.
+    let repainted_flags: Vec<bool> = [10, 20, 2, 3, 30]
+        .into_iter()
+        .map(|screen_column| {
+            handle_mouse_event(
+                &mut client,
+                &mouse_frame,
+                build_mouse_motion(Point {
+                    column: screen_column,
+                    row: 1,
+                }),
+                Instant::now(),
+                &mut pending_mouse_actions,
+            );
+            screen.refresh(&mut client, Some(active_tab_id)).is_some()
+        })
+        .collect();
+
+    assert_eq!(repainted_flags, [true, false, true, false, true]);
+}
+
+#[test]
 fn each_painted_mouse_frame_carries_the_viewer_chrome_it_was_painted_with() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
@@ -8315,6 +8354,54 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints() {
 }
 
 #[test]
+fn a_dock_undock_wait_moves_what_the_viewer_paints_only_when_it_hides_a_shown_handle() {
+    let pane_id = PaneId::new();
+    let mut client = build_test_client();
+    let render_snapshot = build_render_snapshot(&build_received_painted_frame(
+        build_test_painted_frame_with_lock_mode(LockMode::Normal),
+    ));
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
+    client.apply_client_action(ClientActionKind::BeginDockUndock, None);
+    let PlacementInputAction::SubmitCommand {
+        command_id: first_command_id,
+        ..
+    } = client.submit_undock_command(pane_id)
+    else {
+        panic!("an undock sends its command");
+    };
+    assert!(client.reject_undock_command(first_command_id));
+
+    for (placement_handle_hover, is_paint_moved) in [
+        (None, false),
+        (Some(PlacementHandleHover::TiledTopBorder { pane_id }), true),
+    ] {
+        client.placement_handle_hover = placement_handle_hover;
+        let paint_before_wait = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+        let PlacementInputAction::SubmitCommand { command_id, .. } =
+            client.submit_undock_command(pane_id)
+        else {
+            panic!("an undock sends its command");
+        };
+        assert!(client.is_dock_undock_command_pending());
+        let paint_during_wait = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+        assert!(client.reject_undock_command(command_id));
+        let paint_after_wait = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+
+        assert_eq!(
+            paint_before_wait.chrome.placement_handle_hover,
+            placement_handle_hover
+        );
+        assert_eq!(paint_during_wait.chrome.placement_handle_hover, None);
+        assert_eq!(
+            paint_during_wait != paint_before_wait,
+            is_paint_moved,
+            "{placement_handle_hover:?}"
+        );
+        assert_eq!(paint_after_wait, paint_before_wait);
+    }
+}
+
+#[test]
 fn dialing_again_moves_what_the_viewer_paints() {
     // No frame arrives while the link is down. A moved `ViewerPaint` fires the
     // repaint that draws the `RECONNECTING` tag.
@@ -8332,10 +8419,13 @@ fn dialing_again_moves_what_the_viewer_paints() {
     client.set_link_status(LinkStatus::Redialing(reconnecting));
 
     let paint_after_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
-    assert_eq!(paint_before_reconnect.chrome.reconnecting, None);
     assert_eq!(
-        paint_after_reconnect.chrome.reconnecting,
-        Some(reconnecting)
+        paint_before_reconnect.chrome.link_status,
+        LinkStatus::Linked
+    );
+    assert_eq!(
+        paint_after_reconnect.chrome.link_status,
+        LinkStatus::Redialing(reconnecting)
     );
     assert_ne!(paint_after_reconnect, paint_before_reconnect);
 }

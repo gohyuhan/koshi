@@ -24,7 +24,7 @@
 //!
 //! Other things about a frame come from the viewer instead, as a
 //! [`ViewerChrome`]: the pane its pointer is over, the placement handle it
-//! marks, its input mode, its pane placement preview, where its tab strip is
+//! shows or marks, its input mode, its pane placement preview, where its tab strip is
 //! scrolled to, whether it is dialing the session again, and where it draws a
 //! floating pane it moves. The session stores none of them.
 
@@ -358,13 +358,14 @@ pub enum Delivery {
     PlacementCommandRejected(CommandId),
 }
 
-/// The viewer-owned frame state: which pane the pointer is over, which top
-/// border exposes a placement handle, which input mode owns the keymap, where
-/// the tab strip is scrolled, whether the viewer is dialing the session again,
+/// The viewer-owned frame state: which pane the pointer is over, which pane
+/// shows its placement handle and whether the pointer rests on that handle,
+/// which input mode owns the keymap, where
+/// the tab strip is scrolled, whether the viewer holds a link to its session,
 /// and where it draws a floating pane it is moving. While pane placement is
 /// shown, including while a confirmation waits, the viewer clears the pointer
 /// and handle fields before hit-testing and painting, and the renderer ignores
-/// them: hovering `pane-123` leaves its border color unchanged.
+/// the pointer field: hovering `pane-123` leaves its border color unchanged.
 ///
 /// These values belong to one viewer. None is stored on the session or carried
 /// in a snapshot; the viewer hands them in when it hit-tests a frame and again
@@ -375,8 +376,10 @@ pub struct ViewerChrome {
     /// The renderer draws an unfocused pane under the pointer in the hover color
     /// outside pane placement mode; the focused pane keeps its focus color.
     pub hovered_pane_id: Option<PaneId>,
-    /// The pane whose top border currently exposes the placement handle.
-    pub placement_handle_pane_id: Option<PaneId>,
+    /// The placement handle hover this frame shows, as
+    /// [`find_shown_placement_handle_hover`] gives it, or `None`. Hit-testing
+    /// and painting read it as it is.
+    pub placement_handle_hover: Option<PlacementHandleHover>,
     /// The effective input mode for the viewer's keymap and mode tag. `None`
     /// lets generic frame consumers use the mode carried by the session frame.
     pub active_input_mode: Option<LockMode>,
@@ -389,18 +392,124 @@ pub struct ViewerChrome {
     /// without changing focus. The renderer windows the tab list from this and
     /// clamps an index past the last tab.
     pub tabline_offset: Option<usize>,
-    /// Where the viewer's dialing stands while it dials its server again, and
-    /// `None` otherwise. The tabline draws
+    /// Whether the viewer holds a link to its session, and how it is getting
+    /// one back when it does not. The tabline draws
     /// `RECONNECTING (attempt 4, retry in 8s)` from a
-    /// `Reconnecting { attempt: 4, retry_in_seconds: Some(8) }`, and
-    /// `RECONNECTING (attempt 4, dialing)` from a
-    /// `Reconnecting { attempt: 4, retry_in_seconds: None }`.
-    pub reconnecting: Option<Reconnecting>,
+    /// `Redialing(Reconnecting { attempt: 4, retry_in_seconds: Some(8) })`,
+    /// and `RECONNECTING (attempt 4, dialing)` from a
+    /// `Redialing(Reconnecting { attempt: 4, retry_in_seconds: None })`.
+    pub link_status: LinkStatus,
     /// The floating pane this viewer is moving, drawn and hit-tested at the
     /// draft's top-left cell, moved inside the pane area, instead of the cell
     /// the frame places it at. A pinned pane stays at the frame's cell. `None`
     /// while no move is under way.
     pub floating_pane_move_draft: Option<FloatingPaneMoveDraft>,
+}
+
+/// The placement handle hover a viewer shows for `pointer_hover`, the handle or
+/// tiled top border its pointer rests on: `pointer_hover` while a left press on
+/// that handle starts a drag of its pane, and `None` otherwise.
+/// `active_input_mode` is the mode that owns the viewer's keyboard.
+/// `is_dock_undock_command_pending` is `true` while dock/undock mode waits for
+/// the session's answer to the undock or the dock it sent.
+/// `is_floating_pane_move_waiting` is `true` while a floating pane move that
+/// the viewer sent waits for the session's answer.
+///
+/// - While `is_pane_placement_visible` is `true`, or `link_status` is not
+///   [`Linked`](LinkStatus::Linked), it is `None`.
+/// - A [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) or
+///   [`TiledHandle`](PlacementHandleHover::TiledHandle) hover shows in
+///   `Normal`, `Locked` and `PaneMoveChoice`, and in `DockUndock` while
+///   `is_dock_undock_command_pending` is `false`.
+/// - A [`FloatingHandle`](PlacementHandleHover::FloatingHandle) hover of an
+///   unpinned pane shows in `Normal`, `Locked`, `PaneMoveChoice` and
+///   `FloatingPaneMove` while `is_floating_pane_move_waiting` is `false`. In
+///   `DockUndock`, a pinned or unpinned pane's hover shows while
+///   `is_dock_undock_command_pending` and `is_floating_pane_move_waiting` are
+///   both `false`.
+/// - No hover shows in `PanePlacement`.
+///
+/// `TiledTopBorder { pane_id: pane-123 }` gives itself in `Normal` and `None`
+/// in `FloatingPaneMove`.
+#[must_use]
+pub fn find_shown_placement_handle_hover(
+    pointer_hover: Option<PlacementHandleHover>,
+    active_input_mode: LockMode,
+    link_status: LinkStatus,
+    is_pane_placement_visible: bool,
+    is_dock_undock_command_pending: bool,
+    is_floating_pane_move_waiting: bool,
+) -> Option<PlacementHandleHover> {
+    let placement_handle_hover = pointer_hover?;
+    if is_pane_placement_visible || link_status != LinkStatus::Linked {
+        return None;
+    }
+    let is_drag_started_by_press = match placement_handle_hover {
+        PlacementHandleHover::TiledTopBorder { .. } | PlacementHandleHover::TiledHandle { .. } => {
+            match active_input_mode {
+                LockMode::Normal | LockMode::Locked | LockMode::PaneMoveChoice => true,
+                LockMode::DockUndock => !is_dock_undock_command_pending,
+                LockMode::PanePlacement | LockMode::FloatingPaneMove => false,
+            }
+        }
+        PlacementHandleHover::FloatingHandle { is_pinned, .. } => match active_input_mode {
+            LockMode::Normal
+            | LockMode::Locked
+            | LockMode::PaneMoveChoice
+            | LockMode::FloatingPaneMove => !is_pinned && !is_floating_pane_move_waiting,
+            LockMode::DockUndock => {
+                !is_dock_undock_command_pending && !is_floating_pane_move_waiting
+            }
+            LockMode::PanePlacement => false,
+        },
+    };
+    is_drag_started_by_press.then_some(placement_handle_hover)
+}
+
+/// Where a viewer's pointer rests on one pane's placement handle. A tiled pane
+/// draws its handle `⠿⠿⠿` under both tiled variants. Only
+/// [`TiledHandle`](PlacementHandleHover::TiledHandle) and
+/// [`FloatingHandle`](PlacementHandleHover::FloatingHandle) give the pane the
+/// placement hover outline and tint.
+///
+/// The pointer on column `10` of tiled `pane-123`'s top border is
+/// `TiledTopBorder { pane_id: pane-123 }`, and on column `2` it is
+/// `TiledHandle { pane_id: pane-123 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementHandleHover {
+    /// The pointer rests on a tiled pane's top border, between its corners and
+    /// off its handle cells.
+    TiledTopBorder {
+        /// The tiled pane whose top border the pointer rests on.
+        pane_id: PaneId,
+    },
+    /// The pointer rests on a tiled pane's handle cells `⠿⠿⠿`.
+    TiledHandle {
+        /// The tiled pane whose handle the pointer rests on.
+        pane_id: PaneId,
+    },
+    /// The pointer rests on a floating pane's grab handle `⣿⣿`.
+    FloatingHandle {
+        /// The floating pane whose grab handle the pointer rests on.
+        pane_id: PaneId,
+        /// Whether the frame the pointer moved over drew the pane pinned.
+        is_pinned: bool,
+    },
+}
+
+/// Whether a viewer holds a link to its session, and how it is getting one back
+/// when it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkStatus {
+    /// The viewer's requests reach the session, and its frames arrive.
+    #[default]
+    Linked,
+    /// The session is replacing its own process image, and the viewer waits
+    /// to join its new image. The tabline draws no tag.
+    AwaitingRestartedSession,
+    /// The link to a session on a server dropped, and the viewer dials that
+    /// server again. The tabline draws the tag this value describes.
+    Redialing(Reconnecting),
 }
 
 /// A floating pane this viewer draws at a cell of its own choosing, before the
@@ -488,7 +597,10 @@ impl<'a> FrameLayout<'a> {
                 .active_input_mode
                 .unwrap_or(self.client_snapshot.lock_mode),
             is_mouse_selection_enabled: self.client_snapshot.is_mouse_selection_enabled,
-            reconnecting: self.viewer_chrome.reconnecting,
+            reconnecting: match self.viewer_chrome.link_status {
+                LinkStatus::Redialing(reconnecting) => Some(reconnecting),
+                LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
+            },
             tabline_offset: self.viewer_chrome.tabline_offset,
         }
     }

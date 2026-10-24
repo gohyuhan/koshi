@@ -4,8 +4,10 @@
 //! the mode tag tracks the client lock mode, its mouse-select state and a
 //! reconnecting viewer. Pane borders draw with focus and hover highlighting.
 //! A tiled pane's title starts after the three placement handle cells, so a
-//! hovered handle covers no title cell at any width, with a wide-character
-//! title, and on an open stack member under a collapsed header.
+//! shown handle covers no title cell at any width, with a wide-character
+//! title, and on an open stack member under a collapsed header. A top border
+//! hover draws the handle in the hover style, and a handle hover adds the
+//! placement hover outline and tint.
 //! Terminal cells paint into pane content rects with their styles, wide-glyph
 //! handling and highlight spans. Each drawn cell takes the columns that
 //! `compute_text_display_width` gives its symbol: a cell that holds `U+17D8`
@@ -57,7 +59,7 @@ use koshi_terminal::state::CursorShape;
 use super::tabline::format_version_badge_text;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, CursorStyle, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, KeymapHints, PaneSlot, PaneSnapshot, ScrollbackMetadata,
+    ImagePlacementSnapshot, KeymapHints, LinkStatus, PaneSlot, PaneSnapshot, ScrollbackMetadata,
     SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
@@ -1048,7 +1050,7 @@ fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
         },
     );
     let reconnecting_viewer_chrome = ViewerChrome {
-        reconnecting: Some(Reconnecting {
+        link_status: LinkStatus::Redialing(Reconnecting {
             attempt: 3,
             retry_in_seconds: Some(8),
         }),
@@ -1086,7 +1088,7 @@ fn a_viewer_whose_dial_runs_puts_the_dialing_tag_in_the_tabline() {
         },
     );
     let dialing_viewer_chrome = ViewerChrome {
-        reconnecting: Some(Reconnecting {
+        link_status: LinkStatus::Redialing(Reconnecting {
             attempt: 3,
             retry_in_seconds: None,
         }),
@@ -3859,11 +3861,11 @@ fn overlapping_panes_draw_in_layout_order_last_wins() {
 
 /// The top border row of one `outer_column_count`-column tiled pane titled
 /// `pane_title`, drawn at `(0, 1)` in an `outer_column_count x 8` viewport,
-/// with its placement handle hovered when `is_handle_hovered` is `true`.
+/// with the pointer on its top border when `is_handle_shown` is `true`.
 fn render_tiled_pane_top_border(
     outer_column_count: u16,
     pane_title: &str,
-    is_handle_hovered: bool,
+    is_handle_shown: bool,
 ) -> String {
     let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -3879,7 +3881,8 @@ fn render_tiled_pane_top_border(
     );
     render_snapshot.pane_snapshots[0].pane_title = Some(pane_title.to_string());
     let viewer_chrome = ViewerChrome {
-        placement_handle_pane_id: is_handle_hovered.then_some(pane_id),
+        placement_handle_hover: is_handle_shown
+            .then_some(PlacementHandleHover::TiledTopBorder { pane_id }),
         ..ViewerChrome::default()
     };
     let render_buffer =
@@ -3888,7 +3891,51 @@ fn render_tiled_pane_top_border(
 }
 
 #[test]
-fn a_hovered_tiled_handle_and_the_title_take_separate_top_border_cells() {
+fn a_top_border_hover_shows_the_handle_and_only_a_handle_hover_adds_the_outline_and_tint() {
+    let theme = Theme::default();
+    let pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[(pane_id, build_cell_rect(0, 1, 20, 6), true)],
+        None,
+        LockMode::Normal,
+        Size {
+            column_count: 20,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[0].pane_title = Some("user@host".to_string());
+    let render_hovered_pane = |placement_handle_hover| {
+        render_snapshot_with_viewer_chrome(
+            &render_snapshot,
+            ViewerChrome {
+                hovered_pane_id: Some(pane_id),
+                placement_handle_hover: Some(placement_handle_hover),
+                ..ViewerChrome::default()
+            },
+            20,
+            8,
+        )
+    };
+
+    let top_border_buffer = render_hovered_pane(PlacementHandleHover::TiledTopBorder { pane_id });
+    let handle_buffer = render_hovered_pane(PlacementHandleHover::TiledHandle { pane_id });
+
+    for render_buffer in [&top_border_buffer, &handle_buffer] {
+        assert_eq!(
+            format_rendered_row_text(render_buffer, 1),
+            "┌⠿⠿⠿ user@host ────┐"
+        );
+    }
+    assert_eq!(top_border_buffer[(1, 1)].fg, theme.hover_border_color);
+    assert_eq!(top_border_buffer[(5, 3)].bg, Color::Reset);
+    assert_eq!(handle_buffer[(1, 1)].fg, theme.accent_color);
+    assert_eq!(handle_buffer[(5, 3)].bg, Color::Rgb(0x3a, 0x3a, 0x3a));
+}
+
+#[test]
+fn a_shown_tiled_handle_and_the_title_take_separate_top_border_cells() {
     assert_eq!(
         render_tiled_pane_top_border(20, "user@host", false),
         "┌─── user@host ────┐"
@@ -3901,7 +3948,7 @@ fn a_hovered_tiled_handle_and_the_title_take_separate_top_border_cells() {
 
 #[test]
 fn a_tiled_pane_too_narrow_for_its_title_keeps_its_handle() {
-    for (outer_column_count, is_handle_hovered, expected_top_border) in [
+    for (outer_column_count, is_handle_shown, expected_top_border) in [
         (4, true, "┌──┐"),
         (5, false, "┌───┐"),
         (5, true, "┌⠿⠿⠿┐"),
@@ -3911,15 +3958,15 @@ fn a_tiled_pane_too_narrow_for_its_title_keeps_its_handle() {
         (8, true, "┌⠿⠿⠿ u─┐"),
     ] {
         assert_eq!(
-            render_tiled_pane_top_border(outer_column_count, "user@host", is_handle_hovered),
+            render_tiled_pane_top_border(outer_column_count, "user@host", is_handle_shown),
             expected_top_border,
-            "{outer_column_count} columns, handle hovered: {is_handle_hovered}"
+            "{outer_column_count} columns, handle shown: {is_handle_shown}"
         );
     }
 }
 
 #[test]
-fn a_hovered_tiled_handle_leaves_a_wide_character_title_whole() {
+fn a_shown_tiled_handle_leaves_a_wide_character_title_whole() {
     assert_eq!(
         render_tiled_pane_top_border(14, "世界", true),
         "┌⠿⠿⠿ 世 界  ───┐"
@@ -3928,7 +3975,7 @@ fn a_hovered_tiled_handle_leaves_a_wide_character_title_whole() {
 }
 
 #[test]
-fn a_hovered_handle_of_an_open_stack_member_leaves_its_title_and_the_header_above_whole() {
+fn a_shown_handle_of_an_open_stack_member_leaves_its_title_and_the_header_above_whole() {
     let collapsed_pane_id = PaneId::new();
     let open_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -3957,7 +4004,9 @@ fn a_hovered_handle_of_an_open_stack_member_leaves_its_title_and_the_header_abov
         member_count: 2,
     }];
     let viewer_chrome = ViewerChrome {
-        placement_handle_pane_id: Some(open_pane_id),
+        placement_handle_hover: Some(PlacementHandleHover::TiledTopBorder {
+            pane_id: open_pane_id,
+        }),
         ..ViewerChrome::default()
     };
 
@@ -5154,8 +5203,13 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
             Some(pane_ids[seeded_sequence.compute_next_index(pane_ids.len())]);
     }
     if seeded_sequence.compute_next_index(3) == 0 {
-        viewer_chrome.placement_handle_pane_id =
-            Some(pane_ids[seeded_sequence.compute_next_index(pane_ids.len())]);
+        let pane_id = pane_ids[seeded_sequence.compute_next_index(pane_ids.len())];
+        viewer_chrome.placement_handle_hover =
+            Some(if seeded_sequence.compute_next_index(2) == 0 {
+                PlacementHandleHover::TiledTopBorder { pane_id }
+            } else {
+                PlacementHandleHover::TiledHandle { pane_id }
+            });
     }
     (render_snapshot, viewer_chrome)
 }
