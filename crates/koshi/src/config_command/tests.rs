@@ -24,12 +24,25 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// What `koshi config check` gives for `config_directory`, with `koshi.kdl`
+/// read once first, as `koshi` reads it at start.
+fn check_config_directory_read_at_start(config_directory: &Path) -> Result<String, CliError> {
+    check_config_directory(
+        config_directory,
+        &load_app_config_file(Some(config_directory)).app_config_outcome,
+    )
+}
+
 #[test]
 fn path_prints_the_given_config_directory() {
     let config_directory = TempDir::new().unwrap();
 
-    let config_command_output =
-        run_config_command_in_directory(&ConfigCommand::Path, config_directory.path()).unwrap();
+    let config_command_output = run_config_command_in_directory(
+        &ConfigCommand::Path,
+        config_directory.path(),
+        &AppConfigOutcome::Absent,
+    )
+    .unwrap();
 
     assert_eq!(
         config_command_output,
@@ -439,7 +452,7 @@ fn check_validates_every_known_file_in_sorted_path_order() {
     )
     .unwrap();
 
-    let report_text = check_config_directory(config_directory.path()).unwrap();
+    let report_text = check_config_directory_read_at_start(config_directory.path()).unwrap();
 
     assert_eq!(
         report_text,
@@ -464,7 +477,7 @@ fn check_collects_errors_from_all_files() {
     )
     .unwrap();
 
-    let config_error = check_config_directory(config_directory.path())
+    let config_error = check_config_directory_read_at_start(config_directory.path())
         .unwrap_err()
         .to_string();
 
@@ -488,7 +501,7 @@ fn run_config_check_on_profiles(profile_texts_by_file_name: &[(&str, &str)]) -> 
     for (profile_file_name, profile_text) in profile_texts_by_file_name {
         fs::write(profile_directory.join(profile_file_name), profile_text).unwrap();
     }
-    let config_error = check_config_directory(config_directory.path())
+    let config_error = check_config_directory_read_at_start(config_directory.path())
         .unwrap_err()
         .to_string();
     (config_directory, config_error)
@@ -576,7 +589,7 @@ fn check_names_the_location_of_the_same_app_config_warning_on_two_nodes() {
     )
     .unwrap();
 
-    let config_error = check_config_directory(config_directory.path())
+    let config_error = check_config_directory_read_at_start(config_directory.path())
         .unwrap_err()
         .to_string();
 
@@ -598,7 +611,7 @@ fn check_rejects_a_config_path_that_is_not_a_regular_file() {
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::create_dir(&app_config_path).unwrap();
 
-    let config_error = check_config_directory(config_directory.path()).unwrap_err();
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
 
     assert_eq!(
         config_error.to_string(),
@@ -615,7 +628,7 @@ fn check_rejects_a_kdl_directory_below_a_config_folder() {
     let theme_config_path = config_directory.path().join("themes").join("bad.kdl");
     fs::create_dir_all(&theme_config_path).unwrap();
 
-    let config_error = check_config_directory(config_directory.path()).unwrap_err();
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
 
     assert_eq!(
         config_error.to_string(),
@@ -635,7 +648,7 @@ fn check_reports_read_and_validation_errors_together() {
     fs::create_dir_all(theme_config_path.parent().unwrap()).unwrap();
     fs::write(&theme_config_path, "colors {}\n").unwrap();
 
-    let config_error = check_config_directory(config_directory.path()).unwrap_err();
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
 
     assert_eq!(
         config_error.to_string(),
@@ -653,8 +666,12 @@ fn migrate_command_updates_a_schema_one_file_to_schema_two() {
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 1\n").unwrap();
 
-    let migration_report =
-        run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
+    let migration_report = run_config_command_in_directory(
+        &ConfigCommand::Migrate,
+        config_directory.path(),
+        &AppConfigOutcome::Absent,
+    )
+    .unwrap();
 
     assert_eq!(
         migration_report,
@@ -669,8 +686,12 @@ fn migrate_command_keeps_an_unknown_key_in_a_migrated_file() {
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 1\nmade-up-key \"x\"\n").unwrap();
 
-    let migration_report =
-        run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
+    let migration_report = run_config_command_in_directory(
+        &ConfigCommand::Migrate,
+        config_directory.path(),
+        &AppConfigOutcome::Absent,
+    )
+    .unwrap();
 
     assert_eq!(
         migration_report,
@@ -868,7 +889,7 @@ fn migrate_write_failure_warns_that_the_failing_file_may_have_changed() {
 fn check_of_a_directory_holding_no_config_file_says_so_and_names_the_directory() {
     let config_directory = TempDir::new().unwrap();
 
-    let report_text = check_config_directory(config_directory.path()).unwrap();
+    let report_text = check_config_directory_read_at_start(config_directory.path()).unwrap();
 
     assert_eq!(
         report_text,
@@ -913,6 +934,7 @@ fn run_config_command_in_directory_routes_explain_to_the_field_table() {
             config_key: "koshi.pane.gap".to_string(),
         },
         config_directory.path(),
+        &AppConfigOutcome::Absent,
     )
     .unwrap();
 
@@ -929,8 +951,12 @@ fn run_config_command_in_directory_routes_check_to_the_directory_scan() {
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 2\n").unwrap();
 
-    let config_command_output =
-        run_config_command_in_directory(&ConfigCommand::Check, config_directory.path()).unwrap();
+    let config_command_output = run_config_command_in_directory(
+        &ConfigCommand::Check,
+        config_directory.path(),
+        &load_app_config_file(Some(config_directory.path())).app_config_outcome,
+    )
+    .unwrap();
 
     assert_eq!(
         config_command_output,
@@ -946,8 +972,12 @@ fn run_config_command_in_directory_migrate_leaves_a_file_already_on_this_schema_
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 2\n").unwrap();
 
-    let config_command_output =
-        run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
+    let config_command_output = run_config_command_in_directory(
+        &ConfigCommand::Migrate,
+        config_directory.path(),
+        &AppConfigOutcome::Absent,
+    )
+    .unwrap();
 
     assert_eq!(
         config_command_output,
@@ -963,7 +993,7 @@ fn check_reports_a_themes_path_that_is_not_a_directory() {
     fs::write(&themes_path, "not a directory").unwrap();
     let io_error = fs::read_dir(&themes_path).unwrap_err();
 
-    let config_error = check_config_directory(config_directory.path()).unwrap_err();
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
 
     assert_eq!(
         config_error.to_string(),
@@ -982,7 +1012,7 @@ fn check_validates_a_config_symlink_through_its_target() {
     fs::write(&stored_config_path, "version 2\n").unwrap();
     symlink(&stored_config_path, &app_config_path).unwrap();
 
-    let report_text = check_config_directory(config_directory.path()).unwrap();
+    let report_text = check_config_directory_read_at_start(config_directory.path()).unwrap();
 
     assert_eq!(
         report_text,
@@ -1004,7 +1034,7 @@ fn check_reports_a_config_symlink_that_points_nowhere() {
     .unwrap();
     let io_error = fs::canonicalize(&app_config_path).unwrap_err();
 
-    let config_error = check_config_directory(config_directory.path()).unwrap_err();
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
 
     assert_eq!(
         config_error.to_string(),
@@ -1026,12 +1056,111 @@ fn check_rejects_a_config_symlink_that_points_at_a_directory() {
     fs::create_dir(&target_directory).unwrap();
     symlink(&target_directory, &app_config_path).unwrap();
 
-    let config_error = check_config_directory(config_directory.path()).unwrap_err();
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
 
     assert_eq!(
         config_error.to_string(),
         format!(
             "config failed: read {}: expected a regular file",
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
+fn check_validates_the_koshi_kdl_text_read_at_start_and_not_the_text_on_disk() {
+    // `koshi.kdl` on disk names no `version`; the text read at start is
+    // `version 2`.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "pane {}\n").unwrap();
+    let app_config_outcome =
+        parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+
+    let report_text = check_config_directory(config_directory.path(), &app_config_outcome).unwrap();
+
+    assert_eq!(
+        report_text,
+        format!("{}: valid (version 2)\n", app_config_path.display())
+    );
+}
+
+#[test]
+fn check_reports_the_read_error_of_the_koshi_kdl_read_at_start() {
+    // `koshi.kdl` on disk is valid; the read at start failed.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 2\n").unwrap();
+
+    let config_error = check_config_directory(
+        config_directory.path(),
+        &AppConfigOutcome::Unreadable {
+            read_error_text: "Permission denied (os error 13)".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: read {}: Permission denied (os error 13)",
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
+fn check_finds_no_koshi_kdl_when_none_was_read_at_start() {
+    // `koshi.kdl` was absent at start and is on disk now.
+    let config_directory = TempDir::new().unwrap();
+    fs::write(config_directory.path().join("koshi.kdl"), "version 2\n").unwrap();
+
+    let report_text =
+        check_config_directory(config_directory.path(), &AppConfigOutcome::Absent).unwrap();
+
+    assert_eq!(
+        report_text,
+        format!(
+            "no config files found in {}\n",
+            config_directory.path().display()
+        )
+    );
+}
+
+#[test]
+fn check_rejects_a_koshi_kdl_that_is_no_regular_file_now_whatever_text_was_read_at_start() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::create_dir(&app_config_path).unwrap();
+    let app_config_outcome =
+        parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+
+    let config_error =
+        check_config_directory(config_directory.path(), &app_config_outcome).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: read {}: expected a regular file",
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
+fn check_reports_a_koshi_kdl_that_is_not_utf8_with_its_read_error() {
+    // `0x80` starts no UTF-8 sequence: the read fails on every platform.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, [0x76, 0x65, 0x80, 0x72]).unwrap();
+    let read_error = fs::read_to_string(&app_config_path).unwrap_err();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: read {}: {read_error}",
             app_config_path.display()
         )
     );

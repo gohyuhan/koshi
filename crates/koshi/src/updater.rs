@@ -2667,8 +2667,8 @@ fn is_update_due(update_state: &UpdateState, check_interval_day_count: u32) -> b
 /// auto-check off. Only the `update` section of a file that parsed is read.
 fn resolve_update_config(app_config_outcome: &AppConfigOutcome) -> UpdateConfig {
     match app_config_outcome {
-        AppConfigOutcome::Unread => UpdateConfig::default(),
-        AppConfigOutcome::Refused => UpdateConfig {
+        AppConfigOutcome::Absent | AppConfigOutcome::Unreadable { .. } => UpdateConfig::default(),
+        AppConfigOutcome::Refused { .. } => UpdateConfig {
             should_auto_check_for_updates: false,
             ..UpdateConfig::default()
         },
