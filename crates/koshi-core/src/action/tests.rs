@@ -1025,6 +1025,136 @@ fn continuous_action_seeds_are_stable() {
     assert_eq!(continuous_action_names, expected_continuous_action_names);
 }
 
+/// Pins every seed that carries a hint label, and its label: the seven
+/// direction families. Every other seed carries none.
+#[test]
+fn hint_labels_name_each_direction_family_without_its_direction() {
+    let mut hint_label_by_action_name: Vec<(String, &str)> = build_core_action_seeds()
+        .iter()
+        .filter_map(|(action_reference, action_metadata)| {
+            let hint_label = action_metadata.hint_label?;
+            Some((action_reference.to_string(), hint_label))
+        })
+        .collect();
+    hint_label_by_action_name.sort();
+
+    let mut expected_hint_label_by_action_name: Vec<(String, &str)> = [
+        ("core:new-pane-left", "Split Pane"),
+        ("core:new-pane-down", "Split Pane"),
+        ("core:new-pane-up", "Split Pane"),
+        ("core:new-pane-right", "Split Pane"),
+        ("core:resize-pane-left", "Resize Pane"),
+        ("core:resize-pane-down", "Resize Pane"),
+        ("core:resize-pane-up", "Resize Pane"),
+        ("core:resize-pane-right", "Resize Pane"),
+        ("core:select-pane-target-left", "Select Pane Target"),
+        ("core:select-pane-target-down", "Select Pane Target"),
+        ("core:select-pane-target-up", "Select Pane Target"),
+        ("core:select-pane-target-right", "Select Pane Target"),
+        ("core:select-pane-insertion-left", "Select Pane Insertion"),
+        ("core:select-pane-insertion-down", "Select Pane Insertion"),
+        ("core:select-pane-insertion-up", "Select Pane Insertion"),
+        ("core:select-pane-insertion-right", "Select Pane Insertion"),
+        ("core:move-floating-pane-left", "Move Floating Pane"),
+        ("core:move-floating-pane-down", "Move Floating Pane"),
+        ("core:move-floating-pane-up", "Move Floating Pane"),
+        ("core:move-floating-pane-right", "Move Floating Pane"),
+        ("core:focus-pane-left", "Focus Pane"),
+        ("core:focus-pane-down", "Focus Pane"),
+        ("core:focus-pane-up", "Focus Pane"),
+        ("core:focus-pane-right", "Focus Pane"),
+        ("core:scroll-pane-up", "Scroll Pane"),
+        ("core:scroll-pane-down", "Scroll Pane"),
+    ]
+    .map(|(action_name, hint_label)| (action_name.to_string(), hint_label))
+    .to_vec();
+    expected_hint_label_by_action_name.sort();
+
+    assert_eq!(
+        hint_label_by_action_name,
+        expected_hint_label_by_action_name
+    );
+}
+
+/// Pins every seed outside [`HintTier::Other`], and its tier. Every other
+/// seed is `Other`, the default.
+#[test]
+fn hint_tiers_are_stable() {
+    assert_eq!(HintTier::default(), HintTier::Other);
+    let mut hint_tier_by_action_name: Vec<(HintTier, String)> = build_core_action_seeds()
+        .iter()
+        .filter(|(_, action_metadata)| action_metadata.hint_tier != HintTier::Other)
+        .map(|(action_reference, action_metadata)| {
+            (action_metadata.hint_tier, action_reference.to_string())
+        })
+        .collect();
+    hint_tier_by_action_name.sort();
+
+    let essential_action_names = [
+        "core:cancel-dock-undock",
+        "core:cancel-floating-pane-move",
+        "core:cancel-pane-move-choice",
+        "core:cancel-pane-placement",
+        "core:close-pane",
+        "core:close-pane-tree",
+        "core:close-tab",
+        "core:confirm-dock-undock",
+        "core:confirm-floating-pane-move",
+        "core:confirm-pane-move-choice",
+        "core:confirm-pane-placement",
+        "core:lock",
+        "core:new-pane",
+        "core:new-tab",
+        "core:unlock",
+    ];
+    let navigation_action_names = [
+        "core:focus-next-floating-pane",
+        "core:focus-pane-down",
+        "core:focus-pane-left",
+        "core:focus-pane-right",
+        "core:focus-pane-up",
+        "core:focus-previous-floating-pane",
+        "core:move-floating-pane-down",
+        "core:move-floating-pane-left",
+        "core:move-floating-pane-right",
+        "core:move-floating-pane-up",
+        "core:new-pane-down",
+        "core:new-pane-left",
+        "core:new-pane-right",
+        "core:new-pane-up",
+        "core:next-tab",
+        "core:previous-tab",
+        "core:resize-pane-down",
+        "core:resize-pane-left",
+        "core:resize-pane-right",
+        "core:resize-pane-up",
+        "core:scroll-pane-down",
+        "core:scroll-pane-up",
+        "core:select-next-floating-pane",
+        "core:select-next-placement-tab",
+        "core:select-pane-insertion-down",
+        "core:select-pane-insertion-left",
+        "core:select-pane-insertion-right",
+        "core:select-pane-insertion-up",
+        "core:select-pane-target-down",
+        "core:select-pane-target-left",
+        "core:select-pane-target-right",
+        "core:select-pane-target-up",
+        "core:select-previous-floating-pane",
+        "core:select-previous-placement-tab",
+    ];
+    let expected_hint_tier_by_action_name: Vec<(HintTier, String)> = essential_action_names
+        .map(|action_name| (HintTier::Essential, action_name.to_string()))
+        .into_iter()
+        .chain(
+            navigation_action_names
+                .map(|action_name| (HintTier::Navigation, action_name.to_string())),
+        )
+        .collect();
+
+    assert_eq!(hint_tier_by_action_name, expected_hint_tier_by_action_name);
+}
+
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed
 /// changes this list and fails the assert.
 #[test]

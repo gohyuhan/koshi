@@ -2317,12 +2317,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
         let mut hint_labels = keymap_hints
             .hint_bindings
             .iter()
-            .map(|hint_binding| {
-                (
-                    hint_binding.action_display_name.clone(),
-                    hint_binding.is_pinned,
-                )
-            })
+            .map(|hint_binding| (hint_binding.action_label.clone(), hint_binding.is_pinned))
             .collect::<Vec<_>>();
         hint_labels.sort_unstable();
         hint_labels
@@ -2336,27 +2331,27 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Close Tab",
             "Dock Or Undock Pane",
             "Focus Next Floating Pane",
-            "Focus Pane Down",
-            "Focus Pane Left",
-            "Focus Pane Right",
-            "Focus Pane Up",
+            "Focus Pane",
+            "Focus Pane",
+            "Focus Pane",
+            "Focus Pane",
             "Focus Previous Floating Pane",
             "Lock",
             "Mouse Select",
             "New Pane",
-            "New Pane Down",
-            "New Pane Left",
-            "New Pane Right",
-            "New Pane Up",
             "New Stacked Pane",
             "New Tab",
             "Next Tab",
             "Previous Tab",
             "Quit",
-            "Resize Pane Down",
-            "Resize Pane Left",
-            "Resize Pane Right",
-            "Resize Pane Up",
+            "Resize Pane",
+            "Resize Pane",
+            "Resize Pane",
+            "Resize Pane",
+            "Split Pane",
+            "Split Pane",
+            "Split Pane",
+            "Split Pane",
             "Toggle Pane Fullscreen",
         ]
         .map(|hint_label| (hint_label.to_string(), false))

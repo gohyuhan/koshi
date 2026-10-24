@@ -44,6 +44,7 @@ use super::*;
 
 use std::sync::Arc;
 
+use koshi_core::action::HintTier;
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
@@ -346,7 +347,8 @@ fn build_lock_hint_keymap() -> KeymapHints {
                 BindingModifierFlags::CTRL,
                 Key::Char('l'),
             )),
-            action_display_name: "Lock".to_string(),
+            action_label: "Lock".to_string(),
+            hint_tier: HintTier::Essential,
             is_user_authored: false,
             is_pinned: false,
         }]),

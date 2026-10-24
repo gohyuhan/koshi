@@ -2,17 +2,21 @@
 //! groups, `+N` counts once a user binding or a removal touches a group), the
 //! key names of a folded ribbon (`←↓`, `hj`, `ENTER|f`, and the shipped pane
 //! move chooser row), the open-sequence view (breadcrumb plus continuations,
-//! nested groups),
-//! pinned-first ordering, whole-item truncation, the blanked row for a mode
-//! with nothing to hint, and the cells outside the given area that the bar
-//! leaves untouched.
+//! nested groups), group order, pinned-first and hint-tier ordering,
+//! whole-item truncation, the shipped rows of every mode and of the `<C-p>`
+//! continuations at 40, 80 and 120 columns, the blanked row for a mode with
+//! nothing to hint, and the cells outside the given area that the bar leaves
+//! untouched.
 
 use super::*;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use koshi_config::conflict::{build_keymap_layers, detect_conflicts, KeymapVerdict};
 use koshi_config::hints::KeymapHintCatalog;
+use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
+use koshi_core::action::{ActionReference, HintTier};
 use koshi_core::key::{BindingModifierFlags, Key, KeySequence, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
@@ -35,7 +39,8 @@ fn build_key_sequence(key_chords: &[KeyChord]) -> KeySequence {
     KeySequence::from_first_and_rest(key_chords[0], key_chords[1..].to_vec())
 }
 
-/// Create a hint binding with the given flags.
+/// Create a hint binding with the given flags, in the [`HintTier::Other`]
+/// hint tier.
 fn build_hint_binding(
     key_sequence: KeySequence,
     action_label: &str,
@@ -44,7 +49,8 @@ fn build_hint_binding(
 ) -> HintBinding {
     HintBinding {
         key_sequence,
-        action_display_name: action_label.to_string(),
+        action_label: action_label.to_string(),
+        hint_tier: HintTier::Other,
         is_user_authored,
         is_pinned,
     }
@@ -359,19 +365,19 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
     let render_buffer = render_statusline(&keymap_hints, 80);
     assert_eq!(
         format_rendered_row(&render_buffer),
-        " Ctrl +  l  Lock  Shift +  Tab  Previous Tab  Tab  Next Tab"
+        " Ctrl +  l  Lock  Tab  Next Tab  Shift +  Tab  Previous Tab"
     );
-    // The Shift group's key is a block: dark text on the mid ramp stop.
-    assert_eq!(render_buffer[(27, 0)].bg, Color::Rgb(0xa7, 0xb0, 0xff));
-    assert_eq!(render_buffer[(27, 0)].fg, Color::Rgb(0x12, 0x09, 0x1f));
     // The bare Tab is its own opener: header-styled text on the bar itself —
-    // the blue ramp end as foreground over the bar background, no block
+    // the mid ramp stop as foreground over the bar background, no block
     // behind it.
-    assert_eq!(render_buffer[(46, 0)].fg, Color::Rgb(0x7d, 0xbc, 0xff));
-    assert_eq!(render_buffer[(46, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
-    assert!(render_buffer[(46, 0)].modifier.contains(Modifier::BOLD));
+    assert_eq!(render_buffer[(18, 0)].fg, Color::Rgb(0xa7, 0xb0, 0xff));
+    assert_eq!(render_buffer[(18, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
+    assert!(render_buffer[(18, 0)].modifier.contains(Modifier::BOLD));
     // Its action label keeps the dimmed block, same as any other ribbon.
-    assert_eq!(render_buffer[(51, 0)].bg, Color::Rgb(0x44, 0x67, 0x8c));
+    assert_eq!(render_buffer[(23, 0)].bg, Color::Rgb(0x5b, 0x60, 0x8c));
+    // The Shift group's key is a block: dark text on the blue ramp end.
+    assert_eq!(render_buffer[(42, 0)].bg, Color::Rgb(0x7d, 0xbc, 0xff));
+    assert_eq!(render_buffer[(42, 0)].fg, Color::Rgb(0x12, 0x09, 0x1f));
 }
 
 #[test]
@@ -408,6 +414,76 @@ fn arrow_keys_sort_left_down_up_right_ahead_of_other_keys() {
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  ←↓↑→z  Focus Pane"
+    );
+}
+
+#[test]
+fn keys_in_one_group_read_pinned_then_essential_then_navigation_then_other() {
+    let build_tiered_hint_binding =
+        |key_character: char, action_label: &str, hint_tier: HintTier, is_pinned: bool| {
+            HintBinding {
+                hint_tier,
+                ..build_hint_binding(
+                    build_key_sequence(&[build_ctrl_chord(key_character)]),
+                    action_label,
+                    false,
+                    is_pinned,
+                )
+            }
+        };
+    // Fed in reverse of the order they must come out in. Inside one tier,
+    // keys read in key order: `c` before `d`.
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_tiered_hint_binding('a', "Other", HintTier::Other, false),
+            build_tiered_hint_binding('b', "Navigation", HintTier::Navigation, false),
+            build_tiered_hint_binding('d', "Dog", HintTier::Essential, false),
+            build_tiered_hint_binding('c', "Cat", HintTier::Essential, false),
+            build_tiered_hint_binding('z', "Pinned", HintTier::Other, true),
+        ],
+        &[],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Ctrl +  z  Pinned  c  Cat  d  Dog  b  Navigation  a  Other"
+    );
+}
+
+#[test]
+fn a_prefix_key_takes_the_first_tier_among_the_bindings_under_it() {
+    // `<C-t>` starts one `Other` and one `Essential` binding, so it reads as
+    // `Essential` and leads the `Other` leaf `<C-a>`.
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_hint_binding(
+                build_key_sequence(&[build_ctrl_chord('a')]),
+                "Alpha",
+                false,
+                false,
+            ),
+            build_hint_binding(
+                build_key_sequence(&[build_ctrl_chord('t'), build_plain_chord('m')]),
+                "Move Tab",
+                false,
+                false,
+            ),
+            HintBinding {
+                hint_tier: HintTier::Essential,
+                ..build_hint_binding(
+                    build_key_sequence(&[build_ctrl_chord('t'), build_plain_chord('n')]),
+                    "New Tab",
+                    false,
+                    false,
+                )
+            },
+        ],
+        &[],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Ctrl +  t  +2  a  Alpha"
     );
 }
 
@@ -778,9 +854,8 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
 }
 
 #[test]
-fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
-    // Pinned puts a hint first inside its own group; the groups themselves
-    // still read in modifier order: `Ctrl` leads the pinned `Alt` hint.
+fn a_pinned_hint_pulls_its_modifier_group_ahead() {
+    // The `Alt` group holds the pinned `Unlock`, so it reads before `Ctrl`.
     let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
@@ -804,7 +879,7 @@ fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
-        " Ctrl +  l  Lock  Alt +  u  Unlock"
+        " Alt +  u  Unlock  Ctrl +  l  Lock"
     );
 }
 
@@ -1068,7 +1143,7 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
 }
 
 #[test]
-fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
+fn modifier_groups_read_ctrl_alt_no_modifier_ctrl_shift_shift_super_then_the_rest() {
     let build_modifier_hint_binding = |modifier_flags, key_character: char, action_label: &str| {
         build_hint_binding(
             build_key_sequence(&[KeyChord::from_parts(
@@ -1105,8 +1180,8 @@ fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 200)),
         concat!(
-            " Ctrl +  e  Ctrl  Alt +  d  Alt  Ctrl+Shift +  c  CtrlShift ",
-            " Shift +  b  Shift  Super +  a  Super  g  Bare  Ctrl+Alt +  f  CtrlAlt"
+            " Ctrl +  e  Ctrl  Alt +  d  Alt  g  Bare  Ctrl+Shift +  c  CtrlShift ",
+            " Shift +  b  Shift  Super +  a  Super  Ctrl+Alt +  f  CtrlAlt"
         )
     );
 }
@@ -1389,5 +1464,267 @@ fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 40)),
         "…"
+    );
+}
+
+/// The bar's data for `lock_mode` from the shipped catalog: the built-in
+/// defaults over the built-in action table, with mouse-select off and the
+/// focused pane tiled.
+fn build_shipped_keymap_hints(lock_mode: LockMode) -> KeymapHints {
+    KeymapHintCatalog::from_registry(&ActionRegistry::new())
+        .build_frame_hints(lock_mode, false, false)
+}
+
+/// The bar's data for `lock_mode` from the built-in defaults under
+/// `keybindings_config`, with a user layer that binds
+/// `bound_action_by_key_sequence` and removes `removed_key_sequences` in
+/// `lock_mode`.
+fn build_user_keymap_hints(
+    keybindings_config: &KeybindingsConfig,
+    lock_mode: LockMode,
+    bound_action_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
+    removed_key_sequences: BTreeSet<KeySequence>,
+) -> KeymapHints {
+    let keymap_layers = build_keymap_layers(
+        Some(BTreeMap::from([(
+            ModeName::from_text(lock_mode.get_keymap_name()),
+            ModeBindings {
+                bound_action_by_key_sequence,
+                removed_key_sequences,
+            },
+        )])),
+        keybindings_config.leader,
+    );
+    KeymapHintCatalog::from_keymap_layers_config_and_registry(
+        &keymap_layers,
+        keybindings_config,
+        &ActionRegistry::new(),
+    )
+    .build_frame_hints(lock_mode, false, false)
+}
+
+/// A binding to the `core:` action named `action_name`.
+fn build_core_bound_action(action_name: &str) -> BoundAction {
+    BoundAction {
+        action_reference: ActionReference::from_core_action_name(action_name)
+            .expect("a core action name"),
+    }
+}
+
+/// An unmodified named-key chord.
+fn build_plain_named_chord(named_key: NamedKey) -> KeyChord {
+    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(named_key))
+}
+
+#[test]
+fn the_shipped_pane_prefix_row_shows_new_and_close_first_at_40_80_and_120_columns() {
+    let keymap_hints = build_shipped_keymap_hints(LockMode::Normal);
+    let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
+    for (column_count, expected_row) in [
+        (40, " Ctrl +  p  PANE  ▶  n  New Pane …"),
+        (
+            80,
+            " Ctrl +  p  PANE  ▶  n  New Pane  x  Close Pane Tree  ←↓↑→  Focus Pane …",
+        ),
+        (
+            120,
+            concat!(
+                " Ctrl +  p  PANE  ▶  n  New Pane  x  Close Pane Tree  ←↓↑→  Focus Pane ",
+                " Tab  Focus Next Floating Pane  hjkl  Split Pane…"
+            ),
+        ),
+    ] {
+        assert_eq!(
+            format_rendered_row(&render_pending_statusline(
+                &keymap_hints,
+                &pending_key_sequence,
+                column_count,
+            )),
+            expected_row,
+            "{column_count} columns"
+        );
+    }
+}
+
+#[test]
+fn the_shipped_pane_prefix_rows_overflow_marker_takes_the_first_dropped_hints_column() {
+    // At 80 columns the row ends after ` ←↓↑→  Focus Pane ` at column 71. The
+    // next hint, ` Tab  Focus Next Floating Pane `, needs 31 cells, so the `…`
+    // takes column 71 and every cell after it stays blank.
+    let render_buffer = render_pending_statusline(
+        &build_shipped_keymap_hints(LockMode::Normal),
+        &build_key_sequence(&[build_ctrl_chord('p')]),
+        80,
+    );
+    assert_eq!(render_buffer[(70, 0)].symbol(), " ");
+    assert_eq!(render_buffer[(71, 0)].symbol(), "…");
+    assert_eq!(render_buffer[(71, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
+    assert_eq!(render_buffer[(71, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
+    assert!(render_buffer[(71, 0)].modifier.contains(Modifier::BOLD));
+    for column_index in 72..80 {
+        assert_eq!(
+            render_buffer[(column_index, 0)].symbol(),
+            " ",
+            "col {column_index}"
+        );
+    }
+}
+
+#[test]
+fn the_shipped_normal_row_at_80_columns_leads_with_lock_and_the_new_and_close_prefixes() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::Normal),
+            80
+        )),
+        " Ctrl +  l  Lock  p  PANE  t  TAB  s  RESIZE  g  Mouse Select  q  Quit …"
+    );
+}
+
+#[test]
+fn the_shipped_normal_row_at_120_columns_puts_the_bare_tab_ahead_of_shift_tab() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::Normal),
+            120
+        )),
+        concat!(
+            " Ctrl +  l  Lock  p  PANE  t  TAB  s  RESIZE  g  Mouse Select  q  Quit ",
+            " Alt +  f  Toggle Pane Fullscreen  Tab  Next Tab…"
+        )
+    );
+}
+
+#[test]
+fn the_shipped_locked_row_at_80_columns_leads_with_the_pinned_unlock() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::Locked),
+            80
+        )),
+        " Ctrl +  l  Unlock  g  Mouse Select  q  Quit"
+    );
+}
+
+#[test]
+fn the_shipped_pane_placement_row_at_80_columns_leads_with_confirm_and_cancel() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::PanePlacement),
+            80
+        )),
+        " ENTER  Confirm Pane Placement  ESC  Cancel Pane Placement …"
+    );
+}
+
+#[test]
+fn the_shipped_floating_pane_move_row_at_80_columns_leads_with_confirm_and_cancel() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::FloatingPaneMove),
+            80
+        )),
+        " ENTER  Confirm Floating Pane Move  ESC  Cancel Floating Pane Move …"
+    );
+}
+
+#[test]
+fn the_shipped_floating_pane_move_row_at_40_columns_shows_confirm() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::FloatingPaneMove),
+            40
+        )),
+        " ENTER  Confirm Floating Pane Move …"
+    );
+}
+
+#[test]
+fn the_shipped_dock_undock_row_at_80_columns_leads_with_confirm_cancel_and_the_targets() {
+    assert_eq!(
+        format_rendered_row(&render_statusline(
+            &build_shipped_keymap_hints(LockMode::DockUndock),
+            80
+        )),
+        " ENTER  Dock Or Undock  ESC  Cancel Dock Or Undock  ←↓↑→  Select Pane Target …"
+    );
+}
+
+#[test]
+fn an_alt_unlock_alternative_keeps_the_pinned_unlock_first_at_40_and_80_columns() {
+    // `unlock-alternative "<A-u>"`, with the locked block binding `<A-u>` to
+    // `core:unlock` and removing `<C-l>`. Conflict detection applies it.
+    let alternative_unlock_chord = KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('u'));
+    let keybindings_config = KeybindingsConfig {
+        unlock_alternative: Some(alternative_unlock_chord),
+        ..KeybindingsConfig::default()
+    };
+    let bound_action_by_key_sequence = BTreeMap::from([(
+        KeySequence::from(alternative_unlock_chord),
+        build_core_bound_action("unlock"),
+    )]);
+    let removed_key_sequences =
+        BTreeSet::from([KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)]);
+    let conflict_report = detect_conflicts(
+        &build_keymap_layers(
+            Some(BTreeMap::from([(
+                ModeName::from_text(LockMode::Locked.get_keymap_name()),
+                ModeBindings {
+                    bound_action_by_key_sequence: bound_action_by_key_sequence.clone(),
+                    removed_key_sequences: removed_key_sequences.clone(),
+                },
+            )])),
+            keybindings_config.leader,
+        ),
+        keybindings_config.leader,
+        keybindings_config.unlock_alternative,
+        keybindings_config.maximum_chord_depth,
+        &ActionRegistry::new(),
+    );
+    assert_eq!(conflict_report.get_verdict(), KeymapVerdict::Apply);
+
+    let keymap_hints = build_user_keymap_hints(
+        &keybindings_config,
+        LockMode::Locked,
+        bound_action_by_key_sequence,
+        removed_key_sequences,
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 40)),
+        " Alt +  u  Unlock …"
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Alt +  u  Unlock  Ctrl +  g  Mouse Select  q  Quit"
+    );
+}
+
+#[test]
+fn a_partly_rebound_direction_family_folds_only_the_keys_that_keep_its_label() {
+    // `<C-p> <Left>` rebound to `core:resize-pane-left` reads `Resize Pane`;
+    // the other three arrows keep `Focus Pane` and fold without it. The user
+    // binding under `<C-p>` turns its `PANE` label into the `+15` count.
+    let keymap_hints = build_user_keymap_hints(
+        &KeybindingsConfig::default(),
+        LockMode::Normal,
+        BTreeMap::from([(
+            build_key_sequence(&[
+                build_ctrl_chord('p'),
+                build_plain_named_chord(NamedKey::Left),
+            ]),
+            build_core_bound_action("resize-pane-left"),
+        )]),
+        BTreeSet::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_pending_statusline(
+            &keymap_hints,
+            &build_key_sequence(&[build_ctrl_chord('p')]),
+            120,
+        )),
+        concat!(
+            " Ctrl +  p  +15  ▶  n  New Pane  x  Close Pane Tree  ←  Resize Pane ",
+            " ↓↑→  Focus Pane  Tab  Focus Next Floating Pane …"
+        )
     );
 }
