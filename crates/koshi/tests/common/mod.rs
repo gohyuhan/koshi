@@ -22,12 +22,13 @@
 pub mod in_process_session;
 pub mod session_connection;
 
-use std::collections::BTreeMap;
-use std::io::Read;
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi::session_end::list_pane_holder_records;
@@ -240,9 +241,22 @@ impl Drop for SessionProcess {
     }
 }
 
+/// How many of the last lines a router wrote on its error stream a
+/// [`RunningRouter`] keeps: 20.
+const ROUTER_ERROR_TAIL_LINE_COUNT: usize = 20;
+
 /// A router the test started. Dropping it ends that router.
+///
+/// A thread reads the router's error stream until it ends, and keeps the last
+/// [`ROUTER_ERROR_TAIL_LINE_COUNT`] lines, as [`start_error_stream_reader`]
+/// states.
 pub struct RunningRouter {
     child_process: Child,
+    /// The last lines the router wrote on its error stream, oldest first.
+    error_tail_lines: Arc<Mutex<VecDeque<String>>>,
+    /// Gives `Disconnected` once the thread that reads the error stream has
+    /// ended.
+    error_stream_end_receiver: Receiver<()>,
 }
 
 impl RunningRouter {
@@ -251,13 +265,81 @@ impl RunningRouter {
         self.child_process.id()
     }
 
-    /// True once the router process has ended.
-    pub fn has_router_exited(&mut self) -> bool {
+    /// The exit status of the router process, or `None` while it runs.
+    pub fn find_router_exit_status(&mut self) -> Option<ExitStatus> {
         self.child_process
             .try_wait()
             .expect("the router's state can be read")
-            .is_some()
     }
+
+    /// True once the router process has ended.
+    pub fn has_router_exited(&mut self) -> bool {
+        self.find_router_exit_status().is_some()
+    }
+
+    /// Wait until the thread that reads the router's error stream has ended,
+    /// or until `wait_deadline` passes.
+    pub fn wait_for_error_stream_end(&self, wait_deadline: Instant) {
+        let _ = self
+            .error_stream_end_receiver
+            .recv_timeout(wait_deadline.saturating_duration_since(Instant::now()));
+    }
+
+    /// The last lines the router wrote on its error stream, oldest first and
+    /// one per line, or `(nothing)` when it wrote none.
+    pub fn format_error_tail(&self) -> String {
+        let error_tail_lines = self
+            .error_tail_lines
+            .lock()
+            .expect("the router's error lines");
+        if error_tail_lines.is_empty() {
+            return "(nothing)".to_string();
+        }
+        error_tail_lines
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<&str>>()
+            .join("\n")
+    }
+}
+
+/// Read `error_stream` on a thread of its own until it ends, and hand back
+/// the last [`ROUTER_ERROR_TAIL_LINE_COUNT`] lines it held, oldest first, with
+/// the receiver that gives `Disconnected` once the thread has ended.
+///
+/// Each kept line drops its line break, and bytes that are not UTF-8 read as
+/// U+FFFD. A read that fails ends the thread and closes the stream, and a
+/// write into it then fails at once.
+fn start_error_stream_reader(
+    error_stream: ChildStderr,
+) -> (Arc<Mutex<VecDeque<String>>>, Receiver<()>) {
+    let error_tail_lines = Arc::new(Mutex::new(VecDeque::new()));
+    let (error_stream_end_sender, error_stream_end_receiver) = mpsc::channel::<()>();
+    let reader_tail_lines = Arc::clone(&error_tail_lines);
+    std::thread::Builder::new()
+        .name("router-error-stream".to_string())
+        .spawn(move || {
+            let _error_stream_end_sender = error_stream_end_sender;
+            let mut error_stream_reader = BufReader::new(error_stream);
+            let mut line_bytes = Vec::new();
+            loop {
+                line_bytes.clear();
+                match error_stream_reader.read_until(b'\n', &mut line_bytes) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                let line_text = String::from_utf8_lossy(&line_bytes)
+                    .trim_end_matches(['\n', '\r'])
+                    .to_string();
+                let mut tail_lines = reader_tail_lines.lock().expect("the router's error lines");
+                if tail_lines.len() == ROUTER_ERROR_TAIL_LINE_COUNT {
+                    tail_lines.pop_front();
+                }
+                tail_lines.push_back(line_text);
+            }
+        })
+        .expect("the thread that reads the router's error stream starts");
+    (error_tail_lines, error_stream_end_receiver)
 }
 
 impl Drop for RunningRouter {
@@ -507,21 +589,32 @@ pub fn start_session_server_under_home(
 
 /// Start the binary at `binary_path` as the router serving `runtime_directory`,
 /// under `home_directory` as [`build_koshi_command_at`] sets it. Every session
-/// server the router starts inherits that home. Both output streams are closed.
+/// server the router starts inherits that home. Standard output is closed. The
+/// error stream is a pipe that [`start_error_stream_reader`] reads until it
+/// ends.
 pub fn start_router_from_binary(
     binary_path: &Path,
     home_directory: &Path,
     runtime_directory: &Path,
 ) -> RunningRouter {
-    let child_process = start_program_process(
+    let mut child_process = start_program_process(
         build_koshi_command_at(binary_path, home_directory)
             .arg("serve-router")
             .arg("--runtime-dir")
             .arg(runtime_directory)
             .stdout(Stdio::null())
-            .stderr(Stdio::null()),
+            .stderr(Stdio::piped()),
     );
-    RunningRouter { child_process }
+    let error_stream = child_process
+        .stderr
+        .take()
+        .expect("the router's error stream is a pipe");
+    let (error_tail_lines, error_stream_end_receiver) = start_error_stream_reader(error_stream);
+    RunningRouter {
+        child_process,
+        error_tail_lines,
+        error_stream_end_receiver,
+    }
 }
 
 /// [`start_router_from_binary`], run from the binary this build produced.

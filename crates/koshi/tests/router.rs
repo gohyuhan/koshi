@@ -28,8 +28,8 @@ use common::{
     build_koshi_command_under_home, build_no_such_session_result, build_short_test_directory,
     connect_to_router, copy_koshi_binary, create_session, resolve_runtime_directory_under_home,
     send_attach_lookup, send_router_request, start_router_from_binary, start_router_process,
-    terminate_process, wait_for_session_lookup_refusal, RunningSessions, POLL_INTERVAL_DURATION,
-    WAIT_DURATION,
+    terminate_process, wait_for_session_lookup_refusal, RunningRouter, RunningSessions,
+    POLL_INTERVAL_DURATION, WAIT_DURATION,
 };
 use koshi_test_support::fixtures::build_test_runtime_directory;
 
@@ -75,26 +75,57 @@ fn assert_router_finds_session(connection: &mut Connection, created_session: &Se
 /// from `endpoint_before_restart`'s. A router writes its endpoint file once its
 /// socket is bound, under a token of its own.
 ///
+/// `router_process` is the router the test started. On Unix the restart keeps
+/// its process. On Windows the restart hands over to a new process, and
+/// `router_process` ends as part of it.
+///
 /// # Panics
-/// When no such file reads within [`WAIT_DURATION`].
+/// - On Unix, once `router_process` has ended and the endpoint file read after
+///   that still names no other token. The message names the exit status and
+///   the last lines of the router's error stream.
+/// - When no such file reads within [`WAIT_DURATION`]. The message names what
+///   the last read of the endpoint file found and the last lines of the
+///   router's error stream.
 fn wait_for_restarted_router_endpoint(
     runtime_directory: &Path,
     endpoint_before_restart: &EndpointFile,
+    router_process: &mut RunningRouter,
 ) -> EndpointFile {
     let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
-        if let Ok(advertised_endpoint) =
-            EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory))
-        {
-            if advertised_endpoint.connection_token.expose_secret()
-                != endpoint_before_restart.connection_token.expose_secret()
-            {
-                return advertised_endpoint;
-            }
+        #[cfg(unix)]
+        let router_exit_status = router_process.find_router_exit_status();
+        let last_endpoint_read =
+            match EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory)) {
+                Ok(advertised_endpoint)
+                    if advertised_endpoint.connection_token.expose_secret()
+                        != endpoint_before_restart.connection_token.expose_secret() =>
+                {
+                    return advertised_endpoint;
+                }
+                Ok(advertised_endpoint) => format!(
+                    "the endpoint file still holds the token from before the restart, for \
+                     process {}",
+                    advertised_endpoint.process_id
+                ),
+                Err(endpoint_read_error) => {
+                    format!("the endpoint file could not be read: {endpoint_read_error}")
+                }
+            };
+        #[cfg(unix)]
+        if let Some(router_exit_status) = router_exit_status {
+            router_process.wait_for_error_stream_end(wait_deadline);
+            panic!(
+                "the router exited with {router_exit_status} before it advertised itself after the \
+                 restart; its error stream ended with:\n{}",
+                router_process.format_error_tail()
+            );
         }
         assert!(
             Instant::now() < wait_deadline,
-            "no router advertised itself after the restart"
+            "no router advertised itself after the restart within {WAIT_DURATION:?}: \
+             {last_endpoint_read}; the router's error stream ended with:\n{}",
+            router_process.format_error_tail()
         );
         std::thread::sleep(POLL_INTERVAL_DURATION);
     }
@@ -462,8 +493,11 @@ fn a_restart_keeps_the_sessions_and_the_router_serving() {
     );
     drop(connection);
 
-    let restarted_endpoint =
-        wait_for_restarted_router_endpoint(runtime_directory.path(), &endpoint_before_restart);
+    let restarted_endpoint = wait_for_restarted_router_endpoint(
+        runtime_directory.path(),
+        &endpoint_before_restart,
+        &mut router_process,
+    );
     let mut connection = connect_to_router(runtime_directory.path());
 
     // The restarted router rebuilt its list from the endpoint files: the
@@ -587,7 +621,11 @@ fn a_session_server_the_restarted_router_does_not_list_is_reaped_once_it_exits()
         RouterResult::Restarting
     );
     drop(connection);
-    wait_for_restarted_router_endpoint(runtime_directory.path(), &endpoint_before_restart);
+    wait_for_restarted_router_endpoint(
+        runtime_directory.path(),
+        &endpoint_before_restart,
+        &mut router_process,
+    );
     let session_unix_process_id =
         libc::pid_t::try_from(created_session.process_id).expect("a process id fits a pid");
     assert_eq!(
@@ -782,7 +820,7 @@ fn a_restart_with_no_session_registered_comes_back_answering_lookups() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let _router_process = start_router_from_binary(
+    let mut router_process = start_router_from_binary(
         &binary_path,
         test_home_directory.path(),
         runtime_directory.path(),
@@ -799,8 +837,11 @@ fn a_restart_with_no_session_registered_comes_back_answering_lookups() {
     );
     drop(connection);
 
-    let restarted_endpoint =
-        wait_for_restarted_router_endpoint(runtime_directory.path(), &endpoint_before_restart);
+    let restarted_endpoint = wait_for_restarted_router_endpoint(
+        runtime_directory.path(),
+        &endpoint_before_restart,
+        &mut router_process,
+    );
     #[cfg(windows)]
     let _restarted_router_process = RunningProcess {
         process_id: restarted_endpoint.process_id,
@@ -830,7 +871,7 @@ fn a_router_that_restarted_restarts_again() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let _router_process = start_router_from_binary(
+    let mut router_process = start_router_from_binary(
         &binary_path,
         test_home_directory.path(),
         runtime_directory.path(),
@@ -852,8 +893,11 @@ fn a_router_that_restarted_restarts_again() {
     );
     drop(connection);
 
-    let first_restart_endpoint =
-        wait_for_restarted_router_endpoint(runtime_directory.path(), &initial_endpoint);
+    let first_restart_endpoint = wait_for_restarted_router_endpoint(
+        runtime_directory.path(),
+        &initial_endpoint,
+        &mut router_process,
+    );
     #[cfg(windows)]
     let _restarted_once = RunningProcess {
         process_id: first_restart_endpoint.process_id,
@@ -866,8 +910,11 @@ fn a_router_that_restarted_restarts_again() {
     );
     drop(connection);
 
-    let second_restart_endpoint =
-        wait_for_restarted_router_endpoint(runtime_directory.path(), &first_restart_endpoint);
+    let second_restart_endpoint = wait_for_restarted_router_endpoint(
+        runtime_directory.path(),
+        &first_restart_endpoint,
+        &mut router_process,
+    );
     #[cfg(windows)]
     let _restarted_twice = RunningProcess {
         process_id: second_restart_endpoint.process_id,
@@ -883,6 +930,65 @@ fn a_router_that_restarted_restarts_again() {
 
     // The session started before either restart is still registered.
     assert_router_finds_session(&mut connection, &created_session);
+}
+
+/// Unix only: the restart replaces the router's running image with the
+/// program file. The program file is replaced by a shell script that writes
+/// `restarted image ends` on its error stream and exits with code `3`, so the
+/// image the restart starts ends before it advertises anything. A child shell
+/// writes the script and closes it before the router runs it.
+#[cfg(unix)]
+#[test]
+fn the_restart_wait_names_the_exit_status_and_error_lines_of_a_router_that_ended() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_test_runtime_directory();
+    let binary_path = copy_koshi_binary(runtime_directory.path());
+    let mut router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
+    let mut connection = connect_to_router(runtime_directory.path());
+    let endpoint_before_restart =
+        EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory.path()))
+            .expect("the router advertises its socket");
+
+    std::fs::remove_file(&binary_path).expect("the binary is taken away");
+    let script_write_status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            "printf '%s\\n' '#!/bin/sh' 'echo restarted image ends >&2' 'exit 3' > \"$1\" \
+             && chmod 755 \"$1\"",
+        )
+        .arg("sh")
+        .arg(&binary_path)
+        .status()
+        .expect("the shell that writes the script runs");
+    assert!(script_write_status.success(), "{script_write_status}");
+
+    assert_eq!(
+        send_router_request(&mut connection, RouterRequestKind::Restart),
+        RouterResult::Restarting
+    );
+    drop(connection);
+
+    let wait_panic_payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for_restarted_router_endpoint(
+            runtime_directory.path(),
+            &endpoint_before_restart,
+            &mut router_process,
+        )
+    }))
+    .expect_err("no restarted router advertises itself");
+    assert_eq!(
+        wait_panic_payload
+            .downcast_ref::<String>()
+            .map(String::as_str),
+        Some(
+            "the router exited with exit status: 3 before it advertised itself after the \
+             restart; its error stream ended with:\nrestarted image ends"
+        )
+    );
 }
 
 #[cfg(unix)]
