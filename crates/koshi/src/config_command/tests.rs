@@ -747,8 +747,12 @@ fn migrate_replaces_each_changed_file_after_validation() {
     .unwrap();
 
     assert_eq!(
-        migration_report,
+        migration_report.config_report_text,
         format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(
+        migration_report.app_config_source_text,
+        Some("version 1\nmigrated #true\n".to_string())
     );
     assert_eq!(
         fs::read_to_string(app_config_path).unwrap(),
@@ -775,7 +779,7 @@ fn migrate_updates_a_symlink_target_and_keeps_the_link() {
     .unwrap();
 
     assert_eq!(
-        migration_report,
+        migration_report.config_report_text,
         format!("{}: migrated version 1 to 2\n", app_config_path.display())
     );
     assert!(fs::symlink_metadata(&app_config_path)
@@ -891,7 +895,7 @@ fn migrate_of_a_directory_holding_no_config_file_says_so_and_writes_nothing() {
     .unwrap();
 
     assert_eq!(
-        migration_report,
+        migration_report.config_report_text,
         format!(
             "no config files found in {}\n",
             config_directory.path().display()
@@ -1107,7 +1111,7 @@ fn migrate_writes_only_the_files_that_changed() {
     .unwrap();
 
     assert_eq!(
-        migration_report,
+        migration_report.config_report_text,
         format!(
             "{}: current (version 2)\n{}: migrated version 1 to 2\n",
             keybinding_config_path.display(),

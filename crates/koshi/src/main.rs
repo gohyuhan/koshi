@@ -108,15 +108,16 @@ fn parse_cli_arguments() -> Cli {
 /// the only running session. `--remote` names another machine and picks the
 /// target from that machine's sessions instead, by the same rules.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
-    // A service command whose config migration fails prints the failure on
-    // stderr and starts anyway. A session server also writes it to its log.
-    // The next service start runs the migration again.
+    // A service command migrates the config files first, and its `koshi.kdl`
+    // layer comes from the text that migration read or wrote. A service
+    // command whose config migration fails prints the failure on stderr and
+    // starts anyway. A session server also writes it to its log. The next
+    // service start runs the migration again.
     let config_directory = koshi_paths::resolve_config_directory();
-    let config_migration_error = config_command::migrate_config_for_service_command(
+    let (app_config_layer, config_migration_error) = config_command::load_app_layer_for_command(
         cli.command.as_ref(),
         config_directory.as_deref(),
-    )
-    .err();
+    );
     if let Some(config_migration_error) = &config_migration_error {
         eprintln!("koshi: {config_migration_error}; starting with the config files as they are");
     }
@@ -124,14 +125,9 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
     // entry point reads, before any verb dispatches. One
     // `allow-beta-features` answer covers the CLI verbs and the interactive
-    // launch alike.
-    let app_config_layer = config::load_app_layer(config_directory.as_deref());
+    // launch alike. A router or a session server this process becomes starts
+    // on the same layer.
     config::apply_beta_gate(app_config_layer.clone());
-
-    // `layout.new-pane-direction` from this machine's `koshi.kdl`. A
-    // pane-opening verb given no `--direction` splits toward it; the session
-    // holds no direction of its own.
-    let new_pane_direction = config::resolve_new_pane_direction(app_config_layer);
 
     // The action verb is classified before routing. The command that travels
     // the socket is built after routing resolves the targets.
@@ -243,6 +239,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         return router::run_router(
             &runtime_directory,
             config_directory.as_deref(),
+            app_config_layer,
             *should_wait_for_lock,
         )
         .map_err(|runtime_error| CliError::Runtime {
@@ -271,6 +268,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         return session_server::run_session_server(
             &runtime_directory,
             config_directory.as_deref(),
+            app_config_layer,
             *session_id,
             session_name.clone(),
             profile_name.as_deref(),
@@ -499,6 +497,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             }
         };
     }
+
+    // `layout.new-pane-direction` from this machine's `koshi.kdl`. A
+    // pane-opening verb given no `--direction` splits toward it; the session
+    // holds no direction of its own.
+    let new_pane_direction = config::resolve_new_pane_direction(app_config_layer);
 
     let cli_command = cli
         .command

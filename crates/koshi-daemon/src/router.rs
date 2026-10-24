@@ -111,7 +111,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use fs4::{FileExt, TryLockError};
-use koshi_config::layer::merge_server;
+use koshi_config::layer::{merge_server, PartialKoshiConfig};
 use koshi_config::types::ServerConfig;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::ids::SessionId;
@@ -849,13 +849,16 @@ impl std::error::Error for ChildReapError {}
 /// closes the gate. A restart that fails opens the gate again. A child
 /// process that cannot be reaped closes the gate at once.
 ///
-/// `config_directory` holds the `koshi.kdl` the router reads: at the start for
-/// `remote-listen` and the shared directory, and on every attach lookup for the
-/// shared directory. Every remote status answer names that file. `None` reads
-/// no file.
+/// `app_config_layer` is the `koshi.kdl` layer the caller read at this
+/// process's start: the router takes `remote-listen` and the shared directory
+/// it starts with from it. `None` starts on the built-in defaults.
+/// `config_directory` holds the `koshi.kdl` the router reads again on every
+/// attach lookup for the shared directory. Every remote status answer names
+/// that file. A `config_directory` of `None` reads no file.
 pub fn run_router(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
+    app_config_layer: Option<PartialKoshiConfig>,
     should_wait_for_lock: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     koshi_paths::ensure_private_directory(runtime_directory)?;
@@ -948,10 +951,15 @@ pub fn run_router(
     #[cfg(unix)]
     let mut runtime_file_keeper = start_router_file_keeper(runtime_directory);
 
+    let startup_server_config = merge_server(
+        ServerConfig::default(),
+        app_config_layer.into_iter().collect(),
+    );
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let mut router_sessions = create_router_sessions(
         runtime_directory,
-        koshi_link::config::find_shared_sessions_base_directory(config_directory).as_deref(),
+        koshi_link::config::compute_shared_sessions_base_directory(&startup_server_config)
+            .as_deref(),
         &router_events_sender,
     );
     #[cfg(unix)]
@@ -981,13 +989,7 @@ pub fn run_router(
     };
 
     let mut remote_state = RemoteState {
-        remote_listen_address: merge_server(
-            ServerConfig::default(),
-            koshi_link::config::load_app_layer(config_directory)
-                .into_iter()
-                .collect(),
-        )
-        .remote_listen_address,
+        remote_listen_address: startup_server_config.remote_listen_address,
         data_directory,
         served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),

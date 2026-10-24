@@ -13,12 +13,12 @@ use std::path::Path;
 use kdl::KdlDocument;
 use thiserror::Error;
 
-use crate::app_config::parse_app_config;
+use crate::app_config::parse_app_config_from_document;
 use crate::error::{ConfigError, ConfigParseDiagnostic, ConfigVersionDiagnostic};
-use crate::keybinding::{parse_keybindings, KeybindingParseError};
+use crate::keybinding::parse_keybindings_from_document;
 use crate::parser::{parse_kdl, parse_version_argument};
-use crate::profile::{parse_profile, ProfileError};
-use crate::theme::parse_theme;
+use crate::profile::parse_profile_from_document;
+use crate::theme::parse_theme_from_document;
 use crate::types::SCHEMA_VERSION;
 
 #[cfg(test)]
@@ -102,9 +102,12 @@ pub enum MigrationError {
     },
 }
 
-type ListSchemaProblemsFunction =
-    fn(ConfigFileKind, &Path, &str) -> Result<Vec<String>, MigrationError>;
-type MigrateConfigFunction = fn(&Path, &str) -> Result<String, MigrationError>;
+/// Lists the schema problems of one file, given its path, its text, and the
+/// KDL document parsed from that text.
+type ListSchemaProblemsFunction = fn(ConfigFileKind, &Path, &str, &KdlDocument) -> Vec<String>;
+/// Migrates one file to the next schema version, given its path, its text, and
+/// the KDL document parsed from that text.
+type MigrateConfigFunction = fn(&Path, &str, &KdlDocument) -> Result<String, MigrationError>;
 
 #[derive(Clone, Copy)]
 struct ConfigSchema {
@@ -137,7 +140,8 @@ pub fn validate_config(
     config_source_text: &str,
 ) -> Result<ValidatedConfig, MigrationError> {
     validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION)?;
-    let schema_version = parse_config_schema_version(config_path, config_source_text)?;
+    let (config_document, schema_version) =
+        parse_versioned_config_document(config_path, config_source_text)?;
     if schema_version > SCHEMA_VERSION {
         return Err(build_newer_version_error(
             config_path,
@@ -146,8 +150,12 @@ pub fn validate_config(
         ));
     }
     let schema = find_schema_by_version(CONFIG_SCHEMAS, schema_version)?;
-    let schema_problems =
-        (schema.list_schema_problems)(config_file_kind, config_path, config_source_text)?;
+    let schema_problems = (schema.list_schema_problems)(
+        config_file_kind,
+        config_path,
+        config_source_text,
+        &config_document,
+    );
     if !schema_problems.is_empty() {
         return Err(build_schema_problem_error(config_path, &schema_problems));
     }
@@ -190,7 +198,8 @@ fn migrate_with_registry(
     current_schema_version: u32,
 ) -> Result<MigratedConfig, MigrationError> {
     validate_schema_registry(config_schemas, current_schema_version)?;
-    let source_schema_version = parse_config_schema_version(config_path, config_source_text)?;
+    let (source_document, source_schema_version) =
+        parse_versioned_config_document(config_path, config_source_text)?;
     if source_schema_version > current_schema_version {
         return Err(build_newer_version_error(
             config_path,
@@ -198,13 +207,26 @@ fn migrate_with_registry(
             current_schema_version,
         ));
     }
+    if source_schema_version == current_schema_version {
+        return Ok(MigratedConfig {
+            source_schema_version,
+            target_schema_version: source_schema_version,
+            migrated_source: config_source_text.to_string(),
+            is_changed: false,
+        });
+    }
 
     let source_schema = find_schema_by_version(config_schemas, source_schema_version)?;
-    let source_problem_count =
-        (source_schema.list_schema_problems)(config_file_kind, config_path, config_source_text)?
-            .len();
+    let source_problem_count = (source_schema.list_schema_problems)(
+        config_file_kind,
+        config_path,
+        config_source_text,
+        &source_document,
+    )
+    .len();
     let mut schema_version = source_schema_version;
     let mut migrated_source = config_source_text.to_string();
+    let mut migrated_document = source_document;
     while schema_version < current_schema_version {
         let next_schema_version = schema_version + 1;
         let schema = find_schema_by_version(config_schemas, schema_version)
@@ -212,8 +234,11 @@ fn migrate_with_registry(
         let migrate_to_next_schema = schema
             .migrate_to_next_schema
             .expect("validate_schema_registry found a step below the current version");
-        migrated_source = migrate_to_next_schema(config_path, &migrated_source)?;
-        let declared_schema_version = parse_config_schema_version(config_path, &migrated_source)?;
+        migrated_source =
+            migrate_to_next_schema(config_path, &migrated_source, &migrated_document)?;
+        let (next_document, declared_schema_version) =
+            parse_versioned_config_document(config_path, &migrated_source)?;
+        migrated_document = next_document;
         if declared_schema_version != next_schema_version {
             return Err(MigrationError::Version {
                 config_path: config_path.display().to_string(),
@@ -224,8 +249,12 @@ fn migrate_with_registry(
         }
         let next_schema = find_schema_by_version(config_schemas, next_schema_version)
             .expect("validate_schema_registry found every supported version");
-        let migrated_problems =
-            (next_schema.list_schema_problems)(config_file_kind, config_path, &migrated_source)?;
+        let migrated_problems = (next_schema.list_schema_problems)(
+            config_file_kind,
+            config_path,
+            &migrated_source,
+            &migrated_document,
+        );
         if migrated_problems.len() > source_problem_count {
             return Err(build_schema_problem_error(config_path, &migrated_problems));
         }
@@ -235,17 +264,24 @@ fn migrate_with_registry(
     Ok(MigratedConfig {
         source_schema_version,
         target_schema_version: schema_version,
-        is_changed: source_schema_version != schema_version,
+        is_changed: true,
         migrated_source,
     })
 }
 
-fn parse_config_schema_version(
+/// The KDL document parsed from `config_source_text` and the schema version
+/// it declares.
+///
+/// # Errors
+/// Returns [`MigrationError::Parse`] when the text is not valid KDL, and
+/// [`MigrationError::Version`] when the document declares no usable version.
+fn parse_versioned_config_document(
     config_path: &Path,
     config_source_text: &str,
-) -> Result<u32, MigrationError> {
+) -> Result<(KdlDocument, u32), MigrationError> {
     let config_document = parse_kdl(config_path, config_source_text).map_err(build_parse_error)?;
-    parse_schema_version_from_document(config_path, &config_document)
+    let schema_version = parse_schema_version_from_document(config_path, &config_document)?;
+    Ok((config_document, schema_version))
 }
 
 fn parse_schema_version_from_document(
@@ -281,52 +317,42 @@ fn parse_schema_version_from_document(
     Ok(schema_version)
 }
 
-/// Lists the schema problems in one config file, one message each.
-///
-/// # Errors
-/// Returns [`MigrationError::Parse`] when the KDL cannot be parsed.
+/// Lists the schema problems of one config file, one message each, read from
+/// `config_document`, the KDL document parsed from `config_source_text`. An
+/// app or theme file that fails as a whole gives its one error as the one
+/// problem.
 fn list_schema_problems(
     config_file_kind: ConfigFileKind,
     config_path: &Path,
     config_source_text: &str,
-) -> Result<Vec<String>, MigrationError> {
+    config_document: &KdlDocument,
+) -> Vec<String> {
     match config_file_kind {
-        ConfigFileKind::App => match parse_app_config(config_path, config_source_text) {
-            Ok(parsed_app_config) => Ok(parsed_app_config.parse_warnings),
-            Err(config_error) => list_config_error_problems(config_error),
-        },
-        ConfigFileKind::Theme => match parse_theme(config_path, config_source_text) {
-            Ok((_, parse_warnings)) => Ok(parse_warnings),
-            Err(config_error) => list_config_error_problems(config_error),
-        },
-        ConfigFileKind::Keybinding => match parse_keybindings(config_path, config_source_text) {
-            Ok(_) => Ok(Vec::new()),
-            Err(KeybindingParseError::Syntax(parse_diagnostic)) => {
-                Err(build_parse_error(parse_diagnostic))
+        ConfigFileKind::App => {
+            match parse_app_config_from_document(config_document, config_source_text) {
+                Ok(parsed_app_config) => parsed_app_config.parse_warnings,
+                Err(config_error) => vec![config_error.to_string()],
             }
-            Err(keybinding_parse_error @ KeybindingParseError::Invalid { .. }) => {
-                Ok(keybinding_parse_error.list_problem_messages())
+        }
+        ConfigFileKind::Theme => {
+            match parse_theme_from_document(config_document, config_source_text) {
+                Ok((_, parse_warnings)) => parse_warnings,
+                Err(config_error) => vec![config_error.to_string()],
             }
-        },
-        ConfigFileKind::Profile => match parse_profile(config_path, config_source_text) {
-            Ok(_) => Ok(Vec::new()),
-            Err(ProfileError::Syntax(parse_diagnostic)) => Err(build_parse_error(parse_diagnostic)),
-            Err(profile_error @ ProfileError::Invalid { .. }) => {
-                Ok(profile_error.list_problem_messages())
+        }
+        ConfigFileKind::Keybinding => {
+            match parse_keybindings_from_document(config_path, config_source_text, config_document)
+            {
+                Ok(_) => Vec::new(),
+                Err(keybinding_parse_error) => keybinding_parse_error.list_problem_messages(),
             }
-        },
-    }
-}
-
-/// Turns a [`ConfigError`] from an app or theme parse into its schema
-/// problems: a validation error is one problem, and a parse error is
-/// [`MigrationError::Parse`].
-fn list_config_error_problems(config_error: ConfigError) -> Result<Vec<String>, MigrationError> {
-    match config_error {
-        ConfigError::Parse { .. } => Err(MigrationError::Parse {
-            parse_error_detail: config_error.to_string(),
-        }),
-        ConfigError::Validation { .. } => Ok(vec![config_error.to_string()]),
+        }
+        ConfigFileKind::Profile => {
+            match parse_profile_from_document(config_path, config_source_text, config_document) {
+                Ok(_) => Vec::new(),
+                Err(profile_error) => profile_error.list_problem_messages(),
+            }
+        }
     }
 }
 
@@ -377,8 +403,8 @@ fn build_newer_version_error(
 fn migrate_schema_one_to_two(
     config_path: &Path,
     config_source_text: &str,
+    config_document: &KdlDocument,
 ) -> Result<String, MigrationError> {
-    let config_document = parse_kdl(config_path, config_source_text).map_err(build_parse_error)?;
     let version_node = config_document
         .nodes()
         .iter()

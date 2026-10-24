@@ -39,7 +39,7 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use kdl::KdlNode;
+use kdl::{KdlDocument, KdlNode};
 use koshi_core::constant::{
     HIGHEST_MAX_FRAMES_PER_SECOND, LOWEST_MAX_FRAMES_PER_SECOND, MIN_LINK_TIMEOUT_MS,
 };
@@ -122,6 +122,18 @@ pub fn parse_app_config(
     config_source_text: &str,
 ) -> Result<AppConfigFile, ConfigError> {
     let config_document = parse_kdl(config_path, config_source_text)?;
+    parse_app_config_from_document(&config_document, config_source_text)
+}
+
+/// [`parse_app_config`] on `config_document`, the KDL document already parsed
+/// from `config_source_text`.
+///
+/// # Errors
+/// Returns the [`ConfigError::Validation`] errors of [`parse_app_config`].
+pub(crate) fn parse_app_config_from_document(
+    config_document: &KdlDocument,
+    config_source_text: &str,
+) -> Result<AppConfigFile, ConfigError> {
     let mut partial_koshi_config = PartialKoshiConfig::default();
     let mut theme_name = None;
     let mut parse_warnings = ParseWarnings::default();
