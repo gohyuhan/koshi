@@ -96,10 +96,7 @@ fn list_builtin_mode_names_returns_every_lock_mode() {
         [
             "normal",
             "locked",
-            "resize",
             "pane-placement",
-            "tab",
-            "scroll",
             "pane-move-choice",
             "floating-pane-move",
             "dock-undock",
@@ -677,6 +674,39 @@ fn orphan_action_warns_and_applies() {
             key_sequence,
             action_reference: orphan_bound_action.action_reference,
         }]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn resize_tab_and_scroll_mode_blocks_warn_as_unregistered_modes() {
+    // No built-in mode is named `resize`, `tab` or `scroll`: a block for one
+    // binds nothing and warns once.
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 's');
+    let mut user_layer = build_keymap_layer(
+        LayerOrigin::User,
+        "resize",
+        vec![(key_sequence.clone(), build_bound_action("lock"))],
+    );
+    for mode_name_text in ["tab", "scroll"] {
+        user_layer.mode_bindings_by_name.extend(
+            build_keymap_layer(
+                LayerOrigin::User,
+                mode_name_text,
+                vec![(key_sequence.clone(), build_bound_action("lock"))],
+            )
+            .mode_bindings_by_name,
+        );
+    }
+    let report = detect_test_conflicts(&[build_default_keymap_layer(), user_layer]);
+    assert_eq!(
+        report.diagnostics,
+        ["resize", "scroll", "tab"]
+            .map(|mode_name_text| ConflictDiagnostic::OrphanMode {
+                layer_origin: LayerOrigin::User,
+                mode_name: ModeName::from_text(mode_name_text),
+            })
+            .to_vec()
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
 }

@@ -4366,13 +4366,10 @@ fn mode_indicator_joins_active_mode_labels() {
 fn the_mode_indicator_names_every_lock_mode() {
     assert_eq!(build_mode_tags(LockMode::Normal, false, None), "BASE");
     assert_eq!(build_mode_tags(LockMode::Locked, false, None), "LOCK");
-    assert_eq!(build_mode_tags(LockMode::Resize, false, None), "RESIZE");
     assert_eq!(
         build_mode_tags(LockMode::PanePlacement, false, None),
         "PLACE PANE"
     );
-    assert_eq!(build_mode_tags(LockMode::TabMode, false, None), "TAB");
-    assert_eq!(build_mode_tags(LockMode::ScrollMode, false, None), "SCROLL");
     assert_eq!(
         build_mode_tags(LockMode::PaneMoveChoice, false, None),
         "MOVE"
@@ -4381,23 +4378,12 @@ fn the_mode_indicator_names_every_lock_mode() {
         build_mode_tags(LockMode::FloatingPaneMove, false, None),
         "MOVE FLOAT"
     );
+    assert_eq!(build_mode_tags(LockMode::DockUndock, false, None), "DOCK");
 
     // Every non-plain mode joins the mouse-select mode tag the same way.
     assert_eq!(
-        build_mode_tags(LockMode::Resize, true, None),
-        "RESIZE · SELECT"
-    );
-    assert_eq!(
         build_mode_tags(LockMode::PanePlacement, true, None),
         "PLACE PANE · SELECT"
-    );
-    assert_eq!(
-        build_mode_tags(LockMode::TabMode, true, None),
-        "TAB · SELECT"
-    );
-    assert_eq!(
-        build_mode_tags(LockMode::ScrollMode, true, None),
-        "SCROLL · SELECT"
     );
     assert_eq!(
         build_mode_tags(LockMode::FloatingPaneMove, true, None),

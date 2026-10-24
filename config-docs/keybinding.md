@@ -54,6 +54,10 @@ A `mode` block holds the bindings for one built-in keymap — `"normal"`,
 or `"dock-undock"`. Normal and locked are base modes. The other four are local
 modes. Each one takes priority over the base mode while it is open.
 
+A block for any other mode name, such as `mode "resize"`, binds nothing. The
+rest of the file still applies, and `koshi keys conflicts` warns that the mode
+is unregistered.
+
 - `bind "<key>" "core:action"` — exactly two strings: the key sequence and the
   **full** action reference (namespaced, e.g. `core:new-tab`; a bare `new-tab`
   is rejected with a hint). A `bind` takes no arguments — a fixed choice lives

@@ -374,8 +374,8 @@ impl Default for KeybindingsConfig {
     }
 }
 
-/// The name of an input mode (`normal`, `locked`, `resize`, …), stored as a
-/// plain string. A keybinding file may name a mode outside the built-in set;
+/// The name of an input mode (`normal`, `locked`, `pane-placement`, …), stored
+/// as a plain string. A keybinding file may name a mode outside the built-in set;
 /// conflict detection warns that mode as unregistered.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModeName(String);
