@@ -1,7 +1,7 @@
 //! Rendering for CLI answers: created ids from applied commands, discovery (`list-*`, `inspect`),
 //! action introspection (`actions list`, `actions explain`), keymap introspection (the `keys`
 //! queries), the `debug` dumps and the `debug events` listing, the two version answers (`version`,
-//! `server-version`), the three `share` answers, the three `remote` answers, the `kill-session`
+//! `server-version`), the four `share` answers, the three `remote` answers, the `kill-session`
 //! ending line, and the `doctor` answer. Read-only queries print as aligned columns
 //! (`--format table`, the default) or JSON (`--format json`).
 //!
@@ -12,19 +12,22 @@
 //! renders one table row per remembered event. `version`
 //! prints the one line `--version` prints, and `server-version` renders one
 //! table row per koshi server. `share list` renders one table row per grant
-//! and `remote list` one per saved server; `share grant`, `share revoke`,
-//! `remote forget` and `remote set-secret` report one outcome as plain lines
-//! and carry no `--format` flag. `kill-session` prints one line on how the
+//! and `remote list` one per saved server; `share grant`, `share open`,
+//! `share revoke`, `remote forget` and `remote set-secret` report one outcome
+//! as plain lines and carry no `--format` flag. `kill-session` prints one line on how the
 //! session ended, and nothing for a session that quit and left no process
 //! running. `doctor` renders one table row per check.
-//! JSON output is
-//! the serde form of the rendered structs — the [`koshi_link::discovery`] listing
-//! rows, the [`koshi_core::discovery`] records an `inspect` reports, and this
-//! module's own summary/detail structs — a JSON array for a list, a JSON
-//! object for a single item, and the stable scripting surface. In table cells
-//! an absent value prints as `-`, an id list prints as its count (full ids are
-//! in the JSON form), and a timestamp prints as whole seconds since the Unix
-//! epoch.
+//!
+//! Each answer is built once into this module's own rows and reports, and
+//! both formats print from them. JSON output serializes them: a JSON array for
+//! a list, a JSON object for a single item, and the stable scripting surface.
+//! Both formats print an id in the prefixed form a target flag takes
+//! (`pane-<uuid>`), a time as RFC 3339 UTC text floored to the whole second
+//! (`2025-01-01T00:00:00Z`), and a state as the lowercase word the table
+//! prints (`running`, `host`, `not running`). In table cells an absent value
+//! prints as `-` and an id list prints as its count; in JSON an absent value
+//! is `null`, an id list is the full list, and a size, a rectangle or a cell is
+//! an object of numbers.
 
 use std::time::SystemTime;
 
@@ -44,9 +47,8 @@ use koshi_link::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
 
 /// The pretty-printed JSON form of `serializable_value`, ending in a newline.
 fn render_json<SerializableValue: Serialize>(serializable_value: &SerializableValue) -> String {
-    let mut rendered_json_text = serde_json::to_string_pretty(serializable_value).expect(
-        "output structs serialize: strings are valid, paths render lossily, clocks post-epoch",
-    );
+    let mut rendered_json_text = serde_json::to_string_pretty(serializable_value)
+        .expect("output rows hold only strings, numbers, booleans, and lists and maps of them");
     rendered_json_text.push('\n');
     rendered_json_text
 }

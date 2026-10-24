@@ -325,8 +325,9 @@ impl Server {
     ///
     /// The target tab — an explicit `--tab`, else the issuing pane's tab for
     /// the in-session CLI, else the issuer's active tab — moves to the
-    /// requested zero-based index, clamped to the valid range, and the other
-    /// tabs close ranks around it. Display order is the only thing that
+    /// requested zero-based index, and the other tabs close ranks around it.
+    /// [`Server::validate_command`] refuses an index past the last tab
+    /// ([`Self::require_tab_index`]). Display order is the only thing that
     /// changes: which tab each client views, layout, focus, and PTYs are all
     /// untouched. Moving a tab to the slot it already occupies is a clean
     /// no-op with no events. A rejected move mutates nothing.

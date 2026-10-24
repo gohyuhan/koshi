@@ -409,6 +409,12 @@ or printed id. A value that reads as an id is always the id — it never falls
 back to a name lookup. A name several targets share is refused, and the error
 lists every matching id. Pane and client flags use printed ids.
 
+An id that no running session holds is refused with `no running session has
+tab tab-3f2a…`. With `--session`, and inside a pane, an id that the session
+does not hold is refused with the id and the session, such as ``tab tab-3f2a…
+is not in session `work` `` or ``client client-1a2b… is not attached to session
+`work` ``. Both refusals exit 1.
+
 A session that another user of this machine started also takes the form
 `<user id>/<session id>`, as `koshi list-sessions` prints it in its `owner`
 column. Example: `koshi attach 1001/session-3f2a…` looks for that session only
@@ -459,6 +465,25 @@ id line.
 
 Every list and inspect command accepts `--format table` or `--format json`.
 Table is the default.
+
+Both formats print the same text for an id, a time, and a state:
+
+- An id prints in the form a target flag takes: `pane-0192f0c1-…`, so a
+  `--pane` flag takes the `pane_id` that `--format json` prints.
+- A time prints as RFC 3339 UTC text, rounded down to the whole second:
+  `2025-01-01T00:00:00Z`. A year before 0 or after 9999 prints with a sign
+  and at least five digits: `-00001-12-31T23:59:59Z`, `+10000-01-01T00:00:00Z`.
+- A state prints as the word the table prints: `running`, `host`,
+  `not running`. A client's input mode prints as its keymap name, such as
+  `normal` or `pane-placement`.
+
+In a table, an absent value prints as `-` and a list of ids prints as its
+count. In JSON, an absent value is `null`, a list of ids is the whole list,
+and a size, a rectangle, or a cell is an object of numbers:
+`"viewport_size": {"column_count": 120, "row_count": 40}`. `koshi inspect
+client --format json` writes `pane_area` as `null` for no report,
+`"starving"`, or a size object, and `origin` as `"local"`, `"remote"`, or
+`null`.
 
 `koshi list-panes` lists the tiled panes of each session in tab order, then
 its floating panes in the order they became floating. A floating pane prints
@@ -599,7 +624,7 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi new-pane` | `--direction`, `--stacked`, `--floating`, `--pane`, `--tab`, `--session`, `--client` | Open a shell pane |
 | `koshi run -- <COMMAND>...` | Same placement flags as `new-pane` | Open a pane running the command |
 | `koshi close-pane` | `--pane`, `--force` | Close a pane |
-| `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border by signed cell count |
+| `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border up to a signed cell count |
 | `koshi move-pane` | `--direction` and `--pane`, or `--pane`, `--x`, `--y` and `--client` | Swap a tiled pane with its visible neighbor in one step, or move a floating pane |
 | `koshi place-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--client` | Insert a pane at one side of a tab's tiled layout, or into a stack |
 | `koshi undock-pane` | `--pane`, `--x`, `--y`, `--client` | Float a tiled pane up where it is drawn |
@@ -612,15 +637,38 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi input "<TEXT>"` | `--pane`, `--no-enter` | Type text; Enter follows unless held back |
 
 Directions: `right`, `down`, `left`, `up`. A positive resize grows toward the
-direction; a negative resize shrinks from that side. On a floating pane,
-`--client` names the client whose view keeps the edge opposite the moved border
-in place. With no `--client`, the issuing client acts, else the session's only
-attached client. With several attached clients and no `--client`, the resize is
-refused. A floating pane grows only up to that client's pane area edge on the
-moved side: a 40-column pane at column 20 of 80 columns, grown right by 30,
-becomes 60 columns wide. A pane that client pinned keeps its pinned cell. On a
-tiled pane, the resize ends the fullscreen view of the client `--client` names.
-A positive `scroll-pane --lines` moves toward history.
+direction; a negative resize shrinks from that side. A pane at the tab edge on
+that side moves its opposite border the same way instead. The border moves up
+to `--size` cells, as far as minimum sizes allow. In a tab of two 40-column
+panes, `resize-pane --direction left --size 100` on the right pane grows it by
+36 columns, and the left pane keeps its 4-column minimum. A border that cannot
+move one cell is refused, and nothing changes:
+
+```text
+koshi: below minimum size
+  pane-0192f0c1-… cannot grow left here; the pane next to it has no room to give
+```
+
+The pane that gives the cells has no room to give when it is at its minimum
+size or hidden for lack of room. A shrink is refused as `<pane> cannot shrink
+from the left here; it has no room to give`. A border that the layout holds in
+place is refused as `invalid in the current state`, with `<pane> cannot grow
+left here; the layout holds this border in place`. The layout holds a border in
+three cases: a pane in the same split keeps the `preferred` size a profile
+gives it; the pane that takes the cells holds its minimum size with cells a
+third pane lends it; or the pane that takes the cells is hidden for lack of
+room. In an 80-column tab whose left pane has `preferred 20`, the border
+between the two panes stays at column 20.
+
+On a floating pane, `--client` names the client whose view keeps the edge
+opposite the moved border in place. With no `--client`, the issuing client
+acts, else the session's only attached client. With several attached clients
+and no `--client`, the resize is refused. A floating pane grows only up to that
+client's pane area edge on the moved side: a 40-column pane at column 20 of 80
+columns, grown right by 30, becomes 60 columns wide. A pane that client pinned
+keeps its pinned cell. On a tiled pane, the resize ends the fullscreen view of
+the client `--client` names. A positive `scroll-pane --lines` moves toward
+history.
 
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.
@@ -643,6 +691,24 @@ outside koshi closes `htop`, and the keys return to the shell.
 
 Example: `koshi input --pane pane-… --no-enter "git status"` leaves
 `git status` at that pane's prompt without running it.
+
+Without `--pane` or `--tab`, `new-pane` and `run` split one pane. Inside a koshi
+pane, they split that pane. Outside koshi, they split the pane that takes the
+keys of the client `--client` names, else of the session's only attached
+client. With several attached clients and no `--client`, the command fails
+with `several clients are attached; name the target client`.
+
+The client that `--client` names shows and focuses the new pane. If that client
+views another tab, it moves onto the tab of the new pane first. Without
+`--client`, the client of the pane the command runs in does this. Outside koshi
+without `--client`, the new pane takes no client's focus on a tab that a client
+already views. On a tab that no client views, the session's only attached
+client moves onto the tab and focuses the new pane.
+
+Example: terminal `client-1a2b…` views tab `logs`, and terminal `client-3c4d…`
+views tab `build`. `koshi new-pane --direction right --client client-3c4d…`,
+typed outside koshi, splits the pane that `client-3c4d…` focuses in `build`.
+`client-3c4d…` then focuses the new pane, and `client-1a2b…` stays on `logs`.
 
 ### Floating panes
 
@@ -763,6 +829,12 @@ pane`.
 | `koshi focus-tab` | `--index` or `--tab <NAME_OR_ID>`, optional `--client` | Focus one tab |
 | `koshi move-tab` | `--index`, optional `--tab <NAME_OR_ID>` | Move one tab to a zero-based index |
 
+`--index` counts from 0. An index past the last tab is refused, and the command
+exits 1. The error names the session and the indexes it takes. Example: session
+`work` has 3 tabs. `koshi focus-tab --index 9` and `koshi move-tab --index 9`
+both print `no target matched`, then ``session `work` has 3 tabs; --index takes
+0 to 2``.
+
 `--client` on `new-tab` names the terminal that switches onto the new tab. With
 one terminal attached the flag is optional. If two or more terminals are
 attached and the command names no terminal, it fails with `several clients are
@@ -788,16 +860,55 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action |
-| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout] [--format table\|json]` | List effective shortcuts |
-| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut |
+| `koshi keys list [--mode <MODE>] [--scope default\|user] [--format table\|json]` | List effective shortcuts |
+| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut, or each shortcut it starts |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
+
+`keys list --mode` takes the name of one built-in mode, such as `normal` or
+`locked`. Another name exits 2 and lists the mode names. `--scope user` lists
+the shortcuts in your `keybinding.kdl`. `--scope default` lists the built-in
+shortcuts. It also lists each built-in shortcut that your file rebinds or
+removes, with the source `defaults (unbound)`.
+
+`keys describe` explains each row that `keys list` prints for the key, and for
+each longer key that starts with it. For example, `koshi keys describe "<C-t>"`
+explains `<C-t> n` (`core:new-tab`) and `<C-t> x` (`core:close-tab`).
+
+If your `keybinding.kdl` rebinds or removes a built-in shortcut, `keys
+describe` also explains that built-in shortcut, with the source
+`defaults (unbound)`. Its `displaced_by` field names what replaced it:
+`user bind` or `user remove`. For example, with `remove "<A-f>"` in the
+`normal` block, `koshi keys describe "<A-f>"` explains
+`core:toggle-pane-fullscreen` with `displaced_by: user remove`, and exits 0.
+Each other shortcut shows `displaced_by: -` in a table and `null` in JSON. A
+key that has no row and starts none exits 2.
+
+`keys conflicts` checks the `keybinding.kdl` in the config directory, and
+`keys validate` checks the file at `PATH`. Each one checks the file the way a
+client checks its own `keybinding.kdl` when it attaches. Each one prints the
+whole answer, then exits 0 when a client applies the file and 2 when a client
+refuses it. A client refuses a file that it cannot read, a file that does not
+parse, and a file with a `fatal` finding. It then uses the built-in shortcuts.
+
+For example, a `keybinding.kdl` that holds `version 2` on line 1 and
+`unlock_alternative "<A-u>"` on line 2 makes `koshi keys conflicts` print this
+answer and exit 2:
+
+```text
+file: ignored (line 2, column 1: unknown key `unlock_alternative`; did you mean `unlock-alternative`?)
+verdict: reject
+```
+
+With no `keybinding.kdl`, `koshi keys conflicts` prints `verdict: apply` and
+exits 0.
 
 ## Remote access
 
 | Command | Result |
 |---|---|
 | `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
+| `koshi share open` | Open the port remote clients connect to, and print the commands that connect |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>] [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
@@ -808,7 +919,7 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 | `koshi remote forget <SERVER>` | Drop one saved server |
 | `koshi remote set-secret <SERVER>` | Replace the secret of one saved server |
 
-The three `share` verbs run on the machine holding the sessions. The rest run
+The four `share` verbs run on the machine holding the sessions. The rest run
 on the machine connecting to it.
 
 The `--session` of a `share` verb names one of your own sessions. A session
@@ -880,21 +991,20 @@ A count of `0` is taken as written too: the grant runs out at the instant it is
 made, so `koshi share grant alice --expires 0s` prints a token that admits
 nothing. Revoke it or grant again to hand alice one that works.
 
-A length koshi cannot represent is refused, and no token is granted:
+A token lasts at most `36500d`, 100 years of 365 days. A longer length is
+refused, and no token is granted:
 
 ```text
-koshi share grant alice --expires 18446744073709551615d
+koshi share grant alice --expires 36501d
 ```
 
-is refused by the command: the count times its unit does not fit the length
-koshi carries.
+is refused with `a token lasts at most 36500d; use never for a token that does
+not expire`. The same refusal comes for every longer length, such as
+`99999999999999d`, on Linux, macOS and Windows. Use `--expires never` for a
+token that does not expire.
 
-```text
-koshi share grant alice --expires 10000000000000000000s
-```
-
-is refused by the router: the expiry lands further ahead than this machine's
-clock can represent.
+A grant whose expiry falls past the latest time this machine's clock counts is
+refused by the router, and no token is granted.
 
 A grant prints its token once, so copy it from that one printing. Anyone
 holding the token can run anything the granting user can.
@@ -909,11 +1019,30 @@ turn it on and open 0.0.0.0:7654? [y/N]
 ```
 
 A typed `y` opens the port, and it opens again on every start after that. Any
-other answer leaves it shut and still prints the token. With no address in
-`koshi.kdl` there is nothing to offer, and the grant says the token cannot be
-used to connect yet.
+other answer leaves it shut, still prints the token, and names `koshi share
+open`, which opens the port at any time without a new token. With no address in
+`koshi.kdl` there is nothing to offer, and the grant names the line to add.
 
-With the port open, the grant prints the command that connects from another
+The router reads `remote-listen` when it starts. When the address it read is
+not the one `koshi.kdl` names now, the grant asks nothing. It prints the token,
+names both addresses, and names `koshi restart-servers`, as `remote-listen` in
+`koshi.md` states:
+
+```text
+/home/user/.config/koshi/koshi.kdl names the remote listen address 127.0.0.1:7654, and the running router read no remote listen address from it when it started. Run `koshi restart-servers` so the router reads it again, then run `koshi share open`. This token cannot be used to connect until the port opens.
+```
+
+A port the router cannot open prints the router's own reason, and whether
+remote access is on:
+
+```text
+remote access stays off, and the port did not open: the remote listener could not open 192.0.2.20:7654: Address already in use (os error 48). Run `koshi share open` once that is fixed. This token cannot be used to connect until the port opens.
+```
+
+A token stands from the moment it is minted, whatever the port does. It
+connects as soon as the port opens.
+
+With the port open, the grant prints the command that connects to this
 machine. Each command carries `--certificate-fingerprint` with the fingerprint
 of the certificate this machine's listener presents: the sha256 of it, as 64
 lowercase hex characters. The address in that command depends on
@@ -928,8 +1057,16 @@ lowercase hex characters. The address in that command depends on
 - One address of this machine, such as `192.0.2.20:7654`, gives one command
   with that address. A line then says that this machine accepts connections on
   that address only.
-- A loopback address, such as `127.0.0.1:7654`, gives no command. A line says
-  that no other machine can connect to it.
+- A loopback address, such as `127.0.0.1:7654`, gives one command with that
+  address, under `connect from this machine:`. A line then says that no other
+  machine can connect to it, and names `0.0.0.0:7654` as a `remote-listen`
+  value that lets another machine connect after `koshi restart-servers`.
+
+The address is the one the router listens on. When `koshi.kdl` names another
+address now, a last line names both, and `koshi restart-servers`.
+
+An IPv4-mapped IPv6 address counts as its IPv4 form: `[::ffff:192.0.2.20]:7654`
+gives the same command as `192.0.2.20:7654`.
 
 ```text
 connect from another machine, at the address of this one it can reach:
@@ -941,6 +1078,23 @@ set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.
 Use the command with an address the other machine can reach. For example, a
 laptop on the same Wi-Fi uses the `en0` address, and a laptop on a VPN uses the
 `utun3` address.
+
+`koshi share open` opens the port without a question and mints no token. It
+prints the same connect commands as a grant, with the same fingerprint and no
+`--save-as`. Its secret line names the secret `koshi share grant` printed in
+place of the secret above. On a port that is already open it
+opens nothing and prints the commands again, so it is also how to read the
+fingerprint again. A port that does not open prints the reason on standard
+error, as the grant does, and the command exits 1. Example, after a grant whose
+`y` was not typed:
+
+```text
+koshi share open
+connect from another machine:
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 [SESSION]
+set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when asked.
+this machine accepts connections on 192.0.2.20 only; the other machine must connect to that address.
+```
 
 `koshi share revoke alice` ends the connections alice's tokens opened, at once,
 attached to a session or not. Her connection stops and no further frame reaches
@@ -960,8 +1114,9 @@ The `koshi share list` columns read:
 | `last_used` | When a presented token last reached a session through this grant. The time is written to the store right after the connection opens |
 | `revoked` | When an operator stopped the grant |
 
-In table cells a time prints as whole seconds since the Unix epoch, and an
-absent value prints as `-`.
+A time prints as RFC 3339 UTC text, such as `2025-01-01T00:00:00Z`, in the
+table and in JSON. An absent value prints as `-` in a table and `null` in JSON.
+`--format json` writes `scope` as `"host"` or the session id.
 
 ### Connecting to another machine
 
@@ -989,8 +1144,8 @@ environment variable `KOSHI_REMOTE_SECRET`, and with that unset asks for it at
 the terminal without printing what is typed. No flag takes a secret.
 
 The fingerprint is the sha256 of the server's certificate, as 64 lowercase hex
-characters. `koshi share grant` on the serving machine prints it in each
-connect command. Both machines speak TLS 1.3 only, and a peer that offers
+characters. `koshi share grant` and `koshi share open` on the serving machine
+print it in each connect command. Both machines speak TLS 1.3 only, and a peer that offers
 TLS 1.2 alone is refused during the handshake.
 
 koshi 0.5.0 and older print no fingerprint, so a first connection from this
@@ -1004,10 +1159,18 @@ on its first connection.
 koshi compares the fingerprint during the TLS handshake, before the secret is
 sent. If the server presents another certificate, the connection is refused,
 the secret is not sent, and the refusal names the address and both
-fingerprints:
+fingerprints. A first connection, and the check that `koshi remote new` and
+`koshi remote edit` run, end in both ways to give the new fingerprint:
 
 ```text
-koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share grant` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+```
+
+A connection to a saved server names that server, by its name or else its
+address:
+
+```text
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with `koshi remote edit work`.
 ```
 
 An address that is not saved needs `--certificate-fingerprint`. Without it,
@@ -1017,17 +1180,54 @@ the connection is refused and nothing is dialled:
 koshi: invalid arguments: laptop.local:7654 is not saved, so the fingerprint of its certificate is needed: add `--certificate-fingerprint <FINGERPRINT>` with the fingerprint `koshi share grant` printed on that machine
 ```
 
-A saved server refuses `--certificate-fingerprint`, and
-`koshi remote edit <SERVER>` changes the fingerprint it expects. If the
-serving machine's certificate changes on purpose, `koshi share grant` there
-prints the new fingerprint, and `koshi remote edit` stores it.
+A saved server takes `--certificate-fingerprint` when it gives the
+fingerprint the server was saved with, and the connection checks that
+fingerprint. Any other fingerprint is refused before a connection opens:
 
-A first connection saves the address, the secret, the fingerprint, and the
-name given by `--save-as`. The store lives on the connecting machine and is
-readable only by its owner. `koshi remote list` prints the name, address,
-fingerprint and last-used time of each saved server, and never a secret. Once
-the serving machine grants a fresh secret, `koshi remote set-secret <SERVER>`
-replaces the saved one; it reads the new secret the same way a connection does.
+```text
+koshi: invalid arguments: work expects the certificate fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, and --certificate-fingerprint gives 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c; run `koshi remote edit work` to change the fingerprint it expects
+```
+
+`koshi remote edit <SERVER>` changes the fingerprint a saved server expects.
+If the serving machine's certificate changes on purpose, `koshi share open`
+there prints the new fingerprint, and `koshi remote edit` stores it.
+
+A first connection from any command that takes `--remote`, with
+`koshi list-sessions` included, saves the address, the secret and the
+fingerprint. `koshi attach` also saves the name that `--save-as` gives. A
+first connection with no `--save-as` saves the server with no name, and
+`koshi remote list` prints `-` for that name. Then
+`koshi attach --remote <address> --save-as <NAME>` gives that server the name
+once the server admits the connection:
+
+```text
+koshi list-sessions --remote laptop.local:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
+koshi attach --remote laptop.local:7654 --save-as work
+```
+
+A saved server takes `--save-as` with the name it has, and refuses another
+name; `koshi remote edit <SERVER>` changes its name. The connect command that
+`koshi share grant` prints runs again with the same result.
+
+The store lives on the connecting machine and is readable only by its owner.
+`koshi remote list` prints the name, address, fingerprint and last-used time of
+each saved server, and never a secret. Once the serving machine grants a fresh
+secret, `koshi remote set-secret <SERVER>` replaces the saved one; it reads the
+new secret the same way a connection does.
+
+A saved server presents the secret it saved. If `KOSHI_REMOTE_SECRET` gives a
+secret that no saved server holds, a `--remote` connection to a saved server
+is refused before it opens, and the saved secret stays:
+
+```text
+koshi: invalid arguments: work holds a saved secret, and KOSHI_REMOTE_SECRET gives one that no saved server holds; run `koshi remote set-secret work` to replace the saved secret with it, or unset KOSHI_REMOTE_SECRET to dial with the saved one
+```
+
+`koshi remote set-secret work` reads that secret from `KOSHI_REMOTE_SECRET`
+and saves it. A value that a saved server holds, an empty value, and an unset
+variable connect with the secret the named server saved. A bare
+`koshi list-sessions` and a bare `koshi attach` present each saved server's own
+secret, and do not read `KOSHI_REMOTE_SECRET`.
 
 `koshi remote new` saves a server without attaching to one of its sessions. It
 asks four questions in turn — the name, the address, the fingerprint of the
@@ -1061,7 +1261,7 @@ fingerprint that was typed:
 
 ```text
 checking laptop.local:7654 …
-koshi: IPC unavailable: laptop.local:7654 refused the connection: nothing is listening on that port. if remote access is not enabled on that machine, run `koshi share grant` there and answer yes to the offer to open the port
+koshi: IPC unavailable: laptop.local:7654 refused the connection: nothing is listening on that port. if remote access is not enabled on that machine, run `koshi share open` there to open the port
 save it anyway? [y/N]: y
 saved work at laptop.local:7654.
 ```
@@ -1152,7 +1352,7 @@ hidden. It prints the same sentence that `koshi attach --remote work` prints,
 which names what to do:
 
 ```text
-koshi: work: the server 192.0.2.10:7654 did not admit the connection. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or revoked: re-grant it on that machine with `koshi share grant`, then store the new secret with `koshi remote set-secret` for a saved server, or give it when the next dial asks
+koshi: work: the server 192.0.2.10:7654 did not admit the connection. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or revoked: re-grant it on that machine with `koshi share grant`, then store the new secret with `koshi remote set-secret work`
 ```
 
 A machine that runs koshi 0.3.0 or 0.4.0 prints its own sentence for a saved
@@ -1278,6 +1478,10 @@ The version column reads:
 | `not running` | Nothing is listening there |
 | `unreachable` | The server could not be asked, the session is restarting, the router did not answer within 5 seconds, or a session did not answer within 5 seconds after the router was checked; the reason prints on standard error |
 
+`--format json` writes each row's `state`: `"running"` with the build in
+`version`, `"not running"`, or `"unreachable"` with the reason in `detail`. A
+server too old to name its build is `"running"` with `"version": null`.
+
 A server that could not be asked does not stop the rest of the answer: the
 other rows still print, and the command exits 4. Up to 16 sessions are asked
 at the same time. Sessions of other users that the shared directory holds past its
@@ -1307,6 +1511,7 @@ log directory       ok       /home/you/.local/state/koshi/logs is writable and l
 router              ok       no koshi is running                                                                 -
 session directory   ok       sessions are advertised in /tmp/koshi-1000 (mode 700), which only you may reach     -
 remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants  -
+remote listener     ok       no koshi is running, so nothing is listening                                        -
 remote connections  ok       no koshi is running, so nothing from another machine is connected                   -
 ```
 
@@ -1333,6 +1538,7 @@ The checks run in this order:
 | `router` | Whether a router answers on its control socket within 5 seconds |
 | `session directory` | Where sessions are advertised, and who may reach that directory |
 | `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
+| `remote listener` | The address the running router read when it started, whether it serves on it, the fingerprint of the certificate it presents, and whether `koshi.kdl` names that address now |
 | `remote connections` | How many open connections the running router holds from another machine |
 
 The `session directory` and `remote connections` rows report facts and rate
@@ -1343,14 +1549,36 @@ creates no directory. The `log directory` row writes one empty file in the log
 directory and removes it again, which is how it reports whether that directory
 can be written.
 
-The `router` row is the only row that rates the running router. A router whose
+The `router` row rates whether the running router answers. A router whose
 build has no such question is `warn`, and its help reads `run: koshi
 restart-servers`. A router that koshi 0.2.0 to 0.4.0 started is `fail`: `the
 running router runs koshi 0.4.0 or older, which this koshi cannot talk to`,
 and its help reads `run: koshi restart-servers`. Any other router that is
 listening and does not answer is `fail`. In each of these cases the `remote
-connections` row reads `the running router did not answer, so this is not
-known`.
+listener` and `remote connections` rows read `the running router did not
+answer, so this is not known`.
+
+The `remote listener` row rates the remote listener of the router that
+answered. It never reads `fail`. Its reasons:
+
+| Reason | Verdict | Help |
+|---|---|---|
+| `the router serves 0.0.0.0:7654 with the certificate fingerprint 3f6a…` | `ok` | - |
+| ``remote access is off, so nothing is listening; `koshi share open` opens 0.0.0.0:7654`` | `ok` | - |
+| `the router read no remote listen address when it started, so nothing is listening` | `ok` | - |
+| `remote access is on, and nothing is listening on 0.0.0.0:7654: the router could not open it when it started` | `warn` | `run: koshi share open` |
+| `the router serves 0.0.0.0:7654 and names no certificate fingerprint`, from a koshi 0.5.0 router | `warn` | `run: koshi restart-servers` |
+
+The fingerprint is the one `koshi share grant` prints in its connect commands,
+so the row reads it again without a new grant. When `koshi.kdl` names another
+address than the one the router read when it started, the row is `warn`. Its
+reason names the file and both addresses, after the fingerprint while the
+router serves. Example: `/home/user/.config/koshi/koshi.kdl names the remote
+listen address 127.0.0.1:7654, and the running router read no remote listen
+address from it when it started`, with the help `run: koshi restart-servers`.
+When the router reads another `koshi.kdl` than `koshi doctor`, the reason
+names both files, and the help reads `set remote-listen in <the router's
+file>, then run: koshi restart-servers`.
 
 A row whose `reason` is shortened to fit the table carries the whole text in a
 `detail` field, which `--format json` prints and the table leaves out. Every
@@ -1386,7 +1614,7 @@ holding different values use different directories and do not find each other.
 | Command | Result |
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
-| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, and per-client focus |
+| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, panes with no room, stacks, each floating pane with what each client draws for it, and per-client focus |
 | `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
 
 A pane's command arguments print as `***`; the program name stays visible.
@@ -1400,6 +1628,43 @@ bottom hint row. Two clients on one tab, one 80x24 and one 120x40, both print
 `viewport 80x22`. What is per client is the view: one client tiled and one with
 a pane fullscreen give that tab two sets of rectangles. A tab no client is
 viewing prints its tree and no rectangles.
+
+`dump-layout` prints the floating panes after the tabs, in the order the panes
+became floating. Each pane line names the size the pane asks for and the size
+it holds. Under it, one line per attached client says what that client draws:
+
+- `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the pane there.
+  Layer `0` draws first, and a higher layer draws over a lower one.
+- `minimized`: the client holds the pane minimized.
+- `no floating viewport`: the client shows the pane and draws nothing. Its
+  pane area is smaller than `5x6`, or it has no room to draw a pane.
+
+Each client line ends with the position that client stored: `default`,
+`moved <x>,<y>`, or `pinned <x>,<y>`. A session with no floating pane prints
+no floating section. `--tab` narrows the tabs only, and every floating pane
+still prints: a floating pane draws over every tab.
+
+Example: one 80x24 terminal shows a floating pane that `koshi new-pane
+--floating` opened. The pane prints as `pane pane-… asks 60%x60% size 48x13`,
+and the client line under it prints as `client client-… rect 16,4 48x13 layer 0
+position default`.
+
+Each line under a split ends with how that child is sized, in the words a
+layout file uses: `weight 2`, `size 30` for 30 cells, or `size 60%`, then
+`min <cells>` and `preferred <cells>` when set, then `resize <cells>` after a
+user resize. Example: `pane pane-…, weight 2 min 10 resize +5`. A split whose
+weights do not number one per child says so: `horizontal split, 3 weights for
+2 children`.
+
+`dump-layout --format json` writes the same words as fields. Each tree node
+has `"node": "pane"` or `"node": "split"`, and a split has `split_direction`
+(`horizontal`, `vertical` or `stacked`) and `weights`, one sizing per child in
+the words above. Each client solve has `layout_mode`
+(`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each client view of a
+floating pane has `position` (`default`, or `moved` or `pinned` with
+`stored_cell`) and `visibility` (`drawn` with `top_left_cell` and
+`layer_index`, `minimized`, or `no floating viewport`). `desired_size` writes
+each axis as `--cols` and `--rows` take it: `"60%"` or `"80"`.
 
 A session that started before you installed this Koshi cannot report its
 layout. `dump-layout` says so and names what to do: restart that session, or
@@ -1417,9 +1682,10 @@ Each row names the session by id and by name, so two sessions sharing a name
 stay apart.
 
 `--since` keeps the events recorded within a length of now — `30s`, `5m`, `2h`,
-`7d`. `--filter` keeps the events whose name contains the text given, matched
-ignoring case, so `--filter pane` keeps `PaneCreated` and `PaneFocused`. An
-empty `--filter` is a usage error.
+`7d`. A length over `18446744073709551615s` is refused with `a length is at
+most 18446744073709551615s`. `--filter` keeps the events whose name contains
+the text given, matched ignoring case, so `--filter pane` keeps `PaneCreated`
+and `PaneFocused`. An empty `--filter` is a usage error.
 
 Example: `koshi debug events --since 30s --filter tab` prints the tab events of
 the last thirty seconds and nothing else.

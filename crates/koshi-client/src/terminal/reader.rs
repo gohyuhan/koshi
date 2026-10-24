@@ -10,8 +10,15 @@ use super::platform::{PlatformEventSource, PlatformWaker};
 
 /// A platform source that can wait for one parsed event.
 pub(super) trait EventSource {
-    /// Return one event, or `None` when `timeout_duration` expires.
+    /// Return one event, or `None` when `timeout_duration` expires. An event
+    /// parsed from bytes an earlier call read comes back before the terminal
+    /// is read again.
     fn try_read_event(&mut self, timeout_duration: Option<Duration>) -> io::Result<Option<Event>>;
+
+    /// Remove and return the next event parsed from bytes this source already
+    /// read, without reading the terminal. `None` once every event parsed
+    /// from those bytes is returned.
+    fn remove_next_parsed_event(&mut self) -> Option<Event>;
 }
 
 /// The owned event reader for one attached terminal.
@@ -75,6 +82,29 @@ impl<Source: EventSource> InputReader<Source> {
                 return Ok(false);
             }
         }
+    }
+
+    /// Remove and return the events of the next read of the terminal, oldest
+    /// first, with no time limit: the next event, then every event parsed
+    /// from the bytes that read returned.
+    ///
+    /// An event that [`Self::wait_for_event`] buffered comes back alone, the
+    /// oldest first. Typing `é-` that the terminal sends in one read returns
+    /// the keys `é` and `-` in one list.
+    pub(super) fn read_events_of_next_terminal_read(&mut self) -> io::Result<Vec<Event>> {
+        if let Some(buffered_terminal_event) = self.buffered_terminal_events.pop_front() {
+            return Ok(vec![buffered_terminal_event]);
+        }
+        let first_terminal_event = loop {
+            if let Some(terminal_event) = self.event_source.try_read_event(None)? {
+                break terminal_event;
+            }
+        };
+        let mut terminal_events = vec![first_terminal_event];
+        while let Some(parsed_terminal_event) = self.event_source.remove_next_parsed_event() {
+            terminal_events.push(parsed_terminal_event);
+        }
+        Ok(terminal_events)
     }
 
     /// Remove and return the first event accepted by `event_filter`, from the

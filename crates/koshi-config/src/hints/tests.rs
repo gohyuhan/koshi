@@ -3,8 +3,7 @@
 //! filter (a refused action, a locked-mode sequence holding the unlock chord,
 //! and a mode the build does not register each yield no hint), the
 //! chord-depth cap at 0 and 1, the pinned locked-mode unlock, prefix labels
-//! under either leader shape, sequence matching, empty modes, the label each
-//! frame shows for the move chooser's Enter and for mouse-select, and the
+//! under either leader shape, sequence matching, the label each frame shows for the move chooser's Enter and for mouse-select, and the
 //! per-frame `Arc` sharing.
 
 use koshi_core::key::{BindingModifierFlags, Key, NamedKey};
@@ -93,9 +92,9 @@ fn quit_binding_surfaces_in_both_modes() {
 #[test]
 fn locked_mode_pins_the_reserved_unlock() {
     let hints = build_default_hint_catalog().build_frame_hints(LockMode::Locked, false, false);
-    // The reserved unlock (the same `<C-l>` that locks in normal mode), the
-    // pane placement opener, and the quit and mouse-select chords.
-    assert_eq!(hints.hint_bindings.len(), 4);
+    // The reserved unlock (the same `<C-l>` that locks in normal mode), and
+    // the quit and mouse-select chords.
+    assert_eq!(hints.hint_bindings.len(), 3);
     let hint_binding = hints
         .hint_bindings
         .iter()
@@ -105,19 +104,6 @@ fn locked_mode_pins_the_reserved_unlock() {
         .expect("locked mode binds the reserved unlock");
     assert_eq!(hint_binding.action_display_name, "Unlock");
     assert!(hint_binding.is_pinned);
-}
-
-#[test]
-fn modes_without_defaults_are_empty() {
-    let hint_catalog = build_default_hint_catalog();
-    for lock_mode in [LockMode::Resize, LockMode::TabMode, LockMode::ScrollMode] {
-        let hints = hint_catalog.build_frame_hints(lock_mode, false, false);
-        assert!(
-            hints.hint_bindings.is_empty(),
-            "{lock_mode:?} ships no bindings"
-        );
-        assert!(hints.removed_key_sequences.is_empty());
-    }
 }
 
 #[test]
@@ -245,10 +231,15 @@ fn an_unbound_sequence_matches_nothing() {
         ),
         KeyMatch::default()
     );
-    // A mode nothing binds in holds no map at all.
+    // A catalog built from no layers holds no map for any mode.
+    let empty_hint_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
+        &[],
+        &KeybindingsConfig::default(),
+        &ActionRegistry::new(),
+    );
     assert_eq!(
-        hint_catalog.match_sequence(
-            LockMode::Resize,
+        empty_hint_catalog.match_sequence(
+            LockMode::Normal,
             &build_single_chord_sequence(BindingModifierFlags::CTRL, 'q')
         ),
         KeyMatch::default()
@@ -287,6 +278,10 @@ fn the_unlock_chord_is_the_reserved_one_when_the_config_names_no_alternative() {
         build_default_hint_catalog().get_chord_timeout(),
         Duration::from_millis(500)
     );
+    assert_eq!(
+        build_default_hint_catalog().get_which_key_delay(),
+        Duration::from_millis(300)
+    );
 }
 
 #[test]
@@ -306,30 +301,6 @@ fn a_rebound_leader_moves_the_prefix_labels() {
     assert_eq!(
         *hints.prefix_labels,
         build_expected_prefix_labels(BindingModifierFlags::ALT)
-    );
-}
-
-#[test]
-fn default_hint_catalog_is_not_marked_reverted_to_defaults() {
-    assert!(
-        !build_default_hint_catalog()
-            .build_frame_hints(LockMode::Normal, false, false)
-            .is_reverted_to_defaults
-    );
-}
-
-#[test]
-fn mark_reverted_to_defaults_marks_every_mode_hint() {
-    let hint_catalog = build_default_hint_catalog().mark_reverted_to_defaults();
-    assert!(
-        hint_catalog
-            .build_frame_hints(LockMode::Normal, false, false)
-            .is_reverted_to_defaults
-    );
-    assert!(
-        hint_catalog
-            .build_frame_hints(LockMode::Locked, false, false)
-            .is_reverted_to_defaults
     );
 }
 
@@ -477,10 +448,6 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
         mouse_selection_disabled_hints.removed_key_sequences,
         mouse_selection_enabled_hints.removed_key_sequences
     );
-    assert_eq!(
-        mouse_selection_disabled_hints.is_reverted_to_defaults,
-        mouse_selection_enabled_hints.is_reverted_to_defaults
-    );
 }
 
 #[test]
@@ -616,7 +583,7 @@ fn every_locked_entry_firing_unlock_is_pinned() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Locked, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 5);
+    assert_eq!(hints.hint_bindings.len(), 4);
     let pinned_key_sequences: Vec<String> = hints
         .hint_bindings
         .iter()
@@ -691,38 +658,23 @@ fn the_chord_timeout_carries_the_configured_milliseconds_at_both_bounds() {
 }
 
 #[test]
-fn mark_reverted_to_defaults_changes_only_the_flag() {
-    let base_hint_catalog = build_default_hint_catalog();
-    let reverted_hint_catalog = base_hint_catalog.clone().mark_reverted_to_defaults();
-    let base_hints = base_hint_catalog.build_frame_hints(LockMode::Normal, false, false);
-    let reverted_hints = reverted_hint_catalog.build_frame_hints(LockMode::Normal, false, false);
+fn the_which_key_delay_carries_the_configured_milliseconds_at_both_bounds() {
+    let minimum_delay_hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
+        which_key_delay_ms: 0,
+        ..KeybindingsConfig::default()
+    });
+    assert_eq!(
+        minimum_delay_hint_catalog.get_which_key_delay(),
+        Duration::ZERO
+    );
 
-    assert!(!base_hints.is_reverted_to_defaults);
-    assert!(reverted_hints.is_reverted_to_defaults);
-    assert!(Arc::ptr_eq(
-        &base_hints.hint_bindings,
-        &reverted_hints.hint_bindings
-    ));
-    assert!(Arc::ptr_eq(
-        &base_hints.removed_key_sequences,
-        &reverted_hints.removed_key_sequences
-    ));
-    assert!(Arc::ptr_eq(
-        &base_hints.prefix_labels,
-        &reverted_hints.prefix_labels
-    ));
+    let maximum_delay_hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
+        which_key_delay_ms: u32::MAX,
+        ..KeybindingsConfig::default()
+    });
     assert_eq!(
-        reverted_hint_catalog.get_unlock_chord(),
-        base_hint_catalog.get_unlock_chord()
-    );
-    assert_eq!(
-        reverted_hint_catalog.get_chord_timeout(),
-        base_hint_catalog.get_chord_timeout()
-    );
-    let quit_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'q');
-    assert_eq!(
-        reverted_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence),
-        base_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence)
+        maximum_delay_hint_catalog.get_which_key_delay(),
+        Duration::from_millis(4_294_967_295)
     );
 }
 
@@ -825,7 +777,7 @@ fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Locked, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 4);
+    assert_eq!(hints.hint_bindings.len(), 3);
     assert_eq!(
         hints
             .hint_bindings

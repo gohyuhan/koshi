@@ -14,8 +14,8 @@
 //! the session's first client in locked input mode.
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
-//! span-tagged [`ProfileDiagnostic`] and a file with any problem yields no
-//! template.
+//! span-tagged [`ProfileDiagnostic`], in file order, and a file with any
+//! problem yields no template.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ use koshi_layout::template::{
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
-use crate::error::ConfigParseDiagnostic;
+use crate::error::{format_problems_at_line_and_column, ConfigParseDiagnostic};
 use crate::parser::{find_version_node_problem, format_unknown_key, parse_kdl};
 
 #[cfg(test)]
@@ -50,10 +50,42 @@ pub enum ProfileError {
     Invalid {
         /// Path of the profile file, for the header line.
         profile_path: String,
-        /// Every schema violation, each pointing at its own span.
+        /// Every schema violation of the file at `profile_path`, each pointing
+        /// at its own span, in file order: ascending span start, and the order
+        /// found for one start.
         #[related]
         diagnostics: Vec<ProfileDiagnostic>,
     },
+}
+
+impl ProfileError {
+    /// One message per problem, in the order of `diagnostics`. A syntax error
+    /// gives the one [`ConfigError::Parse`](crate::error::ConfigError::Parse)
+    /// message, such as `config parse error in profile/dev.kdl: line 1,
+    /// column 5: No closing '}' for child block`. A schema error gives each
+    /// diagnostic's message after the line and column its span starts at, such
+    /// as ``line 2, column 14: sizing applies only to children of `horizontal`
+    /// or `vertical` ``.
+    #[must_use]
+    pub fn list_problem_messages(&self) -> Vec<String> {
+        match self {
+            Self::Syntax(parse_diagnostic) => {
+                vec![parse_diagnostic.build_config_error().to_string()]
+            }
+            Self::Invalid { diagnostics, .. } => match diagnostics.first() {
+                Some(first_diagnostic) => format_problems_at_line_and_column(
+                    first_diagnostic.profile_source.inner(),
+                    diagnostics.iter().map(|diagnostic| {
+                        (
+                            diagnostic.diagnostic_span.offset(),
+                            diagnostic.get_diagnostic_message(),
+                        )
+                    }),
+                ),
+                None => Vec::new(),
+            },
+        }
+    }
 }
 
 /// One schema violation in a profile file, rendered with a caret at the
@@ -98,6 +130,19 @@ pub fn parse_profile(
     profile_source_text: &str,
 ) -> Result<ProfileTemplate, ProfileError> {
     let profile_document = parse_kdl(profile_path, profile_source_text)?;
+    parse_profile_from_document(profile_path, profile_source_text, &profile_document)
+}
+
+/// [`parse_profile`] on `profile_document`, the KDL document already parsed
+/// from `profile_source_text`.
+///
+/// # Errors
+/// [`ProfileError::Invalid`] with every schema violation.
+pub(crate) fn parse_profile_from_document(
+    profile_path: &Path,
+    profile_source_text: &str,
+    profile_document: &KdlDocument,
+) -> Result<ProfileTemplate, ProfileError> {
     let mut profile_walker = ProfileDocumentWalker {
         profile_source: NamedSource::new(
             profile_path.display().to_string(),
@@ -107,7 +152,10 @@ pub fn parse_profile(
         tab_leaf_count: 0,
         focused_tab_leaf_spans: Vec::new(),
     };
-    let profile_template = profile_walker.parse_profile_document(&profile_document);
+    let profile_template = profile_walker.parse_profile_document(profile_document);
+    profile_walker
+        .profile_diagnostics
+        .sort_by_key(|profile_diagnostic| profile_diagnostic.diagnostic_span.offset());
     match profile_template {
         Some(profile_template) if profile_walker.profile_diagnostics.is_empty() => {
             Ok(profile_template)
@@ -158,13 +206,16 @@ impl ProfileSizing {
         }
     }
 
-    /// The span of the first sizing node present, for "sizing not allowed
-    /// here" reports. `None` when no sizing was given.
-    fn find_first_sizing_span(&self) -> Option<SourceSpan> {
-        self.primary_constraint
-            .map(|(_, span)| span)
-            .or(self.minimum_cell_count.map(|(_, span)| span))
-            .or(self.preferred_cell_count.map(|(_, span)| span))
+    /// The span of every sizing node present: the `size` or `weight` node,
+    /// then `min`, then `preferred`. Empty when no sizing was given.
+    fn list_sizing_spans(&self) -> impl Iterator<Item = SourceSpan> {
+        [
+            self.primary_constraint.map(|(_, span)| span),
+            self.minimum_cell_count.map(|(_, span)| span),
+            self.preferred_cell_count.map(|(_, span)| span),
+        ]
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -487,6 +538,7 @@ impl ProfileDocumentWalker {
                 }
             }
         }
+        self.validate_sizing_context(&leaf_config.leaf_sizing, parent_context);
         self.record_leaf(&leaf_config);
         ProfileSlot {
             template_node: TemplateNode::Leaf(TerminalTemplate {
@@ -681,9 +733,8 @@ impl ProfileDocumentWalker {
         }
     }
 
-    /// Handles a `pane` config child: sizing, `focus`, `expanded`. Sizing
-    /// outside a `Directional` slot is reported and
-    /// discarded. Returns `false` when the node is none of the three.
+    /// Handles a `pane` config child: sizing, `focus`, `expanded`. Returns
+    /// `false` when the node is none of the three.
     fn is_leaf_config_node_handled(
         &mut self,
         config_node: &KdlNode,
@@ -722,17 +773,7 @@ impl ProfileDocumentWalker {
                 }
                 true
             }
-            _ => {
-                if self.is_sizing_node_handled(config_node, &mut leaf_config.leaf_sizing) {
-                    if parent_context != ProfileNodeContext::Directional {
-                        self.validate_sizing_context(&leaf_config.leaf_sizing, parent_context);
-                        leaf_config.leaf_sizing = ProfileSizing::default();
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
+            _ => self.is_sizing_node_handled(config_node, &mut leaf_config.leaf_sizing),
         }
     }
 
@@ -747,8 +788,9 @@ impl ProfileDocumentWalker {
         }
     }
 
-    /// Reports sizing given where none is meaningful — anywhere but a child
-    /// slot of `horizontal`/`vertical`.
+    /// Reports each sizing node given where none is meaningful — anywhere
+    /// but a child slot of `horizontal`/`vertical`. One diagnostic per
+    /// sizing node, at that node.
     fn validate_sizing_context(
         &mut self,
         sizing: &ProfileSizing,
@@ -757,7 +799,7 @@ impl ProfileDocumentWalker {
         if parent_context == ProfileNodeContext::Directional {
             return;
         }
-        if let Some(sizing_span) = sizing.find_first_sizing_span() {
+        for sizing_span in sizing.list_sizing_spans() {
             self.record_diagnostic(
                 sizing_span,
                 "sizing applies only to children of `horizontal` or `vertical`",

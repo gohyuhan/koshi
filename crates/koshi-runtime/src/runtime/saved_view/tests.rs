@@ -5,9 +5,9 @@
 //! round-trips, which saved view records a save drops, and which attached
 //! client a token finds.
 
-use koshi_core::geometry::{Point, Size};
+use koshi_core::geometry::{FloatingPanePosition, Point, Size};
 use koshi_core::ids::SessionId;
-use koshi_session::client::{ClientOrigin, FloatingPanePosition};
+use koshi_session::client::ClientOrigin;
 
 use super::*;
 

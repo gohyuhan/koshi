@@ -3383,10 +3383,13 @@ fn the_update_lock_file_is_readable_by_its_owner_alone() {
 #[test]
 fn a_pinned_homebrew_formula_is_not_upgraded_and_names_the_formula_to_move_to() {
     assert_eq!(
-        update_release_install(&ReleaseInstall::Homebrew {
-            brew_path: PathBuf::from("/opt/homebrew/bin/brew"),
-            formula_name: "koshi@0.5.0".to_string(),
-        }),
+        update_release_install(
+            &ReleaseInstall::Homebrew {
+                brew_path: PathBuf::from("/opt/homebrew/bin/brew"),
+                formula_name: "koshi@0.5.0".to_string(),
+            },
+            &AppConfigOutcome::Absent
+        ),
         Err(
             "this koshi comes from the Homebrew formula koshi@0.5.0, which stays on its version; \
              move to the newest koshi with: brew install gohyuhan/koshi/koshi"
@@ -3446,7 +3449,7 @@ fn run_stand_in_brew_upgrade(brew_path: &Path) -> Result<(), String> {
     };
     let busy_deadline = Instant::now() + BUSY_PROGRAM_WAIT_DURATION;
     loop {
-        let upgrade_result = update_release_install(&homebrew_install);
+        let upgrade_result = update_release_install(&homebrew_install, &AppConfigOutcome::Absent);
         let is_brew_busy = upgrade_result
             .as_ref()
             .is_err_and(|upgrade_error| upgrade_error.contains("could not be run"));
@@ -4500,5 +4503,47 @@ fn several_koshi_0_1_0_windows_running_from_a_runtime_directory_are_counted_in_o
              talk to them, and each one ends when its terminal closes"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn a_koshi_kdl_that_was_not_read_gives_the_default_update_config() {
+    assert_eq!(
+        (
+            resolve_update_config(&AppConfigOutcome::Absent),
+            resolve_update_config(&AppConfigOutcome::Unreadable {
+                read_error_text: "Permission denied (os error 13)".to_string(),
+            }),
+        ),
+        (UpdateConfig::default(), UpdateConfig::default())
+    );
+}
+
+#[test]
+fn a_koshi_kdl_that_does_not_parse_turns_the_automatic_check_off() {
+    assert_eq!(
+        resolve_update_config(&AppConfigOutcome::Refused {
+            app_config_source_text: "version 999\n".to_string(),
+        }),
+        UpdateConfig {
+            should_auto_check_for_updates: false,
+            ..UpdateConfig::default()
+        }
+    );
+}
+
+#[test]
+fn a_koshi_kdl_that_parsed_gives_its_update_section() {
+    let loaded_app_config = koshi_link::config::parse_app_config_text(
+        Path::new("koshi.kdl"),
+        "version 2\nupdate {\n    allow-prerelease #true\n}\n".to_string(),
+    );
+
+    assert_eq!(
+        resolve_update_config(&loaded_app_config.app_config_outcome),
+        UpdateConfig {
+            should_allow_prerelease_updates: true,
+            ..UpdateConfig::default()
+        }
     );
 }

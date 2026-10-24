@@ -23,19 +23,20 @@ use std::time::{Instant, SystemTime};
 use koshi_core::process::SpawnSpec;
 use koshi_core::text::format_counted_noun;
 use koshi_ipc::remote_tokens::TokenStore;
-use serde::Serialize;
 
 use crate::cli::OutputFormat;
-use crate::output;
+use crate::output::{self, ConfigMismatch};
+use crate::share::find_config_mismatch;
+use koshi_link::config::{AppConfigOutcome, LoadedAppConfig};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::SERVER_ANSWER_TIMEOUT_DURATION;
-use koshi_link::router_client::{query_running_router_remote_connections, RemoteConnections};
+use koshi_link::router_client::{query_running_router_remote_status, RunningRouterRemoteStatus};
 use koshi_observability::logging::resolve_session_log_path;
 use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// The check found what it looks for.
     Ok,
@@ -46,7 +47,7 @@ pub enum Verdict {
 }
 
 /// One check's answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorOutcome {
     /// What the check concluded.
     pub verdict: Verdict,
@@ -145,6 +146,10 @@ const DOCTOR_CHECKS: &[DoctorCheck] = &[
         run_check: check_remote_access,
     },
     DoctorCheck {
+        check_name: "remote listener",
+        run_check: check_remote_listener,
+    },
+    DoctorCheck {
         check_name: "remote connections",
         run_check: check_remote_connections,
     },
@@ -173,6 +178,9 @@ pub struct DoctorContext {
     /// The directory `koshi.kdl` lives in, or `None` when this machine
     /// reports no home directory.
     pub config_directory: Option<PathBuf>,
+    /// What the one read of `koshi.kdl` at start found. The config check
+    /// validates its text.
+    pub app_config_outcome: AppConfigOutcome,
     /// The private runtime directory holding the endpoint files, or `None`
     /// when this machine reports no home directory.
     /// [`DoctorContext::runtime_directory_rule`] names the rule that produced it.
@@ -214,38 +222,60 @@ pub struct DoctorContext {
     /// How many remote access grants still stand, or the message naming why
     /// they could not be read.
     pub standing_grant_count: Result<usize, String>,
-    /// What asking the running router produced.
-    pub router_connections: RemoteConnections,
+    /// What asking the running router for its remote access status produced.
+    pub router_remote_status: RunningRouterRemoteStatus,
+    /// Why the listen address the running router read when it started is not
+    /// the one the `koshi.kdl` read at start names, as `koshi share grant`
+    /// finds it. `None` when they agree, and when no router answered.
+    pub remote_config_mismatch: Option<ConfigMismatch>,
 }
 
 impl DoctorContext {
-    /// Read every fact the checks need from this machine: the platform
-    /// directories, the rule that produced the runtime directory, `koshi.kdl`,
-    /// the environment, the grant file, and the running router. Format 1
-    /// grants are counted in memory. Creates nothing and starts no router.
+    /// Gather every fact the checks need: `koshi.kdl` as `loaded_app_config`
+    /// read it at start, and from this machine the platform directories, the
+    /// rule that produced the runtime directory, the environment, the grant
+    /// file, the running router, and the `koshi.kdl` the running router names
+    /// when it is not this one. Format 1 grants are counted in memory. Creates
+    /// nothing and starts no router.
     #[must_use]
-    pub fn from_current_machine() -> DoctorContext {
+    pub fn from_current_machine(loaded_app_config: LoadedAppConfig) -> DoctorContext {
         let config_directory = koshi_paths::resolve_config_directory();
         let (runtime_directory, runtime_directory_rule) =
             koshi_paths::resolve_runtime_directory_with_rule().unzip();
         let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
         let server_config =
-            koshi_link::config::load_current_server_config(config_directory.as_deref());
+            koshi_link::config::resolve_server_config(loaded_app_config.find_app_config_layer());
         let shared_sessions_directory =
             koshi_link::config::compute_shared_sessions_base_directory(&server_config);
         let standing_grant_count = match koshi_paths::resolve_data_directory() {
             Some(data_directory) => load_standing_grant_count(&data_directory, SystemTime::now()),
             None => Err("this machine reports no home directory".to_string()),
         };
-        let router_connections = match runtime_directory.as_deref() {
-            Some(runtime_directory) => query_running_router_remote_connections(
+        let router_remote_status = match runtime_directory.as_deref() {
+            Some(runtime_directory) => query_running_router_remote_status(
                 runtime_directory,
                 Instant::now() + SERVER_ANSWER_TIMEOUT_DURATION,
             ),
-            None => RemoteConnections::NotRunning,
+            None => RunningRouterRemoteStatus::NotRunning,
+        };
+        let remote_config_mismatch = match &router_remote_status {
+            RunningRouterRemoteStatus::Answered(remote_access_status) => find_config_mismatch(
+                remote_access_status.remote_listen_address,
+                remote_access_status.config_file_path.as_deref(),
+                config_directory
+                    .as_deref()
+                    .map(|config_directory| config_directory.join("koshi.kdl"))
+                    .as_deref(),
+                server_config.remote_listen_address,
+            ),
+            RunningRouterRemoteStatus::NotRunning
+            | RunningRouterRemoteStatus::OlderBuild
+            | RunningRouterRemoteStatus::PreviousRelease
+            | RunningRouterRemoteStatus::NoAnswer { .. } => None,
         };
         DoctorContext {
             config_directory,
+            app_config_outcome: loaded_app_config.app_config_outcome,
             runtime_directory,
             runtime_directory_rule,
             runtime_directory_mode,
@@ -281,7 +311,8 @@ impl DoctorContext {
             remote_listen_address: server_config.remote_listen_address,
             is_logging_enabled: server_config.logging.is_enabled,
             standing_grant_count,
-            router_connections,
+            router_remote_status,
+            remote_config_mismatch,
         }
     }
 }
@@ -296,13 +327,11 @@ fn load_standing_grant_count(
 }
 
 /// One row of the answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorCheckRow {
     /// The check's name.
     pub check_name: &'static str,
-    /// What the check concluded. `--format json` prints its fields beside
-    /// `check_name` in the same object.
-    #[serde(flatten)]
+    /// What the check concluded.
     pub outcome: DoctorOutcome,
 }
 
@@ -318,13 +347,17 @@ pub fn build_doctor_check_rows(doctor_context: &DoctorContext) -> Vec<DoctorChec
         .collect()
 }
 
-/// Check this machine's koshi installation and print one row per check.
+/// Check this machine's koshi installation, with `koshi.kdl` as
+/// `loaded_app_config` read it at start, and print one row per check.
 ///
 /// # Errors
 /// [`CliError::Runtime`] when any row is [`Verdict::Fail`], after the whole
 /// answer has been printed. A [`Verdict::Warn`] row never fails the run.
-pub fn run_doctor_checks(output_format: OutputFormat) -> Result<(), CliError> {
-    let doctor_context = DoctorContext::from_current_machine();
+pub fn run_doctor_checks(
+    output_format: OutputFormat,
+    loaded_app_config: LoadedAppConfig,
+) -> Result<(), CliError> {
+    let doctor_context = DoctorContext::from_current_machine(loaded_app_config);
     let check_rows = build_doctor_check_rows(&doctor_context);
     print!("{}", output::render_doctor(&check_rows, output_format));
     build_failure_outcome_from_check_rows(&check_rows).map_or(Ok(()), Err)
@@ -352,7 +385,10 @@ fn check_config(doctor_context: &DoctorContext) -> DoctorOutcome {
     let Some(config_directory) = doctor_context.config_directory.as_deref() else {
         return build_no_home_directory_outcome("config");
     };
-    let config_report = crate::config_command::validate_config_directory(config_directory);
+    let config_report = crate::config_command::validate_config_directory(
+        config_directory,
+        &doctor_context.app_config_outcome,
+    );
     if !config_report.config_file_errors.is_empty() {
         return DoctorOutcome::build_failure_outcome(
             config_report.config_file_errors.join("; "),
@@ -449,23 +485,23 @@ fn check_runtime_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
 }
 
 fn check_router(doctor_context: &DoctorContext) -> DoctorOutcome {
-    match &doctor_context.router_connections {
-        RemoteConnections::Answered(_) => DoctorOutcome::build_success_outcome(
+    match &doctor_context.router_remote_status {
+        RunningRouterRemoteStatus::Answered(_) => DoctorOutcome::build_success_outcome(
             "a router answers on its control socket".to_string(),
         ),
-        RemoteConnections::NotRunning => {
+        RunningRouterRemoteStatus::NotRunning => {
             DoctorOutcome::build_success_outcome("no koshi is running".to_string())
         }
-        RemoteConnections::OlderBuild => DoctorOutcome::build_warning_outcome(
+        RunningRouterRemoteStatus::OlderBuild => DoctorOutcome::build_warning_outcome(
             "the running router is an older koshi build".to_string(),
             "run: koshi restart-servers",
         ),
-        RemoteConnections::PreviousRelease => DoctorOutcome::build_failure_outcome(
+        RunningRouterRemoteStatus::PreviousRelease => DoctorOutcome::build_failure_outcome(
             "the running router runs koshi 0.4.0 or older, which this koshi cannot talk to"
                 .to_string(),
             "run: koshi restart-servers",
         ),
-        RemoteConnections::NoAnswer {
+        RunningRouterRemoteStatus::NoAnswer {
             error_detail: router_error_detail,
             router_process_id,
         } => {
@@ -584,24 +620,117 @@ fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
     }
 }
 
+/// The remote listener check: where the running router listens and the
+/// fingerprint of the certificate it presents, and whether `koshi.kdl` names
+/// the address the router read when it started.
+///
+/// A router that serves `0.0.0.0:7654` with the fingerprint `3f6a…` gives the
+/// reason `"the router serves 0.0.0.0:7654 with the certificate fingerprint
+/// 3f6a…"`. A [`DoctorContext::remote_config_mismatch`] makes the row `warn`:
+/// its facts follow the fingerprint, or stand alone while nothing listens, and
+/// the help names the step that makes the router read the file again.
+fn check_remote_listener(doctor_context: &DoctorContext) -> DoctorOutcome {
+    let remote_access_status = match &doctor_context.router_remote_status {
+        RunningRouterRemoteStatus::Answered(remote_access_status) => remote_access_status,
+        RunningRouterRemoteStatus::NotRunning => {
+            return DoctorOutcome::build_success_outcome(
+                "no koshi is running, so nothing is listening".to_string(),
+            )
+        }
+        RunningRouterRemoteStatus::OlderBuild
+        | RunningRouterRemoteStatus::PreviousRelease
+        | RunningRouterRemoteStatus::NoAnswer { .. } => {
+            return DoctorOutcome::build_success_outcome(
+                "the running router did not answer, so this is not known".to_string(),
+            )
+        }
+    };
+    let serving_description = match (
+        remote_access_status.remote_listen_address,
+        remote_access_status.is_listening,
+        &remote_access_status.certificate_fingerprint,
+    ) {
+        (Some(remote_listen_address), true, Some(certificate_fingerprint)) => Some(format!(
+            "the router serves {remote_listen_address} with the certificate fingerprint \
+             {certificate_fingerprint}"
+        )),
+        _ => None,
+    };
+    if let Some(config_mismatch) = &doctor_context.remote_config_mismatch {
+        let mismatch_fact = output::render_config_mismatch_fact(
+            config_mismatch,
+            remote_access_status.remote_listen_address,
+        );
+        let mismatch_help = match config_mismatch {
+            ConfigMismatch::OtherFile {
+                router_config_file_path: Some(router_config_file_path),
+                ..
+            } => format!(
+                "set remote-listen in {}, then run: koshi restart-servers",
+                router_config_file_path.display()
+            ),
+            ConfigMismatch::FileChanged { .. }
+            | ConfigMismatch::OtherFile {
+                router_config_file_path: None,
+                ..
+            } => "run: koshi restart-servers".to_string(),
+        };
+        let mismatch_reason = match serving_description {
+            Some(serving_description) => format!("{serving_description}; {mismatch_fact}"),
+            None => mismatch_fact,
+        };
+        return DoctorOutcome::build_warning_outcome(mismatch_reason, &mismatch_help);
+    }
+    if let Some(serving_description) = serving_description {
+        return DoctorOutcome::build_success_outcome(serving_description);
+    }
+    let Some(remote_listen_address) = remote_access_status.remote_listen_address else {
+        return DoctorOutcome::build_success_outcome(
+            "the router read no remote listen address when it started, so nothing is listening"
+                .to_string(),
+        );
+    };
+    if remote_access_status.is_listening {
+        return DoctorOutcome::build_warning_outcome(
+            format!(
+                "the router serves {remote_listen_address} and names no certificate fingerprint"
+            ),
+            "run: koshi restart-servers",
+        );
+    }
+    if remote_access_status.is_remote_access_enabled {
+        return DoctorOutcome::build_warning_outcome(
+            format!(
+                "remote access is on, and nothing is listening on {remote_listen_address}: the \
+                 router could not open it when it started"
+            ),
+            "run: koshi share open",
+        );
+    }
+    DoctorOutcome::build_success_outcome(format!(
+        "remote access is off, so nothing is listening; `koshi share open` opens \
+         {remote_listen_address}"
+    ))
+}
+
 fn check_remote_connections(doctor_context: &DoctorContext) -> DoctorOutcome {
-    match &doctor_context.router_connections {
-        RemoteConnections::Answered(remote_connection_count) => {
+    match &doctor_context.router_remote_status {
+        RunningRouterRemoteStatus::Answered(remote_access_status) => {
             DoctorOutcome::build_success_outcome(format!(
                 "this machine holds {} from another machine",
                 format_counted_noun(
-                    *remote_connection_count,
+                    remote_access_status.remote_connection_count,
                     "open connection",
                     "open connections"
                 )
             ))
         }
-        RemoteConnections::NotRunning => DoctorOutcome::build_success_outcome(
+        RunningRouterRemoteStatus::NotRunning => DoctorOutcome::build_success_outcome(
             "no koshi is running, so nothing from another machine is connected".to_string(),
         ),
-        RemoteConnections::OlderBuild
-        | RemoteConnections::PreviousRelease
-        | RemoteConnections::NoAnswer { .. } => DoctorOutcome::build_success_outcome(
+        RunningRouterRemoteStatus::OlderBuild
+        | RunningRouterRemoteStatus::PreviousRelease
+        | RunningRouterRemoteStatus::NoAnswer { .. } => DoctorOutcome::build_success_outcome(
             "the running router did not answer, so this is not known".to_string(),
         ),
     }

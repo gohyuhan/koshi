@@ -16,7 +16,7 @@ This reads `profile/dev.kdl` instead of opening one shell pane.
 
 **If anything is wrong, the whole profile is dropped.** Koshi starts one shell
 instead. A missing named profile uses the same fallback. `koshi config check`
-validates every saved profile.
+validates every saved profile and names each problem with its line and column.
 
 ## Structure
 
@@ -39,7 +39,7 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | `command "prog" "arg"…` | The program to run and its arguments. Omit for the default shell. | ≥ 0.1.0 |
 | `cwd "/path"` | Working directory, used as written. Use an absolute path; `~` is not expanded. | ≥ 0.1.0 |
 | `env "NAME" "VALUE"` | An environment variable for this pane (repeatable). | ≥ 0.1.0 |
-| `focus` | Start with this pane focused. One per tab. | ≥ 0.1.0 |
+| `focus` | The session's first terminal starts with this pane focused. One per tab. | ≥ 0.1.0 |
 
 Omitting `cwd` inherits the directory where koshi was launched. Example:
 launch from `/home/me/proj` + `pane` results in that pane starting in
@@ -49,6 +49,8 @@ launch from `/home/me/proj` + `pane` results in that pane starting in
 
 Each child of a split may carry sizing. Without any, children share the space
 equally. `size` and `weight` are the same slot: give one of the two, once.
+Every sizing node anywhere else, such as on a stack member or on the one node
+of a `tab`, is a problem of its own.
 
 | Key | Value / type | Since |
 |---|---|---|
@@ -89,9 +91,18 @@ tab {
 
 ## Focus
 
-`focus` inside a `pane` marks the pane that starts focused (one per tab).
-`focus` as a direct child of a `tab` marks the tab that starts active (one per
-profile). Without either, the first pane and the first tab start focused.
+`focus` inside a `pane` marks the pane that the session's first terminal
+focuses in that tab (one per tab). `focus` as a direct child of a `tab` marks
+the tab that the session's first terminal opens on (one per profile). Without
+either, the first terminal opens on the first tab, and focuses the first pane
+that shows in each tab. In a `stack`, that pane is the `expanded` member.
+
+Every terminal that attaches after the first one opens on the first tab,
+focused on its first pane that shows. The markers name where the first
+terminal opens, not a setting the session keeps. Example: with `tab { pane }`
+and then `tab { focus; pane }`, the terminal that runs `koshi --profile` opens
+on the second tab, and a `koshi attach` from another terminal opens on the
+first tab.
 
 ## Full example
 
@@ -110,7 +121,7 @@ tab {
             env "RUST_LOG" "debug"          // one env var...
             env "NO_COLOR" "1"              // ...repeat for more
             size "60%"                      // fixed share of the split
-            focus                           // this pane starts focused
+            focus                           // the first terminal focuses this pane
         }
         vertical {
             size "40%"
@@ -130,7 +141,7 @@ tab {
 }
 
 tab {
-    focus                                    // this tab starts active
+    focus                                    // the first terminal opens on this tab
 
     // a stack: members share one rectangle; `expanded` is the open one
     stack {

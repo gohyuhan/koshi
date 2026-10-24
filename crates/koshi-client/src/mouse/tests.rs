@@ -5,7 +5,9 @@
 //! highlighting text; the run of clicks that picks a highlight's shape; the
 //! capture that keeps a gesture with the pane its press landed on; plain pane
 //! drags swap, Shift-pane drags insert, edge scroll a held text drag drives on
-//! the clock; and the gestures a new frame ends. For floating panes: the
+//! the clock; the top border hover that shows a tiled pane's handle, the
+//! handle cells that mark it, the panes that show none, and the press, drag,
+//! release or wheel tick that hides it; and the gestures a new frame ends. For floating panes: the
 //! grab-handle move, the pin toggle, minimize and close buttons, a corner
 //! resize, floating pane move mode, and dock/undock mode.
 //!
@@ -30,16 +32,17 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, FloatingPaneSlot, MousePane, PaneSlot, PlacementSnapshot,
-    PlacementTabSnapshot, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, FloatingPaneSlot, LinkStatus, MousePane, PaneSlot,
+    PlacementSnapshot, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::input::KeyOutcome;
 use crate::tests::{
-    build_core_bound_action, build_expected_confirm_placement, build_test_client,
-    build_test_placement_snapshot, float_placement_source_pane, get_source_tab_snapshot_mut,
-    hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
+    apply_frame_keeping_view, build_core_bound_action, build_expected_confirm_placement,
+    build_test_client, build_test_placement_snapshot, float_placement_source_pane,
+    get_source_tab_snapshot_mut, hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{
     Client, DockUndockMode, PlacementDrag, PlacementMode, PlacementModeLifetime, TiledPaneSelection,
@@ -2838,7 +2841,7 @@ fn dragging_a_pane_focuses_the_source_and_hides_pointer_chrome() {
     assert_eq!(client.get_placement_source_pane_id(), Some(dragged_pane_id));
     let viewer_chrome = client.build_viewer_chrome(active_tab_id);
     assert_eq!(viewer_chrome.hovered_pane_id, None);
-    assert_eq!(viewer_chrome.placement_handle_pane_id, None);
+    assert_eq!(viewer_chrome.placement_handle_hover, None);
 }
 
 #[test]
@@ -2853,7 +2856,7 @@ fn shifted_handle_press_in_normal_mode_does_not_start_pane_placement() {
         Some(pane_id),
         vec![active_tab_id],
     );
-    client.placement_handle_pane_id = Some(pane_id);
+    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
@@ -2900,7 +2903,7 @@ fn plain_handle_press_in_normal_mode_starts_pane_placement() {
         Some(pane_id),
         vec![active_tab_id],
     );
-    client.placement_handle_pane_id = Some(pane_id);
+    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
@@ -2928,6 +2931,239 @@ fn plain_handle_press_in_normal_mode_starts_pane_placement() {
         })
     );
     assert!(client.is_placement_mode_active());
+}
+
+#[test]
+fn a_tiled_handle_drag_while_locked_opens_pane_placement_and_keeps_the_client_locked() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    client.set_frame_view(
+        active_tab_id,
+        Some(pane_id),
+        Some(pane_id),
+        vec![active_tab_id],
+    );
+    client.set_lock_mode(LockMode::Locked);
+    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
+    let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    let handle_position = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
+        HitRegion::PlacementHandle { pane_id }
+    );
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(handle_position),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::FocusPane { pane_id })
+    );
+    assert_eq!(
+        client.find_placement_preview_target(),
+        Some(PanePlacementPreviewTarget {
+            source_pane_id: pane_id,
+            destination_tab_id: active_tab_id,
+        })
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_release(handle_position),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.find_placement_preview_target(), None);
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+}
+
+/// Drag the upper pane `source_pane_id` of the two-pane `mouse_frame` onto the
+/// lower pane `target_pane_id` and release it there. The drag starts with a
+/// left press at `press_position` that returns `expected_press_action`, and
+/// right after the press `client` holds the preview of the tab
+/// `[source_pane_id / target_pane_id]`. Returns the id of the swap the release
+/// confirmed.
+fn drop_upper_pane_on_lower_pane(
+    client: &mut Client,
+    mouse_frame: &MouseFrame,
+    source_pane_id: PaneId,
+    target_pane_id: PaneId,
+    press_position: Point,
+    expected_press_action: PlacementInputAction,
+) -> CommandId {
+    let current_time = Instant::now();
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(press_position),
+            mouse_frame,
+            current_time,
+        ),
+        Some(expected_press_action)
+    );
+    hold_placement_snapshot(
+        client,
+        build_mouse_placement_snapshot(
+            mouse_frame,
+            source_pane_id,
+            build_two_band_layout_tree(source_pane_id, target_pane_id),
+        ),
+    );
+    // Screen `(20, 16)` is inside the lower pane's content.
+    let target_position = Point {
+        column: 20,
+        row: 16,
+    };
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(target_position),
+            mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(target_position),
+        mouse_frame,
+        current_time,
+    );
+    assert_eq!(
+        release_action,
+        Some(build_expected_confirm_placement(
+            client,
+            source_pane_id,
+            TiledPlacementTarget::Swap { target_pane_id },
+        ))
+    );
+    client
+        .get_pending_placement_command_id()
+        .expect("the release confirmed a placement")
+}
+
+#[test]
+fn a_handle_drag_drop_the_session_accepts_leaves_the_client_in_its_base_mode() {
+    let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('e'));
+    for base_lock_mode in [LockMode::Normal, LockMode::Locked] {
+        let [source_pane_id, target_pane_id] = [PaneId::new(), PaneId::new()];
+        let mouse_frame = build_mouse_frame(
+            &[
+                build_plain_mouse_pane(source_pane_id),
+                build_plain_mouse_pane(target_pane_id),
+            ],
+            Some(source_pane_id),
+        );
+        let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+        let mut client = build_test_client();
+        assert!(
+            client
+                .client_config
+                .should_stay_in_pane_placement_mode_after_placement
+        );
+        client.set_frame_view(
+            active_tab_id,
+            Some(source_pane_id),
+            Some(source_pane_id),
+            vec![active_tab_id],
+        );
+        client.set_lock_mode(base_lock_mode);
+        client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+            pane_id: source_pane_id,
+        });
+        let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+        let handle_position = Point { column: 1, row: 1 };
+        assert_eq!(
+            resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
+            HitRegion::PlacementHandle {
+                pane_id: source_pane_id
+            }
+        );
+
+        let command_id = drop_upper_pane_on_lower_pane(
+            &mut client,
+            &mouse_frame,
+            source_pane_id,
+            target_pane_id,
+            handle_position,
+            PlacementInputAction::FocusPane {
+                pane_id: source_pane_id,
+            },
+        );
+        assert_eq!(client.get_active_input_mode(), base_lock_mode);
+        apply_frame_keeping_view(&mut client, Some(CommandId::new()), None);
+        assert!(client.is_pending_placement_command(command_id));
+        assert_eq!(client.get_active_input_mode(), base_lock_mode);
+
+        apply_frame_keeping_view(&mut client, Some(command_id), None);
+
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "base mode {base_lock_mode:?}"
+        );
+        assert_eq!(client.get_lock_mode(), base_lock_mode);
+        assert_eq!(client.get_active_input_mode(), base_lock_mode);
+        assert_eq!(
+            client.resolve_key(typed_key_chord, Instant::now()),
+            KeyOutcome::PassThrough(typed_key_chord)
+        );
+    }
+}
+
+#[test]
+fn a_mouse_drop_the_session_accepts_keeps_pane_placement_mode_opened_by_a_key() {
+    let [source_pane_id, target_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(target_pane_id),
+        ],
+        Some(source_pane_id),
+    );
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    assert!(
+        client
+            .client_config
+            .should_stay_in_pane_placement_mode_after_placement
+    );
+    client.set_frame_view(
+        active_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![active_tab_id],
+    );
+    assert!(client.begin_placement_mode());
+
+    // Screen `(20, 5)` is inside the upper pane's content.
+    let command_id = drop_upper_pane_on_lower_pane(
+        &mut client,
+        &mouse_frame,
+        source_pane_id,
+        target_pane_id,
+        Point { column: 20, row: 5 },
+        PlacementInputAction::Consumed,
+    );
+    apply_frame_keeping_view(&mut client, Some(command_id), None);
+
+    assert!(client.is_placement_mode_active());
+    assert_eq!(
+        client.placement_state.placement_mode_lifetime,
+        PlacementModeLifetime::UntilCancelled
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+    assert_eq!(client.get_placement_target(), None);
+    assert!(!client.is_placement_confirmation_pending());
+    let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('e'));
+    assert_eq!(
+        client.resolve_key(typed_key_chord, Instant::now()),
+        KeyOutcome::Discard
+    );
 }
 
 #[test]
@@ -4102,6 +4338,120 @@ fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position(
             placement_target
         ))
     );
+}
+
+#[test]
+fn a_handle_drag_dropped_on_a_pane_of_a_hovered_tab_returns_to_the_base_mode_once_accepted() {
+    let source_pane_id = PaneId::new();
+    let destination_first_pane_id = PaneId::new();
+    let destination_second_pane_id = PaneId::new();
+    let source_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(PaneId::new()),
+        ],
+        Some(source_pane_id),
+    );
+    let source_tab_id = source_frame.client_snapshot.active_tab_id;
+    let destination_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(destination_first_pane_id),
+            build_plain_mouse_pane(destination_second_pane_id),
+        ],
+        Some(destination_first_pane_id),
+    );
+    let destination_tab_id = destination_frame.client_snapshot.active_tab_id;
+    let placement_snapshot = build_cross_tab_mouse_placement_snapshot(
+        &source_frame,
+        source_pane_id,
+        destination_tab_id,
+        [destination_first_pane_id, destination_second_pane_id],
+    );
+    let destination_point = get_content_cell(&destination_frame, 1);
+    let hover_started_at = Instant::now();
+    let mut client = build_test_client();
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![source_tab_id, destination_tab_id],
+    );
+    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+        pane_id: source_pane_id,
+    });
+    let source_frame = repaint_mouse_frame(&client, &source_frame);
+    let handle_position = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(source_frame.build_frame_layout(), handle_position),
+        HitRegion::PlacementHandle {
+            pane_id: source_pane_id
+        }
+    );
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(handle_position),
+            &source_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::FocusPane {
+            pane_id: source_pane_id
+        })
+    );
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(Point { column: 2, row: 0 }),
+            &source_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    client.update_placement_tab_hover(Some(destination_tab_id), hover_started_at);
+    client.expire_placement_tab_hover(hover_started_at + crate::PLACEMENT_TAB_HOVER_DELAY_DURATION);
+    assert_eq!(
+        client.find_placement_preview_target(),
+        Some(PanePlacementPreviewTarget {
+            source_pane_id,
+            destination_tab_id,
+        })
+    );
+    hold_placement_snapshot(&mut client, placement_snapshot);
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_drag(destination_point),
+            &destination_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    let placement_target = TiledPlacementTarget::Swap {
+        target_pane_id: destination_second_pane_id,
+    };
+    assert_eq!(
+        client.get_placement_target().cloned(),
+        Some(placement_target.clone())
+    );
+    let release_action = client.handle_placement_mouse(
+        build_left_mouse_release(destination_point),
+        &destination_frame,
+        hover_started_at,
+    );
+    assert_eq!(
+        release_action,
+        Some(build_expected_confirm_placement(
+            &client,
+            source_pane_id,
+            placement_target
+        ))
+    );
+    let command_id = client
+        .get_pending_placement_command_id()
+        .expect("the release confirmed a placement");
+
+    apply_frame_keeping_view(&mut client, Some(command_id), None);
+
+    assert_eq!(client.placement_state.placement_mode, None);
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
 }
 
 #[test]
@@ -6619,7 +6969,7 @@ fn a_floating_panes_titlebar_focuses_it_also_when_the_painted_frame_focuses_it()
 }
 
 #[test]
-fn hovering_a_floating_panes_grab_handle_marks_its_handle() {
+fn hovering_a_floating_panes_grab_handle_marks_its_handle_and_its_top_border_shows_none() {
     let floating_pane_id = PaneId::new();
     let mouse_frame = build_floating_mouse_frame(
         build_plain_mouse_pane(PaneId::new()),
@@ -6639,19 +6989,821 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle() {
     assert_eq!(
         client
             .build_viewer_chrome(active_tab_id)
-            .placement_handle_pane_id,
-        Some(floating_pane_id)
+            .placement_handle_hover,
+        Some(PlacementHandleHover::FloatingHandle {
+            pane_id: floating_pane_id,
+            is_pinned: false,
+        })
     );
-    client.handle_mouse(
-        build_mouse_motion(Point { column: 20, row: 6 }),
+    for (screen_point, time_offset_seconds) in [
+        (Point { column: 20, row: 6 }, 1),
+        (Point { column: 20, row: 5 }, 2),
+    ] {
+        client.handle_mouse(
+            build_mouse_motion(screen_point),
+            &mouse_frame,
+            advance_time_by_seconds(current_time, time_offset_seconds),
+        );
+        assert_eq!(
+            client
+                .build_viewer_chrome(active_tab_id)
+                .placement_handle_hover,
+            None,
+            "{screen_point:?}"
+        );
+    }
+}
+
+/// The placement handle hover `client` shows after each of `mouse_inputs`
+/// over `mouse_frame`, in order. The frame is painted again with `client`'s
+/// chrome after each event, as the attach loop paints it.
+fn list_placement_handle_hovers(
+    client: &mut Client,
+    mouse_frame: &MouseFrame,
+    mouse_inputs: &[MouseInput],
+) -> Vec<Option<PlacementHandleHover>> {
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);
+    let mut placement_handle_hovers = Vec::new();
+    for mouse_input in mouse_inputs {
+        client.handle_mouse(*mouse_input, &painted_mouse_frame, Instant::now());
+        placement_handle_hovers.push(
+            client
+                .build_viewer_chrome(active_tab_id)
+                .placement_handle_hover,
+        );
+        painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);
+    }
+    placement_handle_hovers
+}
+
+/// One pointer motion to each `(column, row)` cell of `screen_cells`.
+fn build_mouse_motions(screen_cells: &[(u16, u16)]) -> Vec<MouseInput> {
+    screen_cells
+        .iter()
+        .map(|&(column, row)| build_mouse_motion(Point { column, row }))
+        .collect()
+}
+
+/// A visible tiled pane slot whose content is `outer_rect` inset by its
+/// one-cell border.
+fn build_visible_pane_slot(pane_id: PaneId, outer_rect: Rect) -> PaneSlot {
+    PaneSlot {
+        pane_id,
+        outer_rect,
+        content_rect: Some(outer_rect.compute_inner_with_border()),
+        is_visible: true,
+        is_suppressed: false,
+    }
+}
+
+#[test]
+fn moving_along_a_tiled_top_border_shows_the_handle_and_marks_it_only_on_its_cells() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let mut client = build_test_client();
+    let top_border = Some(PlacementHandleHover::TiledTopBorder { pane_id });
+    let handle = Some(PlacementHandleHover::TiledHandle { pane_id });
+
+    // The pane's 80-column box starts at screen (0, 1): the title, the handle,
+    // the left corner, the last cell before the right corner, the right
+    // corner, the content, the top border again, and the tabline row.
+    let placement_handle_hovers = list_placement_handle_hovers(
+        &mut client,
         &mouse_frame,
-        advance_time_by_seconds(current_time, 1),
+        &build_mouse_motions(&[
+            (10, 1),
+            (4, 1),
+            (3, 1),
+            (2, 1),
+            (1, 1),
+            (0, 1),
+            (78, 1),
+            (79, 1),
+            (10, 2),
+            (10, 1),
+            (10, 0),
+        ]),
+    );
+
+    assert_eq!(
+        placement_handle_hovers,
+        [
+            top_border, top_border, handle, handle, handle, None, top_border, None, None,
+            top_border, None
+        ]
+    );
+}
+
+#[test]
+fn moving_between_two_side_by_side_top_borders_shows_only_the_handle_under_the_pointer() {
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
+    let mut mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(left_pane_id),
+            build_plain_mouse_pane(right_pane_id),
+        ],
+        Some(left_pane_id),
+    );
+    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots = vec![
+        build_visible_pane_slot(left_pane_id, build_cell_rect(0, 0, 40, 22)),
+        build_visible_pane_slot(right_pane_id, build_cell_rect(40, 0, 40, 22)),
+    ];
+    let mut client = build_test_client();
+
+    // Both top borders are on screen row 1; the corners meet at columns 39
+    // and 40.
+    let placement_handle_hovers = list_placement_handle_hovers(
+        &mut client,
+        &mouse_frame,
+        &build_mouse_motions(&[
+            (30, 1),
+            (38, 1),
+            (39, 1),
+            (40, 1),
+            (41, 1),
+            (50, 1),
+            (30, 1),
+        ]),
+    );
+
+    assert_eq!(
+        placement_handle_hovers,
+        [
+            Some(PlacementHandleHover::TiledTopBorder {
+                pane_id: left_pane_id
+            }),
+            Some(PlacementHandleHover::TiledTopBorder {
+                pane_id: left_pane_id
+            }),
+            None,
+            None,
+            Some(PlacementHandleHover::TiledHandle {
+                pane_id: right_pane_id
+            }),
+            Some(PlacementHandleHover::TiledTopBorder {
+                pane_id: right_pane_id
+            }),
+            Some(PlacementHandleHover::TiledTopBorder {
+                pane_id: left_pane_id
+            }),
+        ]
+    );
+}
+
+#[test]
+fn a_collapsed_stack_header_and_a_pane_four_columns_wide_show_no_handle() {
+    let collapsed_pane_id = PaneId::new();
+    let open_pane_id = PaneId::new();
+    let narrow_pane_id = PaneId::new();
+    let mut mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(collapsed_pane_id),
+            build_plain_mouse_pane(open_pane_id),
+            build_plain_mouse_pane(narrow_pane_id),
+        ],
+        Some(open_pane_id),
+    );
+    let header_rect = build_cell_rect(0, 0, 76, 1);
+    let active_tab_snapshot = &mut mouse_frame.session_snapshot.active_tab_snapshot;
+    active_tab_snapshot.pane_slots = vec![
+        PaneSlot {
+            pane_id: collapsed_pane_id,
+            outer_rect: header_rect,
+            content_rect: None,
+            is_visible: false,
+            is_suppressed: false,
+        },
+        build_visible_pane_slot(open_pane_id, build_cell_rect(0, 1, 76, 21)),
+        build_visible_pane_slot(narrow_pane_id, build_cell_rect(76, 0, 4, 22)),
+    ];
+    active_tab_snapshot.stack_headers = vec![StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect,
+        member_index: 0,
+        member_count: 2,
+    }];
+    let mut client = build_test_client();
+
+    // Screen row 1 is the header and the narrow pane's top border; screen
+    // row 2 is the open member's top border.
+    let placement_handle_hovers = list_placement_handle_hovers(
+        &mut client,
+        &mouse_frame,
+        &build_mouse_motions(&[(10, 1), (2, 1), (10, 2), (2, 2), (77, 1), (78, 1)]),
+    );
+
+    assert_eq!(
+        placement_handle_hovers,
+        [
+            None,
+            None,
+            Some(PlacementHandleHover::TiledTopBorder {
+                pane_id: open_pane_id
+            }),
+            Some(PlacementHandleHover::TiledHandle {
+                pane_id: open_pane_id
+            }),
+            None,
+            None,
+        ]
+    );
+}
+
+#[test]
+fn a_press_a_drag_a_release_or_a_wheel_tick_hides_a_shown_tiled_handle_until_the_next_motion() {
+    let upper_pane_id = PaneId::new();
+    let lower_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(upper_pane_id),
+    );
+    let mut client = build_test_client();
+    let lower_top_border = Some(PlacementHandleHover::TiledTopBorder {
+        pane_id: lower_pane_id,
+    });
+
+    // The lower pane's top border is screen row 12, the divider a border
+    // drag moves.
+    let placement_handle_hovers = list_placement_handle_hovers(
+        &mut client,
+        &mouse_frame,
+        &[
+            build_mouse_motion(Point {
+                column: 10,
+                row: 12,
+            }),
+            build_left_mouse_press(Point {
+                column: 10,
+                row: 12,
+            }),
+            build_left_mouse_drag(Point {
+                column: 20,
+                row: 12,
+            }),
+            build_left_mouse_release(Point {
+                column: 20,
+                row: 12,
+            }),
+            build_mouse_motion(Point {
+                column: 20,
+                row: 12,
+            }),
+            build_mouse_wheel(
+                ScrollDirection::Up,
+                Point {
+                    column: 20,
+                    row: 12,
+                },
+            ),
+            build_mouse_motion(Point {
+                column: 30,
+                row: 12,
+            }),
+        ],
+    );
+
+    assert_eq!(
+        placement_handle_hovers,
+        [
+            lower_top_border,
+            None,
+            None,
+            None,
+            lower_top_border,
+            None,
+            lower_top_border
+        ]
+    );
+}
+
+/// The placement handle hovers `client` shows after pointer motions to
+/// `(60, 1)` and `(2, 1)` on the top border of the tiled pane that
+/// [`build_floating_mouse_frame`] draws at `(0, 1)`, and the region that the
+/// frame painted after them hit-tests at the handle cell `(2, 1)`. Column `60`
+/// is right of the floating pane, which covers columns `10` to `49`.
+fn list_tiled_top_border_hovers_and_handle_cell_region(
+    client: &mut Client,
+    mouse_frame: &MouseFrame,
+) -> (Vec<Option<PlacementHandleHover>>, HitRegion) {
+    let placement_handle_hovers = list_placement_handle_hovers(
+        client,
+        mouse_frame,
+        &build_mouse_motions(&[(60, 1), (2, 1)]),
+    );
+    let handle_cell_region = resolve_hit_region(
+        repaint_mouse_frame(client, mouse_frame).build_frame_layout(),
+        Point { column: 2, row: 1 },
+    );
+    (placement_handle_hovers, handle_cell_region)
+}
+
+/// The answer of [`list_tiled_top_border_hovers_and_handle_cell_region`] while
+/// the tiled pane `tiled_pane_id` shows its handle.
+fn build_shown_tiled_handle_answer(
+    tiled_pane_id: PaneId,
+) -> (Vec<Option<PlacementHandleHover>>, HitRegion) {
+    (
+        vec![
+            Some(PlacementHandleHover::TiledTopBorder {
+                pane_id: tiled_pane_id,
+            }),
+            Some(PlacementHandleHover::TiledHandle {
+                pane_id: tiled_pane_id,
+            }),
+        ],
+        HitRegion::PlacementHandle {
+            pane_id: tiled_pane_id,
+        },
+    )
+}
+
+/// The answer of [`list_tiled_top_border_hovers_and_handle_cell_region`] while
+/// the tiled pane `tiled_pane_id` shows no handle: no hover, and the handle
+/// cell is top border.
+fn build_hidden_tiled_handle_answer(
+    tiled_pane_id: PaneId,
+) -> (Vec<Option<PlacementHandleHover>>, HitRegion) {
+    (
+        vec![None, None],
+        HitRegion::PaneBorder {
+            pane_id: tiled_pane_id,
+            side: Direction::Up,
+            corner_horizontal_side: None,
+        },
+    )
+}
+
+/// A client that took `mouse_frame` in, with no mode on.
+fn build_viewing_client(mouse_frame: &MouseFrame) -> Client {
+    let mut client = build_test_client();
+    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(mouse_frame));
+    client.drop_gestures_the_frame_ended(mouse_frame);
+    client
+}
+
+#[test]
+fn dock_undock_mode_shows_the_tiled_handle_whose_cells_start_the_undock_drag_until_it_waits() {
+    let tiled_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(PaneId::new()),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame)),
+        PlacementInputAction::Consumed
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
+    assert_eq!(
+        list_tiled_top_border_hovers_and_handle_cell_region(&mut client, &mouse_frame),
+        build_shown_tiled_handle_answer(tiled_pane_id)
+    );
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    let handle_position = Point { column: 2, row: 1 };
+    let drag_position = Point { column: 3, row: 1 };
+    let current_time = Instant::now();
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(handle_position),
+            &painted_mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
     );
     assert_eq!(
-        client
-            .build_viewer_chrome(active_tab_id)
-            .placement_handle_pane_id,
+        client.left_button_gesture,
+        Some(LeftButtonGesture::FloatingPaneMove(
+            FloatingPaneHandleDrag {
+                pane_id: tiled_pane_id,
+                top_left_cell: Point { column: 0, row: 0 },
+                press_position: handle_position,
+                press_top_left_cell: Point { column: 0, row: 0 },
+            }
+        ))
+    );
+    let drag_action = client.handle_placement_mouse(
+        build_left_mouse_drag(drag_position),
+        &painted_mouse_frame,
+        current_time,
+    );
+    let Some(PlacementInputAction::SubmitCommand {
+        command_id,
+        command,
+    }) = drag_action
+    else {
+        panic!("the first move of the drag sends the undock, got {drag_action:?}");
+    };
+    assert_eq!(
+        command,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: Some(tiled_pane_id),
+            placement_target: PanePlacementTarget::Floating {
+                top_left_cell: None,
+            },
+        })
+    );
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_release(drag_position),
+            &painted_mouse_frame,
+            current_time,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+
+    // While the undock waits for the session, no tiled pane shows its handle.
+    assert_eq!(
+        list_tiled_top_border_hovers_and_handle_cell_region(&mut client, &mouse_frame),
+        build_hidden_tiled_handle_answer(tiled_pane_id)
+    );
+    assert!(client.reject_undock_command(command_id));
+    assert_eq!(
+        repaint_mouse_frame(&client, &mouse_frame)
+            .viewer_chrome
+            .placement_handle_hover,
+        Some(PlacementHandleHover::TiledHandle {
+            pane_id: tiled_pane_id,
+        })
+    );
+}
+
+#[test]
+fn pane_placement_mode_shows_no_tiled_handle() {
+    let tiled_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(PaneId::new()),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    assert!(client.begin_placement_mode());
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
+
+    assert_eq!(
+        list_tiled_top_border_hovers_and_handle_cell_region(&mut client, &mouse_frame),
+        build_hidden_tiled_handle_answer(tiled_pane_id)
+    );
+}
+
+#[test]
+fn the_move_chooser_shows_both_handles_and_a_press_on_either_starts_a_drag() {
+    let [tiled_pane_id, floating_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    client.apply_client_action(ClientActionKind::BeginPanePlacement, Some(&mouse_frame));
+    assert_eq!(client.get_active_input_mode(), LockMode::PaneMoveChoice);
+
+    assert_eq!(
+        list_tiled_top_border_hovers_and_handle_cell_region(&mut client, &mouse_frame),
+        build_shown_tiled_handle_answer(tiled_pane_id)
+    );
+    assert_eq!(
+        find_grab_handle_hover(&mut client, &mouse_frame),
+        Some(PlacementHandleHover::FloatingHandle {
+            pane_id: floating_pane_id,
+            is_pinned: false,
+        })
+    );
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(GRAB_HANDLE_POSITION),
+            &painted_mouse_frame,
+            Instant::now(),
+        ),
         None
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_press(GRAB_HANDLE_POSITION),
+            &painted_mouse_frame,
+            Instant::now(),
+        ),
+        vec![build_focus_pane_action(
+            client.get_client_id(),
+            floating_pane_id
+        )]
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        build_grab_handle_press_gesture(floating_pane_id)
+    );
+}
+
+#[test]
+fn a_viewer_with_no_link_shows_no_tiled_handle_until_it_is_linked_again() {
+    let tiled_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(PaneId::new()),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    assert_eq!(
+        list_tiled_top_border_hovers_and_handle_cell_region(&mut client, &mouse_frame),
+        build_shown_tiled_handle_answer(tiled_pane_id)
+    );
+
+    for link_status in [
+        LinkStatus::AwaitingRestartedSession,
+        LinkStatus::Redialing(Reconnecting {
+            attempt: 1,
+            retry_in_seconds: Some(5),
+        }),
+    ] {
+        client.set_link_status(link_status);
+        let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+        assert_eq!(
+            painted_mouse_frame.viewer_chrome.placement_handle_hover, None,
+            "{link_status:?}"
+        );
+        assert_eq!(
+            resolve_hit_region(
+                painted_mouse_frame.build_frame_layout(),
+                Point { column: 2, row: 1 },
+            ),
+            build_hidden_tiled_handle_answer(tiled_pane_id).1,
+            "{link_status:?}"
+        );
+    }
+
+    client.set_link_status(LinkStatus::Linked);
+    assert_eq!(
+        repaint_mouse_frame(&client, &mouse_frame)
+            .viewer_chrome
+            .placement_handle_hover,
+        Some(PlacementHandleHover::TiledHandle {
+            pane_id: tiled_pane_id,
+        })
+    );
+}
+
+/// The placement handle hover `client` shows after a pointer motion to
+/// `(13, 6)`, the grab handle `⣿⣿` of the floating pane that
+/// [`build_floating_mouse_frame`] draws at pane-area cell `(10, 4)`.
+fn find_grab_handle_hover(
+    client: &mut Client,
+    mouse_frame: &MouseFrame,
+) -> Option<PlacementHandleHover> {
+    list_placement_handle_hovers(client, mouse_frame, &build_mouse_motions(&[(13, 6)]))[0]
+}
+
+/// The screen cell of the grab handle that [`find_grab_handle_hover`] moves to.
+const GRAB_HANDLE_POSITION: Point = Point { column: 13, row: 6 };
+
+/// The grab-handle drag a left press on [`GRAB_HANDLE_POSITION`] starts for
+/// floating pane `floating_pane_id`, drawn at pane-area cell `(10, 4)`.
+fn build_grab_handle_press_gesture(floating_pane_id: PaneId) -> Option<LeftButtonGesture> {
+    Some(LeftButtonGesture::FloatingPaneMove(
+        FloatingPaneHandleDrag {
+            pane_id: floating_pane_id,
+            top_left_cell: FLOATING_PANE_OUTER_RECT.origin,
+            press_position: GRAB_HANDLE_POSITION,
+            press_top_left_cell: FLOATING_PANE_OUTER_RECT.origin,
+        },
+    ))
+}
+
+#[test]
+fn a_pinned_floating_pane_shows_its_grab_handle_hover_only_in_dock_undock_mode() {
+    let [tiled_pane_id, floating_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        true,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    assert_eq!(find_grab_handle_hover(&mut client, &mouse_frame), None);
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(GRAB_HANDLE_POSITION),
+            &painted_mouse_frame,
+            Instant::now(),
+        ),
+        None
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_press(GRAB_HANDLE_POSITION),
+            &painted_mouse_frame,
+            Instant::now(),
+        ),
+        vec![build_focus_pane_action(
+            client.get_client_id(),
+            floating_pane_id
+        )]
+    );
+    assert_eq!(client.left_button_gesture, None);
+    client.handle_mouse(
+        build_left_mouse_release(GRAB_HANDLE_POSITION),
+        &painted_mouse_frame,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame)),
+        PlacementInputAction::Consumed
+    );
+    assert_eq!(
+        find_grab_handle_hover(&mut client, &mouse_frame),
+        Some(PlacementHandleHover::FloatingHandle {
+            pane_id: floating_pane_id,
+            is_pinned: true,
+        })
+    );
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(GRAB_HANDLE_POSITION),
+            &painted_mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        client.left_button_gesture,
+        build_grab_handle_press_gesture(floating_pane_id)
+    );
+}
+
+#[test]
+fn a_sent_floating_pane_move_hides_the_grab_handle_hover_until_the_session_answers() {
+    let [tiled_pane_id, floating_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    let unpinned_grab_handle_hover = Some(PlacementHandleHover::FloatingHandle {
+        pane_id: floating_pane_id,
+        is_pinned: false,
+    });
+    assert_eq!(
+        find_grab_handle_hover(&mut client, &mouse_frame),
+        unpinned_grab_handle_hover
+    );
+
+    client.sent_floating_pane_move = Some(SentFloatingPaneMove {
+        pane_id: floating_pane_id,
+        top_left_cell: FLOATING_PANE_OUTER_RECT.origin,
+        command_id: CommandId::new(),
+    });
+    assert_eq!(find_grab_handle_hover(&mut client, &mouse_frame), None);
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    client.handle_mouse(
+        build_left_mouse_press(GRAB_HANDLE_POSITION),
+        &painted_mouse_frame,
+        Instant::now(),
+    );
+    assert_eq!(client.left_button_gesture, None);
+
+    client.sent_floating_pane_move = None;
+    assert_eq!(
+        repaint_mouse_frame(&client, &mouse_frame)
+            .viewer_chrome
+            .placement_handle_hover,
+        unpinned_grab_handle_hover
+    );
+}
+
+#[test]
+fn floating_pane_move_mode_shows_the_grab_handle_hover_until_its_move_waits() {
+    let [tiled_pane_id, floating_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_floating_pane_move_client(&mouse_frame);
+    assert_eq!(client.get_active_input_mode(), LockMode::FloatingPaneMove);
+    assert_eq!(
+        find_grab_handle_hover(&mut client, &mouse_frame),
+        Some(PlacementHandleHover::FloatingHandle {
+            pane_id: floating_pane_id,
+            is_pinned: false,
+        })
+    );
+
+    client.pane_move_mode =
+        build_floating_pane_move_mode(floating_pane_id, None, Some(CommandId::new()));
+    assert_eq!(find_grab_handle_hover(&mut client, &mouse_frame), None);
+    client.handle_mouse(
+        build_left_mouse_press(GRAB_HANDLE_POSITION),
+        &repaint_mouse_frame(&client, &mouse_frame),
+        Instant::now(),
+    );
+    assert_eq!(client.left_button_gesture, None);
+}
+
+#[test]
+fn a_dock_undock_wait_or_a_link_drop_hides_the_grab_handle_hover() {
+    let [tiled_pane_id, floating_pane_id] = [PaneId::new(), PaneId::new()];
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let mut client = build_viewing_client(&mouse_frame);
+    let unpinned_grab_handle_hover = Some(PlacementHandleHover::FloatingHandle {
+        pane_id: floating_pane_id,
+        is_pinned: false,
+    });
+    for link_status in [
+        LinkStatus::AwaitingRestartedSession,
+        LinkStatus::Redialing(Reconnecting {
+            attempt: 1,
+            retry_in_seconds: Some(5),
+        }),
+    ] {
+        assert_eq!(
+            find_grab_handle_hover(&mut client, &mouse_frame),
+            unpinned_grab_handle_hover
+        );
+        client.set_link_status(link_status);
+        assert_eq!(
+            repaint_mouse_frame(&client, &mouse_frame)
+                .viewer_chrome
+                .placement_handle_hover,
+            None,
+            "{link_status:?}"
+        );
+        client.set_link_status(LinkStatus::Linked);
+    }
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame)),
+        PlacementInputAction::Consumed
+    );
+    assert_eq!(
+        find_grab_handle_hover(&mut client, &mouse_frame),
+        unpinned_grab_handle_hover
+    );
+    let PlacementInputAction::SubmitCommand { command_id, .. } =
+        client.submit_undock_command(tiled_pane_id)
+    else {
+        panic!("an undock sends its command");
+    };
+    assert_eq!(find_grab_handle_hover(&mut client, &mouse_frame), None);
+    let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(GRAB_HANDLE_POSITION),
+            &painted_mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.left_button_gesture, None);
+
+    assert!(client.reject_undock_command(command_id));
+    assert_eq!(
+        repaint_mouse_frame(&client, &mouse_frame)
+            .viewer_chrome
+            .placement_handle_hover,
+        unpinned_grab_handle_hover
+    );
+}
+
+#[test]
+fn a_locked_viewer_shows_and_marks_the_tiled_handle_the_same_way() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let mut client = build_test_client();
+    client.set_lock_mode(LockMode::Locked);
+
+    let placement_handle_hovers = list_placement_handle_hovers(
+        &mut client,
+        &mouse_frame,
+        &build_mouse_motions(&[(10, 1), (2, 1)]),
+    );
+
+    assert_eq!(
+        placement_handle_hovers,
+        [
+            Some(PlacementHandleHover::TiledTopBorder { pane_id }),
+            Some(PlacementHandleHover::TiledHandle { pane_id })
+        ]
     );
 }
 
@@ -7153,7 +8305,8 @@ fn a_press_and_release_on_the_selected_pane_keeps_the_arrow_keys_draft() {
 }
 
 #[test]
-fn floating_pane_move_mode_keeps_a_tiled_placement_handle_from_opening_pane_placement() {
+fn floating_pane_move_mode_shows_no_tiled_handle_and_a_press_on_its_cells_opens_no_pane_placement()
+{
     let tiled_pane_id = PaneId::new();
     let mouse_frame = build_floating_mouse_frame(
         build_plain_mouse_pane(tiled_pane_id),
@@ -7162,15 +8315,12 @@ fn floating_pane_move_mode_keeps_a_tiled_placement_handle_from_opening_pane_plac
         tiled_pane_id,
     );
     let mut client = build_floating_pane_move_client(&mouse_frame);
-    client.placement_handle_pane_id = Some(tiled_pane_id);
-    let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
-    let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
-        resolve_hit_region(mouse_frame.build_frame_layout(), handle_position),
-        HitRegion::PlacementHandle {
-            pane_id: tiled_pane_id
-        }
+        list_tiled_top_border_hovers_and_handle_cell_region(&mut client, &mouse_frame),
+        build_hidden_tiled_handle_answer(tiled_pane_id)
     );
+    let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
+    let handle_position = Point { column: 2, row: 1 };
 
     assert_eq!(
         client.handle_placement_mouse(
@@ -7205,7 +8355,9 @@ fn a_tiled_placement_handle_press_in_the_move_chooser_opens_pane_placement() {
     client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&mouse_frame));
     client.apply_client_action(ClientActionKind::BeginPanePlacement, Some(&mouse_frame));
     assert_eq!(client.pane_move_mode, Some(PaneMoveMode::Choice));
-    client.placement_handle_pane_id = Some(tiled_pane_id);
+    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+        pane_id: tiled_pane_id,
+    });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
 
     assert_eq!(

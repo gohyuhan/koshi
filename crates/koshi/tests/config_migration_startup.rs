@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use koshi::cli::Cli;
-use koshi::config_command::migrate_config_for_service_command;
+use koshi::config_command::load_app_config_for_command;
+use koshi_config::app_config::parse_app_config;
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::ids::SessionId;
 use koshi_daemon::session_server::ResumeSupport;
 use koshi_ipc::router::resolve_router_endpoint_path;
@@ -61,13 +63,24 @@ fn block_migration_lock(config_directory: &Path) -> (PathBuf, std::io::Error) {
 }
 
 /// Parses `cli_arguments` and runs the config migration step for the command
-/// they name against `config_directory`.
+/// they name against `config_directory`. Gives the `koshi.kdl` layer the
+/// command starts on, or the migration error.
 fn run_config_migration_step(
     cli_arguments: Vec<String>,
     config_directory: &Path,
-) -> Result<(), koshi_link::error::CliError> {
+) -> Result<Option<PartialKoshiConfig>, koshi_link::error::CliError> {
     let parsed_cli = Cli::try_parse_from(cli_arguments).expect("parse command");
-    migrate_config_for_service_command(parsed_cli.command.as_ref(), Some(config_directory))
+    match load_app_config_for_command(parsed_cli.command.as_ref(), Some(config_directory)) {
+        (_, Some(config_migration_error)) => Err(config_migration_error),
+        (loaded_app_config, None) => Ok(loaded_app_config.into_app_config_layer()),
+    }
+}
+
+/// The layer `app_config_source_text` parses to as `app_config_path`.
+fn parse_app_layer(app_config_path: &Path, app_config_source_text: &str) -> PartialKoshiConfig {
+    parse_app_config(app_config_path, app_config_source_text)
+        .expect("the config parses")
+        .layer
 }
 
 #[test]
@@ -135,7 +148,7 @@ fn the_migration_step_reports_config_kdl_that_does_not_parse_on_every_platform()
         assert_eq!(
             migration_error.to_string(),
             format!(
-                "config failed: config parse error in {}: No closing '}}' for child block",
+                "config failed: config parse error in {}: line 2, column 6: No closing '}}' for child block",
                 app_config_path.display()
             )
         );
@@ -207,12 +220,108 @@ fn non_service_commands_leave_released_config_unchanged_on_every_platform() {
         let app_config_path = write_app_config(&config_directory, "version 1\n");
         block_migration_lock(&config_directory);
 
-        run_config_migration_step(cli_arguments, &config_directory)
+        let app_config_layer = run_config_migration_step(cli_arguments, &config_directory)
             .expect("non-service command does not migrate config");
 
         assert_eq!(
+            app_config_layer,
+            Some(parse_app_layer(&app_config_path, "version 1\n"))
+        );
+        assert_eq!(
             fs::read_to_string(app_config_path).expect("read unchanged config"),
             "version 1\n"
+        );
+    }
+}
+
+#[test]
+fn service_commands_start_on_no_layer_when_koshi_kdl_is_absent_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        fs::create_dir_all(&config_directory).expect("create config directory");
+
+        let app_config_layer = run_config_migration_step(cli_arguments, &config_directory)
+            .expect("a directory with no koshi.kdl needs no migration");
+
+        assert_eq!(app_config_layer, None);
+    }
+}
+
+#[test]
+fn service_commands_start_on_the_layer_of_a_current_koshi_kdl_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        let app_config_path =
+            write_app_config(&config_directory, "version 2\nallow-beta-features #true\n");
+        block_migration_lock(&config_directory);
+
+        let app_config_layer = run_config_migration_step(cli_arguments, &config_directory)
+            .expect("current config needs no migration");
+
+        assert_eq!(
+            app_config_layer,
+            Some(parse_app_layer(
+                &app_config_path,
+                "version 2\nallow-beta-features #true\n"
+            ))
+        );
+    }
+}
+
+#[test]
+fn service_commands_start_on_the_layer_of_the_migrated_koshi_kdl_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        let app_config_path =
+            write_app_config(&config_directory, "version 1\nallow-beta-features #true\n");
+
+        let app_config_layer = run_config_migration_step(cli_arguments, &config_directory)
+            .expect("migrate released config");
+
+        assert_eq!(
+            app_config_layer,
+            Some(parse_app_layer(
+                &app_config_path,
+                "version 2\nallow-beta-features #true\n"
+            ))
+        );
+        assert_eq!(
+            fs::read_to_string(app_config_path).expect("read migrated config"),
+            "version 2\nallow-beta-features #true\n"
+        );
+    }
+}
+
+#[test]
+fn a_service_command_whose_migration_fails_starts_on_koshi_kdl_as_it_is_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        let app_config_path =
+            write_app_config(&config_directory, "version 2\nallow-beta-features #true\n");
+        let keybinding_config_path = config_directory.join("keybinding.kdl");
+        fs::write(&keybinding_config_path, "version 1\nnormal {").expect("write keybinding config");
+        let parsed_cli = Cli::try_parse_from(cli_arguments).expect("parse command");
+
+        let (loaded_app_config, config_migration_error) =
+            load_app_config_for_command(parsed_cli.command.as_ref(), Some(&config_directory));
+
+        assert_eq!(
+            loaded_app_config.into_app_config_layer(),
+            Some(parse_app_layer(
+                &app_config_path,
+                "version 2\nallow-beta-features #true\n"
+            ))
+        );
+        assert_eq!(
+            config_migration_error.map(|migration_error| migration_error.to_string()),
+            Some(format!(
+                "config failed: config parse error in {}: line 2, column 8: No closing '}}' for child block",
+                keybinding_config_path.display()
+            ))
         );
     }
 }
@@ -306,7 +415,7 @@ fn a_router_whose_config_migration_fails_warns_and_serves() {
     assert_eq!(
         String::from_utf8_lossy(&router_output.stderr),
         format!(
-            "koshi: config failed: config parse error in {}: No closing '}}' for child block; \
+            "koshi: config failed: config parse error in {}: line 2, column 6: No closing '}}' for child block; \
              starting with the config files as they are\n",
             app_config_path.display()
         )
@@ -366,7 +475,7 @@ fn a_session_server_whose_config_migration_fails_writes_the_failure_to_its_log()
         .spawn()
         .expect("start the session server");
     let expected_warning = format!(
-        "config failed: config parse error in {}: No closing '}}' for child block",
+        "config failed: config parse error in {}: line 2, column 8: No closing '}}' for child block",
         keybinding_config_path.display()
     );
     let startup_deadline = Instant::now() + WAIT_DURATION;

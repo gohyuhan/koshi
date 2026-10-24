@@ -1,4 +1,4 @@
-//! The resize transaction: move one pane border by an exact cell count.
+//! The resize transaction: move one pane border by up to a signed cell count.
 //!
 //! A resize permanently shifts cells between two siblings by updating their
 //! weights' `resize_delta`, then lets the solver re-derive geometry.
@@ -6,7 +6,9 @@
 //! The signed cell delta names the border by direction: a resize of `pane`
 //! toward `Right` by `5` moves the pane's right border outward (the pane
 //! grows, the right neighbor donates), and by `-5` moves the same border
-//! inward (the pane donates, the right neighbor gains).
+//! inward (the pane donates, the right neighbor gains). The cell count is
+//! the distance the border moves on screen; the border stops early when the
+//! donor reaches its minimum size or the layout holds it in place.
 //!
 //! Panes inside a stack resize as a unit: the border that moves is the
 //! stack's outer one, never a border between two stack members.
@@ -19,7 +21,7 @@ use crate::size::SizeWeight;
 use crate::solver::{
     compute_directional_child_rects, compute_slot_floor, compute_stacked_child_rects, PaneSizing,
 };
-use crate::tree::{compute_split_direction, LayoutNode};
+use crate::tree::{compute_split_direction, LayoutNode, SplitNode};
 
 /// A rejected resize. The caller's tree is unchanged in every case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -34,42 +36,83 @@ pub enum ResizeError {
         pane_id: PaneId,
         direction: Direction,
     },
-    /// The pane giving up the cells — the neighbor on a grow, the pane
-    /// itself on a shrink — cannot give that many without going below its
-    /// minimum size.
+    /// The side giving up the cells — the neighbor on a grow, the pane
+    /// itself on a shrink — holds no cell above its minimum size: it is at
+    /// that size, or suppressed for lack of room. The `direction` border of
+    /// `pane_id` cannot move one cell. `is_pane_growing` is `true` for a grow
+    /// and `false` for a shrink.
+    #[error("the {direction:?} border of pane {pane_id} cannot move: the donating side has no room to give")]
+    DonorAtMinimumSize {
+        pane_id: PaneId,
+        direction: Direction,
+        is_pane_growing: bool,
+    },
+    /// The donating side is above its minimum size, but no added resize
+    /// offset moves the `direction` border of `pane_id` one cell on screen.
+    /// `is_pane_growing` is `true` for a grow and `false` for a shrink.
+    ///
+    /// Three layouts hold a border:
+    /// - a child of the split keeps its `preferred` size: a pane at
+    ///   `preferred 20` beside a wider flexible pane keeps its 20 columns,
+    ///   whichever side grows;
+    /// - the receiving side's share plus its offset is below its floor, and
+    ///   a third child gives the cells that lift it to that floor: each
+    ///   offset cell goes from the donor to that third child until the donor
+    ///   is at its floor;
+    /// - the receiving side is suppressed for lack of room.
     #[error(
-        "resize of {requested_cell_count} cells exceeds the donating pane's {spare_cell_count} spare cells"
+        "the {direction:?} border of pane {pane_id} cannot move: the layout holds it in place"
     )]
-    MinimumSizeExceeded {
-        requested_cell_count: u16,
-        spare_cell_count: u16,
+    BorderHeld {
+        pane_id: PaneId,
+        direction: Direction,
+        is_pane_growing: bool,
     },
 }
 
-/// Moves `pane_id`'s border on the `direction` side by `resize_cell_delta`: positive
-/// moves it outward (the pane grows and the adjacent sibling on that side
-/// donates the cells), negative moves it inward (the pane donates and that
-/// sibling gains them). A `resize_cell_delta` of `0` runs the same lookups and checks
-/// and moves no cells.
+/// Moves `pane_id`'s border on the `direction` side by up to `resize_cell_delta`
+/// cells on screen: positive moves it outward (the pane grows and the
+/// adjacent sibling on that side donates the cells), negative moves it inward
+/// (the pane donates and that sibling gains them).
 ///
 /// The border that moves belongs to the deepest ancestor split that runs on
 /// the matching axis (horizontal for left/right, vertical for up/down) and
 /// has a sibling on the `direction` side. A pane on its inner split's edge
 /// moves the enclosing split's border. Splits below a collapsed stack
-/// member are skipped. `tab_rect` is the rect the tree solves into; the
-/// donor's solved size above its floor bounds the move.
+/// member are skipped. `tab_rect` is the rect the tree solves into.
+///
+/// The move adds one cell of resize offset at a time to the receiving
+/// sibling and takes one from the donating sibling, then solves the split
+/// again and measures how far the border moved from where it started. Only
+/// the added counts at which the receiver's or the donor's offset lies
+/// between minus and plus the split's axis length are solved, at most four
+/// times that length; the solve at any other count equals the solve at the
+/// count before it. The offsets stop when the border moved the whole
+/// magnitude of `resize_cell_delta`, when the donor's solved size holds no
+/// cell above its floor, or after the last of those counts. The resized tree
+/// keeps only the offset that the last on-screen cell of the move needed. One
+/// offset cell can move the border by no cell when a floor holds the
+/// receiver up; the next offset cell then moves it.
 ///
 /// `pane_sizing.minimum_size` is the per-pane content floor the donor's spare
 /// is measured against, and the donor's solved size excludes the
 /// [`PaneSizing::gap_cell_count`] beside it.
+///
+/// Returns the resized tree and the cell count the border moved on screen,
+/// at most the magnitude of `resize_cell_delta`. A donor `10` columns wide
+/// with a floor of `4`, asked for `100`, moves `6`. A `resize_cell_delta` of
+/// `0` runs the same lookups, moves no cells, and returns `0`.
 ///
 /// # Errors
 ///
 /// - [`ResizeError::PaneNotFound`] when `pane_id` is not in the tree.
 /// - [`ResizeError::NoAdjacentBorder`] when no ancestor has a neighbor on
 ///   that side.
-/// - [`ResizeError::MinimumSizeExceeded`] when the donating side would drop below its
-///   floor.
+/// - [`ResizeError::DonorAtMinimumSize`] when `resize_cell_delta` is not `0`
+///   and the donor holds no cell above its floor.
+/// - [`ResizeError::BorderHeld`] when `resize_cell_delta` is not `0`, the
+///   donor holds a cell above its floor, and no offset moves the border one
+///   cell.
 pub fn resize_layout_with_sizing(
     layout_tree: &LayoutNode,
     tab_rect: Rect,
@@ -77,7 +120,7 @@ pub fn resize_layout_with_sizing(
     direction: Direction,
     resize_cell_delta: i16,
     pane_sizing: PaneSizing,
-) -> Result<LayoutNode, ResizeError> {
+) -> Result<(LayoutNode, u16), ResizeError> {
     let pane_path = layout_tree
         .find_pane_path(pane_id)
         .ok_or(ResizeError::PaneNotFound { pane_id })?;
@@ -95,47 +138,17 @@ pub fn resize_layout_with_sizing(
     // neighbor gives them to the pane, on a shrink the pane gives them to
     // the neighbor.
     let requested_cell_count = resize_cell_delta.unsigned_abs();
-    let (receiving_child_index, donating_child_index) = if resize_cell_delta < 0 {
-        (adjacent_child_index, target_pane_child_index)
-    } else {
+    let is_pane_growing = resize_cell_delta > 0;
+    let (receiving_child_index, donating_child_index) = if is_pane_growing {
         (target_pane_child_index, adjacent_child_index)
-    };
-
-    // The donor can give only what its solved size holds above its floor.
-    let split_node = layout_tree.get_split_at_path(&pane_path[..resize_split_depth]);
-    let split_rect = compute_rect_at_path(
-        layout_tree,
-        tab_rect,
-        &pane_path[..resize_split_depth],
-        pane_sizing,
-    );
-    let donating_pane_rect =
-        compute_directional_child_rects(split_node, split_rect, pane_sizing)[donating_child_index];
-    let donating_cell_count = if is_horizontal_split {
-        donating_pane_rect.size.column_count
     } else {
-        donating_pane_rect.size.row_count
+        (adjacent_child_index, target_pane_child_index)
     };
-    let donating_slot_floor = compute_slot_floor(
-        split_node,
-        donating_child_index,
-        is_horizontal_split,
-        pane_sizing,
-    );
-    // A floor above `u16::MAX` leaves no spare cell.
-    let spare_cell_count = match u16::try_from(donating_slot_floor) {
-        Ok(donating_slot_floor) => donating_cell_count.saturating_sub(donating_slot_floor),
-        Err(_) => 0,
-    };
-    if requested_cell_count > spare_cell_count {
-        return Err(ResizeError::MinimumSizeExceeded {
-            requested_cell_count,
-            spare_cell_count,
-        });
-    }
 
+    let split_path = &pane_path[..resize_split_depth];
+    let split_rect = compute_rect_at_path(layout_tree, tab_rect, split_path, pane_sizing);
     let mut updated_layout_tree = layout_tree.clone();
-    let split_node = updated_layout_tree.get_split_at_path_mut(&pane_path[..resize_split_depth]);
+    let split_node = updated_layout_tree.get_split_at_path_mut(split_path);
     // Missing weights are padded with the default share up to the child
     // count.
     if split_node.weights.len() < split_node.children.len() {
@@ -143,15 +156,121 @@ pub fn resize_layout_with_sizing(
             .weights
             .resize(split_node.children.len(), SizeWeight::default());
     }
-    split_node.weights[receiving_child_index].resize_delta = split_node.weights
-        [receiving_child_index]
-        .resize_delta
-        .saturating_add(i32::from(requested_cell_count));
-    split_node.weights[donating_child_index].resize_delta = split_node.weights
-        [donating_child_index]
-        .resize_delta
-        .saturating_sub(i32::from(requested_cell_count));
-    Ok(updated_layout_tree)
+    let donating_slot_floor = compute_slot_floor(
+        split_node,
+        donating_child_index,
+        is_horizontal_split,
+        pane_sizing,
+    );
+    // The border is the leading edge of whichever sibling comes second in
+    // layout order.
+    let border_child_index = receiving_child_index.max(donating_child_index);
+    let is_border_moving_forward = donating_child_index > receiving_child_index;
+    // The border's cell on the split axis, and the cells the donor's solved
+    // size holds above its floor. A floor above `u16::MAX` leaves no spare
+    // cell.
+    let measure_border = |split_node: &SplitNode| -> (i32, u16) {
+        let child_rects = compute_directional_child_rects(split_node, split_rect, pane_sizing);
+        let border_rect = child_rects[border_child_index];
+        let donating_pane_rect = child_rects[donating_child_index];
+        let (border_cell, donating_cell_count) = if is_horizontal_split {
+            (
+                border_rect.origin.column,
+                donating_pane_rect.size.column_count,
+            )
+        } else {
+            (border_rect.origin.row, donating_pane_rect.size.row_count)
+        };
+        let spare_cell_count = match u16::try_from(donating_slot_floor) {
+            Ok(donating_slot_floor) => donating_cell_count.saturating_sub(donating_slot_floor),
+            Err(_) => 0,
+        };
+        (i32::from(border_cell), spare_cell_count)
+    };
+
+    let starting_receiving_resize_delta =
+        i64::from(split_node.weights[receiving_child_index].resize_delta);
+    let starting_donating_resize_delta =
+        i64::from(split_node.weights[donating_child_index].resize_delta);
+    // The receiver gains `added_cell_count` cells of offset and the donor
+    // loses as many. An offset outside the `i32` range is stored at its end.
+    let set_added_cell_count = |split_node: &mut SplitNode, added_cell_count: i64| {
+        split_node.weights[receiving_child_index].resize_delta =
+            (starting_receiving_resize_delta + added_cell_count)
+                .clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+        split_node.weights[donating_child_index].resize_delta =
+            (starting_donating_resize_delta - added_cell_count)
+                .clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+    };
+    // The solver clamps each share plus its offset to the cells the children
+    // share, at most `axis_cell_count`, and every share lies in that range:
+    // an offset changes the solve only inside
+    // `-axis_cell_count..=axis_cell_count`. The receiver's offset crosses
+    // that range at the added counts in `receiving_offset_window`, the
+    // donor's at those in `donating_offset_window`. Every other added count
+    // solves like the count before it and is skipped. The two windows are
+    // walked in ascending order, each count once.
+    let axis_cell_count = i64::from(if is_horizontal_split {
+        split_rect.size.column_count
+    } else {
+        split_rect.size.row_count
+    });
+    let receiving_offset_window = (1 - axis_cell_count - starting_receiving_resize_delta).max(1)
+        ..=(axis_cell_count - starting_receiving_resize_delta);
+    let donating_offset_window = (1 - axis_cell_count + starting_donating_resize_delta).max(1)
+        ..=(axis_cell_count + starting_donating_resize_delta);
+    let (first_offset_window, second_offset_window) =
+        if receiving_offset_window.start() <= donating_offset_window.start() {
+            (receiving_offset_window, donating_offset_window)
+        } else {
+            (donating_offset_window, receiving_offset_window)
+        };
+    let added_cell_counts = first_offset_window.clone().chain(
+        second_offset_window
+            .filter(|added_cell_count| !first_offset_window.contains(added_cell_count)),
+    );
+    let (starting_border_cell, starting_spare_cell_count) = measure_border(split_node);
+
+    let mut best_moved_cell_count: u16 = 0;
+    let mut best_added_cell_count: i64 = 0;
+    if requested_cell_count > 0 && starting_spare_cell_count > 0 {
+        for added_cell_count in added_cell_counts {
+            set_added_cell_count(split_node, added_cell_count);
+            let (border_cell, spare_cell_count) = measure_border(split_node);
+            let moved_cell_count = if is_border_moving_forward {
+                border_cell - starting_border_cell
+            } else {
+                starting_border_cell - border_cell
+            };
+            if moved_cell_count > i32::from(best_moved_cell_count)
+                && moved_cell_count <= i32::from(requested_cell_count)
+            {
+                best_moved_cell_count = moved_cell_count as u16;
+                best_added_cell_count = added_cell_count;
+            }
+            if moved_cell_count >= i32::from(requested_cell_count) || spare_cell_count == 0 {
+                break;
+            }
+        }
+    }
+
+    if requested_cell_count > 0 && best_moved_cell_count == 0 {
+        return Err(if starting_spare_cell_count == 0 {
+            ResizeError::DonorAtMinimumSize {
+                pane_id,
+                direction,
+                is_pane_growing,
+            }
+        } else {
+            ResizeError::BorderHeld {
+                pane_id,
+                direction,
+                is_pane_growing,
+            }
+        });
+    }
+    set_added_cell_count(split_node, best_added_cell_count);
+    Ok((updated_layout_tree, best_moved_cell_count))
 }
 
 /// The deepest ancestor split of direction `split_direction`, above any collapsed

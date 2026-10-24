@@ -101,10 +101,9 @@ fn diagnostic_preserves_spans_from_kdl() {
 #[test]
 fn diagnostic_flattens_to_config_error() {
     let malformed_config_text = "pane { width";
-    // The flattened detail is the first sub-diagnostic's specific message, not
-    // kdl's generic top-level Display.
-    let raw_kdl_error = malformed_config_text.parse::<KdlDocument>().unwrap_err();
-    let expected_parse_error_detail = raw_kdl_error.diagnostics.first().unwrap().to_string();
+    // The flattened detail is the first sub-diagnostic's location and specific
+    // message, not kdl's generic top-level Display.
+    let expected_parse_error_detail = "line 1, column 6: No closing '}' for child block";
     let parse_diagnostic = parse_kdl(Path::new("bad.kdl"), malformed_config_text).unwrap_err();
 
     match ConfigError::from(parse_diagnostic) {
@@ -333,53 +332,72 @@ fn parse_u32_kdl_value_rejects_an_out_of_range_value() {
 #[test]
 fn set_parsed_field_stores_an_ok_value_and_adds_no_warning() {
     let mut parsed_field_value_slot: Option<u16> = None;
-    let mut parse_warnings: Vec<String> = Vec::new();
+    let mut parse_warnings = ParseWarnings::default();
     set_parsed_field(
         &mut parsed_field_value_slot,
         Ok(20),
         "pane",
-        "min-cols",
+        &parse_test_kdl_node("min-cols 20"),
         &mut parse_warnings,
     );
     assert_eq!(parsed_field_value_slot, Some(20));
-    assert_eq!(parse_warnings, Vec::<String>::new());
+    assert_eq!(
+        parse_warnings.format_in_file_order("min-cols 20"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
 fn set_parsed_field_leaves_the_slot_empty_and_names_the_field_on_error() {
     let mut parsed_field_value_slot: Option<u16> = None;
-    let mut parse_warnings: Vec<String> = Vec::new();
+    let mut parse_warnings = ParseWarnings::default();
     set_parsed_field(
         &mut parsed_field_value_slot,
         Err("expected an integer".to_string()),
         "pane",
-        "min-cols",
+        &parse_test_kdl_node("min-cols \"x\""),
         &mut parse_warnings,
     );
     assert_eq!(parsed_field_value_slot, None);
     assert_eq!(
-        parse_warnings,
-        ["ignored `pane.min-cols`: expected an integer"]
+        parse_warnings.format_in_file_order("min-cols \"x\""),
+        ["line 1, column 1: ignored `pane.min-cols`: expected an integer"]
     );
 }
 
 #[test]
 fn set_parsed_field_keeps_an_earlier_value_when_the_next_one_fails() {
     let mut parsed_field_value_slot: Option<u16> = Some(20);
-    let mut parse_warnings: Vec<String> = vec!["earlier warning".to_string()];
+    let mut parse_warnings = ParseWarnings::default();
+    parse_warnings.record_warning(SourceSpan::from(0..0), "earlier warning");
     set_parsed_field(
         &mut parsed_field_value_slot,
         Err("must be between 0 and 65535".to_string()),
         "pane",
-        "gap",
+        &parse_test_kdl_node("gap 70000"),
         &mut parse_warnings,
     );
     assert_eq!(parsed_field_value_slot, Some(20));
     assert_eq!(
-        parse_warnings,
+        parse_warnings.format_in_file_order("gap 70000"),
         [
-            "earlier warning",
-            "ignored `pane.gap`: must be between 0 and 65535",
+            "line 1, column 1: earlier warning",
+            "line 1, column 1: ignored `pane.gap`: must be between 0 and 65535",
+        ]
+    );
+}
+
+#[test]
+fn parse_warnings_come_out_in_file_order_whatever_order_they_are_recorded_in() {
+    let config_source_text = "first 1\nsecond 2\n";
+    let mut parse_warnings = ParseWarnings::default();
+    parse_warnings.record_warning(SourceSpan::from(8..16), "at the second node");
+    parse_warnings.record_warning(SourceSpan::from(0..7), "at the first node");
+    assert_eq!(
+        parse_warnings.format_in_file_order(config_source_text),
+        [
+            "line 1, column 1: at the first node",
+            "line 2, column 1: at the second node",
         ]
     );
 }
@@ -468,9 +486,15 @@ fn a_block_nested_past_the_limit_is_a_parse_error_not_a_stack_overflow() {
             parse_error_detail,
         } => {
             assert_eq!(config_path, "koshi.kdl");
+            // Each `a {` is three characters: the refused `{` of level 25
+            // is character 75 of line 1.
+            let refused_brace_column_number = 3 * (MAX_BLOCK_DEPTH + 1);
             assert_eq!(
                 parse_error_detail,
-                format!("blocks nest more than {MAX_BLOCK_DEPTH} levels deep")
+                format!(
+                    "line 1, column {refused_brace_column_number}: blocks nest more than \
+                     {MAX_BLOCK_DEPTH} levels deep"
+                )
             );
         }
         unexpected_config_error => {

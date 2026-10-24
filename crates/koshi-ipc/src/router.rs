@@ -132,8 +132,9 @@ pub enum RouterRequestKind {
     /// identity already holds on that same scope stops working.
     ///
     /// The router reads the clock once and stamps both the issue time and the
-    /// expiry time from that one reading. A span the clock cannot represent is
-    /// refused.
+    /// expiry time from that one reading. A span longer than
+    /// [`MAX_TOKEN_LIFETIME_DURATION`](crate::remote_tokens::MAX_TOKEN_LIFETIME_DURATION)
+    /// is refused, and so is an expiry the clock cannot represent.
     GrantToken {
         /// Who the grant is handed to, in the words the operator typed.
         identity: String,
@@ -279,10 +280,16 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::RemoteStatus`]: what this machine's
     /// remote access is set to.
     RemoteStatus {
-        /// The IP address and port remote clients would be served on, such
-        /// as `192.0.2.20:7654`, or `None` when `koshi.kdl` names no listen
-        /// address.
+        /// The IP address and port this router read from `koshi.kdl` when it
+        /// started, such as `192.0.2.20:7654`, or `None` when that file named
+        /// no listen address. The listener opens on this address only. A line
+        /// written to the file after the start does not change it.
         remote_listen_address: Option<SocketAddr>,
+        /// The `koshi.kdl` this router read `remote_listen_address` from, such
+        /// as `/home/user/.config/koshi/koshi.kdl`, or `None` when this router
+        /// has no config directory. A koshi 0.5.0 router leaves the field out,
+        /// which reads as `None`.
+        config_file_path: Option<PathBuf>,
         /// Whether the operator has switched remote access on. This is the
         /// answer they gave, which outlives any one run.
         is_remote_access_enabled: bool,

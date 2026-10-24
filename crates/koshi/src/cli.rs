@@ -21,6 +21,7 @@ use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
@@ -35,7 +36,9 @@ use koshi_core::geometry::{
 };
 use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionId};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_ipc::remote_tokens::{MAX_TOKEN_LIFETIME_DURATION, TOKEN_LIFETIME_TOO_LONG_MESSAGE};
 
 /// A parsed `koshi` invocation.
 #[derive(Debug, PartialEq, Eq, Parser)]
@@ -74,8 +77,9 @@ pub struct Cli {
 
     /// The fingerprint of the certificate the server `--remote` names must
     /// present: 64 lowercase hex characters, as `koshi share grant` prints it
-    /// on that machine. Needed for a server this machine has not saved, and
-    /// refused for a server it has saved.
+    /// on that machine. Needed for a server this machine has not saved. A
+    /// server it has saved takes the fingerprint it holds, and refuses any
+    /// other.
     #[arg(
         long = "certificate-fingerprint",
         global = true,
@@ -188,14 +192,22 @@ pub enum Expiry {
 }
 
 /// Parse a duration argument: a decimal count followed by one unit character —
-/// `s` seconds, `m` minutes, `h` hours, `d` days. `30s` is thirty seconds.
+/// `s` seconds, `m` minutes, `h` hours, `d` days. `30s` is thirty seconds. The
+/// count is ASCII digits, with one leading `+` allowed.
 ///
-/// `expected_error_message` is reported for every value this cannot read: an empty value, a
-/// unit character that is none of the four, a count that is not a whole
-/// number, and a count times its unit that overflows `u64` seconds.
+/// `expected_error_message` is reported for a value that is not a count and a
+/// unit: an empty value, a unit character that is none of the four, and a
+/// count that is not ASCII digits. `too_long_error_message` is reported for a
+/// count and a unit longer than `maximum_duration`, and for a count, or a
+/// count times its unit, past `u64::MAX` seconds.
+///
+/// Example — with `maximum_duration` 60 seconds, `60s` gives 60 seconds, `2m`
+/// gives `too_long_error_message`, and `2w` gives `expected_error_message`.
 fn parse_duration_argument(
     duration_argument: &str,
+    maximum_duration: Duration,
     expected_error_message: &'static str,
+    too_long_error_message: &'static str,
 ) -> Result<Duration, String> {
     let mut duration_characters = duration_argument.chars();
     let duration_unit = duration_characters
@@ -208,20 +220,33 @@ fn parse_duration_argument(
         'd' => 86400,
         _ => return Err(expected_error_message.to_string()),
     };
-    let duration_unit_count: u64 = duration_characters
-        .as_str()
-        .parse()
-        .map_err(|_| expected_error_message)?;
-    let duration_seconds = duration_unit_count
-        .checked_mul(duration_unit_seconds)
-        .ok_or(expected_error_message)?;
-    Ok(Duration::from_secs(duration_seconds))
+    let duration_count_text = duration_characters.as_str();
+    let duration_count_digits = duration_count_text
+        .strip_prefix('+')
+        .unwrap_or(duration_count_text);
+    if duration_count_digits.is_empty()
+        || !duration_count_digits
+            .bytes()
+            .all(|count_byte| count_byte.is_ascii_digit())
+    {
+        return Err(expected_error_message.to_string());
+    }
+    let duration_seconds = duration_count_digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|duration_unit_count| duration_unit_count.checked_mul(duration_unit_seconds));
+    match duration_seconds.map(Duration::from_secs) {
+        Some(duration) if duration <= maximum_duration => Ok(duration),
+        _ => Err(too_long_error_message.to_string()),
+    }
 }
 
 /// Parse an expiry argument: the word `never`, or a decimal count followed by
 /// one unit character — `s` seconds, `m` minutes, `h` hours, `d` days.
 ///
-/// A count times its unit that overflows `u64` seconds is an error.
+/// A length longer than [`MAX_TOKEN_LIFETIME_DURATION`] is
+/// `Err(TOKEN_LIFETIME_TOO_LONG_MESSAGE)`: `36500d` parses, and `36501d` is
+/// refused.
 pub fn parse_expiry(expiry_argument: &str) -> Result<Expiry, String> {
     const EXPECTED_EXPIRY_ERROR_MESSAGE: &str =
         "expected a length such as 30s, 15m, 24h or 7d, or the word never";
@@ -231,17 +256,23 @@ pub fn parse_expiry(expiry_argument: &str) -> Result<Expiry, String> {
     }
     Ok(Expiry::After(parse_duration_argument(
         expiry_argument,
+        MAX_TOKEN_LIFETIME_DURATION,
         EXPECTED_EXPIRY_ERROR_MESSAGE,
+        TOKEN_LIFETIME_TOO_LONG_MESSAGE,
     )?))
 }
 
 /// Parse a `--since` flag value: a decimal count followed by one unit
-/// character — `s` seconds, `m` minutes, `h` hours, `d` days. Every value this
-/// cannot read is `Err("expected a length such as 30s, 15m, 24h or 7d")`.
+/// character — `s` seconds, `m` minutes, `h` hours, `d` days. A value that is
+/// not a count and a unit is
+/// `Err("expected a length such as 30s, 15m, 24h or 7d")`, and a length past
+/// `u64::MAX` seconds is `Err("a length is at most 18446744073709551615s")`.
 fn parse_event_age(event_age_argument: &str) -> Result<Duration, String> {
     parse_duration_argument(
         event_age_argument,
+        Duration::from_secs(u64::MAX),
         "expected a length such as 30s, 15m, 24h or 7d",
+        "a length is at most 18446744073709551615s",
     )
 }
 
@@ -365,8 +396,12 @@ pub struct NewPaneFlags {
         conflicts_with = "pane_id"
     )]
     tab_reference: Option<TabReference>,
-    /// Client that shows and focuses the new pane; defaults to the
-    /// issuing client, else the session's only attached one.
+    /// Client that shows and focuses the new pane. Outside koshi with no
+    /// `--pane` or `--tab`, the new pane splits that client's focused pane.
+    /// Without it, the issuing client shows and focuses the new pane. Outside
+    /// koshi without it, the new pane moves no focus on a tab that a client
+    /// already shows, and the session's only attached client shows and
+    /// focuses it on a tab that no client shows.
     #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
     client_id: Option<ClientId>,
 }
@@ -412,8 +447,8 @@ pub enum CliCommand {
         /// sessions running for this user and on the saved servers.
         #[arg(value_name = "SESSION")]
         session_argument: Option<String>,
-        /// Name to save a server reached for the first time under: `--remote
-        /// NAME` then reaches it. A server already saved refuses this flag.
+        /// Name to save the server under: `--remote NAME` then reaches it. A
+        /// saved server that has another name refuses this flag.
         #[arg(long, requires = "remote_server_reference", value_name = "NAME")]
         save_as: Option<String>,
     },
@@ -462,7 +497,8 @@ pub enum CliCommand {
         /// Which of the pane's borders moves.
         #[arg(long, value_enum, value_name = "DIRECTION")]
         direction: DirectionArgument,
-        /// Signed number of cells the border moves; defaults to 1.
+        /// Signed number of cells the border moves, up to where a pane reaches its
+        /// minimum size; defaults to 1.
         #[arg(
             long = "size",
             value_name = "SIZE",
@@ -825,7 +861,8 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Grant, revoke and list remote access tokens.
+    /// Grant, revoke and list remote access tokens, and open the port remote
+    /// clients connect to.
     Share {
         /// What to do with the tokens.
         #[command(subcommand)]
@@ -1032,7 +1069,8 @@ pub enum ConfigCommand {
 }
 
 /// The `koshi share` subcommands: the remote access tokens this machine has
-/// granted. Every verb asks the router, which owns the token store.
+/// granted, and the port remote clients connect to. Every verb asks the
+/// router, which owns the token store and the port.
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum ShareCommand {
     /// Hand one identity a fresh token and print it once.
@@ -1045,7 +1083,7 @@ pub enum ShareCommand {
         #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
         session_reference: Option<SessionReference>,
         /// How long the token works: a length such as `30s`, `15m`, `24h` or
-        /// `7d`, or the word `never`.
+        /// `7d`, at most `36500d`, or the word `never`.
         #[arg(
             long = "expires",
             value_parser = parse_expiry,
@@ -1054,6 +1092,9 @@ pub enum ShareCommand {
         )]
         token_expiry: Expiry,
     },
+    /// Open the port remote clients connect to, on the address the router read
+    /// from koshi.kdl, and print the commands that connect. Mints no token.
+    Open,
     /// Stop the tokens one identity holds.
     Revoke {
         /// Whose tokens stop working.
@@ -1141,9 +1182,11 @@ pub enum DebugCommand {
         output_format: OutputFormat,
     },
     /// Print each tab's split tree, the rectangles it solves to, the panes
-    /// with no room, the stacks, and each client's focus.
+    /// with no room, the stacks, each floating pane with what each client
+    /// draws for it, and each client's focus.
     DumpLayout {
-        /// Narrow the answer to one tab, by id or name.
+        /// Narrow the tabs to one tab, by id or name; every floating pane still
+        /// prints.
         #[arg(long = "tab", value_parser = parse_tab_reference, value_name = "TAB")]
         tab_reference: Option<TabReference>,
         /// Output format.
@@ -1160,7 +1203,7 @@ pub enum DebugCommand {
     /// content it carried.
     Events {
         /// Keep only the events recorded within this much of now, e.g. `30s`,
-        /// `5m`, `2h`, `7d`.
+        /// `5m`, `2h`, `7d`, at most `18446744073709551615s`.
         #[arg(long = "since", value_parser = parse_event_age, value_name = "LENGTH")]
         event_age_limit: Option<Duration>,
         /// Keep only the events whose name contains this text, matched
@@ -1185,10 +1228,6 @@ pub enum KeymapScope {
     Default,
     /// The user's keybinding file.
     User,
-    /// Per-named-session overrides.
-    Session,
-    /// Bindings a layout file declares.
-    Layout,
 }
 
 /// The `koshi keys` subcommands: read-only keymap introspection. Every verb
@@ -1197,8 +1236,12 @@ pub enum KeymapScope {
 pub enum KeysCommand {
     /// List effective keybindings per mode.
     List {
-        /// Limit the listing to one input mode.
-        #[arg(long = "mode", value_name = "MODE")]
+        /// Limit the listing to one built-in input mode.
+        #[arg(
+            long = "mode",
+            value_name = "MODE",
+            value_parser = PossibleValuesParser::new(LockMode::ALL.map(LockMode::get_keymap_name))
+        )]
         input_mode_name: Option<String>,
         /// Limit the listing to bindings authored by one layer.
         #[arg(long, value_enum, value_name = "SCOPE")]
@@ -1212,7 +1255,8 @@ pub enum KeysCommand {
         )]
         output_format: OutputFormat,
     },
-    /// Describe a key sequence: its action, source layer, and metadata.
+    /// Describe the binding on a key sequence and every longer binding that
+    /// starts with it: action, source layer, and metadata.
     Describe {
         /// The key sequence, in the angle grammar (`"<C-p> n"`).
         #[arg(value_name = "KEY_SEQUENCE")]

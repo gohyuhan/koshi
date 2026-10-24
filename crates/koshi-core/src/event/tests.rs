@@ -604,3 +604,29 @@ fn terminal_too_small_event_with_null_pane_area_decodes_as_none() {
         TerminalTooSmallCause::Regions
     );
 }
+
+#[test]
+fn a_member_not_in_the_session_names_its_kind_its_id_and_the_session() {
+    let tab_id = TabId::from_uuid(uuid::uuid!("019bb2ba-0005-7000-8000-000000000001"));
+    let pane_id = PaneId::from_uuid(uuid::uuid!("019bb2ba-0005-7000-8000-000000000002"));
+    let client_id = ClientId::from_uuid(uuid::uuid!("019bb2ba-0005-7000-8000-000000000003"));
+    for (member_id, expected_help) in [
+        (
+            SessionMemberId::Tab(tab_id),
+            "tab tab-019bb2ba-0005-7000-8000-000000000001 is not in session `work`",
+        ),
+        (
+            SessionMemberId::Pane(pane_id),
+            "pane pane-019bb2ba-0005-7000-8000-000000000002 is not in session `work`",
+        ),
+        (
+            SessionMemberId::Client(client_id),
+            "client client-019bb2ba-0005-7000-8000-000000000003 is not attached to session `work`",
+        ),
+    ] {
+        assert_eq!(
+            format_member_not_in_session_help(member_id, "work"),
+            expected_help
+        );
+    }
+}

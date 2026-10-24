@@ -111,7 +111,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use fs4::{FileExt, TryLockError};
-use koshi_config::layer::merge_server;
+use koshi_config::layer::{merge_server, PartialKoshiConfig};
 use koshi_config::types::ServerConfig;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::ids::SessionId;
@@ -131,7 +131,7 @@ use koshi_ipc::remote_state::{
 };
 use koshi_ipc::remote_tokens::{
     hash_connection_token, resolve_token_store_lock_path, resolve_token_store_path, TokenScope,
-    TokenStore,
+    TokenStore, MAX_TOKEN_LIFETIME_DURATION, TOKEN_LIFETIME_TOO_LONG_MESSAGE,
 };
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
@@ -713,8 +713,8 @@ pub(crate) const MAX_LIVE_REMOTE_CONNECTION_COUNT: usize = 128;
 ///
 /// Owned by the dispatcher loop alone, as the session list is.
 struct RemoteState {
-    /// The IP address and port `koshi.kdl` names, or `None` when it names
-    /// none.
+    /// The IP address and port `koshi.kdl` named when this router started, or
+    /// `None` when it named none. Nothing changes it while this router runs.
     remote_listen_address: Option<SocketAddr>,
     /// The koshi data directory holding the certificate and the record of the
     /// operator's yes, or `None` when this machine has none.
@@ -849,12 +849,16 @@ impl std::error::Error for ChildReapError {}
 /// closes the gate. A restart that fails opens the gate again. A child
 /// process that cannot be reaped closes the gate at once.
 ///
-/// `config_directory` holds the `koshi.kdl` the router reads: at the start for
-/// `remote-listen` and the shared directory, and on every attach lookup for the
-/// shared directory. `None` reads no file.
+/// `app_config_layer` is the `koshi.kdl` layer the caller read at this
+/// process's start: the router takes `remote-listen` and the shared directory
+/// it starts with from it. `None` starts on the built-in defaults.
+/// `config_directory` holds the `koshi.kdl` the router reads again on every
+/// attach lookup for the shared directory. Every remote status answer names
+/// that file. A `config_directory` of `None` reads no file.
 pub fn run_router(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
+    app_config_layer: Option<PartialKoshiConfig>,
     should_wait_for_lock: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     koshi_paths::ensure_private_directory(runtime_directory)?;
@@ -947,10 +951,15 @@ pub fn run_router(
     #[cfg(unix)]
     let mut runtime_file_keeper = start_router_file_keeper(runtime_directory);
 
+    let startup_server_config = merge_server(
+        ServerConfig::default(),
+        app_config_layer.into_iter().collect(),
+    );
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let mut router_sessions = create_router_sessions(
         runtime_directory,
-        koshi_link::config::find_shared_sessions_base_directory(config_directory).as_deref(),
+        koshi_link::config::compute_shared_sessions_base_directory(&startup_server_config)
+            .as_deref(),
         &router_events_sender,
     );
     #[cfg(unix)]
@@ -980,13 +989,7 @@ pub fn run_router(
     };
 
     let mut remote_state = RemoteState {
-        remote_listen_address: merge_server(
-            ServerConfig::default(),
-            koshi_link::config::load_app_layer(config_directory)
-                .into_iter()
-                .collect(),
-        )
-        .remote_listen_address,
+        remote_listen_address: startup_server_config.remote_listen_address,
         data_directory,
         served_certificate_fingerprint: None,
         admitted_remote_connections: Vec::new(),
@@ -1123,8 +1126,9 @@ fn take_router_lock(lock_file: &File, should_wait_for_lock: bool) -> std::io::Re
 /// has switched remote access on.
 ///
 /// An address alone opens nothing. The port opens the first time the operator
-/// answers yes to the offer `koshi share grant` makes, and on every start after
-/// that, which is what the record beside the certificate remembers.
+/// runs `koshi share open` or answers yes to the offer `koshi share grant`
+/// makes, and on every start after that, which is what the record beside the
+/// certificate remembers.
 ///
 /// A certificate that cannot be made and an address that cannot be bound are
 /// both reported and nothing else changes: local clients are served whatever
@@ -1144,7 +1148,7 @@ fn open_remote_listener(
     else {
         tracing::info!(
             "remote listen address {remote_listen_address} is set, but remote access was never switched on; \
-             run `koshi share grant` to switch it on"
+             run `koshi share open` to switch it on"
         );
         return;
     };
@@ -1746,7 +1750,8 @@ fn serve_router_event(
 /// one request at a time.
 ///
 /// `config_directory` is the one [`run_router`] was given. An attach lookup
-/// reads its `koshi.kdl` again for the shared directory.
+/// reads its `koshi.kdl` again for the shared directory, and a remote status
+/// answer names that `koshi.kdl`.
 #[allow(clippy::too_many_arguments)]
 fn serve_router_request(
     runtime_directory: &Path,
@@ -1822,14 +1827,23 @@ fn serve_router_request(
             identity,
             scope,
             expires_in,
-        } => grant_token(token_store_path, remote_state, identity, scope, expires_in),
+        } => grant_token(
+            token_store_path,
+            remote_state,
+            identity,
+            scope,
+            expires_in,
+            SystemTime::now,
+        ),
         RouterRequestKind::RevokeToken { identity, scope } => {
             revoke_token(token_store_path, remote_state, &identity, scope.as_ref())
         }
         RouterRequestKind::ListTokens { scope } => {
             list_token_entries(token_store_path, scope.as_ref())
         }
-        RouterRequestKind::RemoteStatus => build_remote_status_result(remote_state),
+        RouterRequestKind::RemoteStatus => {
+            build_remote_status_result(remote_state, config_directory)
+        }
         RouterRequestKind::EnableRemote => {
             enable_remote_access(remote_state, executable_watch, router_events_sender)
         }
@@ -2064,19 +2078,26 @@ fn locate_remote_session(
     })
 }
 
-/// What this machine's remote access is set to: the address `koshi.kdl` names,
-/// whether the operator has switched remote access on, whether this router is
-/// holding the port right now, the fingerprint of the certificate the open
-/// listener presents, and how many connections from another machine this
-/// router holds admitted.
+/// What this machine's remote access is set to: the address this router read
+/// from `koshi.kdl` when it started, the path of that `koshi.kdl` in
+/// `config_directory`, whether the operator has switched remote access on,
+/// whether this router is holding the port right now, the fingerprint of the
+/// certificate the open listener presents, and how many connections from
+/// another machine this router holds admitted.
 ///
 /// `is_remote_access_enabled` and `is_listening` are separate answers: an
 /// operator who said yes on a machine whose address something else holds reads
 /// `is_remote_access_enabled: true` and `is_listening: false`.
 /// `certificate_fingerprint` is `Some` exactly when `is_listening` is `true`.
-fn build_remote_status_result(remote_state: &RemoteState) -> RouterResult {
+/// `config_file_path` is `None` when `config_directory` is `None`.
+fn build_remote_status_result(
+    remote_state: &RemoteState,
+    config_directory: Option<&Path>,
+) -> RouterResult {
     RouterResult::RemoteStatus {
         remote_listen_address: remote_state.remote_listen_address,
+        config_file_path: config_directory
+            .map(|config_directory| config_directory.join("koshi.kdl")),
         is_remote_access_enabled: remote_state
             .data_directory
             .as_deref()
@@ -2091,10 +2112,12 @@ fn build_remote_status_result(remote_state: &RemoteState) -> RouterResult {
 /// it has none, take the port when it is not already held, write the record that
 /// reopens it on the next start, then serve.
 ///
-/// A certificate that cannot be made and a port that cannot be taken are refused
-/// with `the remote listener could not open <address>: <cause>`, and write no
-/// record. A record that cannot be written gives the port back. Serving is last
-/// and cannot fail.
+/// A router that read no listen address from `koshi.kdl` when it started is
+/// refused with ``this router read no remote listen address from koshi.kdl when
+/// it started; set …, then run `koshi restart-servers` ``. A certificate that
+/// cannot be made and a port that cannot be taken are refused with `the remote
+/// listener could not open <address>: <cause>`, and write no record. A record
+/// that cannot be written gives the port back. Serving is last and cannot fail.
 ///
 /// An address already being listened on skips the certificate, the bind and
 /// the serve, and is answered with the fingerprint of the certificate the
@@ -2106,7 +2129,8 @@ fn enable_remote_access(
 ) -> RouterResult {
     let Some(remote_listen_address) = remote_state.remote_listen_address else {
         return build_refused_result(
-            "no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl"
+            "this router read no remote listen address from koshi.kdl when it started; set \
+             `remote-listen \"<ip>:<port>\"` in koshi.kdl, then run `koshi restart-servers`"
                 .to_string(),
         );
     };
@@ -2212,10 +2236,14 @@ fn load_locked_token_store(
 /// Hand `identity` a fresh secret on `scope` and write the store back, holding
 /// the store lock from the read to the write ([`load_locked_token_store`]).
 ///
-/// The clock is read once, and both the issue time and the expiry are stamped
-/// from that one reading. `expires_in` is added to the issue time with a
-/// checked add. A span the clock cannot represent is refused before anything
-/// is written: the store file is left as it stood.
+/// An `expires_in` longer than [`MAX_TOKEN_LIFETIME_DURATION`] is refused with
+/// [`TOKEN_LIFETIME_TOO_LONG_MESSAGE`] before the store is read.
+///
+/// `read_current_time` is called once, after the lock is taken, and both the
+/// issue time and the expiry are stamped from that one reading. The router
+/// passes [`SystemTime::now`]. `expires_in` is added to the issue time with a
+/// checked add. An expiry the clock cannot represent is refused before
+/// anything is written: the store file is left as it stood.
 ///
 /// A grant takes the place of whatever `identity` held on `scope`. Every
 /// connection the replaced secret admitted ends once the new record is
@@ -2226,13 +2254,17 @@ fn grant_token(
     identity: String,
     scope: TokenScope,
     expires_in: Option<Duration>,
+    read_current_time: fn() -> SystemTime,
 ) -> RouterResult {
+    if expires_in.is_some_and(|expiry_duration| expiry_duration > MAX_TOKEN_LIFETIME_DURATION) {
+        return build_refused_result(TOKEN_LIFETIME_TOO_LONG_MESSAGE.to_string());
+    }
     let (token_store_path, _store_lock_file, mut token_store) =
         match load_locked_token_store(token_store_path) {
             Ok(locked_token_store) => locked_token_store,
             Err(refusal_result) => return refusal_result,
         };
-    let issued_at = SystemTime::now();
+    let issued_at = read_current_time();
     let expires_at = match expires_in {
         None => None,
         Some(expiry_duration) => match issued_at.checked_add(expiry_duration) {

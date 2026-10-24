@@ -30,8 +30,8 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
     list_pane_slots, ClientSnapshot, PaneSlot, PlacementPreview, PlacementSnapshot,
-    PlacementSource, PlacementTabSnapshot, RenderSnapshot, SessionSnapshot, TabMetadata,
-    TabSnapshot,
+    PlacementSource, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 
 use super::*;
@@ -47,6 +47,40 @@ pub(crate) const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
     row_count: 24,
 };
+
+/// Seed a session named `S-example` on `server`, holding one tab with one
+/// shell pane, as the session server does, then attach a fresh local client to
+/// that tab with a [`TEST_VIEWPORT_SIZE`] terminal. Returns the client's id.
+pub(crate) fn create_session_with_attached_client(
+    server: &mut koshi_runtime::server::Server,
+) -> ClientId {
+    let session_id = SessionId::new();
+    server
+        .bootstrap_session(
+            session_id,
+            "S-example".to_string(),
+            TEST_VIEWPORT_SIZE,
+            std::time::SystemTime::UNIX_EPOCH,
+        )
+        .expect("seed the session");
+    let tab_id = *server.list_sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the seeded tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        tab_id,
+        None,
+        std::time::SystemTime::UNIX_EPOCH,
+        false,
+    );
+    client_id
+}
 
 /// A destination tab size that no placement into a tab of two panes fits:
 /// `4x2`.
@@ -1090,6 +1124,7 @@ fn build_client_with_submitted_placement(
             Vec::new(),
         ),
         ambiguity_deadline: None,
+        continuation_hint_hidden_until: None,
     });
     client
 }
@@ -1240,48 +1275,53 @@ fn placement_drag_stays_moved_when_pointer_returns_to_the_press_position() {
 }
 
 #[test]
-fn an_accepted_mouse_drop_keeps_pane_placement_mode_until_esc_by_default() {
-    let command_id = CommandId::new();
-    let mut client = build_client_with_submitted_placement(
-        PlacementModeLifetime::UntilDragEnds,
-        PaneId::new(),
-        TabId::new(),
-    );
-    record_pending_placement_command(&mut client, command_id);
+fn an_accepted_drop_ends_the_mode_a_handle_drag_opened_with_either_stay_setting() {
+    for should_stay in [true, false] {
+        let command_id = CommandId::new();
+        let mut client = build_client_with_submitted_placement(
+            PlacementModeLifetime::UntilDragEnds,
+            PaneId::new(),
+            TabId::new(),
+        );
+        client
+            .client_config
+            .should_stay_in_pane_placement_mode_after_placement = should_stay;
+        let pending_key_sequence = client.pending_key_sequence.clone();
+        record_pending_placement_command(&mut client, command_id);
 
-    apply_frame_keeping_view(&mut client, Some(command_id), None);
+        apply_frame_keeping_view(&mut client, Some(command_id), None);
 
-    assert!(client.is_placement_mode_active());
-    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
-    assert_eq!(
-        client.placement_state.placement_mode_lifetime,
-        PlacementModeLifetime::UntilCancelled
-    );
-    assert!(!client.should_placement_mode_end_with_drag());
-    assert_eq!(client.get_placement_target(), None);
-    assert!(!client.is_placement_confirmation_pending());
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "stay setting {should_stay}"
+        );
+        assert!(!client.is_placement_confirmation_pending());
+        assert!(!client.is_placement_mode_active());
+        assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+        assert_eq!(client.pending_key_sequence, pending_key_sequence);
+    }
 }
 
 #[test]
-fn an_accepted_mouse_drop_ends_pane_placement_mode_when_staying_is_off() {
-    let command_id = CommandId::new();
-    let mut client = build_client_with_submitted_placement(
-        PlacementModeLifetime::UntilDragEnds,
-        PaneId::new(),
-        TabId::new(),
-    );
-    client
-        .client_config
-        .should_stay_in_pane_placement_mode_after_placement = false;
-    let pending_key_sequence = client.pending_key_sequence.clone();
-    record_pending_placement_command(&mut client, command_id);
+fn a_resync_ends_the_mode_a_handle_drag_opened_with_the_next_frame() {
+    for is_drop_applied in [true, false] {
+        let command_id = CommandId::new();
+        let mut client = build_client_with_submitted_placement(
+            PlacementModeLifetime::UntilDragEnds,
+            PaneId::new(),
+            TabId::new(),
+        );
+        record_pending_placement_command(&mut client, command_id);
+        client.prepare_placement_reconciliation();
 
-    apply_frame_keeping_view(&mut client, Some(command_id), None);
+        apply_frame_keeping_view(&mut client, is_drop_applied.then_some(command_id), None);
 
-    assert_eq!(client.placement_state.placement_mode, None);
-    assert!(!client.is_placement_confirmation_pending());
-    assert!(!client.is_placement_mode_active());
-    assert_eq!(client.pending_key_sequence, pending_key_sequence);
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "drop applied {is_drop_applied}"
+        );
+        assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+    }
 }
 
 #[test]
@@ -2323,13 +2363,8 @@ fn frame_hints_follow_the_viewers_own_mode() {
     );
     assert_eq!(
         list_sorted_hint_labels(&locked_mode_hints),
-        [
-            ("Begin Pane Placement", false),
-            ("Mouse Select", false),
-            ("Quit", false),
-            ("Unlock", true),
-        ]
-        .map(|(hint_label, is_pinned)| (hint_label.to_string(), is_pinned))
+        [("Mouse Select", false), ("Quit", false), ("Unlock", true)]
+            .map(|(hint_label, is_pinned)| (hint_label.to_string(), is_pinned))
     );
 }
 
@@ -2417,12 +2452,12 @@ fn a_frame_keeps_a_tab_strip_peek_made_on_the_tab_it_names() {
 }
 
 #[test]
-fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
+fn the_link_status_shows_on_the_chrome_the_viewer_paints() {
     let mut client = build_test_client();
     let active_tab_id = TabId::new();
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).reconnecting,
-        None,
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::Linked,
         "a joined viewer is linked"
     );
 
@@ -2432,19 +2467,21 @@ fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
     };
     client.set_link_status(LinkStatus::Redialing(reconnecting_state));
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).reconnecting,
-        Some(reconnecting_state)
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::Redialing(reconnecting_state)
     );
 
     client.set_link_status(LinkStatus::AwaitingRestartedSession);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).reconnecting,
-        None,
-        "a restart rejoin draws no tag"
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::AwaitingRestartedSession
     );
 
     client.set_link_status(LinkStatus::Linked);
-    assert_eq!(client.build_viewer_chrome(active_tab_id).reconnecting, None);
+    assert_eq!(
+        client.build_viewer_chrome(active_tab_id).link_status,
+        LinkStatus::Linked
+    );
 }
 
 #[test]

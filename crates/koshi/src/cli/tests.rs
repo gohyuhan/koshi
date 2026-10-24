@@ -791,6 +791,47 @@ fn keys_list_parses_its_filters_and_format() {
 }
 
 #[test]
+fn keys_list_mode_accepts_every_built_in_mode_name() {
+    for lock_mode in LockMode::ALL {
+        let mode_name = lock_mode.get_keymap_name();
+        assert_eq!(
+            parse_cli_command(&["koshi", "keys", "list", "--mode", mode_name]),
+            CliCommand::Keys {
+                command: KeysCommand::List {
+                    input_mode_name: Some(mode_name.to_string()),
+                    scope: None,
+                    output_format: OutputFormat::Table,
+                }
+            }
+        );
+    }
+}
+
+#[test]
+fn keys_list_refuses_a_mode_that_is_not_built_in() {
+    for mode_name in ["bogus", "Normal", ""] {
+        let cli_error = parse_cli_error(&["koshi", "keys", "list", "--mode", mode_name]);
+        assert_eq!(
+            cli_error.kind(),
+            ErrorKind::InvalidValue,
+            "for {mode_name:?}"
+        );
+    }
+}
+
+#[test]
+fn keys_list_refuses_the_session_and_layout_scopes() {
+    for scope_name in ["session", "layout"] {
+        let cli_error = parse_cli_error(&["koshi", "keys", "list", "--scope", scope_name]);
+        assert_eq!(
+            cli_error.kind(),
+            ErrorKind::InvalidValue,
+            "for {scope_name}"
+        );
+    }
+}
+
+#[test]
 fn keys_describe_parses_the_sequence() {
     assert_eq!(
         parse_cli_command(&["koshi", "keys", "describe", "<C-p> n"]),
@@ -1466,7 +1507,8 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          - left:  Leftward\n          \
          - up:    Upward\n\n      \
          --size <SIZE>\n          \
-         Signed number of cells the border moves; defaults to 1\n          \n          \
+         Signed number of cells the border moves, up to where a pane reaches its minimum \
+         size; defaults to 1\n          \n          \
          [default: 1]\n\n      \
          --pane <PANE_ID>\n          Pane to resize; defaults to the focused pane\n\n      \
          --client <CLIENT_ID>\n          \
@@ -1478,7 +1520,8 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          --certificate-fingerprint <FINGERPRINT>\n          \
          The fingerprint of the certificate the server `--remote` names must present: 64 \
          lowercase hex characters, as `koshi share grant` prints it on that machine. Needed \
-         for a server this machine has not saved, and refused for a server it has saved\n\n  \
+         for a server this machine has not saved. A server it has saved takes the fingerprint \
+         it holds, and refuses any other\n\n  \
          -h, --help\n          Print help (see a summary with '-h')\n"
     );
 }
@@ -3277,16 +3320,38 @@ fn parse_event_age_reads_a_count_and_one_unit_character() {
             "for {refused_text:?}"
         );
     }
-    // u64::MAX days: the count parses, the multiply by 86400 does not.
+    // The count is checked for digits before it is read as a number.
     assert_eq!(
-        parse_event_age("18446744073709551615d"),
+        parse_event_age("99999999999999999999x9s"),
         Err(EXPECTED_DURATION_ERROR.to_string())
     );
-    // Seconds need no multiply, so the same count is taken.
+}
+
+#[test]
+fn parse_event_age_takes_up_to_u64_seconds_and_names_that_limit_past_it() {
+    const TOO_LONG_DURATION_ERROR: &str = "a length is at most 18446744073709551615s";
+
     assert_eq!(
         parse_event_age("18446744073709551615s"),
         Ok(Duration::from_secs(u64::MAX))
     );
+    // 213503982334601 days is the most days that fit in u64 seconds.
+    assert_eq!(
+        parse_event_age("213503982334601d"),
+        Ok(Duration::from_secs(18_446_744_073_709_526_400))
+    );
+    // One day more, u64::MAX days, and a count one past u64::MAX.
+    for refused_text in [
+        "213503982334602d",
+        "18446744073709551615d",
+        "18446744073709551616s",
+    ] {
+        assert_eq!(
+            parse_event_age(refused_text),
+            Err(TOO_LONG_DURATION_ERROR.to_string()),
+            "for {refused_text:?}"
+        );
+    }
 }
 
 #[test]
@@ -4950,4 +5015,69 @@ fn every_cli_action_name_is_a_registered_core_action() {
     .into_iter()
     .collect();
     assert_eq!(cli_action_names, expected_registered_action_names);
+}
+
+#[test]
+fn every_id_the_json_output_prints_parses_back_through_its_target_flag() {
+    let session_id = SessionId::from_uuid(Uuid::from_u128(1));
+    let tab_id = TabId::from_uuid(Uuid::from_u128(2));
+    let pane_id = PaneId::from_uuid(Uuid::from_u128(3));
+    let client_id = ClientId::from_uuid(Uuid::from_u128(4));
+    let pane_listing_json: serde_json::Value = serde_json::from_str(&crate::output::render_panes(
+        &[koshi_link::discovery::PaneRow {
+            pane_id,
+            pane_name: None,
+            tab_id: Some(tab_id),
+            tab_name: Some("editor".to_string()),
+            session_id,
+            session_name: "quiet-lake".to_string(),
+        }],
+        OutputFormat::Json,
+    ))
+    .expect("the listing is JSON");
+    let client_listing_json: serde_json::Value =
+        serde_json::from_str(&crate::output::render_clients(
+            &[koshi_link::discovery::ClientRow {
+                client_id,
+                session_id,
+                session_name: "quiet-lake".to_string(),
+            }],
+            OutputFormat::Json,
+        ))
+        .expect("the listing is JSON");
+    let grant_listing_json: serde_json::Value =
+        serde_json::from_str(&crate::output::render_share_list(
+            &[koshi_ipc::remote_tokens::TokenEntry {
+                identity: "alice".to_string(),
+                scope: koshi_ipc::remote_tokens::TokenScope::Session(session_id),
+                issued_at: std::time::SystemTime::UNIX_EPOCH,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+            }],
+            OutputFormat::Json,
+        ))
+        .expect("the listing is JSON");
+
+    let printed_pane_id = pane_listing_json[0]["pane_id"].as_str().expect("an id");
+    let printed_tab_id = pane_listing_json[0]["tab_id"].as_str().expect("an id");
+    let printed_session_id = pane_listing_json[0]["session_id"].as_str().expect("an id");
+    let printed_client_id = client_listing_json[0]["client_id"].as_str().expect("an id");
+    let printed_scope = grant_listing_json[0]["scope"].as_str().expect("a scope");
+
+    assert_eq!(printed_pane_id, "pane-00000000-0000-0000-0000-000000000003");
+    assert_eq!(parse_pane_id(printed_pane_id), Ok(pane_id));
+    assert_eq!(
+        parse_tab_reference(printed_tab_id),
+        Ok(TabReference::TabId(tab_id))
+    );
+    assert_eq!(
+        parse_session_reference(printed_session_id),
+        Ok(SessionReference::SessionId(session_id))
+    );
+    assert_eq!(parse_client_id(printed_client_id), Ok(client_id));
+    assert_eq!(
+        parse_session_reference(printed_scope),
+        Ok(SessionReference::SessionId(session_id))
+    );
 }

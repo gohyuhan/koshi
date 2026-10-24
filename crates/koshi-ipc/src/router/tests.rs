@@ -300,6 +300,7 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
             request_id: Some(9),
             answer_result: RouterResult::RemoteStatus {
                 remote_listen_address: Some(SocketAddr::from(([0, 0, 0, 0], 7654))),
+                config_file_path: Some(PathBuf::from("/home/user/.config/koshi/koshi.kdl")),
                 is_remote_access_enabled: true,
                 is_listening: false,
                 certificate_fingerprint: Some("ab".repeat(32)),
@@ -307,7 +308,7 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
             },
         }),
         format!(
-            r#"{{"request_id":9,"answer_result":{{"RemoteStatus":{{"remote_listen_address":"0.0.0.0:7654","is_remote_access_enabled":true,"is_listening":false,"certificate_fingerprint":"{}","remote_connection_count":2}}}}}}"#,
+            r#"{{"request_id":9,"answer_result":{{"RemoteStatus":{{"remote_listen_address":"0.0.0.0:7654","config_file_path":"/home/user/.config/koshi/koshi.kdl","is_remote_access_enabled":true,"is_listening":false,"certificate_fingerprint":"{}","remote_connection_count":2}}}}}}"#,
             "ab".repeat(32)
         )
     );
@@ -316,13 +317,14 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
             request_id: Some(9),
             answer_result: RouterResult::RemoteStatus {
                 remote_listen_address: None,
+                config_file_path: None,
                 is_remote_access_enabled: false,
                 is_listening: false,
                 certificate_fingerprint: None,
                 remote_connection_count: 0,
             },
         }),
-        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null,"remote_connection_count":0}}}"#
+        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"config_file_path":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null,"remote_connection_count":0}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -364,6 +366,26 @@ fn a_hello_answer_of_koshi_0_5_0_reads_with_no_process_image() {
             protocol_version: 3,
             build_version: "0.5.0".to_string(),
             process_image_id: None,
+        }
+    );
+}
+
+#[test]
+fn a_remote_status_answer_of_koshi_0_5_0_reads_with_no_config_file_path() {
+    let remote_status_response: RouterResponse = serde_json::from_str(
+        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":"127.0.0.1:7654","is_remote_access_enabled":true,"is_listening":true,"certificate_fingerprint":null,"remote_connection_count":1}}}"#,
+    )
+    .expect("a koshi 0.5.0 RemoteStatus answer decodes");
+
+    assert_eq!(
+        remote_status_response.answer_result,
+        RouterResult::RemoteStatus {
+            remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
+            config_file_path: None,
+            is_remote_access_enabled: true,
+            is_listening: true,
+            certificate_fingerprint: None,
+            remote_connection_count: 1,
         }
     );
 }
@@ -500,6 +522,7 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         (
             RouterResult::RemoteStatus {
                 remote_listen_address: Some(SocketAddr::from(([0, 0, 0, 0], 7654))),
+                config_file_path: None,
                 is_remote_access_enabled: true,
                 is_listening: false,
                 certificate_fingerprint: Some("ab".repeat(32)),

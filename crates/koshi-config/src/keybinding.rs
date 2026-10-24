@@ -21,8 +21,8 @@
 //! effective depth.
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
-//! span-tagged [`KeybindingDiagnostic`], and a file with any problem yields no
-//! layer at all. The running map stays as it was.
+//! span-tagged [`KeybindingDiagnostic`], in file order, and a file with any
+//! problem yields no layer at all. The running map stays as it was.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -35,7 +35,7 @@ use koshi_core::key::KeySequence;
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
-use crate::error::ConfigParseDiagnostic;
+use crate::error::{format_problems_at_line_and_column, ConfigParseDiagnostic};
 use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
@@ -44,6 +44,14 @@ use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
 mod tests;
+
+/// The setting node that sets the most chords one key sequence holds:
+/// `max-chord-depth 4`.
+pub(crate) const MAX_CHORD_DEPTH_SETTING_NAME: &str = "max-chord-depth";
+
+/// The setting node that names the chord that unlocks input in place of
+/// the reserved `<C-l>`: `unlock-alternative "<A-u>"`.
+pub(crate) const UNLOCK_ALTERNATIVE_SETTING_NAME: &str = "unlock-alternative";
 
 /// A keybinding file that could not be used.
 #[derive(Debug, Error, Diagnostic)]
@@ -59,10 +67,42 @@ pub enum KeybindingParseError {
     Invalid {
         /// Path of the keybinding file, for the header line.
         keybinding_path: String,
-        /// Every schema violation, each pointing at its own span.
+        /// Every schema violation of the file at `keybinding_path`, each
+        /// pointing at its own span, in file order: ascending span start, and
+        /// the order found for one start.
         #[related]
         diagnostics: Vec<KeybindingDiagnostic>,
     },
+}
+
+impl KeybindingParseError {
+    /// One message per problem, in the order of `diagnostics`. A syntax error
+    /// gives the one [`ConfigError::Parse`](crate::error::ConfigError::Parse)
+    /// message, such as `config parse error in keybinding.kdl: line 2, column
+    /// 15: No closing '}' for child block`. A schema error gives each
+    /// diagnostic's message after the line and column its span starts at, such
+    /// as ``line 2, column 1: unknown key `unlock_alternative`; did you mean
+    /// `unlock-alternative`?``.
+    #[must_use]
+    pub fn list_problem_messages(&self) -> Vec<String> {
+        match self {
+            Self::Syntax(parse_diagnostic) => {
+                vec![parse_diagnostic.build_config_error().to_string()]
+            }
+            Self::Invalid { diagnostics, .. } => match diagnostics.first() {
+                Some(first_diagnostic) => format_problems_at_line_and_column(
+                    first_diagnostic.keybinding_source.inner(),
+                    diagnostics.iter().map(|diagnostic| {
+                        (
+                            diagnostic.diagnostic_span.offset(),
+                            diagnostic.get_diagnostic_message(),
+                        )
+                    }),
+                ),
+                None => Vec::new(),
+            },
+        }
+    }
 }
 
 /// One schema violation in a keybinding file, rendered with a caret at the
@@ -107,6 +147,23 @@ pub fn parse_keybindings(
     keybinding_source_text: &str,
 ) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
     let keybinding_document = parse_kdl(keybinding_path, keybinding_source_text)?;
+    parse_keybindings_from_document(
+        keybinding_path,
+        keybinding_source_text,
+        &keybinding_document,
+    )
+}
+
+/// [`parse_keybindings`] on `keybinding_document`, the KDL document already
+/// parsed from `keybinding_source_text`.
+///
+/// # Errors
+/// [`KeybindingParseError::Invalid`] with every schema violation.
+pub(crate) fn parse_keybindings_from_document(
+    keybinding_path: &Path,
+    keybinding_source_text: &str,
+    keybinding_document: &KdlDocument,
+) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
     let mut keybinding_document_walker = KeybindingDocumentWalker {
         keybinding_source: NamedSource::new(
             keybinding_path.display().to_string(),
@@ -115,7 +172,10 @@ pub fn parse_keybindings(
         diagnostics: Vec::new(),
     };
     let partial_keybindings_config =
-        keybinding_document_walker.parse_keybinding_document(&keybinding_document);
+        keybinding_document_walker.parse_keybinding_document(keybinding_document);
+    keybinding_document_walker
+        .diagnostics
+        .sort_by_key(|keybinding_diagnostic| keybinding_diagnostic.diagnostic_span.offset());
     if keybinding_document_walker.diagnostics.is_empty() {
         Ok(partial_keybindings_config)
     } else {
@@ -164,8 +224,12 @@ impl KeybindingDocumentWalker {
         for kdl_node in keybinding_document.nodes() {
             let node_name = kdl_node.name().value();
             match node_name {
-                "version" | "chord-timeout-ms" | "which-key-delay-ms" | "max-chord-depth"
-                | "leader" | "unlock-alternative" => {
+                "version"
+                | "chord-timeout-ms"
+                | "which-key-delay-ms"
+                | MAX_CHORD_DEPTH_SETTING_NAME
+                | "leader"
+                | UNLOCK_ALTERNATIVE_SETTING_NAME => {
                     if !seen_setting_names.insert(node_name) {
                         self.record_diagnostic(
                             kdl_node.span(),
@@ -185,9 +249,9 @@ impl KeybindingDocumentWalker {
                                 "version",
                                 "chord-timeout-ms",
                                 "which-key-delay-ms",
-                                "max-chord-depth",
+                                MAX_CHORD_DEPTH_SETTING_NAME,
                                 "leader",
-                                "unlock-alternative",
+                                UNLOCK_ALTERNATIVE_SETTING_NAME,
                                 "mode",
                             ],
                         ),
@@ -250,7 +314,7 @@ impl KeybindingDocumentWalker {
                         Some(u32::try_from(integer_value).expect("bounded"));
                 }
             }
-            "max-chord-depth" => {
+            MAX_CHORD_DEPTH_SETTING_NAME => {
                 if let Some(integer_value) =
                     self.parse_integer_argument(kdl_node, u64::from(u8::MAX))
                 {
@@ -272,11 +336,11 @@ impl KeybindingDocumentWalker {
                     }
                 }
             }
-            "unlock-alternative" => {
+            UNLOCK_ALTERNATIVE_SETTING_NAME => {
                 if kdl_node.children().is_some() {
                     self.record_diagnostic(
                         kdl_node.span(),
-                        "`unlock-alternative` takes no children",
+                        format!("`{UNLOCK_ALTERNATIVE_SETTING_NAME}` takes no children"),
                     );
                     return;
                 }

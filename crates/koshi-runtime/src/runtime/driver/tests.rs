@@ -26,6 +26,7 @@ use koshi_test_support::fixtures::build_key_input_for_chord;
 
 use crate::runtime::command::tests::{
     attach_second_client, build_floating_new_pane_args, create_floating_pane,
+    create_session_with_attached_client,
 };
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::event::RuntimeEvent;
@@ -65,16 +66,16 @@ fn build_test_runtime_with_inbox_sender(
 /// Starts `session_id` on `server` with one 80x24 local client at timestamp
 /// `0`. Returns that client's id and the id of the session's one pane.
 fn bootstrap_test_session(server: &mut Server, session_id: SessionId) -> (ClientId, PaneId) {
-    let client_id = server
-        .bootstrap_local(
-            session_id,
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        server,
+        session_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
     (client_id, pane_id)
 }
@@ -145,10 +146,10 @@ fn a_client_key_press_is_written_to_that_clients_focused_pane() {
 
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
-        key_input: build_key_input_for_chord(KeyChord::from_parts(
+        key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
             BindingModifierFlags::NONE,
             Key::Char('a'),
-        )),
+        ))],
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -175,7 +176,7 @@ fn a_client_key_repeat_is_written_to_that_clients_focused_pane() {
 
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
-        key_input: repeated_key_input,
+        key_inputs: vec![repeated_key_input],
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -202,7 +203,7 @@ fn a_client_key_release_writes_nothing_to_that_clients_focused_pane() {
 
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
-        key_input: released_key_input,
+        key_inputs: vec![released_key_input],
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -231,7 +232,7 @@ fn a_client_key_that_no_chord_can_name_writes_nothing_to_that_clients_focused_pa
 
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
-        key_input: left_shift_key_input,
+        key_inputs: vec![left_shift_key_input],
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -555,10 +556,10 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
             _ => {
                 let _ = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
                     client_id,
-                    key_input: build_key_input_for_chord(KeyChord::from_parts(
+                    key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
                         BindingModifierFlags::NONE,
                         Key::Char('a'),
-                    )),
+                    ))],
                 });
             }
         }
@@ -736,10 +737,10 @@ fn a_clients_own_input_lets_its_next_frame_go_at_once_and_a_command_from_outside
     let key_waits =
         list_frame_waits_after_input_event(|client_id, _| RuntimeEvent::ClientKeyboard {
             client_id,
-            key_input: build_key_input_for_chord(KeyChord::from_parts(
+            key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
                 BindingModifierFlags::NONE,
                 Key::Char('a'),
-            )),
+            ))],
         });
     assert_eq!(key_waits, own_input_waits);
     let paste_waits = list_frame_waits_after_input_event(|client_id, _| RuntimeEvent::HostPaste {

@@ -9,7 +9,9 @@ reach your sessions, and whether programs in panes may write your clipboard.
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `%APPDATA%\koshi\config\koshi.kdl` on Windows. See [README](README.md#where-the-files-go).
 
-**Bad fields:** startup skips them, keeps their defaults, and logs each one.
+**Bad fields:** startup skips them, keeps their defaults, and logs each one
+with its line and column, such as ``line 3, column 5: ignored `pane.gap`:
+expected an integer``.
 `koshi config check` rejects them. `koshi config migrate` keeps them in the
 migrated file. A bad value in `update` rejects the whole app file for that
 launch.
@@ -115,6 +117,11 @@ On a floating pane's titlebar row:
   on a grab handle starts no new move.
 - `[ ]` pins the pane at its cell, and `[⚪]` unpins it. `–` minimizes the
   pane, and `✕` closes it.
+
+A pane you minimized keeps its program running. `<C-p> <Tab>` steps through
+the floating panes, and shows and focuses each pane it lands on
+(`keybinding.md`, *Floating pane actions*). `koshi restore-pane --all` shows
+every floating pane you minimized.
 
 Drag a floating pane's border to resize it, up to the edge of your pane area
 on that side. A drag on a corner moves the two borders that meet there. A pane
@@ -368,6 +375,46 @@ report for the Shift key alone, such as `^[[57441;2u`. A terminal that does not
 report Shift+Enter prints `^M`. The command restores your terminal before it
 exits.
 
+### Non-ASCII typing in a pane with no UTF-8 locale
+
+Koshi writes the keys of one read of your terminal to the pane in one write,
+in the order you typed them. Typing `é` writes the two bytes `C3 A9`.
+
+Bash, and every other program that uses GNU readline, can read these bytes as
+Meta keys. Readline does this when the pane's locale is `C` or `POSIX`, which
+is the locale when `LC_ALL`, `LC_CTYPE` and `LANG` are all unset. Servers and
+containers often have no locale set. In that locale, readline's `convert-meta`
+setting is on: a byte of `0x80` or more that readline reads as the first byte
+after its input queue is empty becomes `ESC` and the byte with its top bit
+cleared. A byte of `0x80` or more that is already queued behind a typed
+character goes into the line as it is.
+
+Example: typing `echo é-ü` one key at a time gives this:
+
+| Key | Bytes | Readline reads | Result |
+|---|---|---|---|
+| `é` | `C3 A9` | `M-C`, then `M-)` | `M-C` runs `capitalize-word`; `M-)` is unbound, and the `é` is lost |
+| `-` | `2D` | `-` | `-` goes into the line |
+| `ü` | `C3 BC` | `M-C`, then `M-<` | `M-<` puts the oldest history line on the command line |
+
+When `echo é-ü` arrives in one write, such as from `koshi input`, every byte
+after the `e` is queued, and the line reads `echo é-ü`. Typing one key at a
+time gives readline the same bytes in every terminal and in tmux.
+
+To type non-ASCII text in such a pane, do one of these:
+
+1. Set a UTF-8 locale for the shell in the pane, such as
+   `export LANG=C.UTF-8`. `locale -a` lists the locales the system has.
+2. Add these lines to `~/.inputrc`, then start a new shell:
+
+   ```
+   set convert-meta off
+   set output-meta on
+   ```
+
+   `convert-meta off` keeps every byte as text. `output-meta on` shows `é` on
+   the command line in place of `\303\251`.
+
 ## `logging`
 
 Neither side owns these: every koshi process reads them for its own log file.
@@ -594,8 +641,8 @@ Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 
 ## `stay-in-pane-placement-mode-after-placement`
 
-Controls what pane placement mode does after the session accepts a placement.
-Each terminal reads this for itself.
+Controls what pane placement mode opened with a key, such as `<C-p> m`, does
+after the session accepts a placement. Each terminal reads this for itself.
 
 - `#true`: pane placement mode stays on, so you can place the next pane. This
   holds after Enter and after a mouse drop. For example, `<C-p> m`, Right, Enter
@@ -605,8 +652,14 @@ Each terminal reads this for itself.
   swap the panes, and the tab bar returns to `BASE`.
 
 A placement the session rejects, such as one built on a layout that changed
-before it arrived, leaves pane placement mode as it was. Pane placement mode
-opened with `<C-p> m` stays on, and a drag started on a pane's grab handle ends.
+before it arrived, leaves that mode on.
+
+The setting does not apply to a drag started on a pane's grab handle outside
+pane placement mode. That drag ends with its drop, and the tab bar shows the
+mode you were in before the drag, such as `BASE` or `LOCK`, whether the session
+accepts or rejects the placement. For example, in normal mode, a drag of the
+left pane's grab handle onto the right pane swaps the two panes, and the keys
+you type next go to the focused pane.
 
 The setting also covers floating pane move mode (`MOVE FLOAT`). `#true` keeps
 the mode on after the session runs a floating pane move sent with Enter or a
@@ -617,7 +670,7 @@ still shows `MOVE FLOAT`.
 
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode on after a placement is accepted, and floating pane move mode on after a move is run (≥ 0.6.0) | `#true` | ≥ 0.5.0 |
+| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode opened with a key on after a placement is accepted, and floating pane move mode on after a move is run (≥ 0.6.0) | `#true` | ≥ 0.5.0 |
 
 ## `auto-close-session`
 
@@ -799,14 +852,31 @@ This only says where the sockets go. Nobody else reaches them until
 
 `remote-listen "0.0.0.0:7654"` names the address the remote listener binds, and
 does nothing else: writing this line opens no port and makes this machine
-reachable by nobody. The port opens the first time you run `koshi share grant`
-and answer yes to the offer it makes, and on every start after that.
+reachable by nobody. The port opens the first time you run `koshi share open`,
+or answer yes to the offer `koshi share grant` makes, and on every start after
+that.
 The value is an IP address and a port: IPv4 such as `192.0.2.20:7654`, or
 IPv6 in brackets such as `[::1]:7654`. A host name, such as
 `laptop.local:7654`, is ignored with a warning, and nothing binds. `0.0.0.0`
 and `[::]` accept connections on every IPv4 or IPv6 address of this machine.
-`koshi share grant` then names each of those addresses in its connect command,
-as `koshi share grant` in `cli.md` shows.
+`koshi share grant` and `koshi share open` then name each of those addresses
+in their connect command, as `koshi share grant` in `cli.md` shows.
+
+The router reads this line when it starts, and reads it again only when it
+starts again. A line you add, change, or remove while the router runs applies
+after `koshi restart-servers`, which restarts every session and the router with
+their panes kept. Until then the router keeps the address it read, and a
+listener that is open keeps serving on it. `koshi share grant`, `koshi share
+open` and `koshi doctor` compare that address with the line in `koshi.kdl`, and
+name the restart when the two differ:
+
+```text
+koshi: /home/user/.config/koshi/koshi.kdl names the remote listen address 127.0.0.1:7654, and the running router read no remote listen address from it when it started. Run `koshi restart-servers` so the router reads it again, then run `koshi share open`.
+```
+
+The router reads the `koshi.kdl` of the environment that started it. When it
+reads another `koshi.kdl` than the `koshi` command you run, the message names
+both files, and the line to change is the one in the router's file.
 
 `allow-other-users` is a separate switch, about other users logged in to this
 same machine. Neither key turns the other on.

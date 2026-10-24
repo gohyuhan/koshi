@@ -180,8 +180,8 @@ fn a_port_nothing_listens_on_refuses_the_dial_and_names_the_way_to_open_it() {
         rendered_error,
         format!(
             "{server_address} refused the connection: nothing is listening on that port. \
-             if remote access is not enabled on that machine, run `koshi share grant` \
-             there and answer yes to the offer to open the port"
+             if remote access is not enabled on that machine, run `koshi share open` \
+             there to open the port"
         )
     );
 }
@@ -755,6 +755,7 @@ fn a_server_presenting_another_certificate_than_the_expected_one_is_refused() {
         server_address: named_server_address,
         expected_certificate_fingerprint: named_expected_certificate_fingerprint,
         presented_certificate_fingerprint,
+        saved_server_label,
     } = ipc_error
     else {
         panic!("another certificate is its own refusal, not a transport failure");
@@ -765,6 +766,7 @@ fn a_server_presenting_another_certificate_than_the_expected_one_is_refused() {
         expected_certificate_fingerprint
     );
     assert_eq!(presented_certificate_fingerprint, certificate_fingerprint);
+    assert_eq!(saved_server_label, None);
     let _ = server_thread.join();
 }
 

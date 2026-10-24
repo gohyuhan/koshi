@@ -7,8 +7,11 @@
 //! no region leaves every row to the panes, the gap between two panes and a
 //! pane that is not drawn hit nothing, a border cell goes to the pane whose box
 //! holds it, a pane with no content cells clamps to its own origin, a stack
-//! header wins the cells it covers, the tab strip reports its first visible
-//! tab, two clients of different sizes hit-test independently, degenerate
+//! header wins the cells it covers, a tiled pane's handle takes the three
+//! cells after its top-left corner and its title the cells after them at
+//! every width, a shown handle hits only those three cells, a hidden handle or
+//! one under pane placement hits none, and a pane four columns wide has none, the tab strip reports its first visible tab, two
+//! clients of different sizes hit-test independently, degenerate
 //! frames are safe, and floating panes hit front to back over the tiled layer
 //! and the letterbox margin, with their content, border, titlebar and controls
 //! apart.
@@ -26,7 +29,8 @@ use koshi_test_support::fixtures::build_cell_rect;
 use crate::render::tests::compute_version_badge_column_count;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, FloatingPaneMoveDraft, FloatingPaneSlot, MouseFrame,
-    PaneSlot, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    PaneSlot, PlacementHandleHover, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
+    ViewerChrome,
 };
 
 fn build_screen_point(screen_column: u16, screen_row: u16) -> Point {
@@ -993,6 +997,223 @@ fn a_border_corner_reads_as_its_vertical_side_and_names_its_horizontal_side() {
             side: Direction::Right,
             corner_horizontal_side: Some(Direction::Down),
         }
+    );
+}
+
+/// The top border parts of an `outer_column_count`-column, 10-row tiled pane
+/// at `(0, 0)`.
+fn compute_top_border_at_width(outer_column_count: u16) -> TiledPaneTopBorder {
+    compute_tiled_pane_top_border(build_cell_rect(0, 0, outer_column_count, 10))
+}
+
+#[test]
+fn a_tiled_top_border_places_the_handle_from_five_columns_and_the_title_from_seven() {
+    let handle_rect = Some(build_cell_rect(1, 0, 3, 1));
+    for (outer_column_count, expected_top_border) in [
+        (
+            4,
+            TiledPaneTopBorder {
+                placement_handle_rect: None,
+                title_rect: None,
+            },
+        ),
+        (
+            5,
+            TiledPaneTopBorder {
+                placement_handle_rect: handle_rect,
+                title_rect: None,
+            },
+        ),
+        (
+            6,
+            TiledPaneTopBorder {
+                placement_handle_rect: handle_rect,
+                title_rect: None,
+            },
+        ),
+        (
+            7,
+            TiledPaneTopBorder {
+                placement_handle_rect: handle_rect,
+                title_rect: Some(build_cell_rect(4, 0, 1, 1)),
+            },
+        ),
+        (
+            20,
+            TiledPaneTopBorder {
+                placement_handle_rect: handle_rect,
+                title_rect: Some(build_cell_rect(4, 0, 14, 1)),
+            },
+        ),
+    ] {
+        assert_eq!(
+            compute_top_border_at_width(outer_column_count),
+            expected_top_border,
+            "{outer_column_count} columns"
+        );
+    }
+    assert_eq!(
+        compute_tiled_pane_top_border(build_cell_rect(10, 3, 20, 10)),
+        TiledPaneTopBorder {
+            placement_handle_rect: Some(build_cell_rect(11, 3, 3, 1)),
+            title_rect: Some(build_cell_rect(14, 3, 14, 1)),
+        }
+    );
+}
+
+#[test]
+fn a_tiled_top_border_never_puts_the_handle_and_the_title_on_one_cell() {
+    for outer_column_count in 0..=300 {
+        let top_border = compute_top_border_at_width(outer_column_count);
+        if let Some(handle_rect) = top_border.placement_handle_rect {
+            assert_eq!(handle_rect.origin.column, 1, "{outer_column_count} columns");
+            assert!(
+                handle_rect.origin.column + handle_rect.size.column_count < outer_column_count,
+                "{outer_column_count} columns"
+            );
+        }
+        if let Some(title_rect) = top_border.title_rect {
+            assert_eq!(title_rect.origin.column, 4, "{outer_column_count} columns");
+            assert_eq!(
+                title_rect.origin.column + title_rect.size.column_count,
+                outer_column_count - 2,
+                "{outer_column_count} columns"
+            );
+        }
+    }
+}
+
+/// A tiled pane whose handle shows hits the handle on the three cells after
+/// its top-left corner and its top border on every title cell after them. A
+/// hidden handle, and a handle while pane placement shows, hit no handle
+/// cell.
+#[test]
+fn a_shown_tiled_handle_hits_its_three_cells_and_the_title_cells_hit_the_top_border() {
+    let pane_id = PaneId::new();
+    // Centered: the box spans (2, 2)–(21, 11).
+    let render_snapshot = build_render_snapshot(
+        Size {
+            column_count: 24,
+            row_count: 14,
+        },
+        Size {
+            column_count: 20,
+            row_count: 10,
+        },
+        &[(pane_id, build_cell_rect(0, 0, 20, 10), true)],
+        &[],
+        &[],
+    );
+    let viewer_chrome = ViewerChrome {
+        placement_handle_hover: Some(PlacementHandleHover::TiledTopBorder { pane_id }),
+        ..ViewerChrome::default()
+    };
+
+    let top_row_hit_regions: Vec<HitRegion> = (2..22)
+        .map(|screen_column| {
+            resolve_hit_region(
+                render_snapshot.build_frame_layout(viewer_chrome),
+                build_screen_point(screen_column, 2),
+            )
+        })
+        .collect();
+
+    let mut expected_hit_regions = vec![HitRegion::PaneBorder {
+        pane_id,
+        side: Direction::Left,
+        corner_horizontal_side: Some(Direction::Up),
+    }];
+    expected_hit_regions.extend([HitRegion::PlacementHandle { pane_id }; 3]);
+    expected_hit_regions.extend(
+        [HitRegion::PaneBorder {
+            pane_id,
+            side: Direction::Up,
+            corner_horizontal_side: None,
+        }; 15],
+    );
+    expected_hit_regions.push(HitRegion::PaneBorder {
+        pane_id,
+        side: Direction::Right,
+        corner_horizontal_side: Some(Direction::Up),
+    });
+    assert_eq!(top_row_hit_regions, expected_hit_regions);
+    for hidden_handle_viewer_chrome in [
+        ViewerChrome::default(),
+        ViewerChrome {
+            placement_handle_hover: Some(PlacementHandleHover::TiledHandle {
+                pane_id: PaneId::new(),
+            }),
+            ..ViewerChrome::default()
+        },
+    ] {
+        assert_eq!(
+            resolve_hit_region(
+                render_snapshot.build_frame_layout(hidden_handle_viewer_chrome),
+                build_screen_point(3, 2),
+            ),
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            }
+        );
+    }
+}
+
+/// A tiled pane four columns wide draws no handle, so its top border has no
+/// handle cell even while the viewer names it.
+#[test]
+fn a_tiled_pane_too_narrow_for_the_handle_has_no_handle_cell() {
+    let pane_id = PaneId::new();
+    // Centered: the box spans (2, 2)–(5, 11).
+    let render_snapshot = build_render_snapshot(
+        Size {
+            column_count: 8,
+            row_count: 14,
+        },
+        Size {
+            column_count: 4,
+            row_count: 10,
+        },
+        &[(pane_id, build_cell_rect(0, 0, 4, 10), true)],
+        &[],
+        &[],
+    );
+    let viewer_chrome = ViewerChrome {
+        placement_handle_hover: Some(PlacementHandleHover::TiledHandle { pane_id }),
+        ..ViewerChrome::default()
+    };
+
+    let top_row_hit_regions: Vec<HitRegion> = (2..6)
+        .map(|screen_column| {
+            resolve_hit_region(
+                render_snapshot.build_frame_layout(viewer_chrome),
+                build_screen_point(screen_column, 2),
+            )
+        })
+        .collect();
+
+    let top_border_hit_region = HitRegion::PaneBorder {
+        pane_id,
+        side: Direction::Up,
+        corner_horizontal_side: None,
+    };
+    assert_eq!(
+        top_row_hit_regions,
+        [
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Left,
+                corner_horizontal_side: Some(Direction::Up),
+            },
+            top_border_hit_region,
+            top_border_hit_region,
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Right,
+                corner_horizontal_side: Some(Direction::Up),
+            },
+        ]
     );
 }
 

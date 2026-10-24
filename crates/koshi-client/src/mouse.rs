@@ -68,19 +68,20 @@ use koshi_core::mouse::{
 };
 use koshi_layout::placement::PlacementDestinations;
 use koshi_renderer::snapshot::{
-    FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane, TabSnapshot, ViewerChrome,
+    find_shown_placement_handle_hover, FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane,
+    PlacementHandleHover, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
-    compute_placement_handle_rect, find_first_visible_tab_index, find_pane_content_rect,
+    compute_tiled_pane_top_border, find_first_visible_tab_index, find_pane_content_rect,
     resolve_hit_region, HitRegion,
 };
 
 use crate::input::is_same_tab_placement_noop;
 use crate::terminal::project_core_rect;
 use crate::{
-    Client, DockUndockMode, FloatingPaneMoveSelection, LinkStatus, PaneMoveMode,
-    PlacementInputAction, PlacementModeLifetime,
+    Client, DockUndockMode, FloatingPaneMoveSelection, PaneMoveMode, PlacementInputAction,
+    PlacementModeLifetime,
 };
 
 #[cfg(test)]
@@ -352,13 +353,17 @@ pub(crate) struct TablinePeek {
 }
 
 impl Client {
-    /// The pane this viewer's pointer is over, the pane whose placement handle
-    /// it marks, its input mode, its pane placement preview, where its tab
-    /// strip is scrolled, whether it is dialing the session again, and where it
+    /// The pane this viewer's pointer is over, the placement handle it shows or
+    /// marks, its input mode, its pane placement preview, where its tab
+    /// strip is scrolled, whether it holds a link to its session, and where it
     /// draws a floating pane it moves, for the frame it is about to paint, and
     /// for the tab-strip steps and the grab-handle release that read it before
-    /// that paint. While the pane placement preview shows, no pane is hovered
-    /// and no placement handle is marked.
+    /// that paint. While the pane placement preview shows, no pane is hovered.
+    /// The placement handle hover is the pointer's hover while a left press on
+    /// that handle starts a drag of its pane, and `None` otherwise
+    /// ([`find_shown_placement_handle_hover`]). A floating pane move waits
+    /// while the one a grab-handle release sent, or the one floating pane move
+    /// mode sent, has no answer from the session.
     ///
     /// The floating pane move draft is the grab-handle drag under way, else
     /// the cell the arrow keys of floating pane move mode moved the selected
@@ -372,18 +377,22 @@ impl Client {
     #[must_use]
     pub fn build_viewer_chrome(&self, active_tab_id: TabId) -> ViewerChrome {
         let is_pane_placement_visible = self.is_pane_placement_visible();
+        let active_input_mode = self.get_active_input_mode();
         ViewerChrome {
             hovered_pane_id: if is_pane_placement_visible {
                 None
             } else {
                 self.hovered_pane_id
             },
-            placement_handle_pane_id: if is_pane_placement_visible {
-                None
-            } else {
-                self.placement_handle_pane_id
-            },
-            active_input_mode: Some(self.get_active_input_mode()),
+            placement_handle_hover: find_shown_placement_handle_hover(
+                self.placement_handle_hover,
+                active_input_mode,
+                self.link_status,
+                is_pane_placement_visible,
+                self.is_dock_undock_command_pending(),
+                self.sent_floating_pane_move.is_some() || self.is_floating_pane_move_pending(),
+            ),
+            active_input_mode: Some(active_input_mode),
             is_pane_placement_visible,
             placement_source_pane_id: is_pane_placement_visible
                 .then(|| self.get_placement_source_pane_id())
@@ -392,10 +401,7 @@ impl Client {
                 .tabline_peek
                 .filter(|tabline_peek| tabline_peek.active_tab_id == active_tab_id)
                 .map(|tabline_peek| tabline_peek.first_visible_tab_index),
-            reconnecting: match self.link_status {
-                LinkStatus::Redialing(reconnecting) => Some(reconnecting),
-                LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
-            },
+            link_status: self.link_status,
             floating_pane_move_draft: match (
                 self.left_button_gesture,
                 self.pane_move_mode,
@@ -508,7 +514,7 @@ impl Client {
             }
             return None;
         }
-        self.update_placement_hovers(mouse_frame, mouse_input.position, hit_region, current_time);
+        self.update_placement_hovers(mouse_frame, mouse_input, hit_region, current_time);
         let placement_action = match mouse_input.mouse_kind {
             MouseKind::Press(MouseButton::Left) => match hit_region {
                 HitRegion::Tab { tab_id } => {
@@ -646,7 +652,7 @@ impl Client {
         current_time: Instant,
     ) -> PlacementInputAction {
         let hit_region = resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
-        self.update_placement_hovers(mouse_frame, mouse_input.position, hit_region, current_time);
+        self.update_placement_hovers(mouse_frame, mouse_input, hit_region, current_time);
         match mouse_input.mouse_kind {
             MouseKind::Press(MouseButton::Left) => {
                 self.left_button_gesture = None;
@@ -992,8 +998,10 @@ impl Client {
     /// this viewer painted, and return everything the session must do about it,
     /// in order. `mouse_frame` is the frame last passed to
     /// [`drop_gestures_the_frame_ended`](Self::drop_gestures_the_frame_ended).
-    /// The hovered pane and the hovered placement handle are cleared first
-    /// when `mouse_frame` no longer draws their pane.
+    /// The hovered pane is cleared first when `mouse_frame` no longer draws
+    /// it. The placement handle hover is cleared first unless it names a
+    /// floating pane `mouse_frame` draws, and a pointer motion sets a tiled
+    /// pane's again.
     ///
     /// A **wheel tick** is answered by [`handle_mouse_wheel`](Self::handle_mouse_wheel).
     /// The rest is routed by what the press began: a border drag resizes, a
@@ -1009,8 +1017,8 @@ impl Client {
     /// without focusing it. A **left release** ends whichever drag was under
     /// way, and a grab-handle release sends the move. A press, drag or release
     /// of another button goes to the program, and a left drag under way goes
-    /// on. A buttonless **move** updates which pane is hovered and reaches the
-    /// program if it asked for moves.
+    /// on. A buttonless **move** updates which pane is hovered and which
+    /// placement handle shows, and reaches the program if it asked for moves.
     ///
     /// A **press** first ends every gesture its button still holds: a left
     /// press drops koshi's left-button gesture with no copy and no move sent,
@@ -1034,9 +1042,19 @@ impl Client {
         self.hovered_pane_id = self
             .hovered_pane_id
             .filter(|&pane_id| is_pane_drawn(mouse_frame, pane_id));
-        self.placement_handle_pane_id = self
-            .placement_handle_pane_id
-            .filter(|&pane_id| is_pane_drawn(mouse_frame, pane_id));
+        // Keeps only the grab handle hover of a floating pane the frame draws,
+        // with the pin state the frame draws. A pointer motion sets a tiled
+        // pane's placement handle hover again in `update_pointer_hover`.
+        self.placement_handle_hover = match self.placement_handle_hover {
+            Some(PlacementHandleHover::FloatingHandle { pane_id, .. }) => mouse_frame
+                .build_frame_layout()
+                .find_drawn_floating_pane_slot(pane_id)
+                .map(|floating_pane_slot| PlacementHandleHover::FloatingHandle {
+                    pane_id,
+                    is_pinned: floating_pane_slot.is_pinned,
+                }),
+            _ => None,
+        };
         if let MouseKind::Press(pressed_button) = mouse_input.mouse_kind {
             if pressed_button == MouseButton::Left {
                 self.left_button_gesture = None;
@@ -1087,7 +1105,7 @@ impl Client {
             MouseKind::Motion => {
                 let hit_region =
                     resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
-                self.update_pointer_hover(mouse_frame, mouse_input.position, hit_region);
+                self.update_pointer_hover(mouse_frame, mouse_input, hit_region);
                 self.forward_mouse_input(mouse_input, mouse_frame)
             }
             MouseKind::Press(_) | MouseKind::Drag(_) | MouseKind::Release(_) => {
@@ -1122,7 +1140,7 @@ impl Client {
     ) -> Vec<MouseAction> {
         let frame_layout = self.build_frame_layout_with_current_chrome(mouse_frame);
         let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
-        self.update_pointer_hover(mouse_frame, mouse_input.position, hit_region);
+        self.update_pointer_hover(mouse_frame, mouse_input, hit_region);
         match mouse_input.mouse_kind {
             MouseKind::Press(MouseButton::Left) => {
                 let (HitRegion::PaneContent { pane_id } | HitRegion::PlacementHandle { pane_id }) =
@@ -1887,9 +1905,9 @@ impl Client {
     }
 
     /// Advance the border drag's anchor over the `applied_cell_count` cells the session
-    /// changed `pane_id`'s size by, for a move of its `border_side` border asked for in
-    /// direction `resize_step`. The anchor stops where the resize stopped, and a reverse
-    /// drag resizes the pane the instant the pointer crosses back.
+    /// moved `pane_id`'s `border_side` border by, for a move asked for in direction
+    /// `resize_step`. The anchor stops where the resize stopped, and a reverse drag
+    /// resizes the pane the instant the pointer crosses back.
     ///
     /// Nothing moves unless the drag now held is the one `pane_id` names and
     /// grabbed `border_side`: an answer for a border the viewer has let go of,
@@ -2184,16 +2202,16 @@ impl Client {
 
     /// Update the pointer hover ([`update_pointer_hover`](Self::update_pointer_hover))
     /// and the placement tab hover from `hit_region`, the region under
-    /// `screen_point`: a tab region starts the hover of that tab, and any
-    /// other region clears it.
+    /// `mouse_input`'s position: a tab region starts the hover of that tab,
+    /// and any other region clears it.
     fn update_placement_hovers(
         &mut self,
         mouse_frame: &MouseFrame,
-        screen_point: Point,
+        mouse_input: MouseInput,
         hit_region: HitRegion,
         current_time: Instant,
     ) {
-        self.update_pointer_hover(mouse_frame, screen_point, hit_region);
+        self.update_pointer_hover(mouse_frame, mouse_input, hit_region);
         let hovered_tab_id = match hit_region {
             HitRegion::Tab { tab_id } => Some(tab_id),
             _ => None,
@@ -2201,11 +2219,21 @@ impl Client {
         self.update_placement_tab_hover(hovered_tab_id, current_time);
     }
 
-    /// Update the viewer-owned hover state from the region under the pointer.
+    /// Update the viewer-owned hover state from `hit_region`, the region under
+    /// `mouse_input`'s position.
+    ///
+    /// The hovered pane is the pane whose content, top border or placement
+    /// handle the pointer is on. The placement handle hover is
+    /// [`FloatingHandle`](PlacementHandleHover::FloatingHandle) on a drawn
+    /// floating pane's grab handle, with the pin state that frame draws. On a
+    /// tiled pane's top border between its
+    /// corners, a pointer motion takes [`find_tiled_placement_handle_hover`]'s
+    /// answer, and every other event leaves no placement handle hover. Every
+    /// other region leaves none.
     fn update_pointer_hover(
         &mut self,
         mouse_frame: &MouseFrame,
-        screen_point: Point,
+        mouse_input: MouseInput,
         hit_region: HitRegion,
     ) {
         let hovered_pane_id = match hit_region {
@@ -2219,21 +2247,29 @@ impl Client {
             _ => find_content_pane(hit_region),
         };
         self.hovered_pane_id = hovered_pane_id;
-        self.placement_handle_pane_id = match hit_region {
-            HitRegion::PlacementHandle { pane_id }
-                if mouse_frame
-                    .build_frame_layout()
-                    .find_drawn_floating_pane_slot(pane_id)
-                    .is_some() =>
-            {
-                Some(pane_id)
+        let is_pointer_motion = mouse_input.mouse_kind == MouseKind::Motion;
+        let drawn_floating_pane_slot = match hit_region {
+            HitRegion::PlacementHandle { pane_id } => mouse_frame
+                .build_frame_layout()
+                .find_drawn_floating_pane_slot(pane_id),
+            _ => None,
+        };
+        self.placement_handle_hover = match (hit_region, drawn_floating_pane_slot) {
+            (_, Some(floating_pane_slot)) => Some(PlacementHandleHover::FloatingHandle {
+                pane_id: floating_pane_slot.pane_id,
+                is_pinned: floating_pane_slot.is_pinned,
+            }),
+            (
+                HitRegion::PlacementHandle { pane_id }
+                | HitRegion::PaneBorder {
+                    pane_id,
+                    side: Direction::Up,
+                    ..
+                },
+                None,
+            ) if is_pointer_motion => {
+                find_tiled_placement_handle_hover(mouse_frame, pane_id, mouse_input.position)
             }
-            HitRegion::PlacementHandle { pane_id }
-            | HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Up,
-                ..
-            } => find_visible_pane_handle(mouse_frame, pane_id, screen_point),
             _ => None,
         };
     }
@@ -2703,13 +2739,20 @@ fn compute_nearest_edge_direction(screen_point: Point, target_rect: RatatuiRect)
     }
 }
 
-/// Return `pane_id` when it is a visible tiled pane and `screen_point` is inside its
-/// painted placement handle, else `None`. A floating pane returns `None`.
-fn find_visible_pane_handle(
+/// The placement handle hover of the visible tiled pane `pane_id` with the
+/// pointer at `screen_point` on its top border, between its corners:
+/// [`TiledHandle`](PlacementHandleHover::TiledHandle) on the handle cells
+/// [`compute_tiled_pane_top_border`] gives and
+/// [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) on its other cells. `None`
+/// when `pane_id` is no visible tiled pane, a floating pane included, and when
+/// the pane is too narrow to draw a handle. On an `80`-column pane whose box
+/// starts at `(0, 1)`, `(2, 1)` gives `TiledHandle` and `(10, 1)` gives
+/// `TiledTopBorder`.
+fn find_tiled_placement_handle_hover(
     mouse_frame: &MouseFrame,
     pane_id: PaneId,
     screen_point: Point,
-) -> Option<PaneId> {
+) -> Option<PlacementHandleHover> {
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
@@ -2725,9 +2768,13 @@ fn find_visible_pane_handle(
             row_count: content_rect.size.row_count.saturating_add(2),
         },
     );
-    compute_placement_handle_rect(pane_outer_rect)
-        .filter(|handle_rect| handle_rect.is_point_inside(screen_point))
-        .map(|_| pane_id)
+    let placement_handle_rect =
+        compute_tiled_pane_top_border(pane_outer_rect).placement_handle_rect?;
+    if placement_handle_rect.is_point_inside(screen_point) {
+        Some(PlacementHandleHover::TiledHandle { pane_id })
+    } else {
+        Some(PlacementHandleHover::TiledTopBorder { pane_id })
+    }
 }
 
 /// Whether the `border_side` border of `pane_id` has another pane drawn right beside it in

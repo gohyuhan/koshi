@@ -781,7 +781,8 @@ fn order_addresses_by_family(resolved_server_addresses: Vec<SocketAddr>) -> Vec<
 /// address connects by the deadline, and [`IpcError::TlsHandshakeFailed`] when
 /// the handshake on an open connection does not finish, carrying
 /// [`run_tls_handshake`]'s own words. A certificate whose fingerprint is not
-/// `expected_certificate_fingerprint` is [`IpcError::CertificateMismatch`].
+/// `expected_certificate_fingerprint` is [`IpcError::CertificateMismatch`],
+/// naming no saved server.
 /// [`IpcError::Transport`] names the rest: a connect that failed for another
 /// reason, a stream that did not split, and the lookup, which reads
 /// `<address> could not be looked up: invalid socket address` for an address
@@ -852,6 +853,7 @@ pub fn connect_tls_stream(
                         expected_certificate_fingerprint: expected_certificate_fingerprint
                             .to_string(),
                         presented_certificate_fingerprint,
+                        saved_server_label: None,
                     }
                 }
                 _ => IpcError::TlsHandshakeFailed {

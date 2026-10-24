@@ -4,12 +4,13 @@
 
 mod common;
 
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use common::{build_server_with_fake_pty_backend, TEST_VIEWPORT_SIZE};
+use common::{
+    build_server_with_fake_pty_backend, create_session_with_attached_client, TEST_VIEWPORT_SIZE,
+};
 use koshi_client::input::KeyOutcome;
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::ids::SessionId;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
@@ -20,9 +21,7 @@ use koshi_test_support::fixtures::build_key_input_for_chord;
 fn bootstrap_opens_one_shell_and_its_first_subscriber_gets_a_frame_at_once() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
 
-    let client_id = server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(&mut server);
 
     assert_eq!(server.list_sessions().len(), 1);
     let pane_ids = fake_pty_backend.list_spawned_pane_ids();
@@ -44,9 +43,7 @@ fn bootstrap_opens_one_shell_and_its_first_subscriber_gets_a_frame_at_once() {
 #[test]
 fn pty_output_reaches_the_client_snapshot_in_one_dispatch_pass() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    let client_id = server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
     // End to end: the fake child writes two chunks -> the backend's sink
@@ -86,9 +83,7 @@ fn pty_output_reaches_the_client_snapshot_in_one_dispatch_pass() {
 #[test]
 fn typed_keys_write_to_the_focused_pane() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    let client_id = server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
     // `ls` + Enter, key by key. The viewer resolves each one, binds none of
@@ -103,8 +98,10 @@ fn typed_keys_write_to_the_focused_pane() {
         let key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, key);
         match viewer.resolve_key(key_chord, Instant::now()) {
             KeyOutcome::PassThrough(passthrough_key_chord) => {
-                server
-                    .handle_key_input(client_id, &build_key_input_for_chord(passthrough_key_chord));
+                server.handle_key_inputs(
+                    client_id,
+                    &[build_key_input_for_chord(passthrough_key_chord)],
+                );
             }
             unexpected_key_outcome => panic!(
                 "`{key_chord}` binds nothing and passes through; got {unexpected_key_outcome:?}"
@@ -123,9 +120,7 @@ fn typed_keys_write_to_the_focused_pane() {
 #[test]
 fn child_exit_is_forwarded_and_ends_the_last_pane() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
     fake_pty_backend
@@ -141,9 +136,7 @@ fn child_exit_is_forwarded_and_ends_the_last_pane() {
 #[test]
 fn trailing_output_is_parsed_before_the_exit() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
     // The child asks for its status (`CSI 5 n`), then exits. The engine reads
@@ -168,9 +161,7 @@ fn trailing_output_is_parsed_before_the_exit() {
 #[test]
 fn kill_all_panes_group_kills_the_shell() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
     // The panic-path teardown group-kills every pane's child, reaping its
@@ -188,9 +179,7 @@ fn kill_all_panes_group_kills_the_shell() {
 #[test]
 fn shutdown_graceful_group_kills_each_pane() {
     let (mut server, fake_pty_backend, _) = build_server_with_fake_pty_backend();
-    server
-        .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
-        .expect("bootstrap");
+    create_session_with_attached_client(&mut server);
     let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
 
     server.shutdown();

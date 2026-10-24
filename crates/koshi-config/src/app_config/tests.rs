@@ -4,8 +4,6 @@ use super::*;
 
 use std::net::Ipv6Addr;
 
-use kdl::KdlDocument;
-
 use crate::types::ClientConfig;
 
 /// Parses `config_source_text` as `koshi.kdl`, panicking on error, and drops
@@ -26,18 +24,6 @@ fn parse_file(config_source_text: &str) -> AppConfigFile {
     let config_source_text_with_version = add_config_version(config_source_text);
     parse_app_config(Path::new("koshi.kdl"), &config_source_text_with_version)
         .expect("valid config")
-}
-
-/// The message a [`ConfigError::Parse`] carries for `config_source_text`: the
-/// first sub-diagnostic of the raw KDL parse error.
-fn get_kdl_first_diagnostic(config_source_text: &str) -> String {
-    config_source_text
-        .parse::<KdlDocument>()
-        .expect_err("source is invalid KDL")
-        .diagnostics
-        .first()
-        .expect("kdl reports a diagnostic")
-        .to_string()
 }
 
 /// Asserts `validation_error` is [`ConfigError::Validation`] with exactly this
@@ -104,7 +90,7 @@ fn a_blank_theme_name_is_skipped_with_a_warning() {
     assert_eq!(app_config.theme_name, None);
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored `theme`: must not be empty".to_string()]
+        vec!["line 2, column 1: ignored `theme`: must not be empty".to_string()]
     );
 }
 
@@ -115,7 +101,7 @@ fn a_whitespace_only_theme_name_is_skipped_with_a_warning() {
     assert_eq!(app_config.theme_name, None);
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored `theme`: must not be empty".to_string()]
+        vec!["line 2, column 1: ignored `theme`: must not be empty".to_string()]
     );
 }
 
@@ -125,7 +111,7 @@ fn a_non_string_theme_name_is_skipped_with_a_warning() {
     assert_eq!(app_config.theme_name, None);
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored `theme`: expected a string".to_string()]
+        vec!["line 2, column 1: ignored `theme`: expected a string".to_string()]
     );
 }
 
@@ -137,7 +123,7 @@ fn a_repeated_theme_line_keeps_the_first_and_warns() {
     assert_eq!(app_config.theme_name, Some("midnight".to_string()));
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored duplicate `theme` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `theme` section".to_string()]
     );
 }
 
@@ -164,7 +150,10 @@ fn a_non_boolean_allow_beta_features_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.should_allow_beta_features, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `allow-beta-features`: expected a boolean (#true or #false)".to_string()]
+        vec![
+            "line 2, column 1: ignored `allow-beta-features`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
     );
 }
 
@@ -175,7 +164,7 @@ fn a_repeated_allow_beta_features_line_keeps_the_first_and_warns() {
     assert_eq!(app_config_layer.should_allow_beta_features, Some(true));
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `allow-beta-features` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `allow-beta-features` section".to_string()]
     );
 }
 
@@ -203,7 +192,10 @@ fn a_non_boolean_allow_other_users_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.should_allow_other_users, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `allow-other-users`: expected a boolean (#true or #false)".to_string()]
+        vec![
+            "line 2, column 1: ignored `allow-other-users`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
     );
 }
 
@@ -214,7 +206,7 @@ fn a_repeated_allow_other_users_line_keeps_the_first_and_warns() {
     assert_eq!(app_config_layer.should_allow_other_users, Some(true));
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `allow-other-users` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `allow-other-users` section".to_string()]
     );
 }
 
@@ -238,7 +230,7 @@ fn a_non_string_remote_listen_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `remote-listen`: expected a string".to_string()]
+        vec!["line 2, column 1: ignored `remote-listen`: expected a string".to_string()]
     );
 }
 
@@ -249,7 +241,7 @@ fn a_blank_remote_listen_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.remote_listen_address, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `remote-listen`: must not be empty".to_string()]
+        vec!["line 2, column 1: ignored `remote-listen`: must not be empty".to_string()]
     );
 }
 
@@ -269,7 +261,7 @@ fn a_host_name_remote_listen_is_skipped_with_a_warning() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `remote-listen`: `localhost:7654` is not an IP address and port, such as \
+            "line 2, column 1: ignored `remote-listen`: `localhost:7654` is not an IP address and port, such as \
              `192.0.2.20:7654`"
                 .to_string()
         ]
@@ -283,7 +275,7 @@ fn a_remote_listen_with_no_port_is_skipped_with_a_warning() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `remote-listen`: `192.0.2.20` is not an IP address and port, such as \
+            "line 2, column 1: ignored `remote-listen`: `192.0.2.20` is not an IP address and port, such as \
              `192.0.2.20:7654`"
                 .to_string()
         ]
@@ -300,7 +292,7 @@ fn a_repeated_remote_listen_line_keeps_the_first_and_warns() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `remote-listen` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `remote-listen` section".to_string()]
     );
 }
 
@@ -325,7 +317,7 @@ fn a_non_string_shared_sessions_dir_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.shared_sessions_directory, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `shared-sessions-dir`: expected a string".to_string()]
+        vec!["line 2, column 1: ignored `shared-sessions-dir`: expected a string".to_string()]
     );
 }
 
@@ -336,7 +328,7 @@ fn a_blank_shared_sessions_dir_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.shared_sessions_directory, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `shared-sessions-dir`: must not be empty".to_string()]
+        vec!["line 2, column 1: ignored `shared-sessions-dir`: must not be empty".to_string()]
     );
 }
 
@@ -351,7 +343,7 @@ fn a_repeated_shared_sessions_dir_line_keeps_the_first_and_warns() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `shared-sessions-dir` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `shared-sessions-dir` section".to_string()]
     );
 }
 
@@ -379,7 +371,10 @@ fn a_non_boolean_auto_close_session_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.should_auto_close_session, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `auto-close-session`: expected a boolean (#true or #false)".to_string()]
+        vec![
+            "line 2, column 1: ignored `auto-close-session`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
     );
 }
 
@@ -428,7 +423,7 @@ fn a_max_copy_bytes_below_one_is_skipped_with_a_warning() {
         );
         assert_eq!(
             parse_warnings,
-            vec!["ignored `pane-clipboard-writes.max-copy-bytes`: must be at least 1".to_string()]
+            vec!["line 4, column 5: ignored `pane-clipboard-writes.max-copy-bytes`: must be at least 1".to_string()]
         );
     }
 }
@@ -445,7 +440,7 @@ fn a_max_copy_bytes_that_is_not_an_integer_is_skipped_with_a_warning() {
         );
         assert_eq!(
             parse_warnings,
-            vec!["ignored `pane-clipboard-writes.max-copy-bytes`: expected an integer".to_string()]
+            vec!["line 3, column 5: ignored `pane-clipboard-writes.max-copy-bytes`: expected an integer".to_string()]
         );
     }
 }
@@ -475,7 +470,7 @@ fn a_non_boolean_pane_clipboard_writes_allow_is_skipped_with_a_warning() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `pane-clipboard-writes.allow`: expected a boolean (#true or #false)"
+            "line 3, column 5: ignored `pane-clipboard-writes.allow`: expected a boolean (#true or #false)"
                 .to_string()
         ]
     );
@@ -488,7 +483,7 @@ fn an_unknown_pane_clipboard_writes_key_warns_with_the_nearest_key() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored unknown key `pane-clipboard-writes.max-copy-byte`; did you mean \
+            "line 3, column 5: ignored unknown key `pane-clipboard-writes.max-copy-byte`; did you mean \
              `pane-clipboard-writes.max-copy-bytes`?"
                 .to_string()
         ]
@@ -504,7 +499,7 @@ fn a_colors_block_in_the_app_file_is_ignored() {
     assert_eq!(app_config.layer.theme, None);
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored unknown key `colors`; did you mean `copy`?".to_string()]
+        vec!["line 3, column 1: ignored unknown key `colors`; did you mean `copy`?".to_string()]
     );
 }
 
@@ -564,7 +559,10 @@ fn an_unknown_top_level_node_warns_with_a_suggestion() {
     assert_eq!(app_config_layer.mouse, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored unknown key `frobnicate`; did you mean `update`?".to_string()]
+        vec![
+            "line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?"
+                .to_string()
+        ]
     );
 }
 
@@ -577,7 +575,7 @@ fn unknown_field_inside_update_warns() {
     assert_eq!(update.check_interval_days, None);
     assert_eq!(
         parse_warnings,
-        ["ignored unknown key `update.frequency`; did you mean `update.auto-check`?"]
+        ["line 4, column 5: ignored unknown key `update.frequency`; did you mean `update.auto-check`?"]
     );
 }
 
@@ -713,7 +711,7 @@ fn syntax_error_is_a_parse_error() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        get_kdl_first_diagnostic(invalid_config_text)
+        "line 1, column 8: No closing '}' for child block"
     );
 }
 
@@ -810,7 +808,7 @@ fn a_non_boolean_stay_in_pane_placement_mode_after_placement_is_skipped_with_a_w
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `stay-in-pane-placement-mode-after-placement`: expected a boolean (#true or #false)"
+            "line 2, column 1: ignored `stay-in-pane-placement-mode-after-placement`: expected a boolean (#true or #false)"
                 .to_string()
         ]
     );
@@ -822,7 +820,10 @@ fn a_non_boolean_reduced_motion_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.should_reduce_motion, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `reduced-motion`: expected a boolean (#true or #false)".to_string()]
+        vec![
+            "line 2, column 1: ignored `reduced-motion`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
     );
 }
 
@@ -839,7 +840,10 @@ fn a_non_boolean_remote_reconnect_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.should_reconnect_remote_session, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `remote-reconnect`: expected a boolean (#true or #false)".to_string()]
+        vec![
+            "line 2, column 1: ignored `remote-reconnect`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
     );
 }
 
@@ -853,7 +857,7 @@ fn a_repeated_remote_reconnect_line_keeps_the_first_and_warns() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `remote-reconnect` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `remote-reconnect` section".to_string()]
     );
 }
 
@@ -884,23 +888,23 @@ fn a_remote_link_timeout_out_of_range_or_not_an_integer_is_skipped_with_a_warnin
     for (config_text, expected_warning) in [
         (
             "remote-link-timeout-ms 999",
-            "ignored `remote-link-timeout-ms`: must be at least 1000",
+            "line 2, column 1: ignored `remote-link-timeout-ms`: must be at least 1000",
         ),
         (
             "remote-link-timeout-ms 0",
-            "ignored `remote-link-timeout-ms`: must be at least 1000",
+            "line 2, column 1: ignored `remote-link-timeout-ms`: must be at least 1000",
         ),
         (
             "remote-link-timeout-ms -5",
-            "ignored `remote-link-timeout-ms`: must be at least 1000",
+            "line 2, column 1: ignored `remote-link-timeout-ms`: must be at least 1000",
         ),
         (
             "remote-link-timeout-ms 4294967296",
-            "ignored `remote-link-timeout-ms`: must be at most 4294967295",
+            "line 2, column 1: ignored `remote-link-timeout-ms`: must be at most 4294967295",
         ),
         (
             "remote-link-timeout-ms \"30s\"",
-            "ignored `remote-link-timeout-ms`: expected an integer",
+            "line 2, column 1: ignored `remote-link-timeout-ms`: expected an integer",
         ),
     ] {
         let (app_config_layer, parse_warnings) = parse_with_warnings(config_text);
@@ -923,7 +927,7 @@ fn a_repeated_remote_link_timeout_line_keeps_the_first_and_warns() {
     assert_eq!(app_config_layer.remote_link_timeout_ms, Some(5_000));
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `remote-link-timeout-ms` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `remote-link-timeout-ms` section".to_string()]
     );
 }
 
@@ -945,7 +949,7 @@ fn a_repeated_max_frames_per_second_line_keeps_the_first_and_warns() {
     assert_eq!(app_config_layer.max_frames_per_second, Some(30));
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `max-frames-per-second` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `max-frames-per-second` section".to_string()]
     );
 }
 
@@ -956,7 +960,7 @@ fn a_misspelled_max_frames_per_second_names_the_real_key() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored unknown key `max-frame-per-second`; did you mean `max-frames-per-second`?"
+            "line 2, column 1: ignored unknown key `max-frame-per-second`; did you mean `max-frames-per-second`?"
                 .to_string()
         ]
     );
@@ -973,27 +977,27 @@ fn a_max_frames_per_second_out_of_range_or_not_an_integer_is_skipped_with_a_warn
     for (config_text, expected_warning) in [
         (
             "max-frames-per-second 29",
-            "ignored `max-frames-per-second`: must be between 30 and 120",
+            "line 2, column 1: ignored `max-frames-per-second`: must be between 30 and 120",
         ),
         (
             "max-frames-per-second 121",
-            "ignored `max-frames-per-second`: must be between 30 and 120",
+            "line 2, column 1: ignored `max-frames-per-second`: must be between 30 and 120",
         ),
         (
             "max-frames-per-second 0",
-            "ignored `max-frames-per-second`: must be between 30 and 120",
+            "line 2, column 1: ignored `max-frames-per-second`: must be between 30 and 120",
         ),
         (
             "max-frames-per-second -60",
-            "ignored `max-frames-per-second`: must be between 30 and 120",
+            "line 2, column 1: ignored `max-frames-per-second`: must be between 30 and 120",
         ),
         (
             "max-frames-per-second 65596",
-            "ignored `max-frames-per-second`: must be between 30 and 120",
+            "line 2, column 1: ignored `max-frames-per-second`: must be between 30 and 120",
         ),
         (
             "max-frames-per-second \"60\"",
-            "ignored `max-frames-per-second`: expected an integer",
+            "line 2, column 1: ignored `max-frames-per-second`: expected an integer",
         ),
     ] {
         let (app_config_layer, parse_warnings) = parse_with_warnings(config_text);
@@ -1053,7 +1057,7 @@ fn extended_keys_parses_both_modes_and_warns_on_any_other_value() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `terminal.extended-keys`: expected \"on-request\" or \"always\"".to_string()]
+        vec!["line 3, column 5: ignored `terminal.extended-keys`: expected \"on-request\" or \"always\"".to_string()]
     );
 }
 
@@ -1069,8 +1073,8 @@ fn a_blank_term_or_colorterm_is_skipped_so_the_built_in_identity_stands() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `terminal.term`: must not be empty".to_string(),
-            "ignored `terminal.colorterm`: must not be empty".to_string(),
+            "line 3, column 5: ignored `terminal.term`: must not be empty".to_string(),
+            "line 4, column 5: ignored `terminal.colorterm`: must not be empty".to_string(),
         ]
     );
 }
@@ -1090,7 +1094,7 @@ fn an_empty_default_shell_is_skipped_so_the_shell_falls_back_to_the_environment(
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `terminal.default-shell`: must not be empty".to_string()]
+        vec!["line 3, column 5: ignored `terminal.default-shell`: must not be empty".to_string()]
     );
 }
 
@@ -1187,7 +1191,10 @@ fn a_bad_logging_level_is_skipped_with_a_warning() {
     );
     assert_eq!(
         parse_warnings,
-        vec![r#"ignored `logging.level`: expected "info", "warning", or "error""#.to_string()]
+        vec![
+            r#"line 3, column 5: ignored `logging.level`: expected "info", "warning", or "error""#
+                .to_string()
+        ]
     );
 }
 
@@ -1204,7 +1211,7 @@ fn a_bad_field_is_skipped_and_the_rest_of_the_section_applies() {
     assert_eq!(scrollback.maximum_byte_count, Some(500));
     assert_eq!(
         parse_warnings,
-        vec!["ignored `scrollback.max-lines`: expected an integer".to_string()]
+        vec!["line 3, column 5: ignored `scrollback.max-lines`: expected an integer".to_string()]
     );
 }
 
@@ -1240,7 +1247,7 @@ fn a_bad_direction_value_is_skipped_with_a_warning() {
     assert_eq!(
         parse_warnings,
         vec![
-            r#"ignored `layout.new-pane-direction`: expected "left", "right", "up", or "down""#
+            r#"line 3, column 5: ignored `layout.new-pane-direction`: expected "left", "right", "up", or "down""#
                 .to_string()
         ]
     );
@@ -1252,7 +1259,7 @@ fn an_unknown_field_in_a_section_warns() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored unknown key `scrollback.frequency`; did you mean `scrollback.max-lines`?"
+            "line 3, column 5: ignored unknown key `scrollback.frequency`; did you mean `scrollback.max-lines`?"
                 .to_string()
         ]
     );
@@ -1272,7 +1279,7 @@ fn a_duplicate_field_partial_section_warns_and_keeps_the_first() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `scrollback` section".to_string()]
+        vec!["line 5, column 1: ignored duplicate `scrollback` section".to_string()]
     );
 }
 
@@ -1313,7 +1320,7 @@ fn a_string_pane_dimension_is_skipped_as_a_non_integer() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.min-cols`: expected an integer".to_string()]
+        vec!["line 3, column 5: ignored `pane.min-cols`: expected an integer".to_string()]
     );
 }
 
@@ -1326,7 +1333,7 @@ fn a_string_pane_gap_is_skipped_as_a_non_integer() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.gap`: expected an integer".to_string()]
+        vec!["line 3, column 5: ignored `pane.gap`: expected an integer".to_string()]
     );
 }
 
@@ -1339,7 +1346,7 @@ fn a_negative_pane_gap_is_skipped_not_clamped() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.gap`: must be between 0 and 65535".to_string()]
+        vec!["line 3, column 5: ignored `pane.gap`: must be between 0 and 65535".to_string()]
     );
 }
 
@@ -1352,7 +1359,7 @@ fn a_pane_gap_past_the_cell_count_limit_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.gap`: must be between 0 and 65535".to_string()]
+        vec!["line 3, column 5: ignored `pane.gap`: must be between 0 and 65535".to_string()]
     );
 }
 
@@ -1368,8 +1375,8 @@ fn an_out_of_range_pane_dimension_is_skipped_with_the_range_reason() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `pane.min-cols`: must be between 0 and 65535".to_string(),
-            "ignored `pane.min-rows`: must be between 0 and 65535".to_string(),
+            "line 3, column 5: ignored `pane.min-cols`: must be between 0 and 65535".to_string(),
+            "line 4, column 5: ignored `pane.min-rows`: must be between 0 and 65535".to_string(),
         ]
     );
 }
@@ -1388,7 +1395,10 @@ fn a_negative_scroll_lines_is_skipped_not_clamped() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `mouse.scroll-lines`: must be between 0 and 65535".to_string()]
+        vec![
+            "line 3, column 5: ignored `mouse.scroll-lines`: must be between 0 and 65535"
+                .to_string()
+        ]
     );
 }
 
@@ -1478,7 +1488,7 @@ fn a_float_where_an_integer_is_required_is_skipped_as_a_non_integer() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.min-cols`: expected an integer".to_string()]
+        vec!["line 3, column 5: ignored `pane.min-cols`: expected an integer".to_string()]
     );
 }
 
@@ -1546,7 +1556,7 @@ fn a_field_with_no_value_is_skipped_with_a_warning() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.min-cols`: expected exactly one value".to_string()]
+        vec!["line 3, column 5: ignored `pane.min-cols`: expected exactly one value".to_string()]
     );
 }
 
@@ -1568,7 +1578,7 @@ fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        get_kdl_first_diagnostic(invalid_config_text)
+        "line 2, column 10: Unexpected newline in single-line quoted string"
     );
 }
 
@@ -1671,7 +1681,7 @@ fn a_theme_line_with_a_child_block_is_skipped_with_a_warning() {
     assert_eq!(app_config.theme_name, None);
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored `theme`: takes no children".to_string()]
+        vec!["line 2, column 1: ignored `theme`: takes no children".to_string()]
     );
 }
 
@@ -1681,7 +1691,7 @@ fn a_theme_line_with_no_value_is_skipped_with_a_warning() {
     assert_eq!(app_config.theme_name, None);
     assert_eq!(
         app_config.parse_warnings,
-        vec!["ignored `theme`: expected exactly one value".to_string()]
+        vec!["line 2, column 1: ignored `theme`: expected exactly one value".to_string()]
     );
 }
 
@@ -1733,8 +1743,36 @@ fn unknown_top_level_nodes_warn_once_each() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored unknown key `frobnicate`; did you mean `update`?".to_string(),
-            "ignored unknown key `frobnicate`; did you mean `update`?".to_string(),
+            "line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?"
+                .to_string(),
+            "line 3, column 1: ignored unknown key `frobnicate`; did you mean `update`?"
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn the_same_unknown_key_twice_gives_two_warnings_told_apart_by_location() {
+    let (_, parse_warnings) = parse_with_warnings("pane {\n    bogus 1\n    bogus 2\n}");
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "line 3, column 5: ignored unknown key `pane.bogus`; did you mean `pane.gap`?"
+                .to_string(),
+            "line 4, column 5: ignored unknown key `pane.bogus`; did you mean `pane.gap`?"
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn each_repeated_section_gives_a_warning_at_its_own_line() {
+    let (_, parse_warnings) = parse_with_warnings("pane {}\npane {}\npane {}");
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "line 3, column 1: ignored duplicate `pane` section".to_string(),
+            "line 4, column 1: ignored duplicate `pane` section".to_string(),
         ]
     );
 }
@@ -1746,9 +1784,10 @@ fn warnings_arrive_in_file_order() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored `theme`: must not be empty".to_string(),
-            "ignored `pane.min-cols`: expected an integer".to_string(),
-            "ignored unknown key `frobnicate`; did you mean `update`?".to_string(),
+            "line 2, column 1: ignored `theme`: must not be empty".to_string(),
+            "line 4, column 5: ignored `pane.min-cols`: expected an integer".to_string(),
+            "line 6, column 1: ignored unknown key `frobnicate`; did you mean `update`?"
+                .to_string(),
         ]
     );
 }
@@ -1791,7 +1830,10 @@ fn scroll_lines_at_the_u16_ceiling_is_accepted_and_one_past_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `mouse.scroll-lines`: must be between 0 and 65535".to_string()]
+        vec![
+            "line 3, column 5: ignored `mouse.scroll-lines`: must be between 0 and 65535"
+                .to_string()
+        ]
     );
 }
 
@@ -1809,7 +1851,7 @@ fn a_field_with_a_named_property_is_skipped_with_a_warning() {
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane.min-cols`: expected exactly one value".to_string()]
+        vec!["line 3, column 5: ignored `pane.min-cols`: expected exactly one value".to_string()]
     );
 }
 
@@ -1841,7 +1883,10 @@ fn a_bad_wheel_value_is_skipped_with_a_warning() {
     );
     assert_eq!(
         parse_warnings,
-        vec![r#"ignored `mouse.wheel`: expected "scroll-scrollback" or "ignore""#.to_string()]
+        vec![
+            r#"line 3, column 5: ignored `mouse.wheel`: expected "scroll-scrollback" or "ignore""#
+                .to_string()
+        ]
     );
 }
 
@@ -1858,7 +1903,10 @@ fn a_bad_logging_format_is_skipped_with_a_warning() {
     );
     assert_eq!(
         parse_warnings,
-        vec![r#"ignored `logging.format`: expected "pretty" or "json""#.to_string()]
+        vec![
+            r#"line 3, column 5: ignored `logging.format`: expected "pretty" or "json""#
+                .to_string()
+        ]
     );
 }
 
@@ -1889,27 +1937,27 @@ fn an_unknown_field_in_each_section_suggests_its_nearest_key() {
     for (config_source_text, expected_warning) in [
         (
             "pane {\n    min-col 5\n}",
-            "ignored unknown key `pane.min-col`; did you mean `pane.min-cols`?",
+            "line 3, column 5: ignored unknown key `pane.min-col`; did you mean `pane.min-cols`?",
         ),
         (
             "layout {\n    new-pane-directio \"down\"\n}",
-            "ignored unknown key `layout.new-pane-directio`; did you mean `layout.new-pane-direction`?",
+            "line 3, column 5: ignored unknown key `layout.new-pane-directio`; did you mean `layout.new-pane-direction`?",
         ),
         (
             "mouse {\n    whel \"ignore\"\n}",
-            "ignored unknown key `mouse.whel`; did you mean `mouse.wheel`?",
+            "line 3, column 5: ignored unknown key `mouse.whel`; did you mean `mouse.wheel`?",
         ),
         (
             "copy {\n    trim-trailing-whitespac #true\n}",
-            "ignored unknown key `copy.trim-trailing-whitespac`; did you mean `copy.trim-trailing-whitespace`?",
+            "line 3, column 5: ignored unknown key `copy.trim-trailing-whitespac`; did you mean `copy.trim-trailing-whitespace`?",
         ),
         (
             "terminal {\n    trem \"xterm\"\n}",
-            "ignored unknown key `terminal.trem`; did you mean `terminal.term`?",
+            "line 3, column 5: ignored unknown key `terminal.trem`; did you mean `terminal.term`?",
         ),
         (
             "logging {\n    levl \"info\"\n}",
-            "ignored unknown key `logging.levl`; did you mean `logging.level`?",
+            "line 3, column 5: ignored unknown key `logging.levl`; did you mean `logging.level`?",
         ),
     ] {
         let (_, parse_warnings) = parse_with_warnings(config_source_text);
@@ -1933,7 +1981,10 @@ fn a_section_written_with_a_value_instead_of_a_block_is_named_in_the_warnings() 
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `scrollback` value: a section takes a `{ … }` block".to_string()]
+        vec![
+            "line 2, column 1: ignored `scrollback` value: a section takes a `{ … }` block"
+                .to_string()
+        ]
     );
 }
 
@@ -1950,7 +2001,7 @@ fn a_section_carrying_both_a_value_and_a_block_reads_the_block_and_names_the_val
     );
     assert_eq!(
         parse_warnings,
-        vec!["ignored `pane` value: a section takes a `{ … }` block".to_string()]
+        vec!["line 2, column 1: ignored `pane` value: a section takes a `{ … }` block".to_string()]
     );
 }
 
@@ -1960,7 +2011,10 @@ fn a_non_boolean_image_support_is_skipped_with_a_warning() {
     assert_eq!(app_config_layer.supports_image_protocols, None);
     assert_eq!(
         parse_warnings,
-        vec!["ignored `image-support`: expected a boolean (#true or #false)".to_string()]
+        vec![
+            "line 2, column 1: ignored `image-support`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
     );
 }
 
@@ -1971,6 +2025,6 @@ fn a_repeated_image_support_line_keeps_the_first_and_warns() {
     assert_eq!(app_config_layer.supports_image_protocols, Some(false));
     assert_eq!(
         parse_warnings,
-        vec!["ignored duplicate `image-support` section".to_string()]
+        vec!["line 3, column 1: ignored duplicate `image-support` section".to_string()]
     );
 }

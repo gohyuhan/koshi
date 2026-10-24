@@ -6,10 +6,14 @@
 //! [`in_process_session`] runs one session server on a thread of the test
 //! process. [`session_connection`] speaks to a session server either way.
 //! [`RunningClient`] holds a `koshi` client the test started, and the waits
-//! below read what it did. [`spawn_stand_in_remote_server`] answers one remote
-//! connection with the frames a test gives it.
+//! below read what it did. [`spawn_stand_in_remote_server`] answers each remote
+//! connection with the frames a test gives it, and
+//! [`spawn_scripted_remote_server`] answers each connection with frames of its
+//! own.
 //! [`write_saved_server_store`] writes the saved-server store under a test
 //! home, and [`list_saved_server_records`] reads it.
+//! [`run_koshi_under_home`] runs one `koshi` command to its end and returns
+//! what it printed and its exit code.
 //!
 //! Every test binary declaring `mod common;` compiles all of it. No single
 //! binary uses every helper, and an unused helper is allowed here.
@@ -20,7 +24,7 @@ pub mod session_connection;
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -384,9 +388,10 @@ pub fn write_test_config(home_directory: &Path, config_text: &str) {
 
 /// The `koshi` binary at `binary_path`, set to keep its files under
 /// `home_directory` rather than in the developer's own directories, and stripped
-/// of the pane identity so it runs as a CLI outside any session. Standard input
-/// is closed, and both output streams are pipes the test reads. The runtime
-/// directory the child serves is [`resolve_runtime_directory_under_home`].
+/// of the pane identity so it runs as a CLI outside any session, and of
+/// `KOSHI_REMOTE_SECRET`. Standard input is closed, and both output streams are
+/// pipes the test reads. The runtime directory the child serves is
+/// [`resolve_runtime_directory_under_home`].
 ///
 /// `HOME` and `USERPROFILE` name `home_directory`. On Unix other than macOS,
 /// `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR`
@@ -417,6 +422,9 @@ pub fn build_koshi_command_at(binary_path: &Path, home_directory: &Path) -> Comm
         .env_remove("KOSHI_CLIENT_ID")
         .env_remove("KOSHI_PANE_ID")
         .env_remove("KOSHI_SOCKET")
+        // The child gets no `KOSHI_REMOTE_SECRET` from the developer's
+        // environment.
+        .env_remove("KOSHI_REMOTE_SECRET")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -442,6 +450,35 @@ pub fn build_koshi_command_at(binary_path: &Path, home_directory: &Path) -> Comm
 /// [`build_koshi_command_at`], run from the binary this build produced.
 pub fn build_koshi_command_under_home(home_directory: &Path) -> Command {
     build_koshi_command_at(Path::new(env!("CARGO_BIN_EXE_koshi")), home_directory)
+}
+
+/// What one `koshi` run printed, and the code it exited with.
+#[derive(Debug, PartialEq, Eq)]
+pub struct KoshiRunOutput {
+    pub standard_output: String,
+    pub standard_error: String,
+    pub exit_code: Option<i32>,
+}
+
+/// Run `koshi <arguments>` under `home_directory` and collect its output.
+pub fn run_koshi_under_home(home_directory: &Path, arguments: &[&str]) -> KoshiRunOutput {
+    let process_output = build_koshi_command_under_home(home_directory)
+        .args(arguments)
+        .output()
+        .expect("run koshi");
+    KoshiRunOutput {
+        standard_output: String::from_utf8(process_output.stdout).expect("UTF-8 stdout"),
+        standard_error: String::from_utf8(process_output.stderr).expect("UTF-8 stderr"),
+        exit_code: process_output.status.code(),
+    }
+}
+
+/// The `keybinding.kdl` path a `koshi` under `home_directory` reads, with its
+/// config directory created.
+pub fn create_keybinding_file_path(home_directory: &Path) -> PathBuf {
+    let config_directory = resolve_config_directory_under_home(home_directory);
+    std::fs::create_dir_all(&config_directory).expect("create config directory");
+    config_directory.join("keybinding.kdl")
 }
 
 /// Start one session's server under `home_directory`, serving
@@ -726,13 +763,30 @@ pub fn read_client_output_text(running_client: &mut RunningClient) -> String {
 }
 
 /// Start a TLS server on a loopback port that presents a certificate made for
-/// this call, and serve one connection on a thread of its own. For each frame
-/// of `answer_frames`, in order, the thread reads one client frame, then sends
-/// that answer frame. The thread ends after the last answer, or at the first
-/// handshake, read or write that fails.
+/// this call, and serve every connection it accepts, one after another, on a
+/// thread of its own. For each frame of `answer_frames`, in order, the thread
+/// reads one client frame, then sends that answer frame. A connection ends
+/// after the last answer, or at the first handshake, read or write that fails,
+/// and the thread then accepts the next one. The thread ends when an accept
+/// fails.
 ///
 /// Returns the server's address and the fingerprint of its certificate.
 pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (String, String) {
+    spawn_scripted_remote_server(std::iter::repeat(answer_frames))
+}
+
+/// Start a TLS server on a loopback port as [`spawn_stand_in_remote_server`]
+/// does, and answer the connection it accepts at position `N` with the answer
+/// frames at position `N` of `answer_frames_by_connection`. The thread ends
+/// after the last list, or when an accept fails.
+///
+/// Example — `vec![vec![Welcome], vec![Refused]].into_iter()` answers the
+/// first Hello with `Welcome` and the second with `Refused`.
+///
+/// Returns the server's address and the fingerprint of its certificate.
+pub fn spawn_scripted_remote_server(
+    answer_frames_by_connection: impl Iterator<Item = Vec<RemoteServerFrame>> + Send + 'static,
+) -> (String, String) {
     let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .expect("the test certificate is generated");
     let certificate_der_bytes = generated_certificate.cert.der().to_vec();
@@ -754,30 +808,45 @@ pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (S
         .expect("the bound loopback address")
         .to_string();
 
+    let server_config = Arc::new(server_config);
     std::thread::spawn(move || {
-        let Ok((mut socket, _)) = server_listener.accept() else {
-            return;
-        };
-        let mut tls_connection = rustls::Connection::Server(
-            ServerConnection::new(Arc::new(server_config)).expect("the TLS server side starts"),
-        );
-        let handshake_deadline = Instant::now() + WAIT_DURATION;
-        if tls::run_tls_handshake(&mut tls_connection, &mut socket, handshake_deadline).is_err() {
-            return;
-        }
-        let (tls_reader, tls_writer) =
-            tls::split_tls_stream(tls_connection, socket).expect("the TLS stream splits");
-        let (mut frame_reader, mut frame_writer) =
-            build_frame_halves(Box::new(tls_reader), Box::new(tls_writer));
-        for answer_frame in answer_frames {
-            if frame_reader.recv::<RemoteClientFrame>().is_err()
-                || frame_writer.send(&answer_frame).is_err()
-            {
+        for answer_frames in answer_frames_by_connection {
+            let Ok((socket, _)) = server_listener.accept() else {
                 return;
-            }
+            };
+            serve_stand_in_connection(socket, &server_config, &answer_frames);
         }
     });
     (server_address, certificate_fingerprint)
+}
+
+/// Run the TLS handshake on `socket` with `server_config`, then, for each frame
+/// of `answer_frames` in order, read one client frame and send that answer
+/// frame. Returns after the last answer, or at the first handshake, read or
+/// write that fails.
+fn serve_stand_in_connection(
+    mut socket: TcpStream,
+    server_config: &Arc<ServerConfig>,
+    answer_frames: &[RemoteServerFrame],
+) {
+    let mut tls_connection = rustls::Connection::Server(
+        ServerConnection::new(Arc::clone(server_config)).expect("the TLS server side starts"),
+    );
+    let handshake_deadline = Instant::now() + WAIT_DURATION;
+    if tls::run_tls_handshake(&mut tls_connection, &mut socket, handshake_deadline).is_err() {
+        return;
+    }
+    let (tls_reader, tls_writer) =
+        tls::split_tls_stream(tls_connection, socket).expect("the TLS stream splits");
+    let (mut frame_reader, mut frame_writer) =
+        build_frame_halves(Box::new(tls_reader), Box::new(tls_writer));
+    for answer_frame in answer_frames {
+        if frame_reader.recv::<RemoteClientFrame>().is_err()
+            || frame_writer.send(answer_frame).is_err()
+        {
+            return;
+        }
+    }
 }
 
 /// A saved server named `server_name` at `server_address`, holding

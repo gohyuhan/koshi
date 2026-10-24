@@ -6,15 +6,27 @@ use super::*;
 
 fn list_no_schema_problems(
     _config_file_kind: ConfigFileKind,
-    config_path: &Path,
-    config_source_text: &str,
-) -> Result<Vec<String>, MigrationError> {
-    parse_config_schema_version(config_path, config_source_text).map(|_| Vec::new())
+    _config_path: &Path,
+    _config_source_text: &str,
+    _config_document: &KdlDocument,
+) -> Vec<String> {
+    Vec::new()
+}
+
+/// Panics: stands in for a schema whose problems must not be listed.
+fn list_schema_problems_never(
+    _config_file_kind: ConfigFileKind,
+    _config_path: &Path,
+    _config_source_text: &str,
+    _config_document: &KdlDocument,
+) -> Vec<String> {
+    panic!("the schema problems were listed")
 }
 
 fn migrate_to_schema_two(
     _config_path: &Path,
     config_source_text: &str,
+    _config_document: &KdlDocument,
 ) -> Result<String, MigrationError> {
     Ok(config_source_text.replacen("version 1", "version 2", 1) + "step-one #true\n")
 }
@@ -22,8 +34,44 @@ fn migrate_to_schema_two(
 fn migrate_to_schema_three(
     _config_path: &Path,
     config_source_text: &str,
+    _config_document: &KdlDocument,
 ) -> Result<String, MigrationError> {
     Ok(config_source_text.replacen("version 2", "version 3", 1) + "step-two #true\n")
+}
+
+#[test]
+fn a_file_on_the_current_schema_migrates_without_listing_its_problems() {
+    let config_schemas = [
+        ConfigSchema {
+            schema_version: 1,
+            list_schema_problems: list_schema_problems_never,
+            migrate_to_next_schema: Some(migrate_to_schema_two),
+        },
+        ConfigSchema {
+            schema_version: 2,
+            list_schema_problems: list_schema_problems_never,
+            migrate_to_next_schema: None,
+        },
+    ];
+
+    let migrated_config = migrate_with_registry(
+        ConfigFileKind::App,
+        Path::new("koshi.kdl"),
+        "version 2\nmade-up-key \"x\"\n",
+        &config_schemas,
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(
+        migrated_config,
+        MigratedConfig {
+            source_schema_version: 2,
+            target_schema_version: 2,
+            migrated_source: "version 2\nmade-up-key \"x\"\n".to_string(),
+            is_changed: false,
+        }
+    );
 }
 
 #[test]
@@ -249,7 +297,7 @@ fn bad_kdl_is_rejected_before_migration() {
 
     assert_eq!(
         migration_error.to_string(),
-        "config parse error in koshi.kdl: No closing '}' for child block"
+        "config parse error in koshi.kdl: line 2, column 6: No closing '}' for child block"
     );
 }
 
@@ -267,7 +315,8 @@ fn field_partial_warning_is_a_validation_error() {
         MigrationError::Invalid {
             config_path: "koshi.kdl".to_string(),
             validation_error_detail:
-                "ignored unknown key `pane.min-col`; did you mean `pane.min-cols`?".to_string(),
+                "line 2, column 8: ignored unknown key `pane.min-col`; did you mean `pane.min-cols`?"
+                    .to_string(),
         }
     );
 }
@@ -370,8 +419,10 @@ fn list_test_migration_schema_problems(
     _config_file_kind: ConfigFileKind,
     config_path: &Path,
     config_source_text: &str,
-) -> Result<Vec<String>, MigrationError> {
-    let schema_version = parse_config_schema_version(config_path, config_source_text)?;
+    config_document: &KdlDocument,
+) -> Vec<String> {
+    let schema_version = parse_schema_version_from_document(config_path, config_document)
+        .expect("the caller read this version before listing problems");
     let mut schema_problems = Vec::new();
     if config_source_text.contains("bad-old-field") {
         schema_problems.push("bad old field".to_string());
@@ -379,7 +430,7 @@ fn list_test_migration_schema_problems(
     if schema_version == 2 && !config_source_text.contains("required #true") {
         schema_problems.push("missing required version 2 field".to_string());
     }
-    Ok(schema_problems)
+    schema_problems
 }
 
 #[test]
@@ -387,6 +438,7 @@ fn a_source_schema_problem_is_carried_through_migration() {
     fn migrate_to_schema_two_with_required_field(
         _config_path: &Path,
         config_source_text: &str,
+        _config_document: &KdlDocument,
     ) -> Result<String, MigrationError> {
         Ok(config_source_text.replacen("version 1", "version 2", 1) + "required #true\n")
     }
@@ -613,8 +665,8 @@ fn every_keybinding_schema_problem_lands_in_one_invalid_error() {
         migration_error,
         MigrationError::Invalid {
             config_path: "keybinding.kdl".to_string(),
-            validation_error_detail: "unknown key `keybindings`; did you mean `version`?; \
-                      unknown key `unbind`; did you mean `bind`?"
+            validation_error_detail: "line 2, column 1: unknown key `keybindings`; did you mean \
+                      `version`?; line 3, column 17: unknown key `unbind`; did you mean `bind`?"
                 .to_string(),
         }
     );
@@ -651,7 +703,8 @@ fn a_profile_schema_problem_becomes_an_invalid_error() {
         migration_error,
         MigrationError::Invalid {
             config_path: "profile/dev.kdl".to_string(),
-            validation_error_detail: "profile file must define at least one `tab`".to_string(),
+            validation_error_detail:
+                "line 1, column 1: profile file must define at least one `tab`".to_string(),
         }
     );
 }
@@ -669,7 +722,8 @@ fn a_theme_warning_is_a_validation_error() {
         migration_error,
         MigrationError::Invalid {
             config_path: "themes/plain.kdl".to_string(),
-            validation_error_detail: "ignored duplicate `colors` section".to_string(),
+            validation_error_detail: "line 3, column 1: ignored duplicate `colors` section"
+                .to_string(),
         }
     );
 }

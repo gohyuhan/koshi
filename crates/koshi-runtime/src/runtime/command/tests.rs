@@ -292,6 +292,59 @@ pub(crate) fn attach_client_through_server(
     attached_client_id
 }
 
+/// Seed one session under `session_id` with a generated name, one tab and one
+/// shell pane, as the session server does ([`Server::bootstrap_session`]),
+/// then attach a fresh local client to it with a `viewport_size` terminal at
+/// `attached_at` ([`attach_client_to_only_tab`]). Returns the client's id.
+///
+/// # Errors
+/// Returns the [`PtyError`] of a shell that fails to spawn. No session is
+/// committed then.
+pub(crate) fn create_session_with_attached_client(
+    server: &mut Server,
+    session_id: SessionId,
+    viewport_size: Size,
+    attached_at: SystemTime,
+) -> Result<ClientId, PtyError> {
+    let session_name = generate_name(NameKind::Session, |_| false);
+    server.bootstrap_session(session_id, session_name, viewport_size, attached_at)?;
+    Ok(attach_client_to_only_tab(
+        server,
+        session_id,
+        viewport_size,
+        attached_at,
+    ))
+}
+
+/// Attach a fresh local client to the one tab of `session_id` through
+/// [`Server::handle_client_attach`], with a `viewport_size` terminal that
+/// reports no pane area and no cell size, at `attached_at`. Drops the events
+/// of the attach and returns the client's id.
+pub(crate) fn attach_client_to_only_tab(
+    server: &mut Server,
+    session_id: SessionId,
+    viewport_size: Size,
+    attached_at: SystemTime,
+) -> ClientId {
+    let tab_id = *server.session_by_id[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the session holds a tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        viewport_size,
+        None,
+        tab_id,
+        None,
+        attached_at,
+        false,
+    );
+    client_id
+}
+
 /// Attach a client with [`ClientOrigin::Local`] viewing `tab_id` and reporting
 /// `pane_area`, optionally with `focused_pane_id` recorded there.
 fn attach_client_with_reported_pane_area(
@@ -455,9 +508,9 @@ const COMMAND_VARIANT_COUNT: usize = 25;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
-/// id no runtime holds, `MoveFloatingPane` names a pane id no runtime holds, and
-/// `SetPanePinned` and `SetPaneMinimized` name no pane, so each resolves the same way on
-/// every runtime.
+/// id no runtime holds, `MoveFloatingPane` names the same pane id on every runtime, one
+/// no runtime holds, and `SetPanePinned` and `SetPaneMinimized` name no pane, so each
+/// resolves the same way on every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),
@@ -520,7 +573,7 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             scroll_line_count: 3,
         }),
         Command::MoveFloatingPane(MoveFloatingPaneArgs {
-            pane_id: PaneId::new(),
+            pane_id: PaneId::from_uuid(uuid::uuid!("019bb2ba-0007-7000-8000-000000000001")),
             top_left_cell: Point { column: 4, row: 2 },
         }),
         Command::SetPanePinned(SetPanePinnedArgs {
@@ -836,7 +889,9 @@ fn a_command_naming_a_client_of_another_session_is_refused_and_changes_nothing()
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {second_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -939,11 +994,28 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
 
         // The whole answer, not only whether it was refused: a refusal matches
         // reason and help text, and a success matches the emitted events one
-        // for one, in order.
-        let local_outcome = get_command_outcome(&local_command_result);
+        // for one, in order. A help text that names the remote side's pane,
+        // tab or client is compared with those ids read as the local ones.
+        let local_outcome = get_command_outcome(&local_command_result)
+            .map_err(|(reject_reason, help)| (reject_reason, help.map(str::to_string)));
+        let local_id_by_remote_id = [
+            (remote_pane_id.to_string(), local_pane_id.to_string()),
+            (remote_tab_id.to_string(), local_tab_id.to_string()),
+            (remote_client_id.to_string(), local_client_id.to_string()),
+        ];
+        let remote_outcome =
+            get_command_outcome(&remote_command_result).map_err(|(reject_reason, help)| {
+                let help_with_local_ids = help.map(|help| {
+                    local_id_by_remote_id
+                        .iter()
+                        .fold(help.to_string(), |help_text, (remote_id, local_id)| {
+                            help_text.replace(remote_id, local_id)
+                        })
+                });
+                (reject_reason, help_with_local_ids)
+            });
         assert_eq!(
-            get_command_outcome(&remote_command_result),
-            local_outcome,
+            remote_outcome, local_outcome,
             "{command_name} answered a remote client differently from a local one"
         );
 
@@ -2004,11 +2076,12 @@ fn new_pane_stacked_with_a_missing_source_is_not_found() {
 
     // A stacked request naming a pane that does not exist resolves its target
     // like any other new-pane and rejects `TargetNotFound`.
+    let missing_pane_id = PaneId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             placement: NewPanePlacement::Stacked {
-                source_pane_id: Some(PaneId::new()),
+                source_pane_id: Some(missing_pane_id),
                 tab_id: None,
             },
             ..build_new_pane_args()
@@ -2020,7 +2093,7 @@ fn new_pane_stacked_with_a_missing_source_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("pane {missing_pane_id} is not in session `s`")),
         }
     );
 }
@@ -3802,6 +3875,7 @@ fn focus_explicit_client_wins_over_the_issuer() {
 fn focus_unattached_explicit_client_is_rejected_without_fallback() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
@@ -3816,7 +3890,7 @@ fn focus_unattached_explicit_client_is_rejected_without_fallback() {
         CommandSource::from_key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
             focus_target: FocusTarget::Pane(pane_id),
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -3825,7 +3899,9 @@ fn focus_unattached_explicit_client_is_rejected_without_fallback() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     let session = &runtime.session_by_id[&session_id];
@@ -4601,7 +4677,7 @@ fn focus_target_with_removed_registry_record_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("pane {pane_id} is not in session `s`")),
         }
     );
 }
@@ -5323,7 +5399,9 @@ fn new_pane_external_unattached_target_client_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -5331,6 +5409,324 @@ fn new_pane_external_unattached_target_client_is_not_found() {
             .panes
             .count_pane_records(),
         2
+    );
+}
+
+/// A session with two tabs of one pane each and two attached clients:
+/// `first_client_id` views `first_tab_id` with `first_pane_id` focused, and
+/// `second_client_id` views `second_tab_id` with `second_pane_id` focused.
+struct TwoViewedTabsFixture {
+    runtime: Server,
+    session_id: SessionId,
+    first_client_id: ClientId,
+    first_tab_id: TabId,
+    first_pane_id: PaneId,
+    second_client_id: ClientId,
+    second_tab_id: TabId,
+    second_pane_id: PaneId,
+}
+
+/// Build a [`TwoViewedTabsFixture`].
+fn build_two_viewed_tabs_fixture() -> TwoViewedTabsFixture {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let first_client_id = ClientId::new();
+    let second_client_id = ClientId::new();
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let mut session = build_bare_session(SessionId::new());
+    register_pane_record(&mut session, first_pane_id);
+    register_pane_record(&mut session, second_pane_id);
+    register_session_tab(&mut session, first_tab_id, first_pane_id);
+    register_session_tab(&mut session, second_tab_id, second_pane_id);
+    attach_client(
+        &mut session,
+        first_client_id,
+        first_tab_id,
+        Some(first_pane_id),
+    );
+    attach_client(
+        &mut session,
+        second_client_id,
+        second_tab_id,
+        Some(second_pane_id),
+    );
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+    TwoViewedTabsFixture {
+        runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    }
+}
+
+#[test]
+fn new_pane_external_named_client_splits_that_clients_focused_pane() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi new-pane --direction right --client <second>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            client_id: Some(second_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[first_pane_id, second_pane_id]);
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&second_tab_id].get_layout_tree(),
+        &split_leaf(
+            &LayoutNode::Pane(second_pane_id),
+            second_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the second pane splits")
+    );
+    assert_eq!(
+        session.tabs[&first_tab_id].get_layout_tree(),
+        &LayoutNode::Pane(first_pane_id)
+    );
+    let second_client = session.clients.get_client_by_id(second_client_id).unwrap();
+    assert_eq!(second_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(new_pane_id)
+    );
+    let first_client = session.clients.get_client_by_id(first_client_id).unwrap();
+    assert_eq!(first_client.get_active_tab_id(), first_tab_id);
+    assert_eq!(
+        first_client.get_active_focused_pane_id(),
+        Some(first_pane_id)
+    );
+}
+
+#[test]
+fn new_pane_stacked_external_named_client_stacks_onto_that_clients_focused_pane() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi new-pane --stacked --client <second>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: None,
+                tab_id: None,
+            },
+            client_id: Some(second_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[first_pane_id, second_pane_id]);
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&second_tab_id].get_layout_tree(),
+        &add_pane_to_stack(
+            &LayoutNode::Pane(second_pane_id),
+            second_pane_id,
+            new_pane_id
+        )
+        .expect("the second pane takes a stack")
+    );
+    assert_eq!(
+        session.tabs[&first_tab_id].get_layout_tree(),
+        &LayoutNode::Pane(first_pane_id)
+    );
+    let second_client = session.clients.get_client_by_id(second_client_id).unwrap();
+    assert_eq!(second_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(new_pane_id)
+    );
+    let first_client = session.clients.get_client_by_id(first_client_id).unwrap();
+    assert_eq!(first_client.get_active_tab_id(), first_tab_id);
+    assert_eq!(
+        first_client.get_active_focused_pane_id(),
+        Some(first_pane_id)
+    );
+}
+
+#[test]
+fn new_pane_external_naming_no_client_and_no_pane_with_two_clients_is_ambiguous() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        ..
+    } = build_two_viewed_tabs_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+
+    // `koshi new-pane --direction right` typed outside koshi: no pane, no tab
+    // and no client named.
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(build_new_pane_args()),
+    );
+    let command_id = command_envelope.command_id;
+
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("several clients are attached; name the target client".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn new_pane_external_unattached_named_client_is_not_found_for_every_anchor() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        second_tab_id,
+        second_pane_id,
+        ..
+    } = build_two_viewed_tabs_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+    let unattached_client_id = ClientId::new();
+
+    // The named client's focused pane, a named tab and a named pane: each
+    // anchor refuses a client that is not attached, and nothing changes.
+    for (source_pane_id, tab_id) in [
+        (None, None),
+        (None, Some(second_tab_id)),
+        (Some(second_pane_id), None),
+    ] {
+        let command_envelope = build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), None),
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Split {
+                    source_pane_id,
+                    tab_id,
+                    direction: Direction::Right,
+                },
+                client_id: Some(unattached_client_id),
+                ..build_new_pane_args()
+            }),
+        );
+        let command_id = command_envelope.command_id;
+
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: Some(format!(
+                    "client {unattached_client_id} is not attached to session `s`"
+                )),
+            }
+        );
+        assert_eq!(serialize_session_records(&runtime), session_records_before);
+    }
+}
+
+#[test]
+fn new_pane_external_tab_and_named_client_moves_that_client_onto_the_tab() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_client_id,
+        first_tab_id,
+        first_pane_id,
+        second_client_id,
+        second_tab_id,
+        second_pane_id,
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi new-pane --tab <second> --client <first>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: Some(second_tab_id),
+                direction: Direction::Right,
+            },
+            client_id: Some(first_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec![
+            "TabFocused",
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[first_pane_id, second_pane_id]);
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&second_tab_id].get_layout_tree(),
+        &split_leaf(
+            &LayoutNode::Pane(second_pane_id),
+            second_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the second pane splits")
+    );
+    let first_client = session.clients.get_client_by_id(first_client_id).unwrap();
+    assert_eq!(first_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(first_client.get_active_focused_pane_id(), Some(new_pane_id));
+    assert_eq!(
+        first_client.get_focused_pane_id(first_tab_id),
+        Some(first_pane_id)
+    );
+    let second_client = session.clients.get_client_by_id(second_client_id).unwrap();
+    assert_eq!(second_client.get_active_tab_id(), second_tab_id);
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(second_pane_id)
     );
 }
 
@@ -5408,7 +5804,9 @@ fn new_pane_explicit_unattached_client_is_rejected_even_with_an_issuer() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -9770,132 +10168,431 @@ fn resize_pane_explicit_target_resolves_its_owning_session() {
     );
 }
 
+/// The content column count of each pane in `session_id`'s only tab, in
+/// layout order; `None` for a pane with no content rect.
+fn list_content_column_counts(
+    runtime: &Server,
+    session_id: SessionId,
+) -> Vec<(PaneId, Option<u16>)> {
+    Server::compute_tab_content_rects(
+        &runtime.session_by_id[&session_id],
+        get_only_tab_id(runtime, session_id),
+    )
+    .into_iter()
+    .map(|(pane_id, content_rect)| {
+        (
+            pane_id,
+            content_rect.map(|content_rect| content_rect.size.column_count),
+        )
+    })
+    .collect()
+}
+
 #[test]
-fn resize_pane_min_size_rejection_reports_the_spare_and_mutates_nothing() {
+fn resize_pane_past_the_neighbors_minimum_moves_the_border_to_that_minimum() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        split_pane_pty_size,
+        ..
+    } = build_resize_fixture();
+
+    // At 80 columns the donor root holds 40; its border-inclusive floor is 4
+    // (the 2-column content minimum plus the 1-cell border on each side), so
+    // it can give 36. Asking for 100 moves exactly those 36.
+    let (_, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        100,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(2)), (split_pane_id, Some(74))]
+    );
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&split_pane_id],
+        PtySize {
+            column_count: split_pane_pty_size.column_count + 36,
+            row_count: split_pane_pty_size.row_count,
+        }
+    );
+}
+
+#[test]
+fn resize_pane_at_the_neighbors_minimum_is_refused_naming_the_pane_and_direction() {
     let ResizeFixture {
         mut runtime,
         fake_pty_backend,
         session_id,
         client_id,
         split_pane_id,
-        split_pane_pty_size,
         ..
     } = build_resize_fixture();
-    let rects_before = Server::compute_tab_content_rects(
-        &runtime.session_by_id[&session_id],
-        get_only_tab_id(&runtime, session_id),
+    let _ = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        100,
     );
-    let resize_count_before_rejection = fake_pty_backend
+    let content_column_counts_before = list_content_column_counts(&runtime, session_id);
+    let pty_size_before = runtime.pty_size_by_pane_id[&split_pane_id];
+    let resize_count_before = fake_pty_backend
         .list_pane_sizes(split_pane_id)
         .unwrap()
         .len();
 
-    // At 80 columns the donor root holds 40; its border-inclusive floor is 4
-    // (the 2-column content minimum plus the 1-cell border on each side), so
-    // it can give exactly 36. Asking for 100 rejects and leaves everything
-    // untouched.
-    let command_envelope = build_command_envelope(
+    // The root pane is at its minimum: not one more column moves, and nothing
+    // changes.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
         CommandSource::from_key_binding(client_id),
-        Command::ResizePane(ResizePaneArgs {
-            pane_id: None,
-            direction: Direction::Left,
-            resize_amount_cells: 100,
-        }),
+        split_pane_id,
+        Direction::Left,
+        1,
     );
-    let command_id = command_envelope.command_id;
     assert_eq!(
-        runtime.dispatch(command_envelope),
+        command_result,
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinimumSize,
-            help: Some("the donating pane has only 36 spare cells to give".to_string()),
+            help: Some(format!(
+                "{split_pane_id} cannot grow left here; the pane next to it has no room to give"
+            )),
         }
     );
-
-    let rects_after = Server::compute_tab_content_rects(
-        &runtime.session_by_id[&session_id],
-        get_only_tab_id(&runtime, session_id),
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        content_column_counts_before
     );
-    assert_eq!(rects_after, rects_before);
+    assert_eq!(runtime.pty_size_by_pane_id[&split_pane_id], pty_size_before);
     assert_eq!(
         fake_pty_backend
             .list_pane_sizes(split_pane_id)
             .unwrap()
             .len(),
-        resize_count_before_rejection
-    );
-    assert_eq!(
-        runtime.pty_size_by_pane_id[&split_pane_id],
-        split_pane_pty_size
+        resize_count_before
     );
 }
 
 #[test]
-fn dispatch_reporting_spare_hands_back_the_donors_spare_cells() {
+fn resize_pane_shrink_past_the_panes_own_minimum_stops_there_then_is_refused() {
     let ResizeFixture {
         mut runtime,
+        session_id,
         client_id,
+        root_pane_id,
+        split_pane_id,
         ..
     } = build_resize_fixture();
 
-    // The donor root holds 40 of the 80 columns and can give 36 before its own
-    // floor. Asking for 100 refuses and hands that 36 back beside the result.
+    // On a shrink the split pane donates: 40 columns above its floor of 4
+    // leave 36.
+    let (_, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        -100,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(74)), (split_pane_id, Some(2))]
+    );
+
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        -1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{split_pane_id} cannot shrink from the left here; it has no room to give"
+            )),
+        }
+    );
+}
+
+#[test]
+fn resize_pane_at_the_tab_edge_moves_the_opposite_border_to_the_minimum_then_names_it() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+
+    // The split pane touches the tab's right edge: its left border moves
+    // right instead, and the split pane shrinks to its floor.
+    let (_, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Right,
+        100,
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(74)), (split_pane_id, Some(2))]
+    );
+
+    // The refusal names the left border, the one that moves.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Right,
+        1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{split_pane_id} cannot shrink from the left here; it has no room to give"
+            )),
+        }
+    );
+}
+
+#[test]
+fn a_vertical_resize_past_the_minimum_stops_there_and_names_up_and_the_bottom_border() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(split_pane_id),
+                tab_id: None,
+                direction: Direction::Down,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![
+            "PaneCreated",
+            "LayoutChanged",
+            "PaneFocused",
+            "PtyResized",
+            "PtyResized"
+        ])
+    );
+    let bottom_pane_id = find_other_pane_id(&runtime, session_id, &[root_pane_id, split_pane_id]);
+    let top_pty_size = runtime.pty_size_by_pane_id[&split_pane_id];
+    let bottom_pty_size = runtime.pty_size_by_pane_id[&bottom_pane_id];
+
+    // The top pane's content keeps its 1-row minimum: every row above it
+    // moves.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::ResizePane(ResizePaneArgs {
-            pane_id: None,
-            direction: Direction::Left,
+            pane_id: Some(bottom_pane_id),
+            direction: Direction::Up,
             resize_amount_cells: 100,
         }),
     );
-    let command_id = command_envelope.command_id;
+    let (command_result, moved_cell_count) =
+        runtime.dispatch_reporting_moved_cells(command_envelope);
     assert_eq!(
-        runtime.dispatch_reporting_spare(command_envelope),
-        (
-            CommandResult::Rejected {
-                command_id,
-                reason: RejectReason::MinimumSize,
-                help: Some("the donating pane has only 36 spare cells to give".to_string()),
-            },
-            Some(36)
-        )
+        get_command_outcome(&command_result),
+        Ok(vec!["LayoutChanged", "PtyResized", "PtyResized"])
+    );
+    assert_eq!(moved_cell_count, Some(top_pty_size.row_count - 1));
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&bottom_pane_id],
+        PtySize {
+            column_count: bottom_pty_size.column_count,
+            row_count: bottom_pty_size.row_count + top_pty_size.row_count - 1,
+        }
+    );
+
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        bottom_pane_id,
+        Direction::Up,
+        1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{bottom_pane_id} cannot grow up here; the pane next to it has no room to give"
+            )),
+        }
+    );
+
+    // The top pane at its minimum gives no row to a shrink of its own bottom
+    // border.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Down,
+        -1,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::MinimumSize,
+            help: Some(format!(
+                "{split_pane_id} cannot shrink from the bottom here; it has no room to give"
+            )),
+        }
     );
 }
 
 #[test]
-fn dispatch_reporting_spare_reports_no_spare_for_an_applied_resize() {
+fn resize_pane_against_a_preferred_size_is_refused_as_held_and_changes_nothing() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    // The root pane aims for 20 of the 80 columns, as `preferred 20` in a
+    // profile gives it.
+    let tab_id = get_only_tab_id(&runtime, session_id);
+    let session = runtime.session_by_id.get_mut(&session_id).expect("session");
+    let mut preferred_layout_tree = session.tabs[&tab_id].get_layout_tree().clone();
+    let LayoutNode::Split(preferred_split) = &mut preferred_layout_tree else {
+        unreachable!("the fixture tab is a split");
+    };
+    preferred_split.weights[0].preferred_cell_count = Some(20);
+    let _ = session.update_tab_layout(tab_id, preferred_layout_tree);
+    let content_column_counts_before = list_content_column_counts(&runtime, session_id);
+    assert_eq!(
+        content_column_counts_before,
+        vec![(root_pane_id, Some(18)), (split_pane_id, Some(58))]
+    );
+
+    let held_resizes = [
+        (
+            split_pane_id,
+            Direction::Left,
+            5,
+            format!("{split_pane_id} cannot grow left here; the layout holds this border in place"),
+        ),
+        (
+            root_pane_id,
+            Direction::Right,
+            -5,
+            format!(
+                "{root_pane_id} cannot shrink from the right here; the layout holds this border in place"
+            ),
+        ),
+    ];
+    for (resized_pane_id, direction, resize_amount_cells, expected_help) in held_resizes {
+        let (command_id, command_result) = dispatch_resize_pane(
+            &mut runtime,
+            CommandSource::from_key_binding(client_id),
+            resized_pane_id,
+            direction,
+            resize_amount_cells,
+        );
+        assert_eq!(
+            command_result,
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some(expected_help),
+            }
+        );
+    }
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        content_column_counts_before
+    );
+}
+
+#[test]
+fn dispatch_reporting_moved_cells_hands_back_the_cells_the_border_moved() {
     let ResizeFixture {
         mut runtime,
         client_id,
+        split_pane_id,
         ..
     } = build_resize_fixture();
 
-    // A resize the layout grants carries no spare: the second half is `None`
-    // for every outcome but a border refused at a pane minimum.
+    // Within the donor's room the whole request moves; past it, the room.
+    for (resize_amount_cells, expected_moved_cell_count) in [(5, 5), (100, 31)] {
+        let command_envelope = build_command_envelope(
+            CommandSource::from_key_binding(client_id),
+            Command::ResizePane(ResizePaneArgs {
+                pane_id: None,
+                direction: Direction::Left,
+                resize_amount_cells,
+            }),
+        );
+        let (command_result, moved_cell_count) =
+            runtime.dispatch_reporting_moved_cells(command_envelope);
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Ok(vec!["LayoutChanged", "PtyResized"])
+        );
+        assert_eq!(moved_cell_count, Some(expected_moved_cell_count));
+    }
+
+    // A refusal hands back nothing.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::ResizePane(ResizePaneArgs {
             pane_id: None,
             direction: Direction::Left,
-            resize_amount_cells: 5,
+            resize_amount_cells: 1,
         }),
     );
-    let command_id = command_envelope.command_id;
-    let (command_result, spare_cell_count) = runtime.dispatch_reporting_spare(command_envelope);
-    match command_result {
-        CommandResult::Ok {
-            command_id: ok_command_id,
-            emitted_events,
-        } => {
-            assert_eq!(ok_command_id, command_id);
-            assert_eq!(
-                list_event_names(&emitted_events),
-                ["LayoutChanged", "PtyResized"]
-            );
-        }
-        unexpected_result => panic!("expected Ok, got {unexpected_result:?}"),
-    }
-    assert_eq!(spare_cell_count, None);
+    let (command_result, moved_cell_count) =
+        runtime.dispatch_reporting_moved_cells(command_envelope);
+    let expected_help =
+        format!("{split_pane_id} cannot grow left here; the pane next to it has no room to give");
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Err((RejectReason::MinimumSize, Some(expected_help.as_str())))
+    );
+    assert_eq!(moved_cell_count, None);
 }
 
 #[test]
@@ -9903,27 +10600,35 @@ fn a_border_refused_at_the_pane_minimum_writes_no_log_line() {
     let ResizeFixture {
         mut runtime,
         client_id,
+        split_pane_id,
         ..
     } = build_resize_fixture();
+    let _ = dispatch_resize_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        split_pane_id,
+        Direction::Left,
+        100,
+    );
     let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
 
-    // A resize refused at a pane minimum is the one rejection that is not
+    // A border that cannot move one cell is the one rejection that is not
     // logged, so the capture stays empty.
-    let command_envelope = build_command_envelope(
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
         CommandSource::from_key_binding(client_id),
-        Command::ResizePane(ResizePaneArgs {
-            pane_id: None,
-            direction: Direction::Left,
-            resize_amount_cells: 100,
-        }),
+        split_pane_id,
+        Direction::Left,
+        1,
     );
-    let command_id = command_envelope.command_id;
     assert_eq!(
-        runtime.dispatch(command_envelope),
+        command_result,
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::MinimumSize,
-            help: Some("the donating pane has only 36 spare cells to give".to_string()),
+            help: Some(format!(
+                "{split_pane_id} cannot grow left here; the pane next to it has no room to give"
+            )),
         }
     );
     assert_eq!(captured_logs.contents(), "");
@@ -10025,7 +10730,9 @@ fn resize_pane_with_no_border_on_the_axis_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some("pane has no border to move on that axis".to_string()),
+            help: Some(format!(
+                "{split_pane_id} has no top or bottom border to move"
+            )),
         }
     );
     assert_eq!(
@@ -10553,6 +11260,7 @@ fn new_tab_explicit_client_wins_over_the_issuer() {
 fn new_tab_with_an_unattached_explicit_client_is_rejected() {
     let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let first_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
@@ -10565,7 +11273,7 @@ fn new_tab_with_an_unattached_explicit_client_is_rejected() {
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewTab(NewTabArgs {
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
             ..NewTabArgs::default()
         }),
     );
@@ -10575,7 +11283,9 @@ fn new_tab_with_an_unattached_explicit_client_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(runtime.session_by_id[&session_id].tabs.len(), 1);
@@ -11119,10 +11829,11 @@ fn close_tab_with_an_unknown_explicit_tab_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::CloseTab(CloseTabArgs {
-            tab_id: Some(TabId::new()),
+            tab_id: Some(unknown_tab_id),
             should_force_close: false,
             should_kill_process_tree: false,
         }),
@@ -11133,7 +11844,7 @@ fn close_tab_with_an_unknown_explicit_tab_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
     assert_eq!(runtime.session_by_id[&session_id].tabs.len(), 1);
@@ -11349,7 +12060,7 @@ fn move_tab_defaults_to_the_issuers_active_tab() {
 }
 
 #[test]
-fn move_tab_clamps_an_out_of_range_index() {
+fn move_tab_to_the_last_slot_moves_it_behind_every_other_tab() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
     let first_tab_id = TabId::new();
@@ -11369,12 +12080,12 @@ fn move_tab_clamps_an_out_of_range_index() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
-    // Index 99 clamps to the last slot (2).
+    // Index 2 is the last slot of three.
     let command_result = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::MoveTab(MoveTabArgs {
             tab_id: Some(first_tab_id),
-            target_tab_index: 99,
+            target_tab_index: 2,
         }),
     ));
     match command_result {
@@ -11387,6 +12098,60 @@ fn move_tab_clamps_an_out_of_range_index() {
     assert_eq!(session.tabs[&second_tab_id].get_tab_index(), 0);
     assert_eq!(session.tabs[&third_tab_id].get_tab_index(), 1);
     assert_eq!(session.tabs[&first_tab_id].get_tab_index(), 2);
+}
+
+#[test]
+fn move_tab_past_the_last_slot_is_refused_and_names_the_session_and_its_indexes() {
+    for (tab_count, target_tab_index, expected_help) in [
+        (3, 3, "session `s` has 3 tabs; --index takes 0 to 2"),
+        (3, 99, "session `s` has 3 tabs; --index takes 0 to 2"),
+        (
+            3,
+            usize::MAX,
+            "session `s` has 3 tabs; --index takes 0 to 2",
+        ),
+        (1, 1, "session `s` has 1 tab; --index takes 0"),
+    ] {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let mut session = build_bare_session(SessionId::new());
+        let tab_ids: Vec<TabId> = (0..tab_count).map(|_| TabId::new()).collect();
+        for &tab_id in &tab_ids {
+            let pane_id = PaneId::new();
+            register_pane_record(&mut session, pane_id);
+            register_session_tab(&mut session, tab_id, pane_id);
+        }
+        attach_client(&mut session, client_id, tab_ids[0], None);
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+        let _ = take_session_view_changes(&mut runtime, session_id);
+
+        let command_envelope = build_command_envelope(
+            CommandSource::from_key_binding(client_id),
+            Command::MoveTab(MoveTabArgs {
+                tab_id: Some(tab_ids[0]),
+                target_tab_index,
+            }),
+        );
+        let command_id = command_envelope.command_id;
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: Some(expected_help.to_string()),
+            },
+            "{tab_count} tabs, index {target_tab_index}"
+        );
+        let session = &runtime.session_by_id[&session_id];
+        for (tab_index, tab_id) in tab_ids.iter().enumerate() {
+            assert_eq!(session.tabs[tab_id].get_tab_index(), tab_index);
+        }
+        assert_eq!(
+            take_session_view_changes(&mut runtime, session_id),
+            SessionViewChanges::default()
+        );
+    }
 }
 
 #[test]
@@ -11480,11 +12245,14 @@ fn move_tab_with_an_unknown_tab_is_rejected() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    // An unknown tab is refused before its index is read: index 99 is past
+    // the last slot too.
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::MoveTab(MoveTabArgs {
-            tab_id: Some(TabId::new()),
-            target_tab_index: 0,
+            tab_id: Some(unknown_tab_id),
+            target_tab_index: 99,
         }),
     );
     let command_id = command_envelope.command_id;
@@ -11493,7 +12261,7 @@ fn move_tab_with_an_unknown_tab_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
     // A rejected move mutates nothing.
@@ -11666,7 +12434,117 @@ fn focus_tab_on_the_already_active_tab_is_ok_with_no_events() {
 }
 
 #[test]
-fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
+fn an_unknown_id_named_in_or_outside_a_pane_is_refused_naming_it_and_the_session() {
+    let unknown_pane_id = PaneId::from_uuid(uuid::uuid!("019bb2ba-0006-7000-8000-000000000001"));
+    let unknown_tab_id = TabId::from_uuid(uuid::uuid!("019bb2ba-0006-7000-8000-000000000002"));
+    let unknown_client_id =
+        ClientId::from_uuid(uuid::uuid!("019bb2ba-0006-7000-8000-000000000003"));
+    let pane_help = "pane pane-019bb2ba-0006-7000-8000-000000000001 is not in session `amber-fox`";
+    let tab_help = "tab tab-019bb2ba-0006-7000-8000-000000000002 is not in session `amber-fox`";
+    let client_help =
+        "client client-019bb2ba-0006-7000-8000-000000000003 is not attached to session `amber-fox`";
+    let commands_and_helps = [
+        (
+            Command::ClosePane(ClosePaneArgs {
+                pane_id: Some(unknown_pane_id),
+                ..ClosePaneArgs::default()
+            }),
+            pane_help,
+        ),
+        (
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Pane(unknown_pane_id),
+                client_id: None,
+            }),
+            pane_help,
+        ),
+        (
+            Command::CloseTab(CloseTabArgs {
+                tab_id: Some(unknown_tab_id),
+                ..CloseTabArgs::default()
+            }),
+            tab_help,
+        ),
+        (
+            Command::MoveTab(MoveTabArgs {
+                tab_id: Some(unknown_tab_id),
+                target_tab_index: 0,
+            }),
+            tab_help,
+        ),
+        (
+            Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Id(unknown_tab_id),
+                client_id: None,
+            }),
+            tab_help,
+        ),
+        (
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Split {
+                    source_pane_id: None,
+                    tab_id: Some(unknown_tab_id),
+                    direction: Direction::Right,
+                },
+                ..build_new_pane_args()
+            }),
+            tab_help,
+        ),
+        (
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: None,
+                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                    destination_tab_id: unknown_tab_id,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Right,
+                }),
+            }),
+            tab_help,
+        ),
+        (
+            Command::FocusTab(FocusTabArgs {
+                focus_target: TabTarget::Next,
+                client_id: Some(unknown_client_id),
+            }),
+            client_help,
+        ),
+    ];
+    for (command, expected_help) in commands_and_helps {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let tab_id = TabId::new();
+        let pane_id = PaneId::new();
+        let mut session = build_bare_session(SessionId::new());
+        session.session_name = "amber-fox".to_string();
+        register_pane_record(&mut session, pane_id);
+        register_session_tab(&mut session, tab_id, pane_id);
+        attach_client(&mut session, client_id, tab_id, Some(pane_id));
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+        let session_records_before = serialize_session_records(&runtime);
+
+        for command_source in [
+            build_in_session_source(session_id, Some(client_id), pane_id),
+            CommandSource::from_external_cli(Some(session_id), None),
+        ] {
+            let command_envelope = build_command_envelope(command_source, command.clone());
+            let command_id = command_envelope.command_id;
+            assert_eq!(
+                runtime.dispatch(command_envelope),
+                CommandResult::Rejected {
+                    command_id,
+                    reason: RejectReason::TargetNotFound,
+                    help: Some(expected_help.to_string()),
+                },
+                "{command:?}"
+            );
+        }
+        assert_eq!(serialize_session_records(&runtime), session_records_before);
+    }
+}
+
+#[test]
+fn focus_tab_with_an_unknown_id_is_not_found() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
     let first_tab_id = TabId::new();
@@ -11678,11 +12556,64 @@ fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
-    for tab_target in [TabTarget::Id(TabId::new()), TabTarget::Index(9)] {
+    let unknown_tab_id = TabId::new();
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            focus_target: TabTarget::Id(unknown_tab_id),
+            client_id: None,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
+        }
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_active_tab_id(),
+        first_tab_id
+    );
+}
+
+#[test]
+fn focus_tab_with_an_index_past_the_last_tab_names_the_session_and_its_indexes() {
+    for (tab_count, tab_index, expected_help) in [
+        (3, 3, "session `s` has 3 tabs; --index takes 0 to 2"),
+        (
+            3,
+            usize::MAX,
+            "session `s` has 3 tabs; --index takes 0 to 2",
+        ),
+        (1, 1, "session `s` has 1 tab; --index takes 0"),
+        (0, 0, "session `s` has no tab"),
+    ] {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let mut session = build_bare_session(SessionId::new());
+        let tab_ids: Vec<TabId> = (0..tab_count).map(|_| TabId::new()).collect();
+        for &tab_id in &tab_ids {
+            let pane_id = PaneId::new();
+            register_pane_record(&mut session, pane_id);
+            register_session_tab(&mut session, tab_id, pane_id);
+        }
+        // With no tab, the client views a tab the session does not hold.
+        let viewed_tab_id = tab_ids.first().copied().unwrap_or_else(TabId::new);
+        attach_client(&mut session, client_id, viewed_tab_id, None);
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+
         let command_envelope = build_command_envelope(
             CommandSource::from_key_binding(client_id),
             Command::FocusTab(FocusTabArgs {
-                focus_target: tab_target,
+                focus_target: TabTarget::Index(tab_index),
                 client_id: None,
             }),
         );
@@ -11692,18 +12623,19 @@ fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
             CommandResult::Rejected {
                 command_id,
                 reason: RejectReason::TargetNotFound,
-                help: None,
-            }
+                help: Some(expected_help.to_string()),
+            },
+            "{tab_count} tabs, index {tab_index}"
+        );
+        assert_eq!(
+            runtime.session_by_id[&session_id]
+                .clients
+                .get_client_by_id(client_id)
+                .unwrap()
+                .get_active_tab_id(),
+            viewed_tab_id
         );
     }
-    assert_eq!(
-        runtime.session_by_id[&session_id]
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_active_tab_id(),
-        first_tab_id
-    );
 }
 
 #[test]
@@ -11770,6 +12702,7 @@ fn focus_tab_explicit_client_wins_over_the_issuer() {
 fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let first_tab_id = TabId::new();
     let second_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
@@ -11787,7 +12720,7 @@ fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
         CommandSource::from_key_binding(client_id),
         Command::FocusTab(FocusTabArgs {
             focus_target: TabTarget::Id(second_tab_id),
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -11796,7 +12729,9 @@ fn focus_tab_with_an_unattached_explicit_client_is_rejected() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -13413,9 +14348,13 @@ fn client_attach_records_the_view_of_the_joining_client_only() {
         column_count: 80,
         row_count: 24,
     };
-    let bootstrap_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let bootstrap_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
@@ -13465,9 +14404,13 @@ fn client_detach_removes_the_client_and_records_its_view() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
@@ -13700,8 +14643,8 @@ fn child_exit_by_signal_reports_the_signal_and_the_quit_it_causes_carries_it() {
     );
 }
 
-/// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
-/// of each. Panics unless the runtime holds a single session with a single tab
+/// The `(session, tab, pane)` of a runtime [`create_session_with_attached_client`]
+/// built: exactly one of each. Panics unless the runtime holds a single session with a single tab
 /// and a single pane.
 fn get_only_session_slot(runtime: &Server) -> (SessionId, TabId, PaneId) {
     assert_eq!(runtime.session_by_id.len(), 1, "exactly one session");
@@ -13733,9 +14676,13 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
         column_count: 40,
         row_count: 24,
     };
-    let bootstrap_client_id = runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let bootstrap_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_attach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -13828,8 +14775,8 @@ fn build_sixty_percent_floating_pane_size() -> FloatingPaneSize {
     }
 }
 
-/// A session seeded by [`Server::bootstrap_local`] for alice, attached at
-/// `UNIX_EPOCH` with a `120x42` viewport: pane area `120x40`, tiled pane PTY
+/// A session seeded by [`create_session_with_attached_client`] for alice,
+/// attached at `UNIX_EPOCH` with a `120x42` viewport: pane area `120x40`, tiled pane PTY
 /// `118x38`. It also holds one live floating pane asking for 60% by 60%,
 /// solved for alice alone: outer `72x24`, PTY `70x20`.
 fn build_floating_pane_fixture() -> FloatingPaneFixture {
@@ -14453,9 +15400,13 @@ fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
         column_count: 80,
         row_count: 24,
     };
-    let _bootstrap_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let _bootstrap_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let cell_size = PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
     let measured_client_id = ClientId::new();
@@ -14504,9 +15455,13 @@ fn accepting_cell_measurement_marks_the_view_changed() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (_session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     let cell_size = PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
 
@@ -14532,9 +15487,13 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
         column_count: 100,
         row_count: 30,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), initial_viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        initial_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (_session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     let emitted_events = runtime.handle_client_resize(client_id, resized_viewport_size, None, None);
@@ -14582,9 +15541,13 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), small_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        small_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_attach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -14637,7 +15600,6 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
             "seeded-with-no-client".to_string(),
             viewport_size,
             SystemTime::now(),
-            None,
         )
         .expect("bootstrap a session holding no client");
     let (_, tab_id, pane_id) = get_only_session_slot(&runtime);
@@ -14690,9 +15652,13 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _) = get_only_session_slot(&runtime);
 
     // Attach once to take the tab's first pane, then point the client's focus
@@ -14748,9 +15714,13 @@ fn attaching_passes_over_a_focus_history_entry_collapsed_to_a_stack_header() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, collapsed_pane_id) = get_only_session_slot(&runtime);
     let expanded_pane_id = PaneId::new();
     let session = runtime
@@ -14829,9 +15799,13 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
         column_count: 40,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // Two clients view the tab; the smaller one holds it at 40x24.
@@ -14888,9 +15862,13 @@ fn client_detach_records_the_leaving_client_and_no_other_view() {
         column_count: 80,
         row_count: 24,
     };
-    let remaining_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let remaining_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let leaving_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -14928,9 +15906,13 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_last_detach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -14962,16 +15944,16 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
 #[test]
 fn a_client_leaving_does_not_end_the_session_by_default() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // `auto-close-session` defaults off, so the session and its pane outlive the
@@ -14996,9 +15978,13 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15027,16 +16013,16 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
 #[test]
 fn auto_close_ends_the_session_when_the_last_client_leaves() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     runtime.config.should_auto_close_session = true;
 
     runtime.handle_client_detach(client_id);
@@ -15050,16 +16036,16 @@ fn auto_close_ends_the_session_when_the_last_client_leaves() {
 #[test]
 fn a_quit_command_tears_down_without_the_graceful_window() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
 
     runtime.request_quit();
 
@@ -15074,9 +16060,13 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
     runtime.handle_client_attach(
@@ -15120,9 +16110,13 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.handle_client_attach(
         session_id,
@@ -15166,7 +16160,6 @@ fn auto_close_leaves_a_headless_session_with_no_clients_running() {
                 row_count: 24,
             },
             SystemTime::now(),
-            None,
         )
         .expect("bootstrap the headless session");
     assert!(!runtime.is_quit_requested());
@@ -15180,16 +16173,16 @@ fn auto_close_leaves_a_headless_session_with_no_clients_running() {
 #[test]
 fn a_detach_command_ends_the_session_under_auto_close() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15214,16 +16207,16 @@ fn a_detach_command_ends_the_session_under_auto_close() {
 #[test]
 fn quit_from_a_client_detaches_it_and_leaves_the_session_running() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // `auto-close-session` is off, so quit removes the client and nothing else:
@@ -15260,9 +16253,13 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
     let additional_client_id = ClientId::new();
@@ -15304,16 +16301,16 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
 #[test]
 fn quit_from_the_last_client_ends_the_session_under_auto_close() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15337,16 +16334,16 @@ fn quit_from_the_last_client_ends_the_session_under_auto_close() {
 #[test]
 fn quit_from_a_client_that_already_left_is_refused() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
@@ -15406,9 +16403,13 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let resize_count_before_unknown_tab_attach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -15451,9 +16452,13 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         column_count: 40,
         row_count: 24,
     };
-    let first_client_id = runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let first_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, first_tab_id, first_pane_id) = get_only_session_slot(&runtime);
 
     // A second live tab: `NewTab` moves the first client onto it, and leaves
@@ -15584,16 +16589,16 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 #[test]
 fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let genesis_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let genesis_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let now = Instant::now();
@@ -15624,16 +16629,16 @@ fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged()
 #[test]
 fn client_detach_marks_the_view_of_every_other_subscriber() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
 
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let remaining_client_id = ClientId::new();
@@ -15768,16 +16773,16 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
 #[test]
 fn dispatched_command_marks_the_view_changed() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
@@ -15818,9 +16823,13 @@ fn same_session_reattach_preserves_client_view_state() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), initial_viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        initial_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
 
     // The client accumulated per-tab focus.
@@ -15867,15 +16876,23 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
         row_count: 24,
     };
 
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("first session");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("first session");
     let (first_session_id, _first_tab_id, first_pane_id) = get_only_session_slot(&runtime);
 
     // A second, independent session with its own live pane.
-    runtime
-        .bootstrap_local(SessionId::new(), large_viewport_size, SystemTime::now())
-        .expect("second session");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        large_viewport_size,
+        SystemTime::now(),
+    )
+    .expect("second session");
     let second_session_id = *runtime
         .session_by_id
         .keys()
@@ -16052,21 +17069,21 @@ fn new_pane_split_rewraps_the_sibling_grid_content() {
     );
 }
 
-// The genesis root pane goes through `bootstrap_local`, not the new-pane
+// The genesis root pane goes through `bootstrap_session`, not the new-pane
 // handler; its first split must still re-wrap the root's grid content.
 #[test]
 fn bootstrap_root_pane_rewraps_on_first_split() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, root_pane_id) = get_only_session_slot(&runtime);
     let wide_pane_pty_size = runtime.pty_size_by_pane_id[&root_pane_id];
     let written_line: String = "A".repeat(wide_pane_pty_size.column_count as usize - 2);
@@ -16356,9 +17373,13 @@ fn the_snapshot_carries_the_gap_and_leaves_it_between_two_side_by_side_panes() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(build_new_pane_args()),
@@ -16557,10 +17578,11 @@ fn a_rejected_command_leaves_state_intact_and_the_next_command_works() {
     let (mut runtime, _runtime_event_sender, client_id, session_id) = build_lock_fixture();
 
     // Close a pane that does not exist: rejected, nothing changed.
+    let missing_pane_id = PaneId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::ClosePane(ClosePaneArgs {
-            pane_id: Some(PaneId::new()),
+            pane_id: Some(missing_pane_id),
             should_force_close: false,
             should_kill_process_tree: false,
         }),
@@ -16571,7 +17593,7 @@ fn a_rejected_command_leaves_state_intact_and_the_next_command_works() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("pane {missing_pane_id} is not in session `s`")),
         }
     );
     assert_eq!(
@@ -17245,7 +18267,9 @@ fn an_explicit_client_that_is_not_attached_never_falls_back() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -17590,12 +18614,13 @@ fn new_pane_with_an_unknown_tab_target_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    let unknown_tab_id = TabId::new();
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(NewPaneArgs {
             placement: NewPanePlacement::Split {
                 source_pane_id: None,
-                tab_id: Some(TabId::new()),
+                tab_id: Some(unknown_tab_id),
                 direction: Direction::Right,
             },
             working_directory: None,
@@ -17609,7 +18634,7 @@ fn new_pane_with_an_unknown_tab_target_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: None,
+            help: Some(format!("tab {unknown_tab_id} is not in session `s`")),
         }
     );
 }
@@ -17691,6 +18716,7 @@ fn toggle_lock_with_an_explicit_client_flips_that_client() {
 fn lock_with_an_unattached_explicit_client_is_not_found() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let issuer_client_id = ClientId::new();
+    let unattached_client_id = ClientId::new();
     let tab_id = TabId::new();
     let root_pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
@@ -17706,7 +18732,7 @@ fn lock_with_an_unattached_explicit_client_is_not_found() {
         CommandSource::from_key_binding(issuer_client_id),
         Command::SetLockMode(LockModeArgs {
             is_locked: true,
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -17715,7 +18741,9 @@ fn lock_with_an_unattached_explicit_client_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `s`"
+            )),
         }
     );
     assert_eq!(
@@ -18049,16 +19077,16 @@ fn new_tab_with_no_working_directory_opens_in_the_focused_panes_directory() {
 #[test]
 fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18105,9 +19133,13 @@ fn detach_all_takes_every_attached_client() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let additional_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -18168,22 +19200,24 @@ fn detach_all_takes_every_attached_client() {
 #[test]
 fn detach_naming_a_client_that_is_not_attached_is_not_found() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let attached_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let attached_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
 
+    let unattached_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
         Command::Detach(DetachArgs {
-            client_id: Some(ClientId::new()),
+            client_id: Some(unattached_client_id),
         }),
     );
     let command_id = command_envelope.command_id;
@@ -18193,7 +19227,9 @@ fn detach_naming_a_client_that_is_not_attached_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {unattached_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
     assert_eq!(
@@ -18212,9 +19248,13 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
         column_count: 80,
         row_count: 24,
     };
-    let initial_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let additional_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -18262,16 +19302,16 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
 #[test]
 fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let only_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let only_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(only_client_id, 60);
 
@@ -18405,16 +19445,16 @@ fn detach_all_only_detaches_clients_of_the_acting_session() {
 #[test]
 fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
     let target_session_id = SessionId::new();
@@ -18456,16 +19496,16 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
 #[test]
 fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18497,16 +19537,16 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
 #[test]
 fn a_switch_to_another_users_session_with_this_sessions_id_is_queued() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18543,18 +19583,19 @@ fn a_switch_to_another_users_session_with_this_sessions_id_is_queued() {
 #[test]
 fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let stranger_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -18571,7 +19612,9 @@ fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
 }
@@ -18579,16 +19622,16 @@ fn a_switch_naming_a_client_that_is_not_attached_is_refused() {
 #[test]
 fn a_client_that_switched_away_ends_the_session_under_auto_close() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
     // An attach registers the client and its subscriber together, so a client
@@ -18626,16 +19669,16 @@ fn a_client_that_switched_away_ends_the_session_under_auto_close() {
 #[test]
 fn a_switch_moves_the_client_it_names_with_several_attached() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let initial_client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let initial_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
     let additional_client_id = ClientId::new();
     attach_client(
@@ -18688,16 +19731,16 @@ fn a_switch_moves_the_client_it_names_with_several_attached() {
 #[test]
 fn a_switch_is_refused_when_the_clients_queue_is_full() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let client_id = runtime
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::now(),
-        )
-        .expect("bootstrap the genesis client");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60);
 
@@ -18734,9 +19777,13 @@ fn a_client_the_router_bridged_from_another_machine_is_recorded_remote() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let joining_client_id = ClientId::new();
@@ -18771,9 +19818,13 @@ fn a_client_that_reached_this_machine_directly_is_recorded_local() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let joining_client_id = ClientId::new();
@@ -18808,9 +19859,13 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let client_id = ClientId::new();
@@ -18868,9 +19923,13 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
         column_count: 80,
         row_count: 24,
     };
-    runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap the genesis client");
+    create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
     let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
 
     let client_id = ClientId::new();
@@ -19065,9 +20124,13 @@ fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, first_pane_id) = get_only_session_slot(&runtime);
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -19130,9 +20193,13 @@ fn a_resize_reporting_a_zero_pane_area_resizes_no_pty() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, _tab_id, first_pane_id) = get_only_session_slot(&runtime);
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -19189,9 +20256,13 @@ fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, first_pane_id) = get_only_session_slot(&runtime);
     runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -19304,9 +20375,13 @@ fn a_resize_reporting_starving_leaves_the_tab_sizes_unchanged() {
         column_count: 80,
         row_count: 24,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (_session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let pane_sizes_before_starving_resize =
         fake_pty_backend.list_pane_sizes(pane_id).expect("resizes");
@@ -19330,9 +20405,13 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
         column_count: 120,
         row_count: 40,
     };
-    let client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::now(),
+    )
+    .expect("bootstrap");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
 
     let reported_pane_size = PaneArea::Reported(Size {
@@ -19497,13 +20576,18 @@ fn build_floating_command_fixture() -> FloatingCommandFixture {
     })
 }
 
-/// A session seeded by [`Server::bootstrap_local`] for alice, attached at
-/// `UNIX_EPOCH` with a `viewport_size` viewport, holding one tiled pane.
+/// A session seeded by [`create_session_with_attached_client`] for alice,
+/// attached at `UNIX_EPOCH` with a `viewport_size` viewport, holding one tiled
+/// pane.
 fn bootstrap_alice_session(viewport_size: Size) -> FloatingCommandFixture {
     let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let alice_client_id = runtime
-        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::UNIX_EPOCH)
-        .expect("bootstrap alice");
+    let alice_client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        viewport_size,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap alice");
     let (session_id, tab_id, tiled_pane_id) = get_only_session_slot(&runtime);
     FloatingCommandFixture {
         runtime,
@@ -20163,6 +21247,90 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
+    );
+}
+
+#[test]
+fn new_pane_external_named_client_splits_the_pane_that_takes_its_keys() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
+        Some(floating_pane_id)
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, bob_client_id).get_active_focused_pane_id(),
+        Some(tiled_pane_id)
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    // alice's keys go to the floating pane, which has no split to divide.
+    let alice_command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            client_id: Some(alice_client_id),
+            ..build_new_pane_args()
+        }),
+    );
+    let alice_command_id = alice_command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(alice_command_envelope),
+        CommandResult::Rejected {
+            command_id: alice_command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{floating_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    // bob's keys go to the tiled pane, which divides.
+    runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewPane(NewPaneArgs {
+            client_id: Some(bob_client_id),
+            ..build_new_pane_args()
+        }),
+    ));
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id, floating_pane_id]);
+    assert_eq!(
+        runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
+        &split_leaf(
+            &LayoutNode::Pane(tiled_pane_id),
+            tiled_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the tiled pane splits")
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, bob_client_id).get_active_focused_pane_id(),
+        Some(new_pane_id)
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
+        Some(floating_pane_id)
     );
 }
 
@@ -20978,7 +22146,7 @@ fn a_floating_pane_resize_past_the_minimum_or_the_cap_is_refused() {
             command_id,
             reason: RejectReason::MinimumSize,
             help: Some(format!(
-                "{smallest_pane_id} is at its minimum size on that axis"
+                "{smallest_pane_id} cannot shrink from the left here; it is at its minimum size"
             )),
         }
     );
@@ -21097,9 +22265,11 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
             help: Some("several clients are attached; name the target client".to_string()),
         }
     );
+    let stranger_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
-        CommandSource::from_external_cli(Some(session_id), Some(ClientId::new())),
+        CommandSource::from_external_cli(Some(session_id), Some(stranger_client_id)),
         tiled_pane_id,
         Direction::Right,
         1,
@@ -21109,7 +22279,9 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
 
@@ -22661,10 +23833,12 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
         alice_record_before
     );
 
+    let stranger_client_id = ClientId::new();
+    let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let session_records_before = serialize_session_records(&runtime);
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
-        CommandSource::from_external_cli(Some(session_id), Some(ClientId::new())),
+        CommandSource::from_external_cli(Some(session_id), Some(stranger_client_id)),
         floating_pane_id,
         Point { column: 4, row: 2 },
     );
@@ -22673,7 +23847,9 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("target client not attached to the session".to_string()),
+            help: Some(format!(
+                "client {stranger_client_id} is not attached to session `{session_name}`"
+            )),
         }
     );
     let (command_id, command_result) = dispatch_set_pane_pinned(
@@ -22701,16 +23877,16 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
         ..
     } = build_floating_command_fixture();
     let other_session_id = SessionId::new();
-    let carol_client_id = runtime
-        .bootstrap_local(
-            other_session_id,
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap carol");
+    let carol_client_id = create_session_with_attached_client(
+        &mut runtime,
+        other_session_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap carol");
     let other_session = &runtime.session_by_id[&other_session_id];
     let other_tab_id = *other_session
         .tabs

@@ -6,7 +6,7 @@
 use super::*;
 
 use crate::render::tests::compute_version_badge_column_count;
-use crate::snapshot::{Reconnecting, ViewerChrome};
+use crate::snapshot::{LinkStatus, Reconnecting, ViewerChrome};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId, TabId};
@@ -79,10 +79,10 @@ fn build_tabline_frame(
         render_snapshot,
         viewer_chrome: ViewerChrome {
             hovered_pane_id: None,
-            placement_handle_pane_id: None,
+            placement_handle_hover: None,
             active_input_mode: None,
             tabline_offset,
-            reconnecting: None,
+            link_status: LinkStatus::Linked,
             ..ViewerChrome::default()
         },
     }
@@ -133,7 +133,10 @@ fn build_tabline_inputs(tabline_test_frame: &TablineTestFrame) -> TablineInputs<
             .render_snapshot
             .client_snapshot
             .is_mouse_selection_enabled,
-        reconnecting: tabline_test_frame.viewer_chrome.reconnecting,
+        reconnecting: match tabline_test_frame.viewer_chrome.link_status {
+            LinkStatus::Redialing(reconnecting) => Some(reconnecting),
+            LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
+        },
         tabline_offset: tabline_test_frame.viewer_chrome.tabline_offset,
     }
 }
@@ -1210,7 +1213,7 @@ fn draw_paints_the_lock_tag_in_locked_mode() {
 fn draw_paints_the_reconnecting_tag_while_the_viewer_has_no_link() {
     let mut tabline_test_frame =
         build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false);
-    tabline_test_frame.viewer_chrome.reconnecting = Some(Reconnecting {
+    tabline_test_frame.viewer_chrome.link_status = LinkStatus::Redialing(Reconnecting {
         attempt: 3,
         retry_in_seconds: Some(8),
     });

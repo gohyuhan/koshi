@@ -121,6 +121,9 @@ pub struct Surface {
 ///   `link_timeout_ms` below `1000` with the `RequestFailed` code. `Leaving`
 ///   carries `is_returning`; 4 sent a bare `Leaving`. The `Ping` request and
 ///   the `Pong` event exist in 5 only.
+/// - A `Keyboard` request carries `key_inputs`: the keys of one read of the
+///   client's terminal that go to the pane, oldest first, which the session
+///   writes to the pane in one write. 4 carried one key in `key_input`.
 /// - A mouse round's `Forward` carries the event's `mouse_kind`, its
 ///   `modifier_flags` and `pane_local_cell`, the cell in the pane's content
 ///   that the client resolved; 4 carried the client's screen cell in
@@ -163,6 +166,9 @@ pub struct Surface {
 ///   4 also carried `Spawning`, `Exited` with the child's `exit_code`, and
 ///   `Closing`. The answer lists the floating panes after the tiled panes,
 ///   each with a `tab_id` of `null`; 4 has no floating pane.
+/// - A `Layout` answer carries `floating_panes`: each floating pane's desired
+///   size, solved size, and every attached client's stored position and what
+///   that client draws for it. The field is required, and 4 has no such field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -183,6 +189,10 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 /// The `Hello` answer carries `process_image_id`: the id of the answering
 /// router's process image, which a restart into a new image changes. A
 /// `v0.5.0` router leaves it out, and a `v0.5.0` caller ignores it.
+///
+/// The `RemoteStatus` answer carries `config_file_path`: the `koshi.kdl` the
+/// answering router read when it started. A `v0.5.0` router leaves it out,
+/// which reads as `None`, and a `v0.5.0` caller ignores it.
 ///
 /// A request the router reads and refuses, other than one naming a session it
 /// does not have, is answered with the `RequestFailed` code. A `v0.5.0-pr.1`
@@ -279,10 +289,11 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 ///
 /// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. This build
 /// writes 5: format 5 adds each session's floating panes, each client's view of
-/// them, each tab's solved tab size, the views detached clients left with the
-/// resume-token hashes, and the process IDs of the children closed panes left
-/// running. It turns each client's focused pane in each tab into a one-pane
-/// focus history, and drops each pane record's lifecycle and close policy.
+/// them, each session's starting tab, each tab's solved tab size, the views
+/// detached clients left with the resume-token hashes, and the process IDs of
+/// the children closed panes left running. It turns each client's focused pane
+/// in each tab into a one-pane focus history, and drops each pane record's
+/// lifecycle and close policy.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.
 ///

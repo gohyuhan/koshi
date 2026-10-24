@@ -152,22 +152,10 @@ pub struct ProfileTab {
 /// dense display index (`len`, the end) and is solved at `tab_size`, the tab
 /// size its panes were spawned for. The first tab of the session moves it
 /// from `Starting` to `Running`; a session in any other state keeps the state it
-/// has.
+/// has. No client's view or focus changes.
 ///
-/// `focus_client_id` — when given and still attached — records the focus pane for
-/// that client in this tab; a stale id records nothing, exactly like `None`.
-/// `is_active` then decides that client's view: `true` switches it onto the tab,
-/// gives the focus pane that client's input (every floating pane it shows is
-/// minimized, [`apply_tiled_pane_focus`]), emits [`Event::TabFocused`], and
-/// solves the new tab and the tab the client left again at their tab sizes
-/// ([`Session::update_tab_solve`]); `false` leaves the client viewing the tab
-/// it was on, with its input where it was, and emits neither.
-///
-/// Returns the events to emit: [`Event::TabCreated`], one
-/// [`Event::PaneCreated`] per pane in layout order, then, when `is_active`
-/// applies, [`Event::TabFocused`], one [`Event::PaneMinimizedChanged`] per
-/// floating pane minimized, [`Event::PaneFocused`], and the events of the
-/// solves.
+/// Returns the events to emit: [`Event::TabCreated`], then one
+/// [`Event::PaneCreated`] per pane in layout order.
 ///
 /// # Panics
 ///
@@ -178,8 +166,6 @@ pub fn commit_profile_tab(
     tab_id: TabId,
     profile_tab: ProfileTab,
     tab_name: String,
-    focus_client_id: Option<ClientId>,
-    is_active: bool,
     tab_size: Size,
 ) -> Vec<Event> {
     let ProfileTab {
@@ -207,8 +193,6 @@ pub fn commit_profile_tab(
         tab_size,
         session.get_pane_sizing(),
     );
-    // The tab's own most-recent focus, recorded whether or not a client is
-    // given.
     new_tab.record_focus_mru(focused_pane_id);
     if session.tabs.is_empty() {
         let _ = session.update_lifecycle(SessionLifecycleEvent::FirstTabCreated);
@@ -221,29 +205,6 @@ pub fn commit_profile_tab(
             pane_id: *pane_id,
             tab_id: Some(tab_id),
         }));
-    }
-
-    let mut previous_active_tab_id = None;
-    if let Some(client_id) = focus_client_id {
-        if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            if is_active {
-                let previous_tab_id = client.get_active_tab_id();
-                previous_active_tab_id = Some(previous_tab_id);
-                client.update_active_tab_id(tab_id);
-                emitted_events.push(Event::TabFocused(TabFocused {
-                    client_id,
-                    tab_id,
-                    previous_tab_id,
-                }));
-                emitted_events.extend(apply_tiled_pane_focus(client, tab_id, focused_pane_id));
-            } else {
-                client.update_focused_pane(tab_id, focused_pane_id);
-            }
-        }
-    }
-    if let Some(previous_tab_id) = previous_active_tab_id {
-        emitted_events.extend(session.update_tab_solve(tab_id));
-        emitted_events.extend(session.update_tab_solve(previous_tab_id));
     }
 
     emitted_events
@@ -424,11 +385,11 @@ fn find_tab_at_index(session: &Session, tab_index: usize) -> Option<TabId> {
 
 /// Move `tab_id` to display position `new_tab_index`, keeping the index dense.
 ///
-/// `new_tab_index` is clamped to `[0, len-1]`. The other tabs close ranks around the
-/// moved one so the final order is still `0..len` with the target at
-/// `new_tab_index`. A no-op when the tab is unknown or already at that position.
-/// Returns a single [`Event::TabMoved`]; the tabs that shift to make room do not
-/// emit events of their own.
+/// The other tabs close ranks around the moved one so the final order is still
+/// `0..len` with the target at `new_tab_index`. A no-op when the tab is unknown,
+/// when `new_tab_index` is `len` or more, and when the tab already sits at
+/// `new_tab_index`. Returns a single [`Event::TabMoved`]; the tabs that shift to
+/// make room do not emit events of their own.
 #[must_use]
 pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usize) -> Vec<Event> {
     let Some(previous_tab_index) = session
@@ -439,10 +400,7 @@ pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usiz
         return Vec::new();
     };
 
-    // The target exists, so `len` is at least 1.
-    let new_tab_index = new_tab_index.min(session.tabs.len() - 1);
-
-    if new_tab_index == previous_tab_index {
+    if new_tab_index >= session.tabs.len() || new_tab_index == previous_tab_index {
         return Vec::new();
     }
 

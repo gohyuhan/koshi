@@ -79,20 +79,20 @@ fn a_backslash_in_a_name_follows_the_platform_separator() {
     assert!(is_plain_file_name("a\\b"));
 }
 
-// --- load_config_file: absent, present, and unreadable files ---
+// --- read_config_file: absent, present, and unreadable files ---
+
+/// `read_config_file`'s answer with the read error as its text.
+fn read_config_file_as_text(config_path: &Path) -> Result<Option<String>, String> {
+    read_config_file(config_path).map_err(|read_error| read_error.to_string())
+}
 
 #[test]
-fn reading_an_absent_file_is_none_without_a_warning() {
+fn reading_an_absent_file_is_none() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(
-            &test_directory.path().join("missing.kdl"),
-            &mut config_warnings
-        ),
-        None
+        read_config_file_as_text(&test_directory.path().join("missing.kdl")),
+        Ok(None)
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
@@ -100,31 +100,21 @@ fn reading_a_present_file_returns_its_exact_text() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("present.kdl");
     fs::write(&config_file_path, "version 1\n").expect("write");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        Some("version 1\n".to_string())
+        read_config_file_as_text(&config_file_path),
+        Ok(Some("version 1\n".to_string()))
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
-fn reading_a_directory_as_a_file_warns_and_is_none() {
+fn reading_a_directory_as_a_file_is_its_read_error() {
     // Reading a directory as a string fails on every platform.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let read_error =
         fs::read_to_string(test_directory.path()).expect_err("a directory reads as no string");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(test_directory.path(), &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "could not read config file {}: {read_error}",
-            test_directory.path().display()
-        )]
+        read_config_file_as_text(test_directory.path()),
+        Err(read_error.to_string())
     );
 }
 
@@ -132,131 +122,138 @@ fn reading_a_directory_as_a_file_warns_and_is_none() {
 /// read fails with "not a directory", which is not an absent file.
 #[cfg(unix)]
 #[test]
-fn reading_a_path_below_a_regular_file_warns_and_is_none() {
+fn reading_a_path_below_a_regular_file_is_its_read_error() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let parent_file_path = test_directory.path().join("present.kdl");
     fs::write(&parent_file_path, "version 1\n").expect("write");
     let config_file_path = parent_file_path.join("keybinding.kdl");
     let read_error =
         fs::read_to_string(&config_file_path).expect_err("a regular file holds no entries");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "could not read config file {}: {read_error}",
-            config_file_path.display()
-        )]
+        read_config_file_as_text(&config_file_path),
+        Err(read_error.to_string())
     );
 }
 
 #[test]
-fn reading_an_empty_file_returns_an_empty_string_without_a_warning() {
+fn reading_an_empty_file_returns_an_empty_string() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("empty.kdl");
     fs::write(&config_file_path, "").expect("write");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        Some(String::new())
+        read_config_file_as_text(&config_file_path),
+        Ok(Some(String::new()))
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
-fn reading_a_file_that_is_not_utf8_warns_and_is_none() {
+fn reading_a_file_that_is_not_utf8_is_its_read_error() {
     // `0x80` starts no UTF-8 sequence: the read fails on every platform.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("invalid.kdl");
     fs::write(&config_file_path, [0x76, 0x65, 0x80, 0x72]).expect("write");
     let read_error = fs::read_to_string(&config_file_path).expect_err("the bytes are not UTF-8");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "could not read config file {}: {read_error}",
-            config_file_path.display()
-        )]
+        read_config_file_as_text(&config_file_path),
+        Err(read_error.to_string())
     );
 }
 
-// --- load_app_config: clean, absent, hard-error, and unknown-field files ---
+// --- load_app_config_at: clean, absent, unreadable, hard-error, and unknown-field files ---
 
 #[test]
 fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 1\n").expect("write");
-    let mut config_warnings = Vec::new();
-    let app_config_file =
-        load_app_config(&config_file_path, &mut config_warnings).expect("the file loads");
-    assert_eq!(app_config_file.layer, PartialKoshiConfig::default());
-    assert_eq!(app_config_file.theme_name, None);
-    assert_eq!(app_config_file.parse_warnings, Vec::<String>::new());
-    assert_eq!(config_warnings, Vec::<String>::new());
-}
-
-#[test]
-fn loading_an_absent_app_file_is_none_without_a_warning() {
-    let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(
-            &test_directory.path().join("koshi.kdl"),
-            &mut config_warnings
-        ),
-        None
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Parsed {
+                app_config_layer: Box::new(PartialKoshiConfig::default()),
+                theme_name: None,
+                app_config_source_text: "version 1\n".to_string(),
+            },
+            config_warnings: Vec::new(),
+        }
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
-fn an_app_file_with_an_unsupported_version_drops_to_defaults_with_a_warning() {
+fn loading_an_absent_app_file_is_absent_without_a_warning() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    assert_eq!(
+        load_app_config_at(&test_directory.path().join("koshi.kdl")),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Absent,
+            config_warnings: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn loading_an_app_file_that_cannot_be_read_keeps_the_read_error_with_a_warning() {
+    // `koshi.kdl` is a directory: reading it as a string fails on every
+    // platform.
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("koshi.kdl");
+    fs::create_dir(&config_file_path).expect("create dir");
+    let read_error =
+        fs::read_to_string(&config_file_path).expect_err("a directory reads as no string");
+    assert_eq!(
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Unreadable {
+                read_error_text: read_error.to_string(),
+            },
+            config_warnings: vec![format!(
+                "could not read config file {}: {read_error}",
+                config_file_path.display()
+            )],
+        }
+    );
+}
+
+#[test]
+fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 999\n").expect("write");
     let parse_error =
         parse_app_config(&config_file_path, "version 999\n").expect_err("version 999 is refused");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "koshi.kdl not applied ({}): {parse_error}; using defaults",
-            config_file_path.display()
-        )]
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: "version 999\n".to_string(),
+            },
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                config_file_path.display()
+            )],
+        }
     );
 }
 
 #[test]
-fn an_empty_app_file_drops_to_defaults_with_a_warning() {
+fn an_empty_app_file_is_refused_with_a_warning() {
     // An empty file names no `version`, which `parse_app_config` refuses.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "").expect("write");
     let parse_error =
         parse_app_config(&config_file_path, "").expect_err("a missing version is refused");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "koshi.kdl not applied ({}): {parse_error}; using defaults",
-            config_file_path.display()
-        )]
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: String::new(),
+            },
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                config_file_path.display()
+            )],
+        }
     );
 }
 
@@ -271,16 +268,19 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
         "version 1\nfrobnicate 1\ntheme \"midnight\"\n",
     )
     .expect("write");
-    let mut config_warnings = Vec::new();
-    let app_config_file =
-        load_app_config(&config_file_path, &mut config_warnings).expect("the file loads");
-    assert_eq!(app_config_file.theme_name, Some("midnight".to_string()));
     assert_eq!(
-        config_warnings,
-        vec![format!(
-            "{}: ignored unknown key `frobnicate`; did you mean `update`?",
-            config_file_path.display()
-        )]
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Parsed {
+                app_config_layer: Box::new(PartialKoshiConfig::default()),
+                theme_name: Some("midnight".to_string()),
+                app_config_source_text: "version 1\nfrobnicate 1\ntheme \"midnight\"\n".to_string(),
+            },
+            config_warnings: vec![format!(
+                "{}: line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
+                config_file_path.display()
+            )],
+        }
     );
 }
 
@@ -428,7 +428,8 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "{}: ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
+            "{}: line 3, column 5: ignored unknown key `colors.foreground`; did you mean \
+             `colors.ramp-end`?",
             theme_file_path.display()
         )]
     );
@@ -559,13 +560,13 @@ fn loading_an_absent_keybinding_file_is_none_without_a_warning() {
 
 #[test]
 fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
-    // `keybinding.kdl` is all-or-nothing: any parse error drops the file.
+    // `keybinding.kdl` is all-or-nothing: any parse error drops the file. The
+    // warning names every schema problem with its line and column, joined by
+    // `; `.
     let keybinding_source = "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n";
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("keybinding.kdl");
     fs::write(&config_file_path, keybinding_source).expect("write");
-    let parse_error = parse_keybindings(&config_file_path, keybinding_source)
-        .expect_err("the file does not parse");
     let mut config_warnings = Vec::new();
     assert_eq!(
         load_keybindings_config(&config_file_path, &mut config_warnings),
@@ -574,10 +575,114 @@ fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "keybinding.kdl not applied ({}): {parse_error}; using defaults",
+            "keybinding.kdl not applied ({}): line 1, column 1: keybinding file must \
+             declare `version`; line 2, column 10: invalid key `<C-`: missing closing `>`; \
+             using defaults",
             config_file_path.display()
         )]
     );
+}
+
+#[test]
+fn a_keybinding_file_that_is_not_kdl_warns_with_its_line_and_column() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("keybinding.kdl");
+    fs::write(&config_file_path, "version 2\nmode \"normal\" {\n").expect("write");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_keybindings_config(&config_file_path, &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "keybinding.kdl not applied ({path}): config parse error in {path}: line 2, \
+             column 15: No closing '}}' for child block; using defaults",
+            path = config_file_path.display()
+        )]
+    );
+}
+
+#[test]
+fn an_unreadable_keybinding_file_gives_no_layer_with_a_warning() {
+    // A directory named `keybinding.kdl` exists and does not read as text.
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("keybinding.kdl");
+    fs::create_dir(&config_file_path).expect("create directory");
+    let read_error =
+        fs::read_to_string(&config_file_path).expect_err("a directory does not read as text");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_keybindings_config(&config_file_path, &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "could not read config file {}: {read_error}",
+            config_file_path.display()
+        )]
+    );
+}
+
+#[test]
+fn load_keybinding_file_names_why_a_file_gives_no_layer() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+
+    let absent_file_path = test_directory.path().join("absent.kdl");
+    match load_keybinding_file(&absent_file_path) {
+        Ok(None) => {}
+        other_outcome => panic!("expected an absent file, got {other_outcome:?}"),
+    }
+
+    let directory_file_path = test_directory.path().join("directory.kdl");
+    fs::create_dir(&directory_file_path).expect("create directory");
+    let expected_read_error =
+        fs::read_to_string(&directory_file_path).expect_err("a directory does not read as text");
+    match load_keybinding_file(&directory_file_path) {
+        Err(KeybindingFileError::Unreadable(read_error)) => {
+            assert_eq!(read_error.kind(), expected_read_error.kind());
+            assert_eq!(read_error.to_string(), expected_read_error.to_string());
+        }
+        other_outcome => panic!("expected an unreadable file, got {other_outcome:?}"),
+    }
+
+    let unparseable_file_path = test_directory.path().join("unparseable.kdl");
+    fs::write(
+        &unparseable_file_path,
+        "version 2\nunlock_alternative \"<A-u>\"\n",
+    )
+    .expect("write");
+    match load_keybinding_file(&unparseable_file_path) {
+        Err(KeybindingFileError::Unparseable(KeybindingParseError::Invalid {
+            keybinding_path,
+            diagnostics,
+        })) => {
+            assert_eq!(keybinding_path, unparseable_file_path.display().to_string());
+            let diagnostic_messages: Vec<&str> = diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.get_diagnostic_message())
+                .collect();
+            assert_eq!(
+                diagnostic_messages,
+                vec!["unknown key `unlock_alternative`; did you mean `unlock-alternative`?"]
+            );
+        }
+        other_outcome => panic!("expected an unparseable file, got {other_outcome:?}"),
+    }
+
+    let parsed_file_path = test_directory.path().join("parsed.kdl");
+    fs::write(&parsed_file_path, "version 2\nchord-timeout-ms 750\n").expect("write");
+    match load_keybinding_file(&parsed_file_path) {
+        Ok(Some(keybindings_config_layer)) => assert_eq!(
+            keybindings_config_layer,
+            PartialKeybindingsConfig {
+                chord_timeout_ms: Some(750),
+                ..PartialKeybindingsConfig::default()
+            }
+        ),
+        other_outcome => panic!("expected a parsed file, got {other_outcome:?}"),
+    }
 }
 
 // --- append_config_field_warnings: file-prefixed skip lines ---
@@ -634,27 +739,21 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     apply_beta_gate(None);
     assert!(!koshi_beta::should_allow_beta_features());
 
-    // Text on disk → `load_app_config` → `apply_beta_gate` → a
+    // Text on disk → `load_app_config_at` → `apply_beta_gate` → a
     // `#[beta_feature]` function.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
 
     fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").expect("write");
-    let mut config_warnings = Vec::new();
-    apply_beta_gate(
-        load_app_config(&config_file_path, &mut config_warnings)
-            .map(|app_config_file| app_config_file.layer),
-    );
-    assert_eq!(config_warnings, Vec::<String>::new());
+    let loaded_app_config = load_app_config_at(&config_file_path);
+    assert_eq!(loaded_app_config.config_warnings, Vec::<String>::new());
+    apply_beta_gate(loaded_app_config.into_app_config_layer());
     assert_eq!(mock_beta_entry_point(), 1);
 
     fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").expect("write");
-    let mut config_warnings = Vec::new();
-    apply_beta_gate(
-        load_app_config(&config_file_path, &mut config_warnings)
-            .map(|app_config_file| app_config_file.layer),
-    );
-    assert_eq!(config_warnings, Vec::<String>::new());
+    let loaded_app_config = load_app_config_at(&config_file_path);
+    assert_eq!(loaded_app_config.config_warnings, Vec::<String>::new());
+    apply_beta_gate(loaded_app_config.into_app_config_layer());
     assert_eq!(mock_beta_entry_point(), 0);
 }
 
@@ -924,7 +1023,8 @@ fn build_config_directory_with_app_config(app_config_text: &str) -> tempfile::Te
 
 #[test]
 fn no_config_directory_reads_no_file_and_keeps_every_default() {
-    let (loaded_config, config_warnings) = load_config_files(None);
+    let (loaded_config, config_warnings) =
+        load_config_files_on_app_config(None, load_app_config_file(None));
 
     assert_eq!(loaded_config.app_config_layer, None);
     assert_eq!(loaded_config.theme_config_layer, None);
@@ -970,7 +1070,10 @@ fn a_config_turning_the_switch_on_loads_with_no_warning() {
         "version 2\nallow-other-users #true\nshared-sessions-dir \"/var/run/koshi\"\n",
     );
 
-    let (loaded_config, config_warnings) = load_config_files(Some(config_directory.path()));
+    let (loaded_config, config_warnings) = load_config_files_on_app_config(
+        Some(config_directory.path()),
+        load_app_config_file(Some(config_directory.path())),
+    );
 
     assert_eq!(config_warnings, Vec::<String>::new());
     let app_config_layer = loaded_config.app_config_layer.expect("koshi.kdl applies");
@@ -1044,4 +1147,163 @@ fn a_switch_left_to_the_file_is_read_from_the_config_directory_on_every_call() {
         !(other_users_policy.is_enabled)(),
         "an absent file turns the switch off"
     );
+}
+
+#[test]
+fn a_server_config_file_gives_the_remote_listen_address_it_names() {
+    let config_directory = tempfile::tempdir().expect("a config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        "version 2\nremote-listen \"127.0.0.1:7654\"\n",
+    )
+    .expect("the koshi.kdl is written");
+
+    assert_eq!(
+        load_server_config_file(&app_config_path).remote_listen_address,
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 7654)))
+    );
+}
+
+#[test]
+fn an_absent_or_unparseable_server_config_file_gives_the_built_in_defaults() {
+    let config_directory = tempfile::tempdir().expect("a config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+
+    assert_eq!(
+        load_server_config_file(&app_config_path),
+        ServerConfig::default(),
+        "an absent file"
+    );
+
+    fs::write(&app_config_path, "version 2\nremote-listen {\n").expect("the koshi.kdl is written");
+    assert_eq!(
+        load_server_config_file(&app_config_path),
+        ServerConfig::default(),
+        "a file that does not parse"
+    );
+}
+
+#[test]
+fn a_server_config_resolves_from_the_layer_folded_onto_the_built_in_defaults() {
+    let app_config_layer = PartialKoshiConfig {
+        remote_listen_address: Some(Some(std::net::SocketAddr::from(([127, 0, 0, 1], 7654)))),
+        ..PartialKoshiConfig::default()
+    };
+
+    assert_eq!(
+        resolve_server_config(Some(&app_config_layer)),
+        ServerConfig {
+            remote_listen_address: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 7654))),
+            ..ServerConfig::default()
+        },
+        "a layer naming an address"
+    );
+    assert_eq!(
+        resolve_server_config(None),
+        ServerConfig::default(),
+        "no layer"
+    );
+}
+
+#[test]
+fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
+    let app_config_text = "version 2\ntheme \"midnight\"\nfrobnicate 1\n";
+    let config_directory = build_config_directory_with_app_config(app_config_text);
+    let app_config_path = config_directory.path().join("koshi.kdl");
+
+    let loaded_app_config = load_app_config_file(Some(config_directory.path()));
+
+    assert_eq!(
+        loaded_app_config,
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Parsed {
+                app_config_layer: Box::new(PartialKoshiConfig::default()),
+                theme_name: Some("midnight".to_string()),
+                app_config_source_text: app_config_text.to_string(),
+            },
+            config_warnings: vec![format!(
+                "{}: line 3, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
+                app_config_path.display()
+            )],
+        }
+    );
+    assert_eq!(
+        parse_app_config_text(&app_config_path, app_config_text.to_string()),
+        loaded_app_config
+    );
+}
+
+#[test]
+fn config_files_build_on_the_koshi_kdl_already_read_and_read_its_theme() {
+    // `koshi.kdl` on disk names the theme `disk` and leaves `allow-other-users`
+    // off. The `koshi.kdl` already read names the theme `passed` and turns it
+    // on. Only the one already read applies.
+    let config_directory = build_config_directory_with_app_config("version 2\ntheme \"disk\"\n");
+    write_theme_file(
+        config_directory.path(),
+        "disk",
+        "version 1\ncolors {\n    accent \"#000000\"\n}\n",
+    );
+    write_theme_file(
+        config_directory.path(),
+        "passed",
+        "version 1\ncolors {\n    accent \"#f5c2ff\"\n}\n",
+    );
+    let loaded_app_config = LoadedAppConfig {
+        app_config_outcome: AppConfigOutcome::Parsed {
+            app_config_layer: Box::new(PartialKoshiConfig {
+                should_allow_other_users: Some(true),
+                ..PartialKoshiConfig::default()
+            }),
+            theme_name: Some("passed".to_string()),
+            app_config_source_text: "version 2\ntheme \"passed\"\nallow-other-users #true\n"
+                .to_string(),
+        },
+        config_warnings: vec!["koshi.kdl: line 3, column 1: a warning of the read".to_string()],
+    };
+
+    let (loaded_config, config_warnings) =
+        load_config_files_on_app_config(Some(config_directory.path()), loaded_app_config);
+
+    assert_eq!(
+        loaded_config.app_config_layer,
+        Some(PartialKoshiConfig {
+            should_allow_other_users: Some(true),
+            ..PartialKoshiConfig::default()
+        })
+    );
+    let theme_config_layer = loaded_config
+        .theme_config_layer
+        .expect("the passed theme loads");
+    assert_eq!(theme_config_layer.theme_name, Some("passed".to_string()));
+    assert_eq!(
+        theme_config_layer.colors.expect("colors set").accent,
+        Some(RgbColor {
+            red: 0xf5,
+            green: 0xc2,
+            blue: 0xff
+        })
+    );
+    assert_eq!(loaded_config.keybindings_config_layer, None);
+    assert_eq!(
+        config_warnings,
+        vec!["koshi.kdl: line 3, column 1: a warning of the read".to_string()]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_layer_turning_the_switch_on_names_its_shared_directory() {
+    let app_config_layer = PartialKoshiConfig {
+        should_allow_other_users: Some(true),
+        shared_sessions_directory: Some(Some(PathBuf::from("/var/run/koshi"))),
+        ..PartialKoshiConfig::default()
+    };
+
+    assert_eq!(
+        resolve_shared_sessions_base_directory_for_layer(Some(&app_config_layer)),
+        Some(PathBuf::from("/var/run/koshi"))
+    );
+    assert_eq!(resolve_shared_sessions_base_directory_for_layer(None), None);
 }

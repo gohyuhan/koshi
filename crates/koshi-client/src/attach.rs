@@ -170,6 +170,7 @@ use crate::input::{InputReadClock, KeyOutcome};
 use crate::mouse::MouseAction;
 use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client, LinkStatus, PlacementTargetOutcome};
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
@@ -214,6 +215,10 @@ use crate::terminal;
 use crate::terminal::TerminalInput;
 use koshi_core::ids::{format_session_target, parse_owned_session_id, parse_prefixed_uuid};
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
+use koshi_link::config::{
+    load_app_config_file, load_config_files_on_app_config,
+    resolve_shared_sessions_base_directory_for_layer, LoadedAppConfig,
+};
 use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
@@ -325,7 +330,8 @@ pub(crate) struct ViewerPaint {
     pub(crate) is_mouse_selection_enabled: bool,
     /// The multi-chord sequence being typed, which the hint bar draws as a
     /// breadcrumb ahead of the chords that continue it. `None` when no sequence
-    /// is open.
+    /// is open, and while the open sequence waits for its hint deadline
+    /// ([`Client::is_continuation_hint_hidden`]).
     pub(crate) pending_key_sequence: Option<KeySequence>,
     /// The checked placement target outlined in the active pane area.
     pub(crate) placement_target: Option<TiledPlacementTarget>,
@@ -474,7 +480,11 @@ impl ViewerPaint {
             chrome: client.build_viewer_chrome(displayed_active_tab_id),
             lock_mode: client.get_active_input_mode(),
             is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
-            pending_key_sequence: client.get_pending_key_sequence().cloned(),
+            pending_key_sequence: if client.is_continuation_hint_hidden() {
+                None
+            } else {
+                client.get_pending_key_sequence().cloned()
+            },
             placement_target: client.get_placement_target().cloned(),
             placement_presentation: build_pane_placement_presentation(client, render_snapshot),
         }
@@ -1747,9 +1757,9 @@ enum Incoming {
         /// The chunk.
         image_chunk_frame: ImageChunkFrame,
     },
-    /// One event from this terminal and the instant it was read: an event the
-    /// input thread read, or this terminal hanging up as a termination signal
-    /// or a console close reports it, boxed.
+    /// The events of one read of this terminal and the instant it was read,
+    /// or this terminal hanging up as a termination signal or a console close
+    /// reports it, boxed.
     Input(Box<TerminalInput>),
     /// What one attempt to get the link back ended with, boxed. Only
     /// [`run_without_link`] starts an attempt, one at a time.
@@ -2244,18 +2254,26 @@ fn resolve_local_session_target(
 /// this machine is taken straight away, and anything else — several sessions,
 /// or one session on a saved server — is printed as a numbered list to answer
 /// on stdin.
-pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
+///
+/// `loaded_app_config` is the `koshi.kdl` the caller read at this process's
+/// start. Its layer names the shared directory, and the first attachment runs
+/// on it.
+pub fn attach_selected_session(
+    selector: Option<&str>,
+    loaded_app_config: LoadedAppConfig,
+) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let config_directory = koshi_paths::resolve_config_directory();
     let Some(selector) = selector else {
         return attach_selected_session_from_listing(
             runtime_directory,
             config_directory.as_deref(),
+            loaded_app_config,
         );
     };
     let (session_id, owner_user_id) = resolve_local_session_target(
         &runtime_directory,
-        koshi_link::config::find_shared_sessions_base_directory(config_directory.as_deref())
+        resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer())
             .as_deref(),
         selector,
     )?;
@@ -2266,6 +2284,7 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
         },
         SessionSelector::SessionId(session_id),
         config_directory.as_deref(),
+        loaded_app_config,
     )
 }
 
@@ -2273,9 +2292,12 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 ///
 /// `server` is either the name this machine saved that server under or the
 /// `host:port` it listens on. `certificate_fingerprint` is the fingerprint the
-/// certificate of a server reached for the first time must have; a server
-/// already saved refuses it. `save_as` is the name to save a server reached
-/// for the first time under; a server already saved refuses it.
+/// certificate of the server must have: a server reached for the first time
+/// needs it, and a saved server takes the one it holds and refuses any other.
+/// `save_as` is the name to save the server under: a server reached for the
+/// first time, or a saved server that holds no name, takes it; a saved server
+/// that holds that name already takes it too; a saved server that holds
+/// another name refuses it.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display name,
 /// and the server resolves it against the sessions this machine's secret
@@ -2283,18 +2305,24 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// and more than one is printed as a numbered list to answer on stdin. Nothing
 /// here creates a session.
 ///
+/// `loaded_app_config` is the `koshi.kdl` the caller read at this process's
+/// start. The first attachment runs on it.
+///
 /// # Errors
 /// [`CliError::Runtime`] when the server does not admit the secret, and when
 /// nothing this secret reaches is running on it. [`CliError::IpcUnavailable`]
 /// when the certificate it presents is not the expected one.
 /// [`CliError::InvalidArgs`] when a server reached for the first time comes
-/// with no fingerprint or a malformed one, and when a saved server is given a
-/// fingerprint or holds none.
+/// with no fingerprint or a malformed one, when a saved server is given a
+/// fingerprint other than the one it holds, when it holds none, when it
+/// holds a name other than `save_as`, and when `KOSHI_REMOTE_SECRET` holds a
+/// secret no saved server holds.
 pub fn attach_remote_session(
     server: &str,
     certificate_fingerprint: Option<&str>,
     save_as: Option<&str>,
     selector: Option<&str>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     let server_reference = remote_client::resolve_server(server, certificate_fingerprint)?;
     // This connection carries one listing. The attachment below dials its own.
@@ -2318,6 +2346,7 @@ pub fn attach_remote_session(
         },
         session_selector,
         koshi_paths::resolve_config_directory().as_deref(),
+        loaded_app_config,
     )
 }
 
@@ -2327,13 +2356,18 @@ pub fn attach_remote_session(
 /// The saved servers are asked through
 /// [`list_saved_server_session_rows`](remote_client::list_saved_server_session_rows),
 /// which prints one stderr line for each server whose sessions it does not
-/// list, such as a server that refused or did not answer.
+/// list, such as a server that refused or did not answer. A picked remote row
+/// is joined through the saved server that listed it, which presents the
+/// secret it holds. `KOSHI_REMOTE_SECRET` is not read.
 ///
-/// `config_directory` holds the `koshi.kdl` that names the shared directory
-/// other users' sessions are listed from, and the config the attachment reads.
+/// `loaded_app_config` is the `koshi.kdl` read at this process's start. Its
+/// layer names the shared directory other users' sessions are listed from,
+/// and the first attachment runs on it. `config_directory` holds the config
+/// files every attachment reads.
 fn attach_selected_session_from_listing(
     runtime_directory: PathBuf,
     config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     let reachable_session_rows = remote_client::list_saved_server_session_rows();
     let remote_session_rows = reachable_session_rows
@@ -2347,7 +2381,7 @@ fn attach_selected_session_from_listing(
         })
         .collect();
     let shared_sessions_base_directory =
-        koshi_link::config::find_shared_sessions_base_directory(config_directory);
+        resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer());
     let (server_label, selected_session_row) = match select_session(
         &runtime_directory,
         shared_sessions_base_directory.as_deref(),
@@ -2366,6 +2400,7 @@ fn attach_selected_session_from_listing(
                 },
                 SessionSelector::SessionId(session_id),
                 config_directory,
+                loaded_app_config,
             );
         }
         SessionSelection::Remote(remote_session_index) => {
@@ -2374,10 +2409,11 @@ fn attach_selected_session_from_listing(
     };
     attach_home(
         Home::Remote {
-            server: remote_client::resolve_server(server_label, None)?,
+            server: remote_client::resolve_listed_server(server_label)?,
         },
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
+        loaded_app_config,
     )
 }
 
@@ -2423,12 +2459,16 @@ fn select_remote_session(
 /// UUID, a session display name, or `<user id>/<session id>`, and `None` picks
 /// one from the sessions running for this user. A session on another machine
 /// is never offered. The session moves the client this terminal already holds.
+/// `app_config_layer` is the `koshi.kdl` layer the caller read at this
+/// process's start, which names the shared directory.
 pub fn switch_in_session(
     session_context: &InSessionContext,
     selector: Option<&str>,
+    app_config_layer: Option<&PartialKoshiConfig>,
 ) -> Result<CommandResult, CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
+    let shared_sessions_base_directory =
+        resolve_shared_sessions_base_directory_for_layer(app_config_layer);
     let (session_id, owner_user_id) = resolve_session(
         &runtime_directory,
         shared_sessions_base_directory.as_deref(),
@@ -2453,18 +2493,22 @@ pub fn switch_in_session(
 /// cause and how to reattach, and exits non-zero; the other endings print what
 /// happened and exit zero.
 ///
-/// `config_directory` holds the `koshi.kdl` that names the shared directory
-/// searched when `runtime_directory` advertises no `session_id`, and the
-/// config the attachment reads. `None` searches `runtime_directory` alone and
-/// attaches with the built-in config.
+/// `loaded_app_config` is the `koshi.kdl` read at this process's start. Its
+/// layer names the shared directory searched when `runtime_directory`
+/// advertises no `session_id`, and the first attachment runs on it. A layer of
+/// `None` searches `runtime_directory` alone. `config_directory` holds the
+/// config files every attachment reads; `None` attaches with the built-in
+/// config.
 pub(crate) fn attach_session(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
     session_id: SessionId,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     ipc_client::load_session_endpoint(
         runtime_directory,
-        koshi_link::config::find_shared_sessions_base_directory(config_directory).as_deref(),
+        resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer())
+            .as_deref(),
         session_id,
         None,
     )?;
@@ -2475,6 +2519,7 @@ pub(crate) fn attach_session(
         },
         SessionSelector::SessionId(session_id),
         config_directory,
+        loaded_app_config,
     )
 }
 
@@ -2493,19 +2538,30 @@ pub(crate) fn attach_session(
 /// reads it, is read once, here, before the first attachment. `None` when the
 /// platform cannot report it. `config_directory` is handed to every
 /// attachment.
+///
+/// The first attachment runs on `loaded_app_config`, the `koshi.kdl` read at
+/// this process's start. Every attachment after the first reads `koshi.kdl` in
+/// `config_directory` again when it starts.
 fn attach_home(
     mut home: Home,
     session_selector: SessionSelector,
     config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     let client_executable_path = koshi_host::program_path::resolve_program_path().ok();
     let mut next_session_selector = session_selector;
+    let mut first_loaded_app_config = Some(loaded_app_config);
     loop {
+        let attachment_app_config = match first_loaded_app_config.take() {
+            Some(loaded_app_config) => loaded_app_config,
+            None => load_app_config_file(config_directory),
+        };
         let attach_result = attach_once(
             &home,
             &next_session_selector,
             client_executable_path.as_deref(),
             config_directory,
+            attachment_app_config,
         );
         end_process_after_termination_signal();
         let Some((next_session_id, next_owner_user_id)) = attach_result? else {
@@ -2539,16 +2595,19 @@ fn attach_home(
 /// [`report_attachment_ending`] runs `koshi attach` from when the session
 /// restarted into a build that refused this client's protocol version.
 ///
-/// `config_directory` holds the config files read at the start of each
-/// attachment, and the `koshi.kdl` each dial on this machine reads for the
-/// shared directory.
+/// The attachment runs on `loaded_app_config`, the `koshi.kdl` already read
+/// for it, and on the theme it names and the `keybinding.kdl` read here from
+/// `config_directory`. The layer of `loaded_app_config` names the shared
+/// directory the dial on this machine searches.
 fn attach_once(
     home: &Home,
     session_selector: &SessionSelector,
     client_executable_path: Option<&Path>,
     config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<Option<(SessionId, Option<u32>)>, CliError> {
-    let (loaded_config, config_warnings) = koshi_link::config::load_config_files(config_directory);
+    let (loaded_config, config_warnings) =
+        load_config_files_on_app_config(config_directory, loaded_app_config);
     let client_config =
         koshi_link::config::resolve_client_config(loaded_config.app_config_layer.clone());
     let mut terminal_owner =
@@ -2565,7 +2624,8 @@ fn attach_once(
         session_selector,
         attach_settings,
         cell_size_query.get_current_cell_size(),
-        config_directory,
+        resolve_shared_sessions_base_directory_for_layer(loaded_config.app_config_layer.as_ref())
+            .as_deref(),
         client_config.remote_link_timeout_ms,
     )?;
     let client_id = joined_session.client_id;
@@ -2743,12 +2803,12 @@ fn attach_once(
 ///
 /// Each input event is judged at the instant the input thread read it. Every
 /// input timer due at that instant runs before the event: an open sequence's
-/// ambiguity deadline, a placement tab hover, and a selection drag's edge
-/// scroll ([`expire_input_timers`]). At the end of a pass the timers run at the
-/// clock, and they do not run while an event the input thread read has not
-/// reached the loop. Example: the input thread reads `a` 400 ms into
-/// `<C-y>`'s 500 ms deadline, and the loop draws a frame until 600 ms: `a`
-/// continues the sequence.
+/// ambiguity deadline and hint deadline, a placement tab hover, and a
+/// selection drag's edge scroll ([`expire_input_timers`]). At the end of a
+/// pass the timers run at the clock, and they do not run while an event the
+/// input thread read has not reached the loop. Example: the input thread reads
+/// `a` 400 ms into `<C-y>`'s 500 ms deadline, and the loop draws a frame until
+/// 600 ms: `a` continues the sequence.
 ///
 /// On `Home::Remote`, the loop sends `Ping` in its first pass, after the first
 /// group of events already queued, at most
@@ -3047,7 +3107,10 @@ fn run_attachment<B: Backend, W: Write>(
                 // read, so its hangup is this terminal going away while the
                 // session runs on.
                 Incoming::Input(terminal_input)
-                    if matches!(terminal_input.runtime_event, RuntimeEvent::Quit) =>
+                    if matches!(
+                        terminal_input.runtime_events.as_slice(),
+                        [RuntimeEvent::Quit]
+                    ) =>
                 {
                     attachment_ending = Some(AttachmentEnding::TerminalGone);
                     break;
@@ -3334,10 +3397,10 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// On this machine the session's endpoint file names the socket and holds the
 /// token the Hello presents, and a display name is resolved by the router
 /// first. A session with no endpoint file in the runtime directory is looked
-/// up in the shared directory `koshi.kdl` in `config_directory` names, read
-/// again on every dial. A home that names another user's id reads only that
-/// user's folder of the shared directory. A session of this user's that
-/// refuses this build's protocol version is dialed again once it has
+/// up in `shared_sessions_base_directory`, the shared directory the
+/// attachment's `koshi.kdl` names. A home that names another user's id reads
+/// only that user's folder of the shared directory. A session of this user's
+/// that refuses this build's protocol version is dialed again once it has
 /// restarted, and one that refuses the connection token is dialed again once
 /// it advertises another, as
 /// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait)
@@ -3358,7 +3421,7 @@ fn dial_session(
     session_selector: &SessionSelector,
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
-    config_directory: Option<&Path>,
+    shared_sessions_base_directory: Option<&Path>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, CliError> {
     match home {
@@ -3377,8 +3440,7 @@ fn dial_session(
             };
             ipc_client::run_session_exchange_across_restart(
                 runtime_directory,
-                koshi_link::config::find_shared_sessions_base_directory(config_directory)
-                    .as_deref(),
+                shared_sessions_base_directory,
                 session_id,
                 *owner_user_id,
                 None,
@@ -3961,9 +4023,9 @@ impl LinkRecovery {
     /// Hold `held_input` for a restarted session, oldest first. A redial drops
     /// it, and so does a rejoin while dock/undock mode, pane placement mode,
     /// the move chooser, or floating pane move mode is on for `client`. An
-    /// input past [`MAX_HELD_INPUT_COUNT`] inputs or past
-    /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text drops everything held, and
-    /// everything typed after it during this rejoin.
+    /// input past [`MAX_HELD_INPUT_COUNT`] keys, fired bindings and pastes, or
+    /// past [`MAX_FRAME_BYTE_COUNT`] bytes of paste text, drops everything
+    /// held, and everything typed after it during this rejoin.
     ///
     /// A held [`HeldInput::LockCommand`] also switches `client` to its lock
     /// mode, as [`Client::apply_lock_command`] says. A lock command that is
@@ -4015,8 +4077,12 @@ impl LinkRecovery {
 /// they were typed.
 #[derive(Debug, Default)]
 struct InputHold {
-    /// The held input, oldest first. At most [`MAX_HELD_INPUT_COUNT`].
+    /// The held input, oldest first.
     held_inputs: Vec<HeldInput>,
+    /// The keys, fired bindings and pastes in `held_inputs`: a
+    /// [`HeldInput::Keyboard`] counts each of its keys. At most
+    /// [`MAX_HELD_INPUT_COUNT`].
+    held_input_count: usize,
     /// The bytes of paste text in `held_inputs`. At most
     /// [`MAX_FRAME_BYTE_COUNT`].
     held_paste_byte_count: usize,
@@ -4029,21 +4095,23 @@ struct InputHold {
 impl InputHold {
     /// Add `held_input` after the inputs already held and return `true`.
     /// Returns `false`, holding nothing more, when the hold would then carry
-    /// more than [`MAX_HELD_INPUT_COUNT`] inputs or more than
-    /// [`MAX_FRAME_BYTE_COUNT`] bytes of paste text.
+    /// more than [`MAX_HELD_INPUT_COUNT`] keys, fired bindings and pastes, or
+    /// more than [`MAX_FRAME_BYTE_COUNT`] bytes of paste text. A
+    /// [`HeldInput::Keyboard`] of 2 keys added to 1023 held inputs is refused.
     fn hold_input(&mut self, held_input: HeldInput) -> bool {
-        let paste_byte_count = match &held_input {
-            HeldInput::Paste(pasted_text) => pasted_text.len(),
-            HeldInput::Keyboard(_) | HeldInput::DispatchPlan(_) | HeldInput::LockCommand { .. } => {
-                0
-            }
+        let (added_input_count, paste_byte_count) = match &held_input {
+            HeldInput::Keyboard(key_inputs) => (key_inputs.len(), 0),
+            HeldInput::Paste(pasted_text) => (1, pasted_text.len()),
+            HeldInput::DispatchPlan(_) | HeldInput::LockCommand { .. } => (1, 0),
         };
+        let held_input_count = self.held_input_count.saturating_add(added_input_count);
         let held_paste_byte_count = self.held_paste_byte_count.saturating_add(paste_byte_count);
-        if self.held_inputs.len() >= MAX_HELD_INPUT_COUNT
+        if held_input_count > MAX_HELD_INPUT_COUNT
             || held_paste_byte_count > MAX_FRAME_BYTE_COUNT as usize
         {
             return false;
         }
+        self.held_input_count = held_input_count;
         self.held_paste_byte_count = held_paste_byte_count;
         self.held_inputs.push(held_input);
         true
@@ -4054,9 +4122,9 @@ impl InputHold {
 /// joins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HeldInput {
-    /// A key the base keymap passed through, or a key release. Sent as
-    /// [`IpcRequestKind::Keyboard`].
-    Keyboard(KeyInput),
+    /// The keys of one read the base keymap passed through, and the key
+    /// releases, oldest first. Sent as one [`IpcRequestKind::Keyboard`].
+    Keyboard(Vec<KeyInput>),
     /// The plan of a binding the base keymap fired, other than the quit
     /// binding and a lock binding. Run as [`Uplink::run_dispatch_plan`] runs
     /// it.
@@ -4093,7 +4161,9 @@ enum HeldInput {
 /// the channel then sends `Leaving { is_returning: true }` when the channel is
 /// dropped, as [`JoinedSessionGuard`] states. Every other key and paste is held
 /// through [`LinkRecovery::hold_input`] for a restart rejoin, and dropped for a
-/// redial, as [`hold_fired_binding`] says for a binding; a key that opens a
+/// redial, as [`hold_fired_binding`] says for a binding. The keys of one read
+/// that go to the pane are held as one [`HeldInput::Keyboard`], which ends at
+/// any event or key outcome that is not such a key; a key that opens a
 /// sequence keeps its breadcrumb. A held lock binding switches the lock mode
 /// the next key resolves in: `<C-l>` then `<C-l>` holds `SetLockMode` for
 /// `Locked`, then for `Normal`. Each input event is judged at the instant the
@@ -4136,7 +4206,7 @@ fn run_without_link<B: Backend>(
         spawn_rejoin_attempt(Arc::clone(attempt_rejoin), incoming_sender.clone());
     }
     let mut leftover_events = leftover_events.into_iter();
-    let rejoin_result = loop {
+    let rejoin_result = 'stretch: loop {
         let current_time = Instant::now();
         let link_status = match &mut link_recovery {
             LinkRecovery::Redial(redial_schedule) => {
@@ -4222,15 +4292,15 @@ fn run_without_link<B: Backend>(
             },
             Incoming::Input(terminal_input) => {
                 let TerminalInput {
-                    runtime_event,
+                    runtime_events,
                     read_at,
                 } = *terminal_input;
-                if matches!(runtime_event, RuntimeEvent::Quit) {
+                if matches!(runtime_events.as_slice(), [RuntimeEvent::Quit]) {
                     break Err(AttachmentEnding::TerminalGone);
                 }
                 client.get_input_read_clock().note_input_taken(read_at);
-                // A sequence whose deadline passed before this event was read
-                // fires first, and the event is handled after it.
+                // A sequence whose deadline passed before this read fires
+                // first, and the read's events are handled after it.
                 if let Some(expired_bound_action) = client.expire_key_sequence(read_at) {
                     if hold_fired_binding(&mut link_recovery, client, uplink, expired_bound_action)
                         .is_break()
@@ -4238,44 +4308,66 @@ fn run_without_link<B: Backend>(
                         break Err(AttachmentEnding::LeftWhileReconnecting);
                     }
                 }
-                match runtime_event {
-                    RuntimeEvent::KeyInput { key_input, .. } => {
-                        let Some(chord) = key_input.to_binding_chord() else {
-                            link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
-                            continue;
-                        };
-                        match client.resolve_key(chord, read_at) {
-                            KeyOutcome::Fire(bound_action) => {
-                                if hold_fired_binding(
-                                    &mut link_recovery,
-                                    client,
-                                    uplink,
-                                    bound_action,
-                                )
-                                .is_break()
-                                {
-                                    break Err(AttachmentEnding::LeftWhileReconnecting);
+                // The keys of this read bound for the pane, held as one input
+                // when an event that is not such a key comes, and at the end
+                // of the read.
+                let mut pane_key_inputs = Vec::new();
+                for runtime_event in runtime_events {
+                    if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
+                        hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs);
+                    }
+                    match runtime_event {
+                        RuntimeEvent::KeyInput { key_input, .. } => {
+                            let Some(chord) = key_input.to_binding_chord() else {
+                                pane_key_inputs.push(key_input);
+                                continue;
+                            };
+                            match client.resolve_key(chord, read_at) {
+                                KeyOutcome::Fire(bound_action) => {
+                                    hold_pane_key_inputs(
+                                        &mut link_recovery,
+                                        client,
+                                        &mut pane_key_inputs,
+                                    );
+                                    if hold_fired_binding(
+                                        &mut link_recovery,
+                                        client,
+                                        uplink,
+                                        bound_action,
+                                    )
+                                    .is_break()
+                                    {
+                                        break 'stretch Err(
+                                            AttachmentEnding::LeftWhileReconnecting,
+                                        );
+                                    }
+                                }
+                                KeyOutcome::PassThrough(_) => pane_key_inputs.push(key_input),
+                                KeyOutcome::Pending | KeyOutcome::Discard => {
+                                    hold_pane_key_inputs(
+                                        &mut link_recovery,
+                                        client,
+                                        &mut pane_key_inputs,
+                                    );
                                 }
                             }
-                            KeyOutcome::PassThrough(_) => {
-                                link_recovery.hold_input(client, HeldInput::Keyboard(key_input));
-                            }
-                            KeyOutcome::Pending | KeyOutcome::Discard => {}
                         }
+                        RuntimeEvent::HostPaste { pasted_text, .. } => {
+                            link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
+                        }
+                        RuntimeEvent::CellSize { cell_size, .. } => {
+                            let _ = cell_size_query.accept_cell_size_reply(cell_size);
+                        }
+                        RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                            client.handle_outer_terminal_focus_lost();
+                        }
+                        // A resize and a mouse event are dropped and not
+                        // recorded; the new link reads the terminal's size
+                        // itself.
+                        _ => {}
                     }
-                    RuntimeEvent::HostPaste { pasted_text, .. } => {
-                        link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
-                    }
-                    RuntimeEvent::CellSize { cell_size, .. } => {
-                        let _ = cell_size_query.accept_cell_size_reply(cell_size);
-                    }
-                    RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                        client.handle_outer_terminal_focus_lost();
-                    }
-                    // A resize and a mouse event are dropped and not recorded; the
-                    // new link reads the terminal's size itself.
-                    _ => {}
                 }
+                hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs);
             }
         }
     };
@@ -4339,6 +4431,20 @@ fn build_redial_answer(dial_result: Result<JoinedSession, DialError>) -> RejoinA
     }
 }
 
+/// Hold `pane_key_inputs`, the keys of one read that go to the pane, as one
+/// [`HeldInput::Keyboard`] through [`LinkRecovery::hold_input`], and leave it
+/// empty. Holds nothing when it has no key.
+fn hold_pane_key_inputs(
+    link_recovery: &mut LinkRecovery,
+    client: &mut Client,
+    pane_key_inputs: &mut Vec<KeyInput>,
+) {
+    if pane_key_inputs.is_empty() {
+        return;
+    }
+    link_recovery.hold_input(client, HeldInput::Keyboard(take(pane_key_inputs)));
+}
+
 /// Answer one binding that fired while this viewer has no link, against the
 /// action table. Returns [`ControlFlow::Break`] for the quit binding, holding
 /// nothing, and [`ControlFlow::Continue`] for every other binding.
@@ -4371,8 +4477,8 @@ fn hold_fired_binding(
     ControlFlow::Continue(())
 }
 
-/// Send what a restart rejoin held up a new connection, oldest first: a key as
-/// [`IpcRequestKind::Keyboard`], a binding's plan through
+/// Send what a restart rejoin held up a new connection, oldest first: the keys
+/// of one read as one [`IpcRequestKind::Keyboard`], a binding's plan through
 /// [`Uplink::run_dispatch_plan`] with no painted frame, a lock command as `SetLockMode` under its
 /// own command id, and a paste as [`IpcRequestKind::Paste`].
 ///
@@ -4385,8 +4491,8 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
     client.set_pending_lock_command_id(None);
     for held_input in held_inputs {
         match held_input {
-            HeldInput::Keyboard(key_input) => {
-                uplink.send_request(IpcRequestKind::Keyboard { key_input });
+            HeldInput::Keyboard(key_inputs) => {
+                uplink.send_request(IpcRequestKind::Keyboard { key_inputs });
             }
             HeldInput::DispatchPlan(dispatch_plan) => {
                 uplink.run_dispatch_plan(client, dispatch_plan, None);
@@ -5234,7 +5340,7 @@ impl TerminalCloseWatch {
                     for _ in termination_signals.forever() {
                         should_run_default_action.store(true, Ordering::SeqCst);
                         let _ = incoming_sender.send(Incoming::Input(Box::new(TerminalInput {
-                            runtime_event: RuntimeEvent::Quit,
+                            runtime_events: vec![RuntimeEvent::Quit],
                             read_at: Instant::now(),
                         })));
                     }
@@ -5377,7 +5483,7 @@ unsafe extern "system" fn handle_console_control(control_type: u32) -> windows_s
     }
     let is_quit_sent = incoming_sender
         .send(Incoming::Input(Box::new(TerminalInput {
-            runtime_event: RuntimeEvent::Quit,
+            runtime_events: vec![RuntimeEvent::Quit],
             read_at: Instant::now(),
         })))
         .is_ok();
@@ -5415,7 +5521,12 @@ fn build_input_channel() -> (
 /// instant the input thread read it: a key that opens a sequence that is both a
 /// binding and a longer one's prefix sets that sequence's ambiguity deadline
 /// one chord timeout after `read_at`. A press that goes to the pane's program
-/// also ends the selection gesture under way. A resize records the viewport and
+/// also ends the selection gesture under way. A key that goes to the pane is
+/// added to `pane_key_inputs`, and sends nothing. Every other key outcome
+/// first sends `pane_key_inputs` as one [`IpcRequestKind::Keyboard`]
+/// ([`send_pane_key_inputs`]): a fired binding, a key a sequence holds, and a
+/// discarded key. The caller sends `pane_key_inputs` before any other event,
+/// and at the end of the read. A resize records the viewport and
 /// pane area and sends both to the session. Pasted text goes up whole and ends
 /// the gesture too; the session writes it into the pane, bracketing it when
 /// that pane asked for bracketed paste. A paste of more text than one frame
@@ -5440,6 +5551,7 @@ fn process_runtime_input_with_cell_size(
     mouse_frame: Option<&MouseFrame>,
     runtime_event: RuntimeEvent,
     read_at: Instant,
+    pane_key_inputs: &mut Vec<KeyInput>,
 ) -> ControlFlow<()> {
     match runtime_event {
         RuntimeEvent::CellSize { cell_size, .. } => {
@@ -5460,26 +5572,31 @@ fn process_runtime_input_with_cell_size(
             // while on; every other release goes to the focused pane.
             let Some(chord) = key_input.to_binding_chord() else {
                 if client.find_viewer_local_input_mode().is_none() {
-                    uplink.send_request(IpcRequestKind::Keyboard { key_input });
+                    pane_key_inputs.push(key_input);
                 }
                 return ControlFlow::Continue(());
             };
             match client.resolve_key(chord, read_at) {
                 KeyOutcome::Fire(bound_action) => {
+                    send_pane_key_inputs(uplink, pane_key_inputs);
                     return uplink.submit_bound_action(client, bound_action, mouse_frame);
                 }
                 KeyOutcome::PassThrough(_) => {
                     // The key belongs to the program in the pane, so a
                     // selection gesture over it is over.
                     client.end_mouse_selection();
-                    uplink.send_request(IpcRequestKind::Keyboard { key_input });
+                    pane_key_inputs.push(key_input);
                 }
-                // Held or dropped: nothing reaches the session. A chord that
-                // opens or closes a sequence moves the breadcrumb the hint
-                // bar draws. An `Esc` that ends a grab-handle drag clears the
-                // breadcrumb, and the floating pane is drawn where the frame
-                // places it. Any other discard draws nothing.
-                KeyOutcome::Pending | KeyOutcome::Discard => {}
+                // Held or dropped: nothing more reaches the session. A chord
+                // that continues or closes a sequence the hint bar shows moves
+                // the breadcrumb it draws; a chord that opens a sequence moves
+                // it once the sequence's hint deadline passes. An `Esc` that
+                // ends a grab-handle drag clears the breadcrumb, and the
+                // floating pane is drawn where the frame places it. Any other
+                // discard draws nothing.
+                KeyOutcome::Pending | KeyOutcome::Discard => {
+                    send_pane_key_inputs(uplink, pane_key_inputs);
+                }
             }
         }
         RuntimeEvent::Resize {
@@ -5520,7 +5637,9 @@ fn process_runtime_input_with_cell_size(
 /// 1. An open key sequence whose ambiguity deadline passed fires. The held
 ///    mouse actions go up first as one round ([`flush_mouse_round`]), then the
 ///    commands the sequence resolves to. A viewer-local action reads
-///    `mouse_frame`, the frame this terminal last painted.
+///    `mouse_frame`, the frame this terminal last painted. An open sequence
+///    whose hint deadline passed shows in the hint bar from the next paint
+///    ([`Client::expire_key_sequence`]).
 /// 2. A placement tab hover that has lasted
 ///    [`PLACEMENT_TAB_HOVER_DELAY_DURATION`](crate::PLACEMENT_TAB_HOVER_DELAY_DURATION)
 ///    selects the tab under the pointer as the placement destination.
@@ -5562,17 +5681,25 @@ fn expire_input_timers(
     ControlFlow::Continue(())
 }
 
-/// Answer one input event read from this terminal, other than its hangup,
-/// against `mouse_frame`, the frame this terminal last painted. Requests leave
-/// `uplink` in the order of the inputs that caused them.
+/// Answer the events of one read of this terminal, other than its hangup,
+/// oldest first, against `mouse_frame`, the frame this terminal last painted.
+/// Requests leave `uplink` in the order of the inputs that caused them.
 ///
-/// The event is judged at `terminal_input.read_at`, the instant the input
-/// thread read it. The loop records that it took the event
+/// The events are judged at `terminal_input.read_at`, the instant the input
+/// thread read them. The loop records that it took the read
 /// ([`InputReadClock::note_input_taken`]), and every input timer due at that
 /// instant runs first ([`expire_input_timers`]). Example: `<C-y>` binds
 /// `core:new-tab` and opens `<C-y> a`, the chord timeout is 500 ms, and a paste
 /// is read 600 ms after `<C-y>`: the `NewTab` command goes up, then the paste.
-/// Then:
+///
+/// The keys of the read that go to the pane go up as one
+/// [`IpcRequestKind::Keyboard`]. Any event that is not a key, and any key
+/// outcome that does not go to the pane, sends the keys collected before it
+/// first, so the keys after it go up as a second request. Example: `ab<C-t>cd`
+/// in one read, with `<C-t>` bound to `core:new-tab`, sends `Keyboard` for `a`
+/// and `b`, then `NewTab`, then `Keyboard` for `c` and `d`.
+///
+/// Each event, in turn:
 ///
 /// - A mouse event that pane placement takes
 ///   ([`Client::handle_placement_mouse`]) writes the held mouse actions as one
@@ -5583,7 +5710,8 @@ fn expire_input_timers(
 ///   its end. Before the first paint, `mouse_frame` is `None`, and a mouse
 ///   event changes nothing.
 /// - A loss of the outer terminal's focus ends what
-///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing.
+///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing of
+///   its own.
 /// - Every other event writes the held mouse actions as one round, then sends
 ///   its own requests
 ///   ([`process_runtime_input_with_cell_size`]).
@@ -5593,8 +5721,8 @@ fn expire_input_timers(
 /// `FocusPane` that `Tab` sends.
 ///
 /// Returns [`ControlFlow::Break`] when a key, or a sequence whose deadline
-/// passed before the event was read, fired the quit binding, and
-/// [`ControlFlow::Continue`] otherwise.
+/// passed before the events were read, fired the quit binding, handling none
+/// of the read's events after it, and [`ControlFlow::Continue`] otherwise.
 fn handle_terminal_input_event(
     client: &mut Client,
     uplink: &mut Uplink,
@@ -5605,7 +5733,7 @@ fn handle_terminal_input_event(
     pending_mouse_actions: &mut Vec<MouseAction>,
 ) -> ControlFlow<()> {
     let TerminalInput {
-        runtime_event,
+        runtime_events,
         read_at,
     } = terminal_input;
     client.get_input_read_clock().note_input_taken(read_at);
@@ -5621,42 +5749,65 @@ fn handle_terminal_input_event(
     {
         return ControlFlow::Break(());
     }
-    match runtime_event {
-        RuntimeEvent::MouseInput { mouse_input, .. } => {
-            let Some(mouse_frame) = mouse_frame else {
-                return ControlFlow::Continue(());
-            };
-            match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
-                Some(placement_input_action) => {
-                    flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
-                    uplink.submit_placement_input_action(client, placement_input_action);
+    let mut pane_key_inputs = Vec::new();
+    for runtime_event in runtime_events {
+        if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
+            send_pane_key_inputs(uplink, &mut pane_key_inputs);
+        }
+        match runtime_event {
+            RuntimeEvent::MouseInput { mouse_input, .. } => {
+                let Some(mouse_frame) = mouse_frame else {
+                    continue;
+                };
+                match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
+                    Some(placement_input_action) => {
+                        flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+                        uplink.submit_placement_input_action(client, placement_input_action);
+                    }
+                    None => handle_mouse_event(
+                        client,
+                        mouse_frame,
+                        mouse_input,
+                        read_at,
+                        pending_mouse_actions,
+                    ),
                 }
-                None => handle_mouse_event(
-                    client,
-                    mouse_frame,
-                    mouse_input,
-                    read_at,
-                    pending_mouse_actions,
-                ),
             }
-            ControlFlow::Continue(())
-        }
-        RuntimeEvent::OuterTerminalFocusLost { .. } => {
-            client.handle_outer_terminal_focus_lost();
-            ControlFlow::Continue(())
-        }
-        other_runtime_event => {
-            flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
-            process_runtime_input_with_cell_size(
-                client,
-                uplink,
-                cell_size_query,
-                mouse_frame,
-                other_runtime_event,
-                read_at,
-            )
+            RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                client.handle_outer_terminal_focus_lost();
+            }
+            other_runtime_event => {
+                flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+                if process_runtime_input_with_cell_size(
+                    client,
+                    uplink,
+                    cell_size_query,
+                    mouse_frame,
+                    other_runtime_event,
+                    read_at,
+                    &mut pane_key_inputs,
+                )
+                .is_break()
+                {
+                    return ControlFlow::Break(());
+                }
+            }
         }
     }
+    send_pane_key_inputs(uplink, &mut pane_key_inputs);
+    ControlFlow::Continue(())
+}
+
+/// Send `pane_key_inputs`, keys of one read that go to the pane, as one
+/// [`IpcRequestKind::Keyboard`] request, and leave it empty. Sends nothing
+/// when it has no key.
+fn send_pane_key_inputs(uplink: &mut Uplink, pane_key_inputs: &mut Vec<KeyInput>) {
+    if pane_key_inputs.is_empty() {
+        return;
+    }
+    uplink.send_request(IpcRequestKind::Keyboard {
+        key_inputs: take(pane_key_inputs),
+    });
 }
 
 /// Draw `render_snapshot`, a painted frame whose image records are complete,

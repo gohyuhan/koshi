@@ -57,14 +57,14 @@ fn the_json_form_is_one_object_per_row() {
         "[\n  \
            {\n    \
              \"check_name\": \"config\",\n    \
-             \"verdict\": \"Ok\",\n    \
+             \"verdict\": \"ok\",\n    \
              \"reason\": \"1 config file validated\",\n    \
              \"help\": null,\n    \
              \"detail\": null\n  \
            },\n  \
            {\n    \
              \"check_name\": \"terminal\",\n    \
-             \"verdict\": \"Warn\",\n    \
+             \"verdict\": \"warn\",\n    \
              \"reason\": \"TERM is not set\",\n    \
              \"help\": \"set TERM before running koshi\",\n    \
              \"detail\": null\n  \
@@ -116,7 +116,7 @@ fn the_json_form_carries_the_full_text() {
         "[\n  \
            {\n    \
              \"check_name\": \"router\",\n    \
-             \"verdict\": \"Fail\",\n    \
+             \"verdict\": \"fail\",\n    \
              \"reason\": \"a router is listening and did not answer\",\n    \
              \"help\": \"end every koshi process on this machine and start one again\",\n    \
              \"detail\": \"this router has no request kind named RemoteStatus, and the running router is an older koshi that does not report its build\"\n  \

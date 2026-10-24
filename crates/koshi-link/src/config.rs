@@ -17,12 +17,14 @@
 //! the built-in defaults in place. `koshi.kdl` and the theme file are
 //! field-partial: a single bad field is skipped and the rest of the file still
 //! applies. `keybinding.kdl` is all-or-nothing: any parse error drops the whole
-//! file to defaults. A conflict in a `keybinding.kdl` that *parses* is caught
-//! where the runtime applies it, not here.
+//! file to defaults. [`load_keybinding_file`] reads and parses that file alone
+//! and names why a file gives no layer. A conflict in a `keybinding.kdl` that
+//! *parses* is caught where the viewer applies it, not here.
 //!
-//! `load_config_files` writes no log line of its own. It runs before the
-//! tracing subscriber is installed, and returns each skip reason as a string
-//! the caller replays once tracing is up.
+//! [`load_app_config_file`] and [`load_config_files_on_app_config`] write no
+//! log line of their own. They run before the tracing subscriber is installed,
+//! and return each skip reason as a string the caller replays once tracing is
+//! up.
 
 use std::fs;
 use std::io;
@@ -30,8 +32,8 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex, PoisonError};
 
-use koshi_config::app_config::{parse_app_config, AppConfigFile};
-use koshi_config::keybinding::parse_keybindings;
+use koshi_config::app_config::parse_app_config;
+use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::layer::{
     merge_client, merge_server, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
@@ -60,33 +62,192 @@ pub struct LoadedConfig {
     pub keybindings_config_layer: Option<PartialKeybindingsConfig>,
 }
 
-/// Read and parse the config files from the config directory. Missing,
-/// unreadable, or unparseable files are skipped and leave the defaults in
-/// place.
-///
-/// Returns the parsed layers together with a warning per skip, in file order
-/// (`koshi.kdl`, then the theme it names, then `keybinding.kdl`). The caller
-/// replays the warnings through the log once the tracing subscriber is up.
-///
-/// A `config_directory` of `None` gives every layer `None` and the one
-/// warning `"no config directory found; using built-in defaults"`.
+/// `koshi.kdl` as one read of it left it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LoadedAppConfig {
+    /// What the read found.
+    pub app_config_outcome: AppConfigOutcome,
+    /// One warning per skip, in file order, such as ``<path>: line 2, column
+    /// 1: ignored unknown key `frobnicate`; did you mean `update`?``.
+    pub config_warnings: Vec<String>,
+}
+
+/// What one read of `koshi.kdl` found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum AppConfigOutcome {
+    /// No file was read: no config directory is known, or the file is absent.
+    #[default]
+    Absent,
+    /// The file exists and cannot be read, such as for a permission error or
+    /// for bytes that are not UTF-8.
+    Unreadable {
+        /// The read error, such as `Permission denied (os error 13)`.
+        read_error_text: String,
+    },
+    /// The text was read and does not parse.
+    Refused {
+        /// The text read.
+        app_config_source_text: String,
+    },
+    /// The text parsed.
+    Parsed {
+        /// The settings the file overrides, to fold onto the built-in
+        /// defaults.
+        app_config_layer: Box<PartialKoshiConfig>,
+        /// The name from the `theme "<name>"` line. `None` when the file names
+        /// no theme.
+        theme_name: Option<String>,
+        /// The text read.
+        app_config_source_text: String,
+    },
+}
+
+impl LoadedAppConfig {
+    /// The layer of a `koshi.kdl` that parsed. `None` for one that was not
+    /// read or does not parse.
+    #[must_use]
+    pub fn find_app_config_layer(&self) -> Option<&PartialKoshiConfig> {
+        match &self.app_config_outcome {
+            AppConfigOutcome::Parsed {
+                app_config_layer, ..
+            } => Some(app_config_layer.as_ref()),
+            AppConfigOutcome::Absent
+            | AppConfigOutcome::Unreadable { .. }
+            | AppConfigOutcome::Refused { .. } => None,
+        }
+    }
+
+    /// [`find_app_config_layer`](Self::find_app_config_layer), taking the
+    /// layer out.
+    #[must_use]
+    pub fn into_app_config_layer(self) -> Option<PartialKoshiConfig> {
+        match self.app_config_outcome {
+            AppConfigOutcome::Parsed {
+                app_config_layer, ..
+            } => Some(*app_config_layer),
+            AppConfigOutcome::Absent
+            | AppConfigOutcome::Unreadable { .. }
+            | AppConfigOutcome::Refused { .. } => None,
+        }
+    }
+}
+
+/// Read and parse `koshi.kdl` in `config_directory`. A file that is absent
+/// gives [`AppConfigOutcome::Absent`] and no warning. A file that cannot be
+/// read gives [`AppConfigOutcome::Unreadable`] and the warning
+/// `could not read config file <path>: <read error>`. Text that is read is
+/// parsed as [`parse_app_config_text`] states. A `config_directory` of `None`
+/// reads nothing and gives [`AppConfigOutcome::Absent`] and the one warning
+/// `"no config directory found; using built-in defaults"`.
 #[must_use]
-pub fn load_config_files(config_directory: Option<&Path>) -> (LoadedConfig, Vec<String>) {
-    let mut config_warnings = Vec::new();
-    let Some(config_directory) = config_directory else {
-        config_warnings.push("no config directory found; using built-in defaults".to_string());
-        return (LoadedConfig::default(), config_warnings);
+pub fn load_app_config_file(config_directory: Option<&Path>) -> LoadedAppConfig {
+    match config_directory {
+        Some(config_directory) => load_app_config_at(&config_directory.join("koshi.kdl")),
+        None => LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Absent,
+            config_warnings: vec!["no config directory found; using built-in defaults".to_string()],
+        },
+    }
+}
+
+/// Read and parse the `koshi.kdl` at `app_config_path`, as
+/// [`load_app_config_file`] states for a file it finds.
+fn load_app_config_at(app_config_path: &Path) -> LoadedAppConfig {
+    match read_config_file(app_config_path) {
+        Ok(Some(app_config_source_text)) => {
+            parse_app_config_text(app_config_path, app_config_source_text)
+        }
+        Ok(None) => LoadedAppConfig::default(),
+        Err(read_error) => LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Unreadable {
+                read_error_text: read_error.to_string(),
+            },
+            config_warnings: vec![format_config_read_warning(app_config_path, &read_error)],
+        },
+    }
+}
+
+/// Parse `app_config_source_text`, the text of the `koshi.kdl` at
+/// `app_config_path`.
+///
+/// Text that parses gives [`AppConfigOutcome::Parsed`] and one warning per
+/// field-partial skip, prefixed with `app_config_path`. Text that does not
+/// parse (bad syntax, unknown version, bad `update`) gives
+/// [`AppConfigOutcome::Refused`] and the one warning
+/// `koshi.kdl not applied (<path>): <parse error>; using defaults`. Both
+/// outcomes keep `app_config_source_text`.
+#[must_use]
+pub fn parse_app_config_text(
+    app_config_path: &Path,
+    app_config_source_text: String,
+) -> LoadedAppConfig {
+    match parse_app_config(app_config_path, &app_config_source_text) {
+        Ok(app_config_file) => {
+            let mut config_warnings = Vec::new();
+            append_config_field_warnings(
+                app_config_path,
+                &app_config_file.parse_warnings,
+                &mut config_warnings,
+            );
+            LoadedAppConfig {
+                app_config_outcome: AppConfigOutcome::Parsed {
+                    app_config_layer: Box::new(app_config_file.layer),
+                    theme_name: app_config_file.theme_name,
+                    app_config_source_text,
+                },
+                config_warnings,
+            }
+        }
+        Err(parse_error) => LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text,
+            },
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                app_config_path.display()
+            )],
+        },
+    }
+}
+
+/// The config layers in `config_directory`, built on `loaded_app_config`, the
+/// `koshi.kdl` already read from it. Reads the theme `loaded_app_config` names
+/// and `keybinding.kdl`. Missing, unreadable, or unparseable files are skipped
+/// and leave the defaults in place.
+///
+/// Returns the layers together with a warning per skip, in file order:
+/// `loaded_app_config`'s, then the theme's, then `keybinding.kdl`'s. The
+/// caller replays the warnings through the log once the tracing subscriber is
+/// up. A `config_directory` of `None` reads no file.
+#[must_use]
+pub fn load_config_files_on_app_config(
+    config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
+) -> (LoadedConfig, Vec<String>) {
+    let LoadedAppConfig {
+        app_config_outcome,
+        mut config_warnings,
+    } = loaded_app_config;
+    let (app_config_layer, theme_name) = match app_config_outcome {
+        AppConfigOutcome::Parsed {
+            app_config_layer,
+            theme_name,
+            ..
+        } => (Some(*app_config_layer), theme_name),
+        AppConfigOutcome::Absent
+        | AppConfigOutcome::Unreadable { .. }
+        | AppConfigOutcome::Refused { .. } => (None, None),
     };
-    // `koshi.kdl` is read first. The theme name it carries picks which theme
-    // file — if any — is read next.
-    let (app_config_layer, selected_theme_name) =
-        match load_app_config(&config_directory.join("koshi.kdl"), &mut config_warnings) {
-            Some(app_config_file) => (Some(app_config_file.layer), app_config_file.theme_name),
-            None => (None, None),
+    let Some(config_directory) = config_directory else {
+        let loaded_config = LoadedConfig {
+            app_config_layer,
+            ..LoadedConfig::default()
         };
+        return (loaded_config, config_warnings);
+    };
     let loaded_config = LoadedConfig {
         app_config_layer,
-        theme_config_layer: selected_theme_name.and_then(|theme_name| {
+        theme_config_layer: theme_name.and_then(|theme_name| {
             load_theme_config(config_directory, &theme_name, &mut config_warnings)
         }),
         keybindings_config_layer: load_keybindings_config(
@@ -108,9 +269,7 @@ pub fn load_config_files(config_directory: Option<&Path>) -> (LoadedConfig, Vec<
 #[must_use]
 pub fn load_app_layer(config_directory: Option<&Path>) -> Option<PartialKoshiConfig> {
     let config_directory = config_directory?;
-    let mut config_warnings = Vec::new();
-    load_app_config(&config_directory.join("koshi.kdl"), &mut config_warnings)
-        .map(|app_config_file| app_config_file.layer)
+    load_app_config_at(&config_directory.join("koshi.kdl")).into_app_config_layer()
 }
 
 /// The tracing subscriber's settings for `session_id`: `app_config_layer`'s
@@ -155,10 +314,7 @@ pub fn resolve_other_users_policy(
     is_other_user_access_forced: bool,
     config_directory: Option<&Path>,
 ) -> Option<OtherUsers> {
-    let server_config = merge_server(
-        ServerConfig::default(),
-        app_config_layer.cloned().into_iter().collect(),
-    );
+    let server_config = resolve_server_config(app_config_layer);
     if !is_other_user_access_forced && !server_config.should_allow_other_users {
         return None;
     }
@@ -196,15 +352,21 @@ pub fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> PathBu
         .unwrap_or_else(koshi_paths::resolve_shared_sessions_directory)
 }
 
-/// The `server` settings `koshi.kdl` in `config_directory` carries right now.
-/// Reads and parses the file again on each call: the answer is the one the
-/// file holds at this moment. A `config_directory` of `None` gives the
-/// built-in defaults.
+/// The `server` settings the `koshi.kdl` at `app_config_path` carries right
+/// now, folded onto the built-in defaults. Reads and parses the file on each
+/// call. A file that is absent, unreadable, or unparseable gives the built-in
+/// defaults. Warnings are dropped.
+///
+/// Example: a file holding `remote-listen "127.0.0.1:7654"` gives a config
+/// whose `remote_listen_address` is `127.0.0.1:7654`.
 #[must_use]
-pub fn load_current_server_config(config_directory: Option<&Path>) -> ServerConfig {
+pub fn load_server_config_file(app_config_path: &Path) -> ServerConfig {
     merge_server(
         ServerConfig::default(),
-        load_app_layer(config_directory).into_iter().collect(),
+        load_app_config_at(app_config_path)
+            .into_app_config_layer()
+            .into_iter()
+            .collect(),
     )
 }
 
@@ -227,7 +389,7 @@ fn is_other_user_access_allowed(
     config_path: &Path,
     last_access_answer: &Mutex<Option<OtherUserAccessAnswer>>,
 ) -> bool {
-    let config_source_text = load_config_file(config_path, &mut Vec::new());
+    let config_source_text = read_config_file(config_path).unwrap_or(None);
     let mut last_access_answer = last_access_answer
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -255,6 +417,29 @@ fn is_other_user_access_allowed(
     is_allowed
 }
 
+/// The server settings `app_config_layer` gives, folded onto the built-in
+/// defaults. `None` gives [`ServerConfig::default`]. Example: a layer that sets
+/// `remote-listen "127.0.0.1:7654"` gives `remote_listen_address`
+/// `127.0.0.1:7654`, with every other field at its default.
+#[must_use]
+pub fn resolve_server_config(app_config_layer: Option<&PartialKoshiConfig>) -> ServerConfig {
+    merge_server(
+        ServerConfig::default(),
+        app_config_layer.cloned().into_iter().collect(),
+    )
+}
+
+/// The machine-wide directory holding the sessions other local users started,
+/// as [`compute_shared_sessions_base_directory`] gives it for the `koshi.kdl`
+/// layer `app_config_layer` folded onto the built-in defaults. A layer of
+/// `None` gives `None`.
+#[must_use]
+pub fn resolve_shared_sessions_base_directory_for_layer(
+    app_config_layer: Option<&PartialKoshiConfig>,
+) -> Option<PathBuf> {
+    compute_shared_sessions_base_directory(&resolve_server_config(app_config_layer))
+}
+
 /// The machine-wide directory holding the sessions other local users started,
 /// as [`compute_shared_sessions_base_directory`] gives it for `koshi.kdl` in
 /// `config_directory`. A `config_directory` of `None` gives `None`.
@@ -263,7 +448,10 @@ fn is_other_user_access_allowed(
 /// holds at this moment.
 #[must_use]
 pub fn find_shared_sessions_base_directory(config_directory: Option<&Path>) -> Option<PathBuf> {
-    compute_shared_sessions_base_directory(&load_current_server_config(config_directory))
+    let config_directory = config_directory?;
+    compute_shared_sessions_base_directory(&load_server_config_file(
+        &config_directory.join("koshi.kdl"),
+    ))
 }
 
 /// The machine-wide directory holding the sessions other local users started,
@@ -325,45 +513,26 @@ pub fn resolve_client_config(app_config_layer: Option<PartialKoshiConfig>) -> Cl
     )
 }
 
-/// The file's text, or `None` when it is absent or unreadable. A read failure
-/// other than an absent file, such as a permission error, is recorded in
-/// `config_warnings`.
-fn load_config_file(config_path: &Path, config_warnings: &mut Vec<String>) -> Option<String> {
+/// The file's text, or `Ok(None)` when the file is absent.
+///
+/// # Errors
+/// The read error of a file that exists and cannot be read, such as for a
+/// permission error or for bytes that are not UTF-8.
+fn read_config_file(config_path: &Path) -> io::Result<Option<String>> {
     match fs::read_to_string(config_path) {
-        Ok(config_source_text) => Some(config_source_text),
-        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => None,
-        Err(read_error) => {
-            config_warnings.push(format!(
-                "could not read config file {}: {read_error}",
-                config_path.display()
-            ));
-            None
-        }
+        Ok(config_source_text) => Ok(Some(config_source_text)),
+        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(read_error) => Err(read_error),
     }
 }
 
-/// Parses `koshi.kdl` into its override layer and the theme it names,
-/// recording every field-partial skip and dropping the file to defaults on a
-/// hard error (bad syntax, unknown version, bad `update`).
-fn load_app_config(config_path: &Path, config_warnings: &mut Vec<String>) -> Option<AppConfigFile> {
-    let config_source_text = load_config_file(config_path, config_warnings)?;
-    match parse_app_config(config_path, &config_source_text) {
-        Ok(app_config_file) => {
-            append_config_field_warnings(
-                config_path,
-                &app_config_file.parse_warnings,
-                config_warnings,
-            );
-            Some(app_config_file)
-        }
-        Err(parse_error) => {
-            config_warnings.push(format!(
-                "koshi.kdl not applied ({}): {parse_error}; using defaults",
-                config_path.display()
-            ));
-            None
-        }
-    }
+/// The warning for a config file that exists and cannot be read:
+/// `could not read config file <path>: <read error>`.
+fn format_config_read_warning(config_path: &Path, read_error: &io::Error) -> String {
+    format!(
+        "could not read config file {}: {read_error}",
+        config_path.display()
+    )
 }
 
 /// Parses the theme `theme_name` selects — `themes/<theme_name>.kdl` under
@@ -447,19 +616,56 @@ fn resolve_default_theme_fallback(
     None
 }
 
-/// Parses `keybinding.kdl` all-or-nothing: any parse error drops the whole
-/// file.
+/// Why a `keybinding.kdl` that exists gives no keybinding layer.
+#[derive(Debug)]
+pub enum KeybindingFileError {
+    /// The file exists and cannot be read, such as for a permission error or
+    /// for bytes that are not UTF-8.
+    Unreadable(io::Error),
+    /// The file does not parse. Any parse error refuses the whole file.
+    Unparseable(KeybindingParseError),
+}
+
+/// Read and parse the `keybinding.kdl` at `keybinding_file_path`
+/// all-or-nothing. Returns `Ok(None)` when the file is absent.
+///
+/// # Errors
+/// [`KeybindingFileError::Unreadable`] when the file exists and cannot be
+/// read; [`KeybindingFileError::Unparseable`] when it does not parse.
+pub fn load_keybinding_file(
+    keybinding_file_path: &Path,
+) -> Result<Option<PartialKeybindingsConfig>, KeybindingFileError> {
+    let keybinding_source_text = match read_config_file(keybinding_file_path) {
+        Ok(Some(keybinding_source_text)) => keybinding_source_text,
+        Ok(None) => return Ok(None),
+        Err(read_error) => return Err(KeybindingFileError::Unreadable(read_error)),
+    };
+    parse_keybindings(keybinding_file_path, &keybinding_source_text)
+        .map(Some)
+        .map_err(KeybindingFileError::Unparseable)
+}
+
+/// The [`load_keybinding_file`] layer, or `None` when the file is absent or
+/// gives no layer. A file that gives no layer records one warning in
+/// `config_warnings`. The warning for a file that does not parse names every
+/// problem with its line and column, joined by `; `, such as
+/// ``keybinding.kdl not applied (<path>): line 2, column 1: unknown key
+/// `unlock_alternative`; did you mean `unlock-alternative`?; using defaults``.
 fn load_keybindings_config(
     config_path: &Path,
     config_warnings: &mut Vec<String>,
 ) -> Option<PartialKeybindingsConfig> {
-    let config_source_text = load_config_file(config_path, config_warnings)?;
-    match parse_keybindings(config_path, &config_source_text) {
-        Ok(keybindings_config_layer) => Some(keybindings_config_layer),
-        Err(parse_error) => {
+    match load_keybinding_file(config_path) {
+        Ok(keybindings_config_layer) => keybindings_config_layer,
+        Err(KeybindingFileError::Unreadable(read_error)) => {
+            config_warnings.push(format_config_read_warning(config_path, &read_error));
+            None
+        }
+        Err(KeybindingFileError::Unparseable(parse_error)) => {
             config_warnings.push(format!(
-                "keybinding.kdl not applied ({}): {parse_error}; using defaults",
-                config_path.display()
+                "keybinding.kdl not applied ({}): {}; using defaults",
+                config_path.display(),
+                parse_error.list_problem_messages().join("; ")
             ));
             None
         }
@@ -467,7 +673,8 @@ fn load_keybindings_config(
 }
 
 /// Appends each field-partial skip from a parsed file to `config_warnings`,
-/// prefixed with the file it came from.
+/// prefixed with the file it came from, such as ``<path>: line 2, column 1:
+/// ignored unknown key `frobnicate`; did you mean `update`?``.
 fn append_config_field_warnings(
     config_path: &Path,
     field_warnings: &[String],
@@ -481,7 +688,8 @@ fn append_config_field_warnings(
 /// Read and parse `profile/<profile_name>.kdl` from `config_directory`. A
 /// `config_directory` of `None` returns `None`. A missing, unreadable, or
 /// invalid profile is logged and returns `None`; the caller then starts a
-/// single shell. Profiles are all-or-nothing: any schema violation drops the
+/// single shell. The log line of an invalid profile names every problem with
+/// its line and column, joined by `; `. Profiles are all-or-nothing: any schema violation drops the
 /// whole file, and no pane of a broken profile starts.
 #[must_use]
 pub fn load_profile_template(
@@ -515,7 +723,8 @@ pub fn load_profile_template(
     match parse_profile(&profile_path, &config_source_text) {
         Ok(profile_template) => Some(profile_template),
         Err(profile_error) => {
-            tracing::warn!(path = %profile_path.display(), %profile_error, "profile `{profile_name}` not applied; starting a single shell");
+            let profile_problems = profile_error.list_problem_messages().join("; ");
+            tracing::warn!(path = %profile_path.display(), %profile_problems, "profile `{profile_name}` not applied; starting a single shell");
             None
         }
     }

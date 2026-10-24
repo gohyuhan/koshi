@@ -2,8 +2,8 @@
 //! per-mode lookup tables a keypress consults.
 //!
 //! Bindings arrive in the same layers conflict detection reads — the
-//! built-in defaults, then the user's own surfaces (user file, session,
-//! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
+//! built-in defaults, then the user's `keybinding.kdl`, lowest precedence
+//! first. [`merge_keymaps`] folds them per key:
 //! a higher-precedence layer's entry on a key replaces a lower layer's on the
 //! same key, and every other key is untouched. The result splits each mode
 //! into two maps, and a keypress checks the user map before the default map:
@@ -21,10 +21,8 @@
 //!
 //! Merge runs only on a keymap detection has already approved: every
 //! layer on [`KeymapVerdict::Apply`](crate::conflict::KeymapVerdict::Apply),
-//! or the defaults alone after
-//! [`RevertToDefaults`](crate::conflict::KeymapVerdict::RevertToDefaults).
-//! Merge checks neither the unlock guarantee nor cross-layer collisions;
-//! detection does both. Merging is pure and re-runs on every config load or
+//! or the defaults alone. Merge does not check the unlock guarantee;
+//! detection does. Merging is pure and re-runs on every config load or
 //! reload.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,8 +60,35 @@ pub struct MergedModeKeymap {
     pub removed_key_sequences: BTreeSet<KeySequence>,
     /// Built-in bindings the user displaced: their key is taken by a
     /// `user_bindings_by_key_sequence` entry or cleared by a remove. `koshi
-    /// keys list` shows each one with its default action, marked unbound.
-    pub unbound_default_bindings_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
+    /// keys list` shows each one with its default action, marked unbound, and
+    /// `koshi keys describe` also names the `bind` or `remove` that displaced
+    /// it.
+    pub unbound_default_bindings_by_key_sequence: BTreeMap<KeySequence, UnboundDefaultBinding>,
+}
+
+/// One built-in binding the user displaced, and the entry that displaced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundDefaultBinding {
+    /// The action the built-in binding triggers.
+    pub bound_action: BoundAction,
+    /// The `bind` or `remove` that displaced the built-in binding.
+    pub default_displacement: DefaultDisplacement,
+}
+
+/// The user-authored entry that displaced a built-in binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultDisplacement {
+    /// A `bind` in the layer `layer_origin` took the key.
+    Rebound {
+        /// The layer whose `bind` won the key.
+        layer_origin: LayerOrigin,
+    },
+    /// A `remove` in the layer `layer_origin` cleared the key. A key that a
+    /// `remove` clears is `Removed`, also when a `bind` takes it.
+    Removed {
+        /// The highest layer that removes the key.
+        layer_origin: LayerOrigin,
+    },
 }
 
 /// The merged keymap: one [`MergedModeKeymap`] per registered mode any layer
@@ -86,8 +111,11 @@ pub struct MergedKeymap {
 ///
 /// Per key, the highest firing entry wins. A firing user-authored entry on a
 /// defaulted key takes it, and the displaced default moves to
-/// [`unbound_default_bindings_by_key_sequence`](MergedModeKeymap::unbound_default_bindings_by_key_sequence);
-/// a remove above the defaults layer does the same. A dead binding enters no
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeKeymap::unbound_default_bindings_by_key_sequence)
+/// as [`DefaultDisplacement::Rebound`] by that entry's layer. A remove above
+/// the defaults layer moves the default there too, as
+/// [`DefaultDisplacement::Removed`] by the highest removing layer, also when a
+/// user entry takes the key. A dead binding enters no
 /// map. A binding is dead when the registry refuses it, when it is a
 /// locked-mode sequence that holds the reserved unlock chord, or when it is
 /// longer than `maximum_chord_depth`. A dead user entry leaves the default
@@ -138,9 +166,19 @@ pub fn merge_keymaps(
                     // `unbound_default_bindings_by_key_sequence`; a removed
                     // user entry enters no map at all.
                     if !layer.origin.is_user_authored() {
+                        let removal_layer_index =
+                            removal_layer_index_by_mode_and_key[&(mode_name, key_sequence)];
                         merged_mode_keymap
                             .unbound_default_bindings_by_key_sequence
-                            .insert(key_sequence.clone(), bound_action.clone());
+                            .insert(
+                                key_sequence.clone(),
+                                UnboundDefaultBinding {
+                                    bound_action: bound_action.clone(),
+                                    default_displacement: DefaultDisplacement::Removed {
+                                        layer_origin: layers[removal_layer_index].origin,
+                                    },
+                                },
+                            );
                     }
                     continue;
                 }
@@ -162,14 +200,22 @@ pub fn merge_keymaps(
     }
 
     for merged_mode_keymap in merged_mode_keymap_by_name.values_mut() {
-        for key_sequence in merged_mode_keymap.user_bindings_by_key_sequence.keys() {
+        for (key_sequence, merged_binding) in &merged_mode_keymap.user_bindings_by_key_sequence {
             if let Some(bound_action) = merged_mode_keymap
                 .default_bindings_by_key_sequence
                 .remove(key_sequence)
             {
                 merged_mode_keymap
                     .unbound_default_bindings_by_key_sequence
-                    .insert(key_sequence.clone(), bound_action);
+                    .insert(
+                        key_sequence.clone(),
+                        UnboundDefaultBinding {
+                            bound_action,
+                            default_displacement: DefaultDisplacement::Rebound {
+                                layer_origin: merged_binding.layer_origin,
+                            },
+                        },
+                    );
             }
         }
     }

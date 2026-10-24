@@ -249,6 +249,25 @@ pub const DEFAULT_FLOATING_PANE_SIZE: FloatingPaneSize = FloatingPaneSize {
     height: FloatingPaneDimension::Percent(AxisPercent(60)),
 };
 
+/// Where one client draws one floating pane: the default placement, or a
+/// stored top-left cell counted from that client's pane-area origin.
+///
+/// Encodes as `"Default"`, `{"Moved":{"column":20,"row":5}}` or
+/// `{"Pinned":{"column":20,"row":5}}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FloatingPanePosition {
+    /// The client stored no cell: the pane draws centered in the client's
+    /// floating viewport, moved by its cascade step.
+    #[default]
+    Default,
+    /// The pane's top-left cell, stored by a move, a resize, or the
+    /// `top_left_cell` of the command that created the pane.
+    Moved(Point),
+    /// The pane's top-left cell, locked: a move and a resize of the pane's
+    /// left or top edge are refused.
+    Pinned(Point),
+}
+
 /// A rectangular region of cells, anchored at `origin` with the given cell size.
 ///
 /// ```text

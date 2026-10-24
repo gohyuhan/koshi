@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use koshi_link::config::LoadedAppConfig;
 use koshi_link::error::CliError;
 use koshi_observability::logging::initialize_tracing;
 
@@ -10,27 +11,35 @@ use koshi_observability::logging::initialize_tracing;
 /// server in this terminal's directory, and attach this terminal to it.
 ///
 /// `profile` is handed to the router. A profile that will not launch falls
-/// back to one shell inside the session server.
-pub fn run_default_client(profile: Option<&str>) -> Result<(), CliError> {
+/// back to one shell inside the session server. `loaded_app_config` is the
+/// `koshi.kdl` the caller read at this process's start: its `logging` section
+/// sets whether a log file is opened at all, and at what level and format, and
+/// the first attachment runs on it.
+pub fn run_default_client(
+    profile: Option<&str>,
+    loaded_app_config: LoadedAppConfig,
+) -> Result<(), CliError> {
     let runtime_directory = koshi_link::ipc_client::resolve_runtime_directory()?;
     let config_directory = koshi_paths::resolve_config_directory();
-    // `koshi.kdl`'s `logging` section sets whether a log file is opened at
-    // all, and at what level and format.
-    let app_config_layer = koshi_link::config::load_app_layer(config_directory.as_deref());
     // A `None` forced switch leaves who may reach the new session to that
     // session's own `koshi.kdl`; the interactive launch has no
     // `--allow-other-users` flag.
     let session_id =
         koshi_link::router_client::request_new_session(&runtime_directory, profile, None)?;
     let _ = initialize_tracing(koshi_link::config::build_logging_parameters(
-        app_config_layer.as_ref(),
+        loaded_app_config.find_app_config_layer(),
         session_id,
     ));
     // Runs after the subscriber is installed, so its lines reach the log.
-    // Creating the directory adds no `koshi.kdl`, so the layer read above sees
-    // the same files either way.
+    // Creating the directory adds no `koshi.kdl`, so `loaded_app_config`
+    // holds the same file either way.
     ensure_config_directory(config_directory.as_deref());
-    crate::attach::attach_session(&runtime_directory, config_directory.as_deref(), session_id)
+    crate::attach::attach_session(
+        &runtime_directory,
+        config_directory.as_deref(),
+        session_id,
+        loaded_app_config,
+    )
 }
 
 /// Create `config_directory`, the fixed per-platform path

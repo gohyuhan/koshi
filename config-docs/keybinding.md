@@ -9,7 +9,8 @@ same key. Unchanged keys keep built-in actions.
 `%APPDATA%\koshi\config\keybinding.kdl` on Windows. See
 [README](README.md#where-the-files-go).
 
-**Any error drops the whole file.** `koshi keys conflicts` reports problems.
+**Any error drops the whole file.** `koshi keys conflicts` reports problems,
+and exits 2 when koshi drops the file.
 `koshi keys list` prints the active keymap.
 
 ## Top-level settings
@@ -19,8 +20,8 @@ once beside the `mode` blocks.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `chord-timeout-ms` | integer — ms to wait for the next key in a multi-key shortcut before giving up | `500` | ≥ 0.1.0 |
-| `which-key-delay-ms` | integer — ms before the hint bar shows the keys that continue a shortcut | `300` | ≥ 0.1.0 |
+| `chord-timeout-ms` | integer — ms a shortcut waits for its next key when it is a complete binding and also the start of a longer one. When the time passes, the complete binding fires. A shortcut that only starts longer ones has no time limit (see [Key sequences](#key-sequences)) | `500` | ≥ 0.1.0 |
+| `which-key-delay-ms` | integer — ms from a shortcut's first key until the hint bar shows the keys that continue it. A shortcut that ends sooner leaves the hint bar as it was. `0` shows them with the first key | `300` | ≥ 0.1.0 |
 | `max-chord-depth` | integer 0–255 — most keys a single shortcut may chain. A shortcut longer than this can never fire, and `koshi keys conflicts` reports it | `4` | ≥ 0.1.0 |
 | `leader` | string — the key `<leader>` stands for in bindings; a modifier run like `"C-"` or a single chord like `"<Space>"` | `"C-"` (the Ctrl modifier run) | ≥ 0.1.0 |
 | `unlock-alternative` | string — the chord that leaves locked mode, in place of `<C-l>`. Setting it frees `<C-l>` to rebind, and the whole file is rejected unless the `locked` block also binds this chord to `core:unlock`. A chord plain typing produces is rejected | (none) | ≥ 0.1.0 |
@@ -36,12 +37,26 @@ Keys use angle brackets. Spaces join keys into a sequence.
   `"<Space>"` makes `<Space>` then `p`. Explicit keys such as `<A-f>` do not
   move when the leader changes.
 
+### Key sequences
+
+A key that starts a longer shortcut opens a sequence. While the sequence is
+open, no key reaches the program. A sequence that is not also a complete
+binding waits for its next key with no time limit. A key that continues
+nothing is discarded, and the sequence stays open. The sequence ends when a key
+completes a binding, when you press `<Esc>`, or, in locked mode, when you press
+the unlock chord. For example, in normal mode `<C-p>` then `z` discards `z` and
+leaves `<C-p>` open, and a following `n` opens a new pane.
+
 ## `mode` blocks
 
 A `mode` block holds the bindings for one built-in keymap — `"normal"`,
 `"locked"`, `"pane-placement"`, `"pane-move-choice"`, `"floating-pane-move"`,
 or `"dock-undock"`. Normal and locked are base modes. The other four are local
 modes. Each one takes priority over the base mode while it is open.
+
+A block for any other mode name, such as `mode "resize"`, binds nothing. The
+rest of the file still applies, and `koshi keys conflicts` warns that the mode
+is unregistered.
 
 - `bind "<key>" "core:action"` — exactly two strings: the key sequence and the
   **full** action reference (namespaced, e.g. `core:new-tab`; a bare `new-tab`
@@ -105,7 +120,6 @@ mode "locked" {
     // locked mode passes every other key straight to the program.
     bind "<C-l>" "core:unlock"
     bind "<leader>q" "core:quit"
-    bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>g" "core:mouse-select"
 }
 
@@ -174,8 +188,11 @@ move chooser (see [below](#the-pane-move-chooser)). Pane placement mode moves
 tiled and stacked panes only: its pane is the focused pane of the active tab,
 also while a floating pane is focused. While it is open, this client draws no
 floating pane, and a click never reaches one. The mode keeps the
-current base mode: entering from locked mode keeps the client locked after
-cancellation. While it is active, the `pane-placement` keymap has priority over
+current base mode: a client that enters it from locked mode is still locked
+when the mode ends. The default `locked` keymap binds no key that opens it. A
+locked client opens it by dragging a pane's grab handle, or with a key bound in
+the `locked` block, such as `bind "<leader>p m" "core:begin-pane-placement"`.
+While it is active, the `pane-placement` keymap has priority over
 the normal or locked keymap. An unbound key and every key release are consumed
 by placement.
 
@@ -213,7 +230,11 @@ The default `pane-placement` bindings are:
   starts. On a tab you only preview, focus stays where it is and a collapsed
   member stays collapsed. A release over a target with no room sends nothing,
   and the target stays selected. A drag that began on a grab handle outside
-  pane placement mode ends there, and nothing moves.
+  pane placement mode ends there, and nothing moves. A valid release of that
+  drag ends pane placement mode: the tabline shows the mode the client was in
+  before the drag, such as `BASE` or `LOCK`, whether the session accepts or
+  rejects the placement, and whatever
+  `stay-in-pane-placement-mode-after-placement` says.
 - Enter submits the selected placement. Pane placement mode stays active after
   the session accepts it, unless `koshi.kdl` sets
   `stay-in-pane-placement-mode-after-placement #false`.
@@ -377,6 +398,28 @@ pane, a tab or a cell. They run only from the command line: `koshi
 dock-pane`, `koshi move-pane --x --y`, and `koshi restore-pane --pane`. A key
 bound to one of them loads with an unresolvable-arguments warning and sends
 nothing when pressed.
+
+`<leader>p <Tab>` (`core:focus-next-floating-pane`) and `<leader>p <S-Tab>`
+(`core:focus-previous-floating-pane`) step through every floating pane of the
+session, in the order the panes became floating, and wrap at the ends:
+
+- Each step shows the pane it lands on above this client's other floating
+  panes and gives it this client's input. A minimized pane is shown again.
+- The panes a step passes stay shown.
+- From a tiled or stacked pane, `<Tab>` lands on the first floating pane and
+  `<S-Tab>` on the last.
+- The prefix stays open, so each further `<Tab>` or `<S-Tab>` takes one more
+  step.
+
+Example: `htop` and then `logs` became floating, this client minimized both,
+and its input is on the tiled pane `A`. `<C-p> <Tab>` shows and focuses
+`htop`. `<Tab>` again shows `logs` on top, and `htop` stays shown.
+
+With no floating pane in the session, both are refused with `the session holds
+no floating pane`. A client that cannot draw floating panes refuses both with
+`no floating pane can be drawn on this client`: its pane area is smaller than
+`5x6`, or its tab shows `Terminal too small — enlarge window` in place of every
+pane.
 
 ## The pane move chooser
 

@@ -73,8 +73,9 @@ pub struct ServerConfig {
     /// Nothing reads it on Windows.
     pub should_allow_other_users: bool,
     /// The IP address and port the remote listener binds, such as
-    /// `0.0.0.0:7654`. Setting it opens nothing; `koshi share grant` switches
-    /// remote access on.
+    /// `0.0.0.0:7654`. Setting it opens nothing; `koshi share open`, or a yes
+    /// to the offer `koshi share grant` makes, switches remote access on. The
+    /// router reads it when it starts.
     pub remote_listen_address: Option<SocketAddr>,
     /// The directory the session sockets other users reach live in. `None`
     /// takes `/tmp/koshi`. Nothing reads it on Windows.
@@ -165,12 +166,13 @@ pub struct ClientConfig {
     /// viewer's accepted placement at its committed rectangles, and a pane
     /// this viewer undocks at its floating rectangle, at once.
     pub should_reduce_motion: bool,
-    /// Whether pane placement mode stays on after the session accepts a
-    /// placement confirmed with Enter or a mouse drop. `true` keeps the mode on,
-    /// until Esc, for the next placement. `false` ends the mode once the
-    /// accepted layout arrives. A placement the session rejects leaves the mode
-    /// as it was: a mode that lasts until Esc stays on, and a mode that lasts
-    /// until its pane-handle drag ends is closed.
+    /// Whether pane placement mode opened by a key, such as `<C-p> m`, stays
+    /// on after the session accepts a placement confirmed with Enter or a
+    /// mouse drop. `true` keeps the mode on, until Esc, for the next
+    /// placement. `false` ends the mode once the accepted layout arrives. A
+    /// placement the session rejects leaves that mode on. Pane placement mode
+    /// opened by a pane-handle drag ends once the session accepts or rejects
+    /// its drop, whatever this says.
     ///
     /// It also governs floating pane move mode: `true` keeps the mode on after
     /// the session runs a floating pane move sent with Enter or a mouse
@@ -322,9 +324,12 @@ impl Default for ScrollbackView {
 /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingsConfig {
-    /// Milliseconds to wait for the next chord in a multi-key sequence.
+    /// Milliseconds a sequence that is a complete binding and also a longer
+    /// binding's prefix waits for its next chord before the complete binding
+    /// fires.
     pub chord_timeout_ms: u32,
-    /// Milliseconds before the which-key continuation hint appears.
+    /// Milliseconds from a sequence's first chord until the hint bar shows the
+    /// chords that continue it. `0` shows them with the first chord.
     pub which_key_delay_ms: u32,
     /// Maximum number of chords in one key sequence.
     pub maximum_chord_depth: u8,
@@ -372,8 +377,8 @@ impl Default for KeybindingsConfig {
     }
 }
 
-/// The name of an input mode (`normal`, `locked`, `resize`, …), stored as a
-/// plain string. A keybinding file may name a mode outside the built-in set;
+/// The name of an input mode (`normal`, `locked`, `pane-placement`, …), stored
+/// as a plain string. A keybinding file may name a mode outside the built-in set;
 /// conflict detection warns that mode as unregistered.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModeName(String);
@@ -601,16 +606,11 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
 
     // Locked mode intercepts exactly its bound chords and passes every other
     // key to the pane: the reserved unlock (the same chord that locks in
-    // normal mode), the pane placement opener, the quit chord, and the mouse-select
-    // chord.
+    // normal mode), the quit chord, and the mouse-select chord.
     let locked_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
         (
             build_reserved_unlock_sequence(),
             build_bound_action("unlock"),
-        ),
-        (
-            parse_default_key_sequence("<leader>p m"),
-            build_bound_action("begin-pane-placement"),
         ),
         (
             parse_default_key_sequence("<leader>q"),

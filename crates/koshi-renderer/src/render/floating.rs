@@ -11,14 +11,15 @@ use koshi_core::geometry::{Rect, Size};
 
 use crate::floating_pane_chrome::compute_floating_pane_titlebar;
 use crate::snapshot::{
-    CommittedRegions, FloatingPaneSlot, FrameLayout, RenderSnapshot, ViewerChrome,
+    CommittedRegions, FloatingPaneSlot, FrameLayout, PlacementHandleHover, RenderSnapshot,
+    ViewerChrome,
 };
 use crate::theme::Theme;
 
 use super::{
     clear_drawn_rows, compute_pane_area, compute_pane_border_style, compute_symbol_display_width,
     draw_grid, draw_pane_border, draw_pane_scroll_position, draw_placement_hover_tint,
-    get_area_origin, is_placement_handle_hovered, place_cell_rect, set_line_clipped, DrawnRows,
+    get_area_origin, place_cell_rect, set_line_clipped, DrawnRows,
 };
 
 /// The grab handle a floating pane draws in its titlebar.
@@ -99,15 +100,18 @@ pub(crate) fn list_placed_floating_panes(
 ///    at column `6` becomes a blank at column `5` with the style `世` had, and
 ///    `U+17D8` at column `5` stays.
 /// 2. Draws its border ring in the style [`compute_pane_border_style`] gives
-///    it.
+///    it, with the placement hover style while
+///    `viewer_chrome.placement_handle_hover` is
+///    [`FloatingHandle`](PlacementHandleHover::FloatingHandle) of the pane
+///    with its `is_pinned`.
 /// 3. On an outer area of 4 rows or more, draws the separator `├──┤` on the
 ///    third row and the titlebar on the second row, each part where
 ///    [`compute_floating_pane_titlebar`] places it: the grab handle `⣿⣿`, the
 ///    pane title cut to its cells, the pin toggle `[ ]` (`[⚪]` while
 ///    `is_pinned`), the minimize button `–` and the close button `✕`.
 /// 4. Draws the pane's cells into its visible content area.
-/// 5. Tints the visible content area while `viewer_chrome.placement_handle_pane_id`
-///    names the pane ([`is_placement_handle_hovered`]).
+/// 5. Tints the visible content area while that hover is `FloatingHandle` of
+///    the pane with its `is_pinned`.
 /// 6. Writes the pane's scroll position ` up/total ` into its bottom border
 ///    while it is scrolled back.
 ///
@@ -130,10 +134,15 @@ pub(super) fn draw_floating_pane(
     if !drawn_rows.is_area_drawn(outer_area) {
         return;
     }
+    let is_grab_handle_hovered = viewer_chrome.placement_handle_hover
+        == Some(PlacementHandleHover::FloatingHandle {
+            pane_id: floating_pane_slot.pane_id,
+            is_pinned: floating_pane_slot.is_pinned,
+        });
     let border_style = compute_pane_border_style(
         render_snapshot,
         floating_pane_slot.pane_id,
-        false,
+        is_grab_handle_hovered,
         viewer_chrome,
         theme,
     );
@@ -193,7 +202,7 @@ pub(super) fn draw_floating_pane(
             screen_buffer,
         );
     }
-    if is_placement_handle_hovered(floating_pane_slot.pane_id, viewer_chrome) {
+    if is_grab_handle_hovered {
         draw_placement_hover_tint(
             placed_floating_pane.visible_content_area,
             drawn_rows,

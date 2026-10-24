@@ -1988,7 +1988,6 @@ mod bridge_round_trip {
                 "quiet-lake".to_string(),
                 TEST_VIEWPORT_SIZE,
                 SystemTime::now(),
-                None,
             )
             .expect("the session is seeded");
 
@@ -2113,6 +2112,7 @@ mod bridge_round_trip {
         remote_client::connect_remote_server(
             server_address,
             &ConnectionToken::from_secret("testSecret"),
+            None,
             &test_remote_listener.certificate_fingerprint,
             Duration::from_secs(5),
             None,
@@ -2295,7 +2295,7 @@ mod bridge_round_trip {
             .send(&IpcRequest {
                 request_id: 3,
                 request_kind: IpcRequestKind::Keyboard {
-                    key_input: shifted_digit.clone(),
+                    key_inputs: vec![shifted_digit.clone()],
                 },
             })
             .expect("the keyboard request is written");
@@ -2312,10 +2312,10 @@ mod bridge_round_trip {
             .send(&IpcRequest {
                 request_id: 4,
                 request_kind: IpcRequestKind::Keyboard {
-                    key_input: KeyInput {
+                    key_inputs: vec![KeyInput {
                         key_event_kind: KeyEventKind::Release,
                         ..shifted_digit
-                    },
+                    }],
                 },
             })
             .expect("the release is written");

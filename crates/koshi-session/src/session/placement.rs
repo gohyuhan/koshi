@@ -19,13 +19,15 @@ use std::iter;
 use std::num::NonZeroU16;
 
 use koshi_core::event::{Event, LayoutChanged, PaneFocused, TabFocused};
-use koshi_core::geometry::{FloatingPaneDimension, FloatingPaneSize, Point, Size};
+use koshi_core::geometry::{
+    FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, Point, Size,
+};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::placement::{solve_placed_tab, CrossTabPlacement, PlacementTabSizes};
 use koshi_layout::tree::LayoutNode;
 use thiserror::Error;
 
-use crate::client::{Client, FloatingPanePosition};
+use crate::client::Client;
 use crate::error::FloatingSetError;
 use crate::session::cascade::{
     list_focused_client_rects, remove_pane_from_tab, repair_focus_after_pane_left,

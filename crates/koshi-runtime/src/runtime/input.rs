@@ -1,11 +1,12 @@
-//! The session's half of keyboard input: writing a press the viewer did not
-//! bind.
+//! The session's half of keyboard input: writing the presses the viewer did
+//! not bind.
 //!
 //! **What a key means is decided by the viewer that received it.** The viewer
 //! (`koshi-client`) holds the keymap, the input mode and any sequence being
 //! typed. A binding the viewer resolves reaches the session as the command it
-//! stands for, submitted like any other command. A press the viewer does not
-//! bind reaches this module as a chord to write. Nothing here consults a
+//! stands for, submitted like any other command. The presses the viewer does
+//! not bind in one read of its terminal reach this module as one list of key
+//! events, and go to the pane in one write. Nothing here consults a
 //! keymap. A raw chord that reaches the session
 //! belongs to no attached viewer and is dropped before this module sees it.
 //!
@@ -35,7 +36,7 @@ impl Server {
     /// client's highlight in that pane, then return the client's view to live
     /// output.
     ///
-    /// Three paths call it: a keystroke ([`Server::handle_key_input`]), pasted
+    /// Three paths call it: keystrokes ([`Server::handle_key_inputs`]), pasted
     /// text ([`Server::handle_host_paste`]), and a `core:write-to-pane` write.
     /// A forwarded mouse report drops the highlight itself and does not call
     /// this.
@@ -161,17 +162,20 @@ impl Server {
         find_content_rect(&client_solve, pane_id).map(|_| pane_id)
     }
 
-    /// Write one key the viewer did not bind to the pane it is typing into,
-    /// encoded for that pane's keyboard flags and cursor-key mode at this
-    /// instant.
+    /// Write the keys the viewer did not bind, from one read of its terminal,
+    /// to the pane it is typing into: each key encoded for that pane's
+    /// keyboard flags and cursor-key mode at this instant, all of them in one
+    /// write, oldest first. `é` then `-` write `C3 A9 2D` in one write.
     ///
-    /// Nothing is written when `Server::find_typed_pane` names no pane, and
-    /// nothing is written when the pane asked not to receive this event, such
-    /// as a key release into a pane that pushed no flag. A pane with no
-    /// terminal engine encodes with no keyboard flags and application cursor
-    /// keys off. A write clears the client's highlight in that pane and
-    /// returns the client's view to live output.
-    pub fn handle_key_input(&mut self, client_id: ClientId, key_input: &KeyInput) {
+    /// Nothing is written when `Server::find_typed_pane` names no pane. A key
+    /// the pane asked not to receive, such as a key release into a pane that
+    /// pushed no flag, adds no bytes, and nothing is written when no key adds
+    /// any. A pane with no terminal engine encodes with no keyboard flags and
+    /// application cursor keys off. A write the backend refuses, such as one
+    /// past the pane's queued input limit, writes none of the keys and leaves
+    /// the client's view as it is. A write clears the client's highlight in
+    /// that pane and returns the client's view to live output.
+    pub fn handle_key_inputs(&mut self, client_id: ClientId, key_inputs: &[KeyInput]) {
         let Some(pane_id) = self.find_typed_pane(client_id) else {
             return;
         };
@@ -185,12 +189,15 @@ impl Server {
                     terminal_state.is_application_cursor_keys_enabled(),
                 )
             });
-        let encoded_key_input_bytes = encode_key_input(
-            key_input,
-            keyboard_flags,
-            is_application_cursor_keys_enabled,
-            self.config.terminal.extended_keys_mode,
-        );
+        let mut encoded_key_input_bytes = Vec::new();
+        for key_input in key_inputs {
+            encoded_key_input_bytes.extend(encode_key_input(
+                key_input,
+                keyboard_flags,
+                is_application_cursor_keys_enabled,
+                self.config.terminal.extended_keys_mode,
+            ));
+        }
         if encoded_key_input_bytes.is_empty() {
             return;
         }

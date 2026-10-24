@@ -1834,9 +1834,9 @@ fn stream_events(
                 client_id,
                 cell_size,
             },
-            IpcRequestKind::Keyboard { key_input } => RuntimeEvent::ClientKeyboard {
+            IpcRequestKind::Keyboard { key_inputs } => RuntimeEvent::ClientKeyboard {
                 client_id,
-                key_input,
+                key_inputs,
             },
             IpcRequestKind::Resize { viewport_size, .. }
                 if viewport_size.compute_cell_count() > MAX_VIEWPORT_CELL_COUNT =>

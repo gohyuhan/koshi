@@ -1027,8 +1027,9 @@ impl TerminalOwner {
 
     /// Enable terminal modes and start input delivery after Attach succeeds.
     ///
-    /// The input thread sends each event it reads on `terminal_input_sender`,
-    /// stamped on `input_read_clock`.
+    /// The input thread sends the events of each read of the terminal on
+    /// `terminal_input_sender` as one [`TerminalInput`], stamped on
+    /// `input_read_clock`.
     pub(crate) fn activate_terminal(
         &mut self,
         terminal_input_sender: mpsc::SyncSender<TerminalInput>,
@@ -1084,7 +1085,7 @@ impl TerminalOwner {
                     }));
                     if input_thread_result.is_err() {
                         let _ = panic_input_sender.send(TerminalInput {
-                            runtime_event: RuntimeEvent::Quit,
+                            runtime_events: vec![RuntimeEvent::Quit],
                             read_at: input_read_clock.stamp_input_read(Instant::now()),
                         });
                     }
@@ -1518,8 +1519,10 @@ fn write_fallback_terminal_cleanup(
 }
 
 /// Read semantic terminal events until shutdown or input failure, and send
-/// each one on `terminal_input_sender` with the stamp `input_read_clock` gives
-/// it as it is read.
+/// the events of each read of the terminal on `terminal_input_sender` as one
+/// [`TerminalInput`], with the stamp `input_read_clock` gives that read. A read
+/// whose events all convert to nothing sends nothing. An input failure sends
+/// a [`TerminalInput`] that holds [`RuntimeEvent::Quit`] alone, and ends.
 fn run_terminal_input<EventSourceType: reader::EventSource>(
     input_reader: &mut InputReader<EventSourceType>,
     terminal_input_sender: &mpsc::SyncSender<TerminalInput>,
@@ -1528,47 +1531,54 @@ fn run_terminal_input<EventSourceType: reader::EventSource>(
     is_shutdown_requested: &AtomicBool,
 ) {
     while !is_shutdown_requested.load(Ordering::Acquire) {
-        let runtime_event = match input_reader.read_matching_event(|_| true) {
-            Ok(host_event) => build_terminal_runtime_event(client_id, host_event),
-            Err(input_read_error)
-                if input_read_error.kind() == io::ErrorKind::Interrupted
-                    && is_shutdown_requested.load(Ordering::Acquire) =>
-            {
-                break;
-            }
-            Err(input_read_error) if input_read_error.kind() == io::ErrorKind::Interrupted => {
-                continue
-            }
-            Err(input_read_error) => {
-                tracing::warn!(%input_read_error, "could not read terminal input");
-                Some(RuntimeEvent::Quit)
-            }
-        };
-        if let Some(runtime_event) = runtime_event {
-            let is_quit_event = matches!(runtime_event, RuntimeEvent::Quit);
-            let terminal_input = TerminalInput {
-                runtime_event,
-                read_at: input_read_clock.stamp_input_read(Instant::now()),
+        let runtime_events: Vec<RuntimeEvent> =
+            match input_reader.read_events_of_next_terminal_read() {
+                Ok(host_events) => host_events
+                    .into_iter()
+                    .filter_map(|host_event| build_terminal_runtime_event(client_id, host_event))
+                    .collect(),
+                Err(input_read_error)
+                    if input_read_error.kind() == io::ErrorKind::Interrupted
+                        && is_shutdown_requested.load(Ordering::Acquire) =>
+                {
+                    break;
+                }
+                Err(input_read_error) if input_read_error.kind() == io::ErrorKind::Interrupted => {
+                    continue
+                }
+                Err(input_read_error) => {
+                    tracing::warn!(%input_read_error, "could not read terminal input");
+                    vec![RuntimeEvent::Quit]
+                }
             };
-            if terminal_input_sender.send(terminal_input).is_err() || is_quit_event {
-                break;
-            }
+        if runtime_events.is_empty() {
+            continue;
+        }
+        let is_hangup = matches!(runtime_events.as_slice(), [RuntimeEvent::Quit]);
+        let terminal_input = TerminalInput {
+            runtime_events,
+            read_at: input_read_clock.stamp_input_read(Instant::now()),
+        };
+        if terminal_input_sender.send(terminal_input).is_err() || is_hangup {
+            break;
         }
     }
 }
 
-/// One event from this terminal and the instant it was read: an event its
-/// input thread read, or this terminal hanging up as a termination signal or a
-/// console close reports it.
+/// The events of one read of this terminal and the instant it was read: the
+/// events its input thread parsed from that read, or this terminal hanging up
+/// as a read failure, a termination signal, or a console close reports it.
 #[derive(Debug)]
 pub(crate) struct TerminalInput {
-    /// The event: a key, a mouse event, a paste, a resize, a cell size reply,
-    /// a focus loss, or this terminal hanging up.
-    pub(crate) runtime_event: RuntimeEvent,
-    /// When the input thread read the event, as
-    /// [`InputReadClock::stamp_input_read`] stamped it, or when a hangup
-    /// report arrived. The attach loop runs every input timer due at this
-    /// instant before it handles the event, and ends at a hangup.
+    /// The events, oldest first: keys, mouse events, a paste, a resize, a cell
+    /// size reply, and focus losses. A hangup is [`RuntimeEvent::Quit`] alone.
+    /// Typing `é-` that the terminal sends in one read is the two keys `é`
+    /// and `-`.
+    pub(crate) runtime_events: Vec<RuntimeEvent>,
+    /// When the input thread read the events, as
+    /// [`InputReadClock::stamp_input_read`] stamped that read, or when a
+    /// hangup report arrived. The attach loop runs every input timer due at
+    /// this instant before it handles the events, and ends at a hangup.
     pub(crate) read_at: Instant,
 }
 
@@ -1824,6 +1834,14 @@ impl FrameInputs {
 /// into one pane while a Sixel image in another pane encodes draws at once,
 /// and the image shows its older pixels, or none, until its encode ends.
 ///
+/// A frame that clears the whole screen before its cells
+/// ([`PaintDriver::needs_screen_erase`]), such as the first frame after a
+/// host resize, records that the outer terminal shows no image
+/// ([`ImageOutputState::clear_host_images`]) before it picks the pixels. It
+/// then writes every image it has pixels for after its cells. Example: a
+/// Sixel image at `(0, 0)` and a resize from 80×24 to 100×30 give one frame:
+/// `ESC[2J`, the cells, then the Sixel image again from its kept encode.
+///
 /// # Errors
 ///
 /// Returns a backend, output or native-image error when the frame cannot be
@@ -1882,7 +1900,9 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     )
     .filter(|_| !is_focused_pane_softened);
     let is_native_image_output = image_output_state.get_output_kind().is_some();
-    image_output_state.set_host_terminal_size(terminal_size.column_count, terminal_size.row_count);
+    if paint_driver.needs_screen_erase(terminal_size) {
+        image_output_state.clear_host_images();
+    }
     let mut image_paint_commands = build_image_paints(
         displayed_snapshot,
         committed_regions,

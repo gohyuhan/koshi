@@ -14,16 +14,21 @@ impl Server {
     /// is spawned, and only on success is the pane registered, the
     /// tree swapped in, the sibling PTYs reflowed, and the handle parked. A launch
     /// failure commits nothing and rejects; no pane is registered without its
-    /// process. A client is designated to view and focus the new pane — an
-    /// explicit `--client` target (which wins even over the issuer, and rejects
-    /// outright if not attached), else the in-session issuer, else (an external
-    /// command source, tab unviewed) the session's sole client; a session with several
-    /// attached clients and no named target is rejected as ambiguous, and one with
-    /// no attached client at all is rejected. The designated client is switched
-    /// onto the tab (if not already there) and the tab it left is reflowed. That
-    /// client's zoom drops at the commit, and the new pane shows in the tiled
-    /// view it was sized against; any other client's zoom is left alone. All events
-    /// seal in one transaction.
+    /// process. The source pane and the client that views and focuses the new
+    /// pane come from [`Self::resolve_new_pane_source`]: an external command
+    /// naming `--client` and no `--pane` or `--tab` splits the pane that takes
+    /// that client's input. A client is designated to view and focus the new
+    /// pane — an explicit `--client` target (which wins even over the issuer,
+    /// and rejects outright if not attached), else the attached issuer, else
+    /// (an external command source, tab unviewed) the session's sole client; a
+    /// session with several attached clients and no named target is rejected as
+    /// ambiguous, and one with no attached client at all is rejected. An
+    /// external command source naming no client on a tab a client already
+    /// views designates no client, and no client's focus moves. The designated
+    /// client is switched onto the tab (if not already there) and the tab it
+    /// left is reflowed. That client's zoom drops at the commit, and the new
+    /// pane shows in the tiled view it was sized against; any other client's
+    /// zoom is left alone. All events seal in one transaction.
     ///
     /// A [`NewPanePlacement::Floating`] placement goes to
     /// [`Self::handle_new_floating_pane`].
@@ -59,8 +64,13 @@ impl Server {
             }
         };
         let acting_session = self.resolve_acting_session(command_source)?;
-        let new_pane_target =
-            self.resolve_new_pane_source(source_pane_id, tab_id, command_source, acting_session)?;
+        let new_pane_target = self.resolve_new_pane_source(
+            source_pane_id,
+            tab_id,
+            command_args.client_id,
+            command_source,
+            acting_session,
+        )?;
 
         // The shared backend is cloned before the session is borrowed; spawn
         // and resize run on the clone while `&mut Session` is held.
@@ -119,7 +129,6 @@ impl Server {
             new_pane_target.tab_id,
             &candidate_layout_tree,
             new_pane_target.focus_client_id,
-            command_args.client_id,
             pane_sizing,
         )?;
 
@@ -404,8 +413,12 @@ impl Server {
         command_args: &ClosePaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            acting_session,
+        )?;
         let Some(tab_id) = pane_target.tab_id else {
             return self.handle_close_floating_pane(
                 command_id,
@@ -712,13 +725,17 @@ impl Server {
         emitted_events
     }
 
-    /// Move one border of a pane by an exact signed cell count, then resize
-    /// the affected PTYs.
+    /// Move one border of a pane by up to a signed cell count, then resize
+    /// the affected PTYs. Returns the result and, for a tiled pane, the cells
+    /// the border moved; `None` for a floating pane.
     ///
     /// The border that moves is resolved by the layout crate's resize
     /// transaction: a positive `command_args.resize_amount_cells` grows the pane toward
     /// `command_args.direction` with the adjacent sibling donating the cells, a
-    /// negative one shrinks it with that sibling gaining them. A pane with no
+    /// negative one shrinks it with that sibling gaining them. The border
+    /// moves as far as the donor's minimum size allows: in an `80`-column tab
+    /// split `40`/`40`, the right pane grown left by `100` grows by `36`, and
+    /// its neighbor keeps the `4` columns of its minimum. A pane with no
     /// border on the named side — it touches the tab edge there — moves its
     /// opposite border in the same visual direction instead. The target pane's
     /// tab must be viewed by at least one attached client: the tab is solved
@@ -732,6 +749,11 @@ impl Server {
     /// ([`CommandSource::get_target_client_id`]), else the issuing client. Any
     /// other client's zoom stands.
     ///
+    /// A border that cannot move one cell changes nothing: it is
+    /// [`RejectReason::MinimumSize`] when the donor holds no cell above its
+    /// minimum size, and [`RejectReason::InvalidState`] when the layout holds
+    /// the border in place ([`Self::resize_rejection`]).
+    ///
     /// A floating pane has no sibling: it resizes through
     /// [`Self::resolve_floating_pane_resize`] and
     /// [`Self::handle_resize_floating_pane`].
@@ -740,14 +762,20 @@ impl Server {
         command_id: CommandId,
         command_source: &CommandSource,
         command_args: &ResizePaneArgs,
-    ) -> Result<CommandResult, Rejection> {
+    ) -> Result<(CommandResult, Option<u16>), Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            acting_session,
+        )?;
         let Some(tab_id) = pane_target.tab_id else {
             let floating_pane_resize =
                 self.resolve_floating_pane_resize(command_args, command_source, &pane_target)?;
-            return self.handle_resize_floating_pane(command_id, floating_pane_resize);
+            return self
+                .handle_resize_floating_pane(command_id, floating_pane_resize)
+                .map(|command_result| (command_result, None));
         };
 
         let pty_backend = Arc::clone(self.get_pty_backend());
@@ -764,7 +792,7 @@ impl Server {
         // The resize transaction returns a new tree and leaves the tab's
         // untouched on rejection. When the pane touches the tab edge on the
         // named side, the opposite border moves in the same visual direction.
-        let resized_layout_tree = resize_layout_with_sizing(
+        let (resized_layout_tree, moved_cell_count) = resize_layout_with_sizing(
             tab_state.get_layout_tree(),
             tab_rect,
             pane_target.pane_id,
@@ -809,10 +837,9 @@ impl Server {
             &mut emitted_events,
         );
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
+        Ok((
+            Self::commit_events(&mut self.event_bus, command_id, emitted_events),
+            Some(moved_cell_count),
         ))
     }
 
@@ -1629,25 +1656,94 @@ impl Server {
         }
     }
 
-    /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
-    /// a missing pane is [`RejectReason::TargetNotFound`], a pane with no
-    /// neighbor on the requested side is [`RejectReason::InvalidState`], and
-    /// a donor below its floor is [`RejectReason::MinimumSize`] carrying the spare
-    /// cell count in both the hint and the rejection's own field, which the
-    /// mouse layer reads to ask again for exactly those cells.
+    /// Map a layout [`ResizeError`] onto the command vocabulary's rejection,
+    /// naming the pane and the border of the last resize tried:
+    /// - a missing pane is [`RejectReason::TargetNotFound`];
+    /// - a pane with no neighbor on either side of the axis is
+    ///   [`RejectReason::InvalidState`] `<pane> has no left or right border to
+    ///   move`, or `top or bottom` for `Up` and `Down`;
+    /// - a border whose donor holds no cell above its minimum size, at that
+    ///   size or suppressed for lack of room, is
+    ///   [`RejectReason::MinimumSize`], unlogged: `<pane> cannot grow left
+    ///   here; the pane next to it has no room to give` on a grow, `<pane>
+    ///   cannot shrink from the left here; it has no room to give` on a
+    ///   shrink;
+    /// - a border the layout holds in place is [`RejectReason::InvalidState`],
+    ///   unlogged: `<pane> cannot grow left here; the layout holds this border
+    ///   in place`, or `<pane> cannot shrink from the left here; the layout
+    ///   holds this border in place`.
+    ///
+    /// A grow names the direction (`left`, `right`, `up`, `down`), a shrink
+    /// the border (`left`, `right`, `top`, `bottom`).
     fn resize_rejection(resize_error: &ResizeError) -> Rejection {
-        match resize_error {
+        match *resize_error {
             ResizeError::PaneNotFound { .. } => {
                 Rejection::from_reason(RejectReason::TargetNotFound)
             }
-            ResizeError::NoAdjacentBorder { .. } => Rejection::from_reason_and_help(
+            ResizeError::NoAdjacentBorder { pane_id, direction } => {
+                let axis_border_names = match direction {
+                    Direction::Left | Direction::Right => "left or right",
+                    Direction::Up | Direction::Down => "top or bottom",
+                };
+                Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    &format!("{pane_id} has no {axis_border_names} border to move"),
+                )
+            }
+            ResizeError::DonorAtMinimumSize {
+                pane_id,
+                direction,
+                is_pane_growing,
+            } => {
+                let cause = if is_pane_growing {
+                    "the pane next to it has no room to give"
+                } else {
+                    "it has no room to give"
+                };
+                Rejection::from_unmovable_border(
+                    RejectReason::MinimumSize,
+                    Self::format_unmovable_border_help(pane_id, direction, is_pane_growing, cause),
+                )
+            }
+            ResizeError::BorderHeld {
+                pane_id,
+                direction,
+                is_pane_growing,
+            } => Rejection::from_unmovable_border(
                 RejectReason::InvalidState,
-                "pane has no border to move on that axis",
+                Self::format_unmovable_border_help(
+                    pane_id,
+                    direction,
+                    is_pane_growing,
+                    "the layout holds this border in place",
+                ),
             ),
-            ResizeError::MinimumSizeExceeded {
-                spare_cell_count, ..
-            } => Rejection::from_minimum_size(*spare_cell_count),
         }
+    }
+
+    /// The hint for a border of `pane_id` that cannot move one cell:
+    /// `<pane> cannot grow <direction> here; <cause>` when `is_pane_growing`,
+    /// else `<pane> cannot shrink from the <side> here; <cause>`. `Left`
+    /// growing with `the pane next to it has no room to give` gives
+    /// `pane-… cannot grow left here; the pane next to it has no room to
+    /// give`.
+    pub(super) fn format_unmovable_border_help(
+        pane_id: PaneId,
+        direction: Direction,
+        is_pane_growing: bool,
+        cause: &str,
+    ) -> String {
+        if !is_pane_growing {
+            let side_name = format_side_name(direction);
+            return format!("{pane_id} cannot shrink from the {side_name} here; {cause}");
+        }
+        let direction_name = match direction {
+            Direction::Left => "left",
+            Direction::Right => "right",
+            Direction::Up => "up",
+            Direction::Down => "down",
+        };
+        format!("{pane_id} cannot grow {direction_name} here; {cause}")
     }
 
     /// Handle [`Command::FocusPane`]: move the target client's focus to the
@@ -1957,8 +2053,12 @@ impl Server {
         command_args: &WriteToPaneArgs,
     ) -> Result<CommandResult, Rejection> {
         let acting_session = self.resolve_acting_session(command_source)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            acting_session,
+        )?;
         if self
             .get_pty_backend()
             .write_pane_input(pane_target.pane_id, &command_args.pane_input_bytes)
@@ -1986,18 +2086,18 @@ impl Server {
     /// client — the one that will view the tab and focus the new pane, `None`
     /// when the tab is already viewed and no client was named.
     ///
-    /// A designated client is an explicit `target_client_id` (the command's
-    /// named `--client`, which wins even over an in-session issuer) or, when none is
-    /// named, the issuing client (`focus_client_id`). When one is designated, the
-    /// split is sized to the smallest of the tab's current viewers *and* that
-    /// client, and fits every client that shows it; the caller switches the client
-    /// onto the tab if it is not already there.
+    /// The designated client is `focus_client_id` when set: the client the
+    /// command names, else its issuer while attached
+    /// ([`Self::resolve_new_pane_source`]). The split is then sized to the
+    /// smallest of the tab's current viewers *and* that client, and fits every
+    /// client that shows it; the caller switches the client onto the tab if it
+    /// is not already there.
     ///
-    /// With no designated client (an external command source that names no target):
-    /// an already-viewed tab sizes to its current viewers and designates no one
-    /// (the pane just appears, no view moves); an unviewed tab defaults to the
-    /// session's sole client, and a session with several attached clients is
-    /// [`RejectReason::TargetAmbiguous`].
+    /// With no `focus_client_id` (an external command source that names no
+    /// client): an already-viewed tab sizes to its current viewers and
+    /// designates no one (the pane just appears, no view moves); an unviewed
+    /// tab defaults to the session's sole client, and a session with several
+    /// attached clients is [`RejectReason::TargetAmbiguous`].
     ///
     /// Each client contributes [`Client::get_pane_area`]; a designated client
     /// reporting [`PaneArea::Starving`] contributes nothing, and is rejected
@@ -2006,18 +2106,14 @@ impl Server {
     ///
     /// `candidate_layout_tree` is the post-split tree fit is judged against. Fails
     /// [`RejectReason::MinimumSize`] when the split cannot fit the chosen tab size,
-    /// [`RejectReason::TargetNotFound`] when the designated client (a named
-    /// `target_client_id`, or the issuer) is not attached here — a wrong explicit
-    /// target is rejected outright, never falling back — and
-    /// [`RejectReason::InvalidState`] when the tab has no viewer and the session
-    /// has no attached client at all. A bystander client is never switched to
-    /// satisfy a command that named none.
+    /// and [`RejectReason::InvalidState`] when the tab has no viewer and the
+    /// session has no attached client at all. A bystander client is never
+    /// switched to satisfy a command that named none.
     fn resolve_new_pane_tab_size(
         session: &Session,
         tab_id: TabId,
         candidate_layout_tree: &LayoutNode,
-        issuing_client_id: Option<ClientId>,
-        target_client_id: Option<ClientId>,
+        focus_client_id: Option<ClientId>,
         pane_sizing: PaneSizing,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
         let build_no_room_rejection = || {
@@ -2041,18 +2137,10 @@ impl Server {
         };
         let existing_tab_size = session.get_tab_size(tab_id);
 
-        // An explicit `--client` target wins over the issuing client — a caller
-        // that names a client is honored even in-session — and must be valid: a
-        // wrong target is rejected outright, never falling back to the issuer. With
-        // no explicit target, the in-session issuer is used.
-        if let Some(client_id) = target_client_id.or(issuing_client_id) {
-            let designated_client =
-                session.clients.get_client_by_id(client_id).ok_or_else(|| {
-                    Rejection::from_reason_and_help(
-                        RejectReason::TargetNotFound,
-                        "target client not attached to the session",
-                    )
-                })?;
+        // The focus client is designated: the client the command names, else
+        // its attached issuer.
+        if let Some(client_id) = focus_client_id {
+            let designated_client = Self::require_client(session, client_id)?;
             // The smaller of the tab's current size and the designated
             // client's pane area; a starving designated client adds no size.
             let tab_size = match (existing_tab_size, designated_client.get_pane_area()) {

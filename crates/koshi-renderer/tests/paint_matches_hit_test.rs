@@ -6,8 +6,9 @@
 //! by cell, then checks the two against each other: a chrome row is on the row
 //! its committed region owns, a pane's content cells sit inside the rect
 //! [`find_pane_content_rect`] gives for that pane, a border cell carries a box
-//! glyph, a stack header carries the header background, and every unclassified
-//! cell carries the letterbox backdrop.
+//! glyph, a shown tiled handle cell carries `⠿` and the title cells after it
+//! hit the top border, a stack header carries the header background, and every
+//! unclassified cell carries the letterbox backdrop.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
@@ -21,8 +22,8 @@ use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
-    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
-    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, PlacementHandleHover,
+    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -389,6 +390,67 @@ fn every_cell_classifies_as_what_was_painted() {
                 - EFFECTIVE_LAYOUT_SIZE.column_count * EFFECTIVE_LAYOUT_SIZE.row_count
         )
     );
+}
+
+#[test]
+fn a_shown_tiled_handle_paints_and_hits_the_three_cells_before_the_title() {
+    let (mut render_snapshot, left_pane_id, ..) = build_tiled_frame();
+    render_snapshot.pane_snapshots[0].pane_title = Some("user@host".to_string());
+    let viewer_chrome = ViewerChrome {
+        placement_handle_hover: Some(PlacementHandleHover::TiledTopBorder {
+            pane_id: left_pane_id,
+        }),
+        ..ViewerChrome::default()
+    };
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let frame_layout = mouse_frame.build_frame_layout();
+    // The left pane's 25x10 box starts at screen (5, 2).
+    assert_eq!(
+        find_pane_content_rect(frame_layout, left_pane_id),
+        Some(build_cell_rect(6, 3, 23, 8))
+    );
+
+    let top_row_hit_regions: Vec<HitRegion> = (5..30)
+        .map(|column_index| {
+            resolve_hit_region(
+                frame_layout,
+                Point {
+                    column: column_index,
+                    row: 2,
+                },
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        get_row_text(&screen_buffer, 2, 5, 30),
+        format!("┌⠿⠿⠿ user@host {}┐", "─".repeat(9))
+    );
+    let mut expected_hit_regions = vec![HitRegion::PaneBorder {
+        pane_id: left_pane_id,
+        side: Direction::Left,
+        corner_horizontal_side: Some(Direction::Up),
+    }];
+    expected_hit_regions.extend(
+        [HitRegion::PlacementHandle {
+            pane_id: left_pane_id,
+        }; 3],
+    );
+    expected_hit_regions.extend(
+        [HitRegion::PaneBorder {
+            pane_id: left_pane_id,
+            side: Direction::Up,
+            corner_horizontal_side: None,
+        }; 20],
+    );
+    expected_hit_regions.push(HitRegion::PaneBorder {
+        pane_id: left_pane_id,
+        side: Direction::Right,
+        corner_horizontal_side: Some(Direction::Up),
+    });
+    assert_eq!(top_row_hit_regions, expected_hit_regions);
 }
 
 #[test]

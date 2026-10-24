@@ -2,8 +2,9 @@
 //! is placed at the pane area's origin with no letterbox offset, and its
 //! visible content is cut to the pane area. The panes draw back to front over
 //! the tiled panes and the letterbox, each with its border, titlebar,
-//! separator, cells, border style, grab handle hover tint, unavailable-image text
-//! and scroll position. A glyph two columns wide that starts in the column
+//! separator, cells, border style, grab handle hover tint, a hovered grab
+//! handle beside a whole title, unavailable-image text and scroll position.
+//! A glyph two columns wide that starts in the column
 //! left of a floating pane turns blank, and the frame diff writes the pane's
 //! left border beside it. `U+17D8` there takes 1 column and stays, and in a
 //! title it takes 1 column. While pane placement shows, only the placement
@@ -31,8 +32,8 @@ use crate::render::render_frame;
 use crate::render::tests::{format_rendered_cells, get_pane_snapshot_mut};
 use crate::snapshot::{
     ClientSnapshot, CursorSnapshot, FloatingPaneMoveDraft, GridView, ImagePlacementSnapshot,
-    KeymapHints, PaneSlot, PaneSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
-    TabSnapshot,
+    KeymapHints, PaneSlot, PaneSnapshot, PlacementHandleHover, ScrollbackMetadata, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 
 /// The content of `pane_id`: no title, no grid, a visible cursor at `(0, 0)`.
@@ -469,6 +470,78 @@ fn a_floating_pane_draws_its_box_titlebar_separator_and_cells_over_the_tiled_pan
 }
 
 #[test]
+fn a_hovered_grab_handle_leaves_the_floating_pane_title_whole() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let floating_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
+
+    let render_buffer = render_core_frame(
+        &render_snapshot,
+        ViewerChrome {
+            placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
+                pane_id: floating_pane_id,
+                is_pinned: false,
+            }),
+            ..ViewerChrome::default()
+        },
+        ImageRenderMode::Placeholder,
+    );
+
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 3, 6..32),
+        format!("┌{}┐", "─".repeat(24))
+    );
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 6..32),
+        "│ ⣿⣿  htop    [ ]  –  ✕  │"
+    );
+}
+
+#[test]
+fn a_handle_hover_that_names_a_pane_of_the_other_kind_or_pin_state_changes_no_cell() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    let floating_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
+    render_snapshot.client_snapshot.focused_pane_id = None;
+    let unhovered_render_buffer = render_default_core_frame(&render_snapshot);
+
+    for placement_handle_hover in [
+        PlacementHandleHover::FloatingHandle {
+            pane_id: tiled_pane_id,
+            is_pinned: false,
+        },
+        PlacementHandleHover::FloatingHandle {
+            pane_id: floating_pane_id,
+            is_pinned: true,
+        },
+        PlacementHandleHover::TiledTopBorder {
+            pane_id: floating_pane_id,
+        },
+        PlacementHandleHover::TiledHandle {
+            pane_id: floating_pane_id,
+        },
+    ] {
+        let render_buffer = render_core_frame(
+            &render_snapshot,
+            ViewerChrome {
+                placement_handle_hover: Some(placement_handle_hover),
+                ..ViewerChrome::default()
+            },
+            ImageRenderMode::Placeholder,
+        );
+        assert_eq!(
+            render_buffer, unhovered_render_buffer,
+            "{placement_handle_hover:?}"
+        );
+    }
+}
+
+#[test]
 fn a_wide_glyph_cut_by_a_floating_pane_is_blanked_and_one_that_ends_before_the_box_stays() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
     let tiled_pane_id = render_snapshot
@@ -731,7 +804,10 @@ fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
     let handle_hovered_render_buffer = render_core_frame(
         &render_snapshot,
         ViewerChrome {
-            placement_handle_pane_id: Some(floating_pane_id),
+            placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
+                pane_id: floating_pane_id,
+                is_pinned: false,
+            }),
             ..ViewerChrome::default()
         },
         ImageRenderMode::Placeholder,

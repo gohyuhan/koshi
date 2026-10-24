@@ -34,8 +34,8 @@ pub fn solve_core_regions(viewport_size: Size) -> SolvedRegions {
 /// takes the theme as its own argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StatuslineInputs<'a> {
-    /// Every binding in the viewer's current mode, with the prefix labels, the
-    /// removals, and the keymap-reverted marker.
+    /// Every binding in the viewer's current mode, with the prefix labels and
+    /// the removals.
     pub(crate) keymap_hints: &'a KeymapHints,
     /// The chords already pressed of an open key sequence. `None` when no
     /// sequence is open.

@@ -18,10 +18,7 @@ fn all_lock_modes_list_each_mode_once_with_its_keymap_name() {
         [
             "normal",
             "locked",
-            "resize",
             "pane-placement",
-            "tab",
-            "scroll",
             "pane-move-choice",
             "floating-pane-move",
             "dock-undock"
@@ -48,8 +45,8 @@ fn serde_wire_form_is_the_pascal_case_variant_not_the_keymap_name() {
         "\"Locked\""
     );
     assert_eq!(
-        serde_json::to_string(&LockMode::ScrollMode).expect("serialize"),
-        "\"ScrollMode\""
+        serde_json::to_string(&LockMode::PaneMoveChoice).expect("serialize"),
+        "\"PaneMoveChoice\""
     );
 }
 
@@ -58,10 +55,7 @@ fn only_normal_and_locked_pass_unbound_input_to_the_pane() {
     let mode_expectations = [
         (LockMode::Normal, true),
         (LockMode::Locked, true),
-        (LockMode::Resize, false),
         (LockMode::PanePlacement, false),
-        (LockMode::TabMode, false),
-        (LockMode::ScrollMode, false),
         (LockMode::PaneMoveChoice, false),
         (LockMode::FloatingPaneMove, false),
         (LockMode::DockUndock, false),
@@ -81,8 +75,7 @@ fn decoding_the_keymap_name_is_refused() {
         .expect_err("the wire form is the variant name, not the keymap name");
     assert_eq!(
         lock_mode_parse_error.to_string(),
-        "unknown variant `locked`, expected one of `Normal`, `Locked`, `Resize`, `PanePlacement`, \
-         `TabMode`, `ScrollMode`, `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock` at line 1 \
-         column 8"
+        "unknown variant `locked`, expected one of `Normal`, `Locked`, `PanePlacement`, \
+         `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock` at line 1 column 8"
     );
 }

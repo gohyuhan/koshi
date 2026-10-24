@@ -319,14 +319,21 @@ The default leader is Ctrl.
 | `<C-l>` | Lock or unlock input |
 | `<C-q>` | Quit |
 
-Drag a pane's handle in normal mode to swap it with another pane. In pane
-placement mode, dragging a pane onto another also swaps them. To insert, press
-`<C-p> m`, wait for `PLACE PANE` in the tabline, then hold Shift when you start
-the drag. Koshi asks compatible terminals to send Shift mouse events during
-this mode. A terminal that honors the request sends Shift with the drag. Other
-terminals can keep Shift for their own text selection. Outside pane placement
-mode, Shift+drag over pane content keeps its text selection behavior, and a
-Shift press on a handle does not start placement.
+In locked mode, `<C-l>`, `<C-g>`, and `<C-q>` keep their actions, and every
+other key goes to the program in the focused pane.
+
+Hover a pane's top border to show its handle `⠿⠿⠿` beside the top-left
+corner. Drag the handle in normal or locked mode to swap the pane with another
+pane.
+After the drop, the client stays in normal or locked mode, and the keys you
+type go where they went before the drag. In pane placement mode, dragging a
+pane onto another also swaps them. To insert,
+press `<C-p> m` in normal mode, wait for `PLACE PANE` in the tabline, then hold
+Shift when you start the drag. Koshi asks compatible terminals to send Shift
+mouse events during this mode. A terminal that honors the request sends Shift
+with the drag. Other terminals can keep Shift for their own text selection.
+Outside pane placement mode, Shift+drag over pane content keeps its text
+selection behavior, and a Shift press on a handle does not start placement.
 Shift+Arrow also selects an insertion edge without a mouse.
 
 The preview dims visible affected panes. The moving pane and destination use
@@ -392,7 +399,9 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 
 ### Sessions and discovery
 
-List and inspect commands accept `--format table` or `--format json`.
+List and inspect commands accept `--format table` or `--format json`. Both
+print ids, times, and states as the same text: `pane-0192f0c1-…`,
+`2025-01-01T00:00:00Z`, `running`.
 `NAME_OR_ID` takes the target's generated name or its printed id; an id is
 never treated as a name, and a name several targets share is refused with
 every matching id listed.
@@ -458,8 +467,8 @@ session id.
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported bindable actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action and its targets |
-| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout]` | List active shortcuts |
-| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source |
+| `koshi keys list [--mode <MODE>] [--scope default\|user]` | List active shortcuts |
+| `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source, or each shortcut it starts |
 | `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a keybinding file without applying it |
 
@@ -481,11 +490,15 @@ The global `--remote <SERVER>` flag runs one invocation against the machine
 Every other verb refuses it. A server this machine has not saved also needs
 the global `--certificate-fingerprint <FINGERPRINT>` flag, with the
 fingerprint `koshi share grant` prints on that machine. A saved server
-refuses that flag.
+takes that flag when it gives the fingerprint the server was saved with, and
+refuses any other fingerprint. A saved server presents the secret it saved,
+and refuses a `KOSHI_REMOTE_SECRET` that holds a secret no saved server holds;
+`koshi remote set-secret <SERVER>` saves that secret in place of the old one.
 
 | Command | Result |
 |---|---|
 | `koshi share grant <IDENTITY> [--session <SESSION>] [--expires <DURATION>]` | Grant an identity a remote access token |
+| `koshi share open` | Open the port remote clients connect to, and print the commands that connect |
 | `koshi share revoke <IDENTITY> [--session <SESSION>]` | Revoke the tokens an identity holds |
 | `koshi share list [--session <SESSION>] [--format table\|json]` | List the tokens granted on this machine |
 | `koshi attach --remote <SERVER> [--certificate-fingerprint <FINGERPRINT>] [--save-as <NAME>] [SESSION]` | Attach to a session on the machine `SERVER` names |
@@ -512,7 +525,7 @@ it one.
 | Command | Result |
 |---|---|
 | `koshi debug dump-state [--format table\|json]` | Print every running session's sessions, tabs, panes, and clients |
-| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, and per-client focus |
+| `koshi debug dump-layout [--tab <NAME_OR_ID>] [--format table\|json]` | Print each tab's split tree, solved rectangles, each floating pane with what each client draws for it, and per-client focus |
 | `koshi debug events [--since <LENGTH>] [--filter <NAME>] [--format table\|json]` | Print the events each running session published most recently, oldest first |
 
 ### Versions and updating

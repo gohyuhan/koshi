@@ -32,7 +32,6 @@ use koshi_ipc::endpoint::{
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::validate::reclaim_stale_socket;
-use serde::Serialize;
 
 use crate::error::CliError;
 use crate::ipc_client::{
@@ -40,7 +39,7 @@ use crate::ipc_client::{
 };
 
 /// One `list-sessions` row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
     /// Stable session id.
     pub session_id: SessionId,
@@ -77,7 +76,7 @@ impl SessionRow {
 }
 
 /// One `list-tabs` row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabRow {
     /// Stable tab id.
     pub tab_id: TabId,
@@ -90,7 +89,7 @@ pub struct TabRow {
 }
 
 /// One `list-panes` row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneRow {
     /// Stable pane id.
     pub pane_id: PaneId,
@@ -107,7 +106,7 @@ pub struct PaneRow {
 }
 
 /// One `list-clients` row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientRow {
     /// Stable client id.
     pub client_id: ClientId,
@@ -390,7 +389,7 @@ impl SessionCensusPlan {
 /// itself, and every session `shared_sessions_base_directory` advertises for
 /// the other local users of this machine. `shared_sessions_base_directory` is
 /// the directory
-/// [`resolve_shared_sessions_base_directory`](ipc_client::resolve_shared_sessions_base_directory)
+/// [`resolve_shared_sessions_base_directory_for_layer`](crate::config::resolve_shared_sessions_base_directory_for_layer)
 /// names; `None` asks only this user's sessions.
 ///
 /// Up to [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE)

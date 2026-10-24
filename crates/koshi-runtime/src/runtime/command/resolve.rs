@@ -11,6 +11,9 @@ use super::*;
 
 use std::collections::HashSet;
 
+use koshi_core::event::{format_member_not_in_session_help, SessionMemberId};
+use koshi_session::session::state::Tab;
+
 impl Server {
     /// Check a command against live state before it reaches a handler. Runs the
     /// universal checks in fixed precedence: CLI command admission, session
@@ -19,7 +22,7 @@ impl Server {
     /// Returns the first failure, or `Ok(())` when the command is well-formed
     /// against current state.
     ///
-    /// [`Server::dispatch_reporting_spare`] is the only caller and runs this
+    /// [`Server::dispatch_reporting_moved_cells`] is the only caller and runs this
     /// before any handler, so every command crosses this gate.
     pub(super) fn validate_command(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
         // 1. CLI admission: a CLI command source may submit only the commands
@@ -241,11 +244,20 @@ impl Server {
                 Self::resolve_focus_target(command_args, command_source, session).map(drop)
             }
             Command::ClosePane(command_args) => self
-                .resolve_pane_target(command_args.pane_id, command_source, session)
+                .resolve_pane_target(
+                    command_args.pane_id,
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )
                 .map(drop),
             Command::ResizePane(command_args) => {
-                let pane_target =
-                    self.resolve_pane_target(command_args.pane_id, command_source, session)?;
+                let pane_target = self.resolve_pane_target(
+                    command_args.pane_id,
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )?;
                 if command_args.resize_amount_cells == 0 {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::InvalidState,
@@ -305,7 +317,12 @@ impl Server {
             )
             .map(drop),
             Command::WriteToPane(command_args) => self
-                .resolve_pane_target(command_args.pane_id, command_source, session)
+                .resolve_pane_target(
+                    command_args.pane_id,
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )
                 .map(drop),
             Command::NewPane(command_args) => match command_args.placement {
                 NewPanePlacement::Split {
@@ -317,7 +334,13 @@ impl Server {
                     source_pane_id,
                     tab_id,
                 } => self
-                    .resolve_new_pane_source(source_pane_id, tab_id, command_source, session)
+                    .resolve_new_pane_source(
+                        source_pane_id,
+                        tab_id,
+                        command_args.client_id,
+                        command_source,
+                        session,
+                    )
                     .map(drop),
                 NewPanePlacement::Floating {
                     size,
@@ -368,9 +391,13 @@ impl Server {
             Command::CloseTab(command_args) => self
                 .resolve_tab_or_active(command_args.tab_id, command_source, session)
                 .map(drop),
-            Command::MoveTab(command_args) => self
-                .resolve_tab_or_active(command_args.tab_id, command_source, session)
-                .map(drop),
+            Command::MoveTab(command_args) => {
+                self.resolve_tab_or_active(command_args.tab_id, command_source, session)?;
+                Self::require_tab_index(
+                    Self::require_session(session)?,
+                    command_args.target_tab_index,
+                )
+            }
             Command::FocusTab(command_args) => {
                 Self::resolve_focus_tab_target(command_args, command_source, session).map(drop)
             }
@@ -408,8 +435,12 @@ impl Server {
     ) -> Result<ClientPaneTarget, Rejection> {
         let session = Self::require_session(session)?;
         let client_id = Self::resolve_view_client(None, command_source, session)?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, Some(session))?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            Some(session),
+        )?;
         let Some(tab_id) = pane_target.tab_id else {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -452,8 +483,12 @@ impl Server {
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<ResolvedTiledPlacement, Rejection> {
-        let source_pane_target =
-            self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
+        let source_pane_target = self.resolve_pane_target(
+            command_args.source_pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
         if source_pane_target.tab_id.is_none()
             && matches!(tiled_placement_target, TiledPlacementTarget::Swap { .. })
         {
@@ -476,6 +511,7 @@ impl Server {
             |target_pane_id: PaneId, floating_target_help: &str| -> Result<TabId, Rejection> {
                 let destination_pane_target = self.resolve_pane_target(
                     Some(target_pane_id),
+                    command_source.get_target_client_id(),
                     command_source,
                     Some(owner_session),
                 )?;
@@ -551,8 +587,12 @@ impl Server {
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<UndockPaneTarget, Rejection> {
-        let source_pane_target =
-            self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
+        let source_pane_target = self.resolve_pane_target(
+            command_args.source_pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
         let Some(source_tab_id) = source_pane_target.tab_id else {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -610,8 +650,12 @@ impl Server {
             command_source,
             session,
         )?;
-        let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, Some(session))?;
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            Some(session),
+        )?;
         match pane_target.tab_id {
             Some(_) => Self::require_pane_in_active_tab(session, client_id, pane_target.pane_id)?,
             None => Self::require_floating_pane_shown(session, client_id, pane_target.pane_id)?,
@@ -702,7 +746,12 @@ impl Server {
                 pane_id,
             });
         }
-        let pane_target = self.resolve_pane_target(requested_pane_id, command_source, session)?;
+        let pane_target = self.resolve_pane_target(
+            requested_pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
         if pane_target.tab_id.is_some() {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -918,33 +967,45 @@ impl Server {
     /// [`Self::handle_new_pane`] calls it and uses the value.
     ///
     /// An explicit `--pane` is global: the new pane joins whatever session owns
-    /// that pane, focused for the acting client only when that client is
-    /// attached there. An explicit `--tab` (with no `--pane`) picks the tab
+    /// that pane. An explicit `--tab` (with no `--pane`) picks the tab
     /// within the acting session and anchors the split on that tab's most
     /// recently focused pane ([`Self::resolve_tab_anchor_pane_id`]). With neither, the
     /// command source defaults within the acting session — an in-session CLI's
-    /// captured pane, or the acting client's focused pane.
+    /// captured pane, else the pane that takes the input of the client
+    /// `explicit_client_id` names, else of the acting client
+    /// ([`Self::resolve_pane_target`]).
+    ///
+    /// The focus client is `explicit_client_id` when set, else the issuer
+    /// while it is attached to the session the new pane joins, else none
+    /// ([`Self::resolve_new_pane_focus_client_id`]).
+    ///
+    /// With clients A and B attached and B named, an external CLI naming no
+    /// pane and no tab splits the pane that takes B's input, and B focuses the
+    /// new pane. With neither named, it is [`RejectReason::TargetAmbiguous`].
     ///
     /// A source pane that floats is [`RejectReason::InvalidState`]:
     /// `<pane> is floating and has no split to divide; use new-pane --floating,
-    /// or dock-pane first`.
+    /// or dock-pane first`. An `explicit_client_id` that is not attached to the
+    /// session the new pane joins is [`Self::resolve_view_client`]'s refusal.
     pub(super) fn resolve_new_pane_source(
         &self,
         source_pane_id: Option<PaneId>,
         tab_id: Option<TabId>,
+        explicit_client_id: Option<ClientId>,
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<NewPaneTarget, Rejection> {
         match (source_pane_id, tab_id) {
             // An explicit tab picks where the pane lands; the split anchors on
-            // that tab's most recently focused pane. The issuer becomes the
-            // focus client only while still attached to the acting session.
+            // that tab's most recently focused pane.
             (None, Some(tab_id)) => {
                 let session = Self::require_session(session)?;
                 let source_pane_id = Self::resolve_tab_anchor_pane_id(session, tab_id)?;
-                let focus_client_id = command_source
-                    .get_client_id()
-                    .filter(|client_id| session.clients.get_client_by_id(*client_id).is_some());
+                let focus_client_id = Self::resolve_new_pane_focus_client_id(
+                    explicit_client_id,
+                    command_source,
+                    session,
+                )?;
                 Ok(NewPaneTarget {
                     session_id: session.session_id,
                     source_pane_id,
@@ -954,15 +1015,17 @@ impl Server {
             }
             // An explicit command source pane wins outright, and with none the default
             // pane stands in — the in-session CLI's captured pane, else the
-            // acting client's focused pane. Both resolve through
-            // [`Self::resolve_pane_target`], so the pane's own tab is the
-            // receiving tab. The issuer becomes the focus client only while
-            // still attached to the owning session — an in-session CLI whose
-            // client is gone still splits its pane, and focuses the new pane for
-            // no client.
+            // pane that takes the named or acting client's input. Both resolve
+            // through [`Self::resolve_pane_target`], so the pane's own tab is
+            // the receiving tab. An in-session CLI whose client is gone still
+            // splits its pane, and focuses the new pane for no client.
             (source_pane_id, _) => {
-                let pane_target =
-                    self.resolve_pane_target(source_pane_id, command_source, session)?;
+                let pane_target = self.resolve_pane_target(
+                    source_pane_id,
+                    explicit_client_id,
+                    command_source,
+                    session,
+                )?;
                 let Some(tab_id) = pane_target.tab_id else {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::InvalidState,
@@ -972,13 +1035,15 @@ impl Server {
                         ),
                     ));
                 };
-                let focus_client_id = command_source.get_client_id().filter(|client_id| {
-                    self.session_by_id
-                        .get(&pane_target.session_id)
-                        .is_some_and(|owner_session| {
-                            owner_session.clients.get_client_by_id(*client_id).is_some()
-                        })
-                });
+                let owner_session = self
+                    .session_by_id
+                    .get(&pane_target.session_id)
+                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+                let focus_client_id = Self::resolve_new_pane_focus_client_id(
+                    explicit_client_id,
+                    command_source,
+                    owner_session,
+                )?;
                 Ok(NewPaneTarget {
                     session_id: pane_target.session_id,
                     source_pane_id: pane_target.pane_id,
@@ -986,6 +1051,28 @@ impl Server {
                     focus_client_id,
                 })
             }
+        }
+    }
+
+    /// The client that shows and focuses a new split or stacked pane in
+    /// `session`: `explicit_client_id` when set, else the issuer of
+    /// `command_source` while it is attached to `session`, else `None`.
+    ///
+    /// An `explicit_client_id` that is not attached to `session` is
+    /// [`Self::resolve_view_client`]'s refusal, also when the issuer is
+    /// attached.
+    fn resolve_new_pane_focus_client_id(
+        explicit_client_id: Option<ClientId>,
+        command_source: &CommandSource,
+        session: &Session,
+    ) -> Result<Option<ClientId>, Rejection> {
+        match explicit_client_id {
+            Some(client_id) => {
+                Self::resolve_view_client(Some(client_id), command_source, session).map(Some)
+            }
+            None => Ok(command_source
+                .get_client_id()
+                .filter(|client_id| session.clients.get_client_by_id(*client_id).is_some())),
         }
     }
 
@@ -1138,7 +1225,8 @@ impl Server {
     ///   [`RejectReason::InvalidState`] `<pane> is pinned; unpin it to move
     ///   its left or top edge`;
     /// - a shrink of an axis at the floating minimum:
-    ///   [`RejectReason::MinimumSize`] with no spare cells;
+    ///   [`RejectReason::MinimumSize`], unlogged, `<pane> cannot shrink from
+    ///   the <side> here; it is at its minimum size`;
     /// - a growth of an axis at the floating cap, 90% of the shared floating
     ///   viewport rounding down ([`compute_floating_pane_size_cap`]):
     ///   [`RejectReason::InvalidState`] `<pane> already spans 90% of the
@@ -1225,19 +1313,18 @@ impl Server {
             );
         if clamped_cell_count == i32::from(current_cell_count) {
             if command_args.resize_amount_cells < 0 {
-                return Err(Rejection {
-                    reason: RejectReason::MinimumSize,
-                    help: Some(format!("{pane_id} is at its minimum size on that axis")),
-                    spare_cell_count: Some(0),
-                });
+                return Err(Rejection::from_unmovable_border(
+                    RejectReason::MinimumSize,
+                    Self::format_unmovable_border_help(
+                        pane_id,
+                        direction,
+                        false,
+                        "it is at its minimum size",
+                    ),
+                ));
             }
             if current_cell_count < cap_cell_count {
-                let side_name = match direction {
-                    Direction::Right => "right",
-                    Direction::Down => "bottom",
-                    Direction::Left => "left",
-                    Direction::Up => "top",
-                };
+                let side_name = format_side_name(direction);
                 return Err(Rejection::from_reason_and_help(
                     RejectReason::InvalidState,
                     &format!("{pane_id} already reaches the {side_name} edge of the pane area"),
@@ -1285,14 +1372,23 @@ impl Server {
     /// ([`Self::resolve_pane_tab_id`]).
     ///
     /// An explicit pane target is global: its owning session is found by
-    /// registry membership, and a winding-down owning session rejects. Without one, the
-    /// in-session CLI targets the pane it was issued from, and any other
+    /// registry membership, and a winding-down owning session rejects. A pane
+    /// no session holds is [`RejectReason::TargetNotFound`] with the help
+    /// ``pane pane-<uuid> is not in session `work` `` naming the acting
+    /// session `session` ([`format_member_not_in_session_help`]), and with no
+    /// help when `session` is `None`. Without one, the
+    /// in-session CLI targets the pane it was issued from, whatever
+    /// `explicit_client_id` names, and any other
     /// command source targets the pane that takes the target client's input
     /// ([`Client::get_active_focused_pane_id`]): its focused floating pane,
-    /// else its focused pane in its active tab. The target client is the
-    /// client the caller named ([`CommandSource::get_target_client_id`]) when
-    /// there is one, else the issuer while attached, else the session's sole
-    /// attached client ([`Self::resolve_view_client`]). An external CLI acts
+    /// else its focused pane in its active tab. The target client is
+    /// `explicit_client_id` when set, else the issuer while attached, else the
+    /// session's sole attached client ([`Self::resolve_view_client`]).
+    /// `explicit_client_id` is the client the command names: the one in its own
+    /// arguments, else the one its source names
+    /// ([`CommandSource::get_target_client_id`]). An `explicit_client_id` that
+    /// is not attached to the session is [`Self::resolve_view_client`]'s
+    /// refusal. An external CLI acts
     /// on the pane a keypress on that client acts on. A client with no such
     /// pane is [`RejectReason::TargetNotFound`] `no focused pane`. A stale
     /// tiled focus entry is rejected ([`Self::require_pane_in_active_tab`]).
@@ -1304,14 +1400,21 @@ impl Server {
     pub(super) fn resolve_pane_target(
         &self,
         requested_pane_id: Option<PaneId>,
+        explicit_client_id: Option<ClientId>,
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<PaneTarget, Rejection> {
         match requested_pane_id {
             Some(pane_id) => {
-                let owning_session = self
-                    .get_session_for_pane(pane_id)
-                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+                let owning_session =
+                    self.get_session_for_pane(pane_id)
+                        .ok_or_else(|| match session {
+                            Some(session) => build_member_not_in_session_rejection(
+                                session,
+                                SessionMemberId::Pane(pane_id),
+                            ),
+                            None => Rejection::from_reason(RejectReason::TargetNotFound),
+                        })?;
                 if Self::is_winding_down(owning_session) {
                     return Err(Rejection::from_reason_and_help(
                         RejectReason::InvalidState,
@@ -1340,11 +1443,8 @@ impl Server {
                         })
                     }
                     _ => {
-                        let client_id = Self::resolve_view_client(
-                            command_source.get_target_client_id(),
-                            command_source,
-                            session,
-                        )?;
+                        let client_id =
+                            Self::resolve_view_client(explicit_client_id, command_source, session)?;
                         let client = Self::require_client(session, client_id)?;
                         if let Some(floating_pane_id) = client.get_focused_floating_pane_id() {
                             return Ok(PaneTarget {
@@ -1382,16 +1482,13 @@ impl Server {
 
     /// The pane a tab-addressed `new-pane` splits: the tab's most recently
     /// focused pane, or — until anything in the tab has been focused — its
-    /// first pane in layout order. [`RejectReason::TargetNotFound`] when the
-    /// tab is gone.
+    /// first pane in layout order. A tab `session` does not hold is
+    /// [`Self::require_tab`]'s refusal.
     pub(super) fn resolve_tab_anchor_pane_id(
         session: &Session,
         tab_id: TabId,
     ) -> Result<PaneId, Rejection> {
-        let tab = session
-            .tabs
-            .get(&tab_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let tab = Self::require_tab(session, tab_id)?;
         if let Some(&pane_id) = tab.list_focus_mru().first() {
             return Ok(pane_id);
         }
@@ -1446,8 +1543,10 @@ impl Server {
     ///   client that cannot draw floating panes
     ///   ([`Session::can_client_draw_floating_panes`]) is
     ///   [`RejectReason::InvalidState`] `<pane> cannot be drawn on this
-    ///   client`. Any other pane resolves through
-    ///   [`Self::require_pane_in_active_tab`].
+    ///   client`. A pane with no record in the session's registry is
+    ///   [`RejectReason::TargetNotFound`] with the help ``pane pane-<uuid> is
+    ///   not in session `work` `` ([`format_member_not_in_session_help`]).
+    ///   Any other pane resolves through [`Self::require_pane_in_active_tab`].
     /// - [`FocusTarget::Direction`] with a floating pane focused is the pane
     ///   the client focused in its active tab, in every direction. With none
     ///   focused, it resolves geometrically from that pane over the client's
@@ -1486,7 +1585,15 @@ impl Server {
                     pane_id,
                 }));
             }
-            FocusTarget::Pane(pane_id) => pane_id,
+            FocusTarget::Pane(pane_id) => {
+                if session.panes.get_pane_record_by_id(pane_id).is_none() {
+                    return Err(build_member_not_in_session_rejection(
+                        session,
+                        SessionMemberId::Pane(pane_id),
+                    ));
+                }
+                pane_id
+            }
             FocusTarget::Direction(direction) => {
                 let tab_focused_pane_id =
                     Self::resolve_active_tab_focused_pane(session, client_id)?;
@@ -1651,8 +1758,9 @@ impl Server {
     /// if the client has since switched tabs); any other command source defaults to the
     /// acting client's live `active_tab_id` ([`Self::resolve_acting_client`] — the
     /// issuer while attached, else the session's sole attached client). Fails
-    /// with [`RejectReason::TargetNotFound`] when there is no session context
-    /// or the tab is gone, and with [`RejectReason::InvalidState`]
+    /// with [`RejectReason::TargetNotFound`] when there is no session context,
+    /// with [`Self::require_tab`]'s refusal when the tab is gone, and with
+    /// [`RejectReason::InvalidState`]
     /// `<pane> is floating and belongs to no tab` when an in-session CLI's
     /// command source pane floats and no tab is named.
     pub(super) fn resolve_tab_or_active(
@@ -1693,8 +1801,10 @@ impl Server {
 
     /// Resolve the client a tab-view command acts for: the explicit `client`
     /// argument when set — it wins even over an in-session issuer, and one not
-    /// attached to the acting session is [`RejectReason::TargetNotFound`],
-    /// never a fallback to the issuer. With no explicit target the acting
+    /// attached to the acting session is [`RejectReason::TargetNotFound`] with
+    /// the help ``client client-<uuid> is not attached to session `work` ``
+    /// ([`format_member_not_in_session_help`]), never a fallback to the
+    /// issuer. With no explicit target the acting
     /// client decides ([`Self::resolve_acting_client`]).
     pub(super) fn resolve_view_client(
         explicit_client_id: Option<ClientId>,
@@ -1704,9 +1814,9 @@ impl Server {
         match explicit_client_id {
             Some(client_id) => {
                 if session.clients.get_client_by_id(client_id).is_none() {
-                    return Err(Rejection::from_reason_and_help(
-                        RejectReason::TargetNotFound,
-                        "target client not attached to the session",
+                    return Err(build_member_not_in_session_rejection(
+                        session,
+                        SessionMemberId::Client(client_id),
                     ));
                 }
                 Ok(client_id)
@@ -1751,7 +1861,12 @@ impl Server {
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<ClientPaneTarget, Rejection> {
-        let pane_target = self.resolve_pane_target(None, command_source, session)?;
+        let pane_target = self.resolve_pane_target(
+            None,
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
         let Some(tab_id) = pane_target.tab_id else {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -1776,9 +1891,11 @@ impl Server {
 
     /// Resolve the [`Command::FocusTab`] target: the client whose view
     /// switches ([`Self::resolve_view_client`]) and the concrete tab the
-    /// target names — an id or index must match an existing tab, and
-    /// `Next`/`Previous` step from the *target* client's active tab, wrapping at
-    /// the ends. Validation and [`Self::handle_focus_tab`] both call it.
+    /// target names — an id the session does not hold is
+    /// [`Self::require_tab`]'s refusal, an index past the last tab is
+    /// [`Self::require_tab_index`]'s refusal, and `Next`/`Previous` step
+    /// from the *target* client's active tab, wrapping at the ends. Validation
+    /// and [`Self::handle_focus_tab`] both call it.
     pub(super) fn resolve_focus_tab_target(
         command_args: &FocusTabArgs,
         command_source: &CommandSource,
@@ -1788,8 +1905,14 @@ impl Server {
         let client_id = Self::resolve_view_client(command_args.client_id, command_source, session)?;
         let client = Self::require_client(session, client_id)?;
         let tab_target = match command_args.focus_target {
-            TabTarget::Id(tab_id) => tab_ops::TabTarget::Id(tab_id),
-            TabTarget::Index(tab_index) => tab_ops::TabTarget::Index(tab_index),
+            TabTarget::Id(tab_id) => {
+                Self::require_tab(session, tab_id)?;
+                tab_ops::TabTarget::Id(tab_id)
+            }
+            TabTarget::Index(tab_index) => {
+                Self::require_tab_index(session, tab_index)?;
+                tab_ops::TabTarget::Index(tab_index)
+            }
             TabTarget::Next => tab_ops::TabTarget::Next,
             TabTarget::Previous => tab_ops::TabTarget::Previous,
         };
@@ -1850,13 +1973,42 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))
     }
 
-    /// Confirm `tab_id` exists in `session`.
-    pub(super) fn require_tab(session: &Session, tab_id: TabId) -> Result<(), Rejection> {
-        if session.tabs.contains_key(&tab_id) {
-            Ok(())
-        } else {
-            Err(Rejection::from_reason(RejectReason::TargetNotFound))
+    /// The tab `tab_id` of `session`. A tab `session` does not hold is
+    /// [`RejectReason::TargetNotFound`] with the help
+    /// [`format_member_not_in_session_help`] gives, such as ``tab tab-<uuid>
+    /// is not in session `work` ``.
+    pub(super) fn require_tab(session: &Session, tab_id: TabId) -> Result<&Tab, Rejection> {
+        session.tabs.get(&tab_id).ok_or_else(|| {
+            build_member_not_in_session_rejection(session, SessionMemberId::Tab(tab_id))
+        })
+    }
+
+    /// Confirm a tab sits at display position `tab_index` in `session`, whose
+    /// tabs hold the positions `0` to `session.tabs.len() - 1`.
+    ///
+    /// [`RejectReason::TargetNotFound`] when `tab_index` is past the last tab,
+    /// with a help naming the session's tab count and the `--index` values it
+    /// takes. Session `work` with 3 tabs gives ``session `work` has 3 tabs;
+    /// --index takes 0 to 2``, with 1 tab ``session `work` has 1 tab; --index
+    /// takes 0``, and with no tab ``session `work` has no tab``.
+    pub(super) fn require_tab_index(session: &Session, tab_index: usize) -> Result<(), Rejection> {
+        let tab_count = session.tabs.len();
+        if tab_index < tab_count {
+            return Ok(());
         }
+        let session_name = &session.session_name;
+        let tab_index_help = match tab_count {
+            0 => format!("session `{session_name}` has no tab"),
+            1 => format!("session `{session_name}` has 1 tab; --index takes 0"),
+            _ => format!(
+                "session `{session_name}` has {tab_count} tabs; --index takes 0 to {}",
+                tab_count - 1
+            ),
+        };
+        Err(Rejection::from_reason_and_help(
+            RejectReason::TargetNotFound,
+            &tab_index_help,
+        ))
     }
 
     /// Whether `session` is shutting down (`Stopping`/`Stopped`) and so accepts
@@ -1867,6 +2019,20 @@ impl Server {
             SessionLifecycle::Stopping | SessionLifecycle::Stopped
         )
     }
+}
+
+/// [`RejectReason::TargetNotFound`] with the help
+/// [`format_member_not_in_session_help`] gives for `member_id` and the name of
+/// `session`: ``pane pane-<uuid> is not in session `work` `` for a pane that
+/// session `work` does not hold.
+fn build_member_not_in_session_rejection(
+    session: &Session,
+    member_id: SessionMemberId,
+) -> Rejection {
+    Rejection::from_reason_and_help(
+        RejectReason::TargetNotFound,
+        &format_member_not_in_session_help(member_id, &session.session_name),
+    )
 }
 
 /// Confirm that every pane named by a placement anchor belongs to the selected

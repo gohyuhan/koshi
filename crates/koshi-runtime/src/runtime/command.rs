@@ -42,8 +42,8 @@ use koshi_core::{
         SelectionChanged,
     },
     geometry::{
-        Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, PixelCellSize, Point, Rect,
-        Size, DEFAULT_FLOATING_PANE_SIZE,
+        Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea,
+        PixelCellSize, Point, Rect, Size, DEFAULT_FLOATING_PANE_SIZE,
     },
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     lock::LockMode,
@@ -67,8 +67,7 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
 use koshi_session::client::{
-    compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin,
-    FloatingPanePosition, FloatingPaneView,
+    compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin, FloatingPaneView,
 };
 use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
@@ -196,10 +195,10 @@ fn find_first_focused_tab_id(emitted_events: &[Event]) -> Option<TabId> {
 struct Rejection {
     reason: RejectReason,
     help: Option<String>,
-    /// Cells the donating pane can still give, for a resize refused at a pane
-    /// minimum; `None` for every other rejection. A rejection carrying this is
-    /// the one [`Server::reject_command`] leaves unlogged.
-    spare_cell_count: Option<u16>,
+    /// `false` only for a border that cannot move one cell
+    /// ([`Rejection::from_unmovable_border`]); [`Server::reject_command`]
+    /// logs every other rejection.
+    should_log: bool,
 }
 
 impl Rejection {
@@ -208,7 +207,7 @@ impl Rejection {
         Rejection {
             reason,
             help: Some(help.to_string()),
-            spare_cell_count: None,
+            should_log: true,
         }
     }
 
@@ -217,27 +216,39 @@ impl Rejection {
         Rejection {
             reason,
             help: None,
-            spare_cell_count: None,
+            should_log: true,
         }
     }
 
-    /// A resize refused at a pane minimum, carrying the `spare_cell_count` cells the
-    /// donating pane can still give in both the hint and the field.
-    fn from_minimum_size(spare_cell_count: u16) -> Self {
+    /// A rejection with `reason` and the hint `help`, for a border that
+    /// cannot move one cell: [`RejectReason::MinimumSize`] when a pane is at
+    /// its minimum size, [`RejectReason::InvalidState`] when the layout holds
+    /// the border in place. It is not logged.
+    fn from_unmovable_border(reason: RejectReason, help: String) -> Self {
         Rejection {
-            reason: RejectReason::MinimumSize,
-            help: Some(format!(
-                "the donating pane has only {spare_cell_count} spare cells to give"
-            )),
-            spare_cell_count: Some(spare_cell_count),
+            reason,
+            help: Some(help),
+            should_log: false,
         }
+    }
+}
+
+/// The name of the `direction` side of a pane or a pane area: `left`,
+/// `right`, `top` or `bottom`. `Direction::Up` gives `top`.
+fn format_side_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "left",
+        Direction::Right => "right",
+        Direction::Up => "top",
+        Direction::Down => "bottom",
     }
 }
 
 /// The resolved concrete target of a [`Command::NewPane`]: the session and tab
 /// the new pane joins, the command source pane it splits from, and the client to
-/// auto-focus it for (when one applies). All fields are `Copy`: the target
-/// holds no borrow into the session map.
+/// auto-focus it for: the client the command names, else its issuer while
+/// attached, else none. All fields are `Copy`: the target holds no borrow into
+/// the session map.
 struct NewPaneTarget {
     session_id: SessionId,
     source_pane_id: PaneId,
@@ -411,16 +422,17 @@ impl Server {
     /// marks the views that show it at the next
     /// [`mark_changed_views`](Self::mark_changed_views).
     pub(crate) fn dispatch(&mut self, envelope: CommandEnvelope) -> CommandResult {
-        self.dispatch_reporting_spare(envelope).0
+        self.dispatch_reporting_moved_cells(envelope).0
     }
 
-    /// [`dispatch`](Self::dispatch), also handing back the cells the donating
-    /// pane can still give when a resize was refused at a pane minimum.
+    /// [`dispatch`](Self::dispatch), also handing back the cells a tiled
+    /// pane's border moved.
     ///
-    /// The second half is `Some` only for that refusal; every other outcome,
-    /// including success, gives `None`. The mouse layer reads it to ask again
-    /// for exactly the cells a border still has room to move.
-    pub(crate) fn dispatch_reporting_spare(
+    /// The second half is `Some` only for an applied [`Command::ResizePane`]
+    /// on a tiled pane; every other outcome, a refusal included, gives
+    /// `None`. A border asked to move `100` cells into a neighbor with `36`
+    /// above its minimum gives `Some(36)`.
+    pub(crate) fn dispatch_reporting_moved_cells(
         &mut self,
         envelope: CommandEnvelope,
     ) -> (CommandResult, Option<u16>) {
@@ -428,6 +440,7 @@ impl Server {
         if let Err(rejection) = self.validate_command(&envelope) {
             return (Self::reject_command(command_id, rejection), None);
         }
+        let mut moved_cell_count = None;
         let outcome = match envelope.command {
             Command::NewPane(command_args) => {
                 self.handle_new_pane(command_id, &envelope.command_source, &command_args)
@@ -435,9 +448,12 @@ impl Server {
             Command::ClosePane(command_args) => {
                 self.handle_close_pane(command_id, &envelope.command_source, &command_args)
             }
-            Command::ResizePane(command_args) => {
-                self.handle_resize_pane(command_id, &envelope.command_source, &command_args)
-            }
+            Command::ResizePane(command_args) => self
+                .handle_resize_pane(command_id, &envelope.command_source, &command_args)
+                .map(|(command_result, resize_moved_cell_count)| {
+                    moved_cell_count = resize_moved_cell_count;
+                    command_result
+                }),
             Command::MovePane(command_args) => {
                 self.handle_move_pane(command_id, &envelope.command_source, &command_args)
             }
@@ -505,14 +521,8 @@ impl Server {
             }
         };
         match outcome {
-            Ok(command_result) => (command_result, None),
-            Err(rejection) => {
-                let spare_cell_count = rejection.spare_cell_count;
-                (
-                    Self::reject_command(command_id, rejection),
-                    spare_cell_count,
-                )
-            }
+            Ok(command_result) => (command_result, moved_cell_count),
+            Err(rejection) => (Self::reject_command(command_id, rejection), None),
         }
     }
 
@@ -546,10 +556,10 @@ impl Server {
     ///
     /// Every rejection a handler or validation produces is built here, and
     /// logged here at `warn`: the command did not apply, state is untouched,
-    /// and the session carries on. A border move refused at a pane minimum —
-    /// the rejection carrying `spare_cell_count` — is not logged.
+    /// and the session carries on. A border that cannot move one cell
+    /// ([`Rejection::from_unmovable_border`]) is not logged.
     fn reject_command(command_id: CommandId, rejection: Rejection) -> CommandResult {
-        if rejection.spare_cell_count.is_none() {
+        if rejection.should_log {
             tracing::warn!(
                 command_id = %command_id,
                 reason = %rejection.reason,

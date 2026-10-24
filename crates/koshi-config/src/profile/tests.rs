@@ -368,6 +368,64 @@ fn syntax_error_is_the_syntax_variant() {
 }
 
 #[test]
+fn problem_messages_name_the_line_and_column_of_a_syntax_error_and_of_each_schema_error() {
+    assert_eq!(
+        parse_profile_text("tab {")
+            .unwrap_err()
+            .list_problem_messages(),
+        vec![
+            "config parse error in profile/dev.kdl: line 1, column 5: No closing '}' for child block"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        parse_profile_text("tab {pane}")
+            .unwrap_err()
+            .list_problem_messages(),
+        vec!["line 1, column 1: profile file must declare `version`".to_string()]
+    );
+}
+
+#[test]
+fn one_problem_gives_exactly_one_message() {
+    assert_eq!(
+        parse_profile_text("version 1\ntab { pane { size 30 } }")
+            .unwrap_err()
+            .list_problem_messages(),
+        ["line 2, column 14: sizing applies only to children of `horizontal` or `vertical`"]
+    );
+}
+
+#[test]
+fn the_same_problem_on_two_nodes_gives_two_messages_told_apart_by_location() {
+    assert_eq!(
+        parse_profile_text("version 1\ntab { pane { size 30; min 5 } }")
+            .unwrap_err()
+            .list_problem_messages(),
+        [
+            "line 2, column 14: sizing applies only to children of `horizontal` or `vertical`",
+            "line 2, column 23: sizing applies only to children of `horizontal` or `vertical`",
+        ]
+    );
+}
+
+#[test]
+fn problems_are_listed_in_file_order_whatever_order_the_parse_finds_them() {
+    // The split's own `size 30` is checked after its children, and its
+    // message still comes first.
+    assert_eq!(
+        parse_profile_text("version 1\ntab { horizontal { size 30; pane \"x\"; pane } }")
+            .unwrap_err()
+            .list_problem_messages(),
+        [
+            "line 2, column 20: sizing applies only to children of `horizontal` or `vertical`",
+            "line 2, column 29: `pane` takes no arguments or properties; its configuration goes \
+             in the children block",
+        ]
+    );
+}
+
+#[test]
 fn invalid_report_names_the_file() {
     let profile_error = parse_profile_text("version 1").unwrap_err();
     assert_eq!(
@@ -489,8 +547,8 @@ fn a_plugin_node_is_reported_as_an_unknown_key() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\ntab { plugin \"session-manager\" }"),
         [
-            "unknown key `tab.plugin`; did you mean `tab.pane`?",
             "`tab` needs one layout node (`pane`, `horizontal`, `vertical`, or `stack`)",
+            "unknown key `tab.plugin`; did you mean `tab.pane`?",
         ]
     );
 }
@@ -714,6 +772,41 @@ fn sizing_on_a_stack_at_the_tab_root_is_reported() {
 }
 
 #[test]
+fn every_sizing_node_of_a_split_at_the_tab_root_is_reported_at_that_node() {
+    assert_eq!(
+        collect_profile_diagnostic_spans(
+            "version 1\ntab { horizontal { size 30; min 5; pane; pane } }"
+        ),
+        ["size 30", "min 5"]
+    );
+}
+
+#[test]
+fn every_sizing_node_of_a_stack_at_the_tab_root_is_reported_at_that_node() {
+    assert_eq!(
+        collect_profile_diagnostic_spans(
+            "version 1\ntab { stack { weight 2; preferred 10; pane; pane } }"
+        ),
+        ["weight 2", "preferred 10"]
+    );
+}
+
+#[test]
+fn a_second_size_on_a_stack_member_is_reported_as_a_second_size() {
+    // A leaf outside a directional split reports its sizing nodes the way a
+    // split does: the first `size` is misplaced, and the second one repeats it.
+    assert_eq!(
+        collect_profile_diagnostic_messages(
+            "version 1\ntab { stack { pane { size 30; size 40 }; pane } }"
+        ),
+        [
+            "sizing applies only to children of `horizontal` or `vertical`",
+            "this node already has `size` or `weight`; give one of the two, once",
+        ]
+    );
+}
+
+#[test]
 fn expanded_on_the_tab_root_is_reported() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\ntab { pane {expanded} }"),
@@ -917,8 +1010,8 @@ fn min_as_a_property_is_reported() {
 
 #[test]
 fn two_sizing_violations_outside_directional_context_are_both_reported() {
-    // Each sizing child of a leaf outside a directional split is checked and
-    // reset on its own: two sizing nodes on one leaf draw two diagnostics.
+    // Every sizing child of a leaf outside a directional split draws its own
+    // diagnostic: two sizing nodes on one leaf draw two diagnostics.
     assert_eq!(
         collect_profile_diagnostic_messages(
             "version 1\ntab { stack { pane { size 30; min 5 }; pane } }"
@@ -932,10 +1025,10 @@ fn two_sizing_violations_outside_directional_context_are_both_reported() {
 
 #[test]
 fn each_sizing_violation_points_its_caret_at_its_own_node() {
-    // The per-node sizing reset keeps every diagnostic's caret on the node
-    // that raised it: the second report points at `min 5`, not back at the
-    // first node's `size 30`. (A kdl node's span runs to the next node or
-    // closing brace, so the last node carries its trailing space.)
+    // Every diagnostic's caret sits on the node that raised it: the second
+    // report points at `min 5`, not at the first node's `size 30`. (A kdl
+    // node's span runs to the next node or closing brace, so the last node
+    // carries its trailing space.)
     assert_eq!(
         collect_profile_diagnostic_spans(
             "version 1\ntab { stack { pane { size 30; min 5 }; pane } }"

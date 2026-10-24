@@ -15,6 +15,7 @@ const KEYS_DETAIL_HEADERS: &[&str] = &[
     "description",
     "scope",
     "source",
+    "displaced_by",
     "continuous",
 ];
 
@@ -30,9 +31,8 @@ struct KeyBindingSummary {
     key_sequence: String,
     /// The action reference the key fires.
     action_reference: String,
-    /// The layer that authored the winning entry: `defaults`, `user`,
-    /// `session`, or `layout` — or `defaults (unbound)` for a shipped
-    /// binding a user surface displaced.
+    /// The layer that authored the winning entry: `defaults` or `user` — or
+    /// `defaults (unbound)` for a shipped binding the user displaced.
     binding_source: String,
 }
 
@@ -61,8 +61,12 @@ struct KeyBindingDetail {
     description: String,
     /// How broad the action's effect is.
     scope: String,
-    /// The layer that authored the winning entry.
+    /// The layer that authored the entry: `defaults`, `user`, or `defaults
+    /// (unbound)` for a built-in binding the user displaced.
     binding_source: String,
+    /// For a `defaults (unbound)` entry, the user entry that displaced it:
+    /// `user bind` or `user remove`. `None` for every other entry.
+    displaced_by: Option<String>,
     /// Whether the action re-arms its prefix when fired from a multi-chord
     /// binding.
     is_continuous: bool,
@@ -72,7 +76,7 @@ struct KeyBindingDetail {
 /// `keys validate` answer.
 #[derive(Serialize)]
 struct ConflictFinding {
-    /// The finding's weight: `warning`, `collision`, or `fatal`.
+    /// The finding's weight: `warning` or `fatal`.
     severity: String,
     /// The user-facing message.
     finding_message: String,
@@ -81,11 +85,11 @@ struct ConflictFinding {
 /// A whole `keys conflicts` answer.
 #[derive(Serialize)]
 struct KeysConflicts {
-    /// What a loader would do with the user keymap.
+    /// What a client does with the user keybinding file when it attaches:
+    /// `apply` or `reject`. `apply` when no file exists.
     verdict: String,
     /// Why the user keybinding file was ignored (it could not be read or
-    /// parsed), `null` when it loaded. When set, the verdict and findings
-    /// describe the built-in defaults, not the file.
+    /// parsed), `null` when it loaded. When set, the verdict is `reject`.
     file_error: Option<String>,
     /// Every finding, warnings included.
     conflict_findings: Vec<ConflictFinding>,
@@ -96,7 +100,7 @@ struct KeysConflicts {
 struct KeysValidation {
     /// True when the file parsed as valid keybinding KDL.
     is_valid: bool,
-    /// True when a reload would apply the file.
+    /// True when a client would apply the file as its `keybinding.kdl`.
     is_applicable: bool,
     /// Parse problems, one per line, when the file did not parse.
     parse_errors: Vec<String>,
@@ -105,6 +109,11 @@ struct KeysValidation {
 }
 
 /// Render a `koshi keys list` answer from the offline keymap view.
+///
+/// `scope_filter` keeps the rows one layer authored. [`KeymapScope::Default`]
+/// keeps the surviving defaults and the `defaults (unbound)` rows of the
+/// defaults a user binding or `remove` displaced. [`KeymapScope::User`]
+/// keeps the user's bindings.
 #[must_use]
 pub fn render_keys_list(
     keymap_view: &crate::keymap::KeymapView,
@@ -112,7 +121,11 @@ pub fn render_keys_list(
     scope_filter: Option<KeymapScope>,
     output_format: OutputFormat,
 ) -> String {
-    let scope_filter_label = scope_filter.map(format_scope_argument_label);
+    let listed_layer_origin = scope_filter.map(resolve_scope_layer_origin);
+    let is_layer_listed = |layer_origin: koshi_config::conflict::LayerOrigin| {
+        listed_layer_origin.is_none_or(|listed_layer_origin| listed_layer_origin == layer_origin)
+    };
+    let are_defaults_listed = is_layer_listed(koshi_config::conflict::LayerOrigin::Defaults);
     let mut key_bindings: Vec<KeyBindingSummary> = Vec::new();
     for (mode_name, merged_mode_keymap) in &keymap_view.merged_keymap.mode_keymap_by_name {
         if requested_input_mode_name.is_some_and(|requested_input_mode_name| {
@@ -121,12 +134,18 @@ pub fn render_keys_list(
             continue;
         }
         for (key_sequence, merged_binding) in &merged_mode_keymap.user_bindings_by_key_sequence {
+            if !is_layer_listed(merged_binding.layer_origin) {
+                continue;
+            }
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
                 key_sequence: key_sequence.to_string(),
                 action_reference: merged_binding.bound_action.action_reference.to_string(),
                 binding_source: merged_binding.layer_origin.to_string(),
             });
+        }
+        if !are_defaults_listed {
+            continue;
         }
         for (key_sequence, default_binding) in &merged_mode_keymap.default_bindings_by_key_sequence
         {
@@ -143,13 +162,13 @@ pub fn render_keys_list(
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
                 key_sequence: key_sequence.to_string(),
-                action_reference: displaced_default_binding.action_reference.to_string(),
+                action_reference: displaced_default_binding
+                    .bound_action
+                    .action_reference
+                    .to_string(),
                 binding_source: "defaults (unbound)".to_string(),
             });
         }
-    }
-    if let Some(scope_filter_label) = scope_filter_label {
-        key_bindings.retain(|binding| binding.binding_source == scope_filter_label);
     }
     key_bindings.sort_by(|left_binding, right_binding| {
         (&left_binding.input_mode, &left_binding.key_sequence)
@@ -157,7 +176,7 @@ pub fn render_keys_list(
     });
     match output_format {
         OutputFormat::Json => render_json(&KeysList {
-            is_reverted: keymap_view.is_reverted_to_defaults,
+            is_reverted: keymap_view.keymap_verdict != koshi_config::conflict::KeymapVerdict::Apply,
             key_bindings,
         }),
         OutputFormat::Table => render_table(
@@ -168,11 +187,22 @@ pub fn render_keys_list(
 }
 
 /// Render a `koshi keys describe <key-sequence>` answer: one detail block
-/// per mode the sequence is bound in.
+/// per `koshi keys list` row whose key is the sequence or starts with it,
+/// mode by mode in mode-name order, and in key order within a mode. A user
+/// entry comes before the `defaults (unbound)` entry it displaced on the
+/// same key.
+///
+/// - A prefix that binds nothing itself describes the bindings it opens:
+///   `<C-t>` describes `<C-t> n` and `<C-t> x`.
+/// - A `defaults (unbound)` entry names the user entry that displaced it in
+///   `displaced_by`: `user bind` when a user binding took the key, `user
+///   remove` when a `remove` cleared it. Every other entry prints `-` there
+///   in a table and `null` in JSON.
 ///
 /// # Errors
 /// The parser's message when `key_sequence_text` is not a valid key sequence; `Ok(None)`
-/// when it parses but nothing is bound on it in any mode.
+/// when it parses but no `koshi keys list` row in any mode has the sequence
+/// as its key or as the start of its key.
 pub fn render_keys_describe(
     keymap_view: &crate::keymap::KeymapView,
     key_sequence_text: &str,
@@ -187,44 +217,71 @@ pub fn render_keys_describe(
 
     let mut key_binding_details: Vec<KeyBindingDetail> = Vec::new();
     for (mode_name, merged_mode_keymap) in &keymap_view.merged_keymap.mode_keymap_by_name {
-        let (matched_binding, binding_source) = if let Some(merged_binding) = merged_mode_keymap
-            .user_bindings_by_key_sequence
-            .get(&parsed_key_sequence)
-        {
+        let user_bindings = list_bindings_starting_with(
+            &merged_mode_keymap.user_bindings_by_key_sequence,
+            &parsed_key_sequence,
+        )
+        .map(|(key_sequence, merged_binding)| {
             (
+                key_sequence,
                 &merged_binding.bound_action,
                 merged_binding.layer_origin.to_string(),
+                None,
             )
-        } else if let Some(default_binding) = merged_mode_keymap
-            .default_bindings_by_key_sequence
-            .get(&parsed_key_sequence)
-        {
-            (default_binding, "defaults".to_string())
-        } else {
-            continue;
-        };
-        let action_metadata = keymap_view
-            .action_registry
-            .find_action_metadata(&matched_binding.action_reference);
-        key_binding_details.push(KeyBindingDetail {
-            key_sequence: parsed_key_sequence.to_string(),
-            input_mode: mode_name.get_name().to_string(),
-            action_reference: matched_binding.action_reference.to_string(),
-            display_name: action_metadata.map_or(String::new(), |action_metadata_entry| {
-                action_metadata_entry.display_name.clone()
-            }),
-            description: action_metadata.map_or(String::new(), |action_metadata_entry| {
-                action_metadata_entry.description.clone()
-            }),
-            scope: action_metadata
-                .map_or("-", |action_metadata_entry| {
-                    format_scope_label(action_metadata_entry.scope)
-                })
-                .to_string(),
-            binding_source,
-            is_continuous: action_metadata
-                .is_some_and(|action_metadata_entry| action_metadata_entry.is_continuous),
         });
+        let default_bindings = list_bindings_starting_with(
+            &merged_mode_keymap.default_bindings_by_key_sequence,
+            &parsed_key_sequence,
+        )
+        .map(|(key_sequence, default_binding)| {
+            (key_sequence, default_binding, "defaults".to_string(), None)
+        });
+        let displaced_default_bindings = list_bindings_starting_with(
+            &merged_mode_keymap.unbound_default_bindings_by_key_sequence,
+            &parsed_key_sequence,
+        )
+        .map(|(key_sequence, displaced_default_binding)| {
+            (
+                key_sequence,
+                &displaced_default_binding.bound_action,
+                "defaults (unbound)".to_string(),
+                Some(format_default_displacement_label(
+                    displaced_default_binding.default_displacement,
+                )),
+            )
+        });
+        // A stable sort keeps a user entry ahead of the default it displaced.
+        let mut mode_bindings: Vec<_> = user_bindings
+            .chain(default_bindings)
+            .chain(displaced_default_bindings)
+            .collect();
+        mode_bindings.sort_by_key(|(key_sequence, _, _, _)| *key_sequence);
+
+        for (key_sequence, matched_binding, binding_source, displaced_by) in mode_bindings {
+            let action_metadata = keymap_view
+                .action_registry
+                .find_action_metadata(&matched_binding.action_reference);
+            key_binding_details.push(KeyBindingDetail {
+                key_sequence: key_sequence.to_string(),
+                input_mode: mode_name.get_name().to_string(),
+                action_reference: matched_binding.action_reference.to_string(),
+                display_name: action_metadata.map_or(String::new(), |action_metadata_entry| {
+                    action_metadata_entry.display_name.clone()
+                }),
+                description: action_metadata.map_or(String::new(), |action_metadata_entry| {
+                    action_metadata_entry.description.clone()
+                }),
+                scope: action_metadata
+                    .map_or("-", |action_metadata_entry| {
+                        format_scope_label(action_metadata_entry.scope)
+                    })
+                    .to_string(),
+                binding_source,
+                displaced_by,
+                is_continuous: action_metadata
+                    .is_some_and(|action_metadata_entry| action_metadata_entry.is_continuous),
+            });
+        }
     }
     if key_binding_details.is_empty() {
         return Ok(None);
@@ -247,10 +304,11 @@ pub fn render_keys_describe(
     }))
 }
 
-/// Render a `koshi keys conflicts` answer from the offline keymap view. An
-/// ignored user file (unreadable or unparseable) is part of the answer on
-/// both formats, so a consumer reading only stdout never mistakes a
-/// defaults-only "apply" for a clean file.
+/// Render a `koshi keys conflicts` answer from the offline keymap view: the
+/// view's [`keymap_verdict`](crate::keymap::KeymapView::keymap_verdict) and
+/// every finding. A user file that cannot be read or parsed adds its error on
+/// both formats: the table opens with `file: ignored (<error>)`, and the
+/// verdict reads `reject`.
 #[must_use]
 pub fn render_keys_conflicts(
     keymap_view: &crate::keymap::KeymapView,
@@ -258,7 +316,7 @@ pub fn render_keys_conflicts(
 ) -> String {
     let conflict_findings = build_conflict_findings(&keymap_view.conflict_report);
     let conflicts_answer = KeysConflicts {
-        verdict: format_keymap_verdict_label(keymap_view.conflict_report.get_verdict()).to_string(),
+        verdict: format_keymap_verdict_label(keymap_view.keymap_verdict).to_string(),
         file_error: keymap_view.keybinding_file_error_message.clone(),
         conflict_findings,
     };
@@ -291,12 +349,9 @@ pub fn render_keys_validate(
             parse_errors: parse_errors.clone(),
             conflict_findings: Vec::new(),
         },
-        crate::keymap::KeymapValidationOutcome::Checked {
-            conflict_report,
-            is_applicable,
-        } => KeysValidation {
+        crate::keymap::KeymapValidationOutcome::Checked(conflict_report) => KeysValidation {
             is_valid: true,
-            is_applicable: *is_applicable,
+            is_applicable: is_validation_applicable(validation_outcome),
             parse_errors: Vec::new(),
             conflict_findings: build_conflict_findings(conflict_report),
         },
@@ -307,9 +362,9 @@ pub fn render_keys_validate(
             let mut rendered_output = String::new();
             if validation_answer.is_valid {
                 rendered_output.push_str(if validation_answer.is_applicable {
-                    "valid: a reload would apply this file\n"
+                    "valid: koshi would apply this file as keybinding.kdl\n"
                 } else {
-                    "invalid: a reload would keep the running keymap\n"
+                    "invalid: koshi would refuse this file as keybinding.kdl\n"
                 });
                 append_conflict_table(&mut rendered_output, &validation_answer.conflict_findings);
             } else {
@@ -325,14 +380,17 @@ pub fn render_keys_validate(
     }
 }
 
-/// Whether a rendered validation answer reports a file a reload would apply.
+/// Whether a client would apply the validated file as its `keybinding.kdl`:
+/// the file parsed and its conflict verdict is `apply`.
 #[must_use]
 pub fn is_validation_applicable(
     validation_outcome: &crate::keymap::KeymapValidationOutcome,
 ) -> bool {
     match validation_outcome {
         crate::keymap::KeymapValidationOutcome::ParseFailed(_) => false,
-        crate::keymap::KeymapValidationOutcome::Checked { is_applicable, .. } => *is_applicable,
+        crate::keymap::KeymapValidationOutcome::Checked(conflict_report) => {
+            conflict_report.get_verdict() == koshi_config::conflict::KeymapVerdict::Apply
+        }
     }
 }
 
@@ -356,8 +414,27 @@ fn render_key_detail_cells(key_binding_detail: &KeyBindingDetail) -> Vec<String>
         key_binding_detail.description.clone(),
         key_binding_detail.scope.clone(),
         key_binding_detail.binding_source.clone(),
+        key_binding_detail
+            .displaced_by
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
         key_binding_detail.is_continuous.to_string(),
     ]
+}
+
+/// The `displaced_by` label of one displaced default: the displacing layer,
+/// then `bind` or `remove`. A `remove` in the user layer is `user remove`.
+fn format_default_displacement_label(
+    default_displacement: koshi_config::keymap_merge::DefaultDisplacement,
+) -> String {
+    match default_displacement {
+        koshi_config::keymap_merge::DefaultDisplacement::Rebound { layer_origin } => {
+            format!("{layer_origin} bind")
+        }
+        koshi_config::keymap_merge::DefaultDisplacement::Removed { layer_origin } => {
+            format!("{layer_origin} remove")
+        }
+    }
 }
 
 /// Append the findings table to `rendered_output`, or nothing when there are no
@@ -402,7 +479,6 @@ fn format_conflict_severity_label(
 ) -> &'static str {
     match conflict_severity {
         koshi_config::conflict::ConflictSeverity::Warning => "warning",
-        koshi_config::conflict::ConflictSeverity::Collision => "collision",
         koshi_config::conflict::ConflictSeverity::Fatal => "fatal",
     }
 }
@@ -413,17 +489,33 @@ fn format_keymap_verdict_label(
 ) -> &'static str {
     match keymap_verdict {
         koshi_config::conflict::KeymapVerdict::Apply => "apply",
-        koshi_config::conflict::KeymapVerdict::RevertToDefaults => "revert-to-defaults",
         koshi_config::conflict::KeymapVerdict::Reject => "reject",
     }
 }
 
-/// The `source` label a [`KeymapScope`] filter matches.
-fn format_scope_argument_label(scope_argument: KeymapScope) -> &'static str {
+/// The keymap layer a [`KeymapScope`] filter keeps.
+fn resolve_scope_layer_origin(scope_argument: KeymapScope) -> koshi_config::conflict::LayerOrigin {
     match scope_argument {
-        KeymapScope::Default => "defaults",
-        KeymapScope::User => "user",
-        KeymapScope::Session => "session",
-        KeymapScope::Layout => "layout",
+        KeymapScope::Default => koshi_config::conflict::LayerOrigin::Defaults,
+        KeymapScope::User => koshi_config::conflict::LayerOrigin::User,
     }
+}
+
+/// Every entry of `bindings_by_key_sequence` whose key is `key_sequence` or
+/// starts with it, in key order. With `<C-t> n` and `<C-t> x` bound, `<C-t>`
+/// yields both, and `<C-t> n` yields only itself.
+///
+/// The walk starts at `key_sequence` and stops at the first key that does not
+/// start with it.
+fn list_bindings_starting_with<'a, Binding>(
+    bindings_by_key_sequence: &'a std::collections::BTreeMap<koshi_core::key::KeySequence, Binding>,
+    key_sequence: &'a koshi_core::key::KeySequence,
+) -> impl Iterator<Item = (&'a koshi_core::key::KeySequence, &'a Binding)> {
+    bindings_by_key_sequence
+        .range(key_sequence..)
+        .take_while(|(candidate_key_sequence, _)| {
+            candidate_key_sequence
+                .list_chords()
+                .starts_with(key_sequence.list_chords())
+        })
 }

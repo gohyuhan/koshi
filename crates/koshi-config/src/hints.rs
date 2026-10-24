@@ -49,10 +49,6 @@ pub struct KeymapHints {
     /// Every key a user surface removed in the current mode. A removal under
     /// a labeled prefix voids that label.
     pub removed_key_sequences: Arc<BTreeSet<KeySequence>>,
-    /// True when the user keymap was reverted to defaults over a key
-    /// collision: the bar shows a conflict marker, and the hints listed are
-    /// the reverted-to defaults.
-    pub is_reverted_to_defaults: bool,
 }
 
 /// One binding the hint bar can show: a key sequence, the display name of the
@@ -80,8 +76,12 @@ pub struct HintBinding {
 pub struct KeymapHintCatalog {
     /// Liveness-filtered lookup table shared by hints and keyboard resolution.
     merged_keymap: Arc<MergedKeymap>,
-    /// Multi-chord wait before an incomplete prefix falls through.
+    /// How long an ambiguous sequence waits for its next chord, from
+    /// `chord_timeout_ms`.
     chord_timeout_duration: Duration,
+    /// How long the hint bar waits after a sequence's first chord before it
+    /// shows the chords that continue it, from `which_key_delay_ms`.
+    which_key_delay_duration: Duration,
     /// The chord that unlocks a locked client, ahead of every other lookup.
     unlock_chord: KeyChord,
     /// One sorted binding list per built-in mode in each label form; a mode
@@ -91,12 +91,6 @@ pub struct KeymapHintCatalog {
     removed_key_sequences_by_mode_name: BTreeMap<ModeName, Arc<BTreeSet<KeySequence>>>,
     /// Display labels for the default table's prefix chords.
     prefix_labels: Arc<BTreeMap<KeyChord, String>>,
-    /// True when the user keymap was reverted to defaults over a key
-    /// collision.
-    /// [`from_keymap_layers_config_and_registry`](Self::from_keymap_layers_config_and_registry)
-    /// builds it `false`; [`mark_reverted_to_defaults`](Self::mark_reverted_to_defaults)
-    /// sets it.
-    is_reverted_to_defaults: bool,
 }
 
 impl KeymapHintCatalog {
@@ -112,9 +106,9 @@ impl KeymapHintCatalog {
 
     /// Resolve the hint catalog from `keymap_layers` and the effective
     /// keybinding configuration. Reads `chord_timeout_ms`,
-    /// `unlock_alternative`, `maximum_chord_depth` and `leader`;
-    /// `mode_bindings_by_name` and `which_key_delay_ms` are not read, and
-    /// `keymap_layers` carries the bindings.
+    /// `which_key_delay_ms`, `unlock_alternative`, `maximum_chord_depth` and
+    /// `leader`; `mode_bindings_by_name` is not read, and `keymap_layers`
+    /// carries the bindings.
     ///
     /// Folds the layers with [`merge_keymaps`]: a binding that does not fire
     /// yields no hint — its action unregistered, its arguments unresolvable, a
@@ -129,6 +123,8 @@ impl KeymapHintCatalog {
     ) -> Self {
         let chord_timeout_duration =
             Duration::from_millis(u64::from(keybindings_config.chord_timeout_ms));
+        let which_key_delay_duration =
+            Duration::from_millis(u64::from(keybindings_config.which_key_delay_ms));
         let unlock_chord =
             KeybindingsConfig::resolve_unlock_chord(keybindings_config.unlock_alternative);
         let merged_keymap = merge_keymaps(
@@ -189,21 +185,12 @@ impl KeymapHintCatalog {
         KeymapHintCatalog {
             merged_keymap: Arc::new(merged_keymap),
             chord_timeout_duration,
+            which_key_delay_duration,
             unlock_chord,
             hint_bindings_by_mode_name,
             removed_key_sequences_by_mode_name,
             prefix_labels: Arc::new(build_default_prefix_labels(keybindings_config.leader)),
-            is_reverted_to_defaults: false,
         }
-    }
-
-    /// Mark this catalog as the built-in defaults standing in for a user
-    /// keymap that a key collision reverted. The hint bar draws the revert
-    /// marker for a catalog marked this way.
-    #[must_use]
-    pub fn mark_reverted_to_defaults(mut self) -> Self {
-        self.is_reverted_to_defaults = true;
-        self
     }
 
     /// Resolve one pending sequence in a built-in mode.
@@ -251,6 +238,13 @@ impl KeymapHintCatalog {
         self.chord_timeout_duration
     }
 
+    /// How long the hint bar keeps its face after a sequence's first chord
+    /// before it shows the chords that continue the sequence, from
+    /// `which_key_delay_ms`. `Duration::ZERO` shows them with the first chord.
+    pub fn get_which_key_delay(&self) -> Duration {
+        self.which_key_delay_duration
+    }
+
     /// The chord that unlocks a locked client: the configured
     /// `unlock_alternative` when the user named one, else the reserved
     /// `<C-l>`. Conflict detection refuses a config whose locked mode does
@@ -260,8 +254,7 @@ impl KeymapHintCatalog {
     }
 
     /// The hint-bar data one frame is painted from: the bindings and removals
-    /// of `lock_mode` shared by reference, plus the prefix labels and the
-    /// revert flag.
+    /// of `lock_mode` shared by reference, plus the prefix labels.
     ///
     /// Every entry labelled [`MOUSE_SELECT_HINT`] reads [`MOUSE_UNSELECT_HINT`]
     /// while `is_mouse_selection_enabled` is `true`. Every entry labelled
@@ -302,7 +295,6 @@ impl KeymapHintCatalog {
                 .get(mode_name)
                 .map(Arc::clone)
                 .unwrap_or_default(),
-            is_reverted_to_defaults: self.is_reverted_to_defaults,
         }
     }
 }

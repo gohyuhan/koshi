@@ -2,10 +2,11 @@
 //! event), the decode table (host event → canonical chord) and the encode
 //! table (chord → the bytes a program in a pane expects), with modifiers,
 //! named keys, function keys, unnamed keys, release suppression, and
-//! application-cursor-keys mode.
+//! application-cursor-keys mode. Typed bytes parsed in two reads, split at any
+//! byte, encode to the same pane bytes.
 
 use super::*;
-use crate::host::{KeyCode, KeyEventKind};
+use crate::host::{Event, KeyCode, KeyEventKind, Parser};
 
 /// The bytes this chord sends to a pane in the ordinary (non-application)
 /// cursor-key mode, which is every pane's state until a program changes it.
@@ -2113,4 +2114,29 @@ fn always_converts_exactly_the_chords_legacy_encoding_cannot_tell_apart() {
 /// Whether `encoded_bytes` is a `CSI u` report rather than legacy bytes.
 fn is_csi_u_report(encoded_bytes: &[u8]) -> bool {
     encoded_bytes.starts_with(b"\x1b[") && encoded_bytes.ends_with(b"u")
+}
+
+#[test]
+fn typed_bytes_encode_to_the_same_pane_bytes_at_every_read_split() {
+    // Text with UTF-8, an Up arrow, Ctrl+a, Alt+x, Tab, Backspace and Enter.
+    let typed_bytes = "echo 1 é-ü-ñ-ç\x1b[A\x01\x1bx\t\x7f\r".as_bytes();
+    for split_index in 0..=typed_bytes.len() {
+        let mut terminal_input_parser = Parser::default();
+        let mut pane_bytes = Vec::new();
+        for read_bytes in [&typed_bytes[..split_index], &typed_bytes[split_index..]] {
+            terminal_input_parser.process_input_bytes(read_bytes);
+            while let Some(terminal_event) = terminal_input_parser.remove_next_pending_event() {
+                let Event::Key(host_key_event) = terminal_event else {
+                    panic!("typed bytes parse to keys only, not {terminal_event:?}");
+                };
+                pane_bytes.extend(encode_key_input(
+                    &decode_key_event(host_key_event),
+                    0,
+                    false,
+                    ExtendedKeysMode::OnRequest,
+                ));
+            }
+        }
+        assert_eq!(pane_bytes, typed_bytes, "split at {split_index}");
+    }
 }

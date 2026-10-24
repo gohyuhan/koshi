@@ -2899,6 +2899,7 @@ fn build_layout_named(session_name: &str) -> SessionLayout {
         session_id: SessionId::new(),
         session_name: session_name.to_string(),
         tabs: Vec::new(),
+        floating_panes: Vec::new(),
         clients: Vec::new(),
     }
 }
@@ -3291,13 +3292,13 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(typed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(typed_key_chord)],
             },
         })
         .expect("send the keyboard request");
     let RuntimeEvent::ClientKeyboard {
         client_id: received_client_id,
-        key_input: received_key_input,
+        key_inputs: received_key_inputs,
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("the keyboard request reached the dispatcher")
@@ -3306,8 +3307,8 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
     };
     assert_eq!(received_client_id, client_id);
     assert_eq!(
-        received_key_input,
-        build_key_input_for_chord(typed_key_chord)
+        received_key_inputs,
+        vec![build_key_input_for_chord(typed_key_chord)]
     );
 
     drop(connection);
@@ -3316,7 +3317,8 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
 
 /// Every field the client's terminal reported crosses the attached
 /// connection: the event kind, both alternative keys, the text, and all eight
-/// modifiers.
+/// modifiers. The keys of one request reach the dispatcher as one event, in
+/// their order.
 #[test]
 fn an_attached_connection_carries_every_field_of_the_key_input() {
     let client_id = ClientId::new();
@@ -3336,14 +3338,20 @@ fn an_attached_connection_carries_every_field_of_the_key_input() {
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: reported_key_input.clone(),
+                key_inputs: vec![
+                    reported_key_input.clone(),
+                    build_key_input_for_chord(KeyChord::from_parts(
+                        BindingModifierFlags::NONE,
+                        Key::Char('é'),
+                    )),
+                ],
             },
         })
         .expect("send the keyboard request");
 
     let RuntimeEvent::ClientKeyboard {
         client_id: received_client_id,
-        key_input: received_key_input,
+        key_inputs: received_key_inputs,
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("the keyboard request reached the dispatcher")
@@ -3351,7 +3359,16 @@ fn an_attached_connection_carries_every_field_of_the_key_input() {
         panic!("expected ClientKeyboard");
     };
     assert_eq!(received_client_id, client_id);
-    assert_eq!(received_key_input, reported_key_input);
+    assert_eq!(
+        received_key_inputs,
+        vec![
+            reported_key_input,
+            build_key_input_for_chord(KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Char('é'),
+            )),
+        ]
+    );
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -3585,19 +3602,22 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(pressed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
             },
         })
         .expect("send key press");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
-        key_input,
+        key_inputs,
     } = received_runtime_events.recv().expect("key press event")
     else {
         panic!("expected ClientKeyboard");
     };
     assert_eq!(keyboard_client_id, client_id);
-    assert_eq!(key_input, build_key_input_for_chord(pressed_key_chord));
+    assert_eq!(
+        key_inputs,
+        vec![build_key_input_for_chord(pressed_key_chord)]
+    );
 
     connection
         .send(&IpcRequest {
@@ -3750,7 +3770,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
         .send(&IpcRequest {
             request_id: 4,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(pressed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
             },
         })
         .expect("send key press");
@@ -3759,7 +3779,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
     // request crossed nothing, and the stream carried the one behind it.
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
-        key_input,
+        key_inputs,
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press event")
@@ -3767,7 +3787,10 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
         panic!("expected ClientKeyboard");
     };
     assert_eq!(keyboard_client_id, client_id);
-    assert_eq!(key_input, build_key_input_for_chord(pressed_key_chord));
+    assert_eq!(
+        key_inputs,
+        vec![build_key_input_for_chord(pressed_key_chord)]
+    );
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -3787,7 +3810,7 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(pressed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
             },
         })
         .expect("send key press");
@@ -3796,7 +3819,7 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
     // frame crossed nothing, and the stream carried the one behind it.
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
-        key_input,
+        key_inputs,
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press event")
@@ -3804,7 +3827,10 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
         panic!("expected ClientKeyboard");
     };
     assert_eq!(keyboard_client_id, client_id);
-    assert_eq!(key_input, build_key_input_for_chord(pressed_key_chord));
+    assert_eq!(
+        key_inputs,
+        vec![build_key_input_for_chord(pressed_key_chord)]
+    );
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -3820,10 +3846,10 @@ fn a_keyboard_request_before_an_attach_closes_the_connection() {
         .send(&IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(KeyChord::from_parts(
+                key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
                     BindingModifierFlags::CTRL,
                     Key::Char('t'),
-                )),
+                ))],
             },
         })
         .expect("send the keyboard request");
@@ -4607,26 +4633,29 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(pressed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
             },
         })
         .expect("send key press");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
-        key_input,
+        key_inputs,
     } = received_runtime_events.recv().expect("key press event")
     else {
         panic!("expected ClientKeyboard");
     };
     assert_eq!(keyboard_client_id, client_id);
-    assert_eq!(key_input, build_key_input_for_chord(pressed_key_chord));
+    assert_eq!(
+        key_inputs,
+        vec![build_key_input_for_chord(pressed_key_chord)]
+    );
 
     is_other_user_access_enabled.store(false, Ordering::SeqCst);
     caller_connection
         .send(&IpcRequest {
             request_id: 4,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(pressed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
             },
         })
         .expect("send key press");
@@ -5222,7 +5251,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
             .send(&IpcRequest {
                 request_id: 3 + chord_index as u64,
                 request_kind: IpcRequestKind::Keyboard {
-                    key_input: build_key_input_for_chord(*typed_key_chord),
+                    key_inputs: vec![build_key_input_for_chord(*typed_key_chord)],
                 },
             })
             .expect("send the key press");
@@ -5237,7 +5266,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     for typed_key_chord in typed_key_chords {
         let RuntimeEvent::ClientKeyboard {
             client_id: keyboard_client_id,
-            key_input,
+            key_inputs,
         } = received_runtime_events
             .recv_timeout(Duration::from_secs(5))
             .expect("key press event")
@@ -5245,7 +5274,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
             panic!("expected ClientKeyboard");
         };
         assert_eq!(keyboard_client_id, client_id);
-        assert_eq!(key_input, build_key_input_for_chord(typed_key_chord));
+        assert_eq!(key_inputs, vec![build_key_input_for_chord(typed_key_chord)]);
     }
     // The reading half ends on the request that follows those keys: the detach
     // comes after every key.
@@ -5449,13 +5478,13 @@ fn rotating_the_token_hands_requests_to_the_dispatcher_again_after_they_were_ref
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(typed_key_chord),
+                key_inputs: vec![build_key_input_for_chord(typed_key_chord)],
             },
         })
         .expect("send the key press");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
-        key_input,
+        key_inputs,
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press")
@@ -5463,7 +5492,7 @@ fn rotating_the_token_hands_requests_to_the_dispatcher_again_after_they_were_ref
         panic!("expected ClientKeyboard");
     };
     assert_eq!(keyboard_client_id, client_id);
-    assert_eq!(key_input, build_key_input_for_chord(typed_key_chord));
+    assert_eq!(key_inputs, vec![build_key_input_for_chord(typed_key_chord)]);
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -5625,19 +5654,19 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(taken_key_chord),
+                key_inputs: vec![build_key_input_for_chord(taken_key_chord)],
             },
         })
         .expect("send the key press the session takes");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
-        key_input,
+        key_inputs,
     } = received_runtime_events.recv().expect("key press event")
     else {
         panic!("expected ClientKeyboard");
     };
     assert_eq!(keyboard_client_id, client_id);
-    assert_eq!(key_input, build_key_input_for_chord(taken_key_chord));
+    assert_eq!(key_inputs, vec![build_key_input_for_chord(taken_key_chord)]);
 
     ipc_server.start_refusing_requests();
     // The attach was answered: an attached client's connection holds no
@@ -5651,7 +5680,7 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
         .send(&IpcRequest {
             request_id: 4,
             request_kind: IpcRequestKind::Keyboard {
-                key_input: build_key_input_for_chord(refused_key_chord),
+                key_inputs: vec![build_key_input_for_chord(refused_key_chord)],
             },
         })
         .expect("send the key press the session refuses");

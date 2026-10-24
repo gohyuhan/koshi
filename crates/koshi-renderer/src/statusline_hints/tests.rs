@@ -1,16 +1,21 @@
 //! Tests for the statusline: idle grouping (leaf hints, labeled default prefix
 //! groups, `+N` counts once a user binding or a removal touches a group), the
-//! open-sequence view (breadcrumb plus continuations, nested groups),
-//! pinned-first ordering, whole-item truncation, the right-aligned
-//! keymap-revert marker, the blanked row for a mode with nothing to hint, and
-//! the cells outside the given area that the bar leaves untouched.
+//! key names of a folded ribbon (`←↓`, `hj`, `ENTER|f`, and the shipped pane
+//! move chooser row), the open-sequence view (breadcrumb plus continuations,
+//! nested groups),
+//! pinned-first ordering, whole-item truncation, the blanked row for a mode
+//! with nothing to hint, and the cells outside the given area that the bar
+//! leaves untouched.
 
 use super::*;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use koshi_config::hints::KeymapHintCatalog;
 use koshi_core::key::{BindingModifierFlags, Key, KeySequence, NamedKey};
+use koshi_core::lock::LockMode;
+use koshi_core::registry::ActionRegistry;
 use ratatui::buffer::Cell;
 
 use crate::snapshot::HintBinding;
@@ -50,7 +55,6 @@ fn build_keymap_hints(
     hint_bindings: Vec<HintBinding>,
     prefix_labels: &[(KeyChord, &str)],
     removed_key_sequences: Vec<KeySequence>,
-    is_reverted_to_defaults: bool,
 ) -> KeymapHints {
     KeymapHints {
         hint_bindings: Arc::new(hint_bindings),
@@ -61,7 +65,6 @@ fn build_keymap_hints(
                 .collect(),
         ),
         removed_key_sequences: Arc::new(removed_key_sequences.into_iter().collect::<BTreeSet<_>>()),
-        is_reverted_to_defaults,
     }
 }
 
@@ -95,7 +98,7 @@ fn paint_statusline(
 
 #[test]
 fn recovery_notice_replaces_other_statusline_content_at_full_and_narrow_widths() {
-    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new(), false);
+    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new());
     for (column_count, expected_text) in [
         (
             80,
@@ -217,7 +220,6 @@ fn build_pane_keymap_hints(has_user_close_binding: bool) -> KeymapHints {
         ],
         &[(build_ctrl_chord('p'), "PANE")],
         Vec::new(),
-        false,
     )
 }
 
@@ -324,7 +326,6 @@ fn human_modifier_groups_fold_same_action_keys() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -354,7 +355,6 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     let render_buffer = render_statusline(&keymap_hints, 80);
     assert_eq!(
@@ -402,7 +402,6 @@ fn arrow_keys_sort_left_down_up_right_ahead_of_other_keys() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     // One action: all five keys fold into one ribbon, the four arrows in
     // screen order, then every other key.
@@ -434,11 +433,127 @@ fn named_keys_read_as_their_own_names() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " BACKSPACE  Undo  ENTER  Accept  ESC  Cancel  SPACE  Pick"
+    );
+}
+
+#[test]
+fn the_pane_move_choosers_80_column_row_separates_enter_from_the_key_it_folds_with() {
+    let hint_catalog = KeymapHintCatalog::from_registry(&ActionRegistry::new());
+    // Each case: whether the focused pane is floating, then the row the
+    // shipped `pane-move-choice` bindings paint.
+    for (is_focused_pane_floating, expected_row) in [
+        (
+            true,
+            " ENTER|f  Move Floating Pane  ESC  Cancel Move  t  Move Tiled Pane",
+        ),
+        (
+            false,
+            " ENTER|t  Move Tiled Pane  ESC  Cancel Move  f  Move Floating Pane",
+        ),
+    ] {
+        let keymap_hints = hint_catalog.build_frame_hints(
+            LockMode::PaneMoveChoice,
+            false,
+            is_focused_pane_floating,
+        );
+        assert_eq!(
+            format_rendered_row(&render_statusline(&keymap_hints, 80)),
+            expected_row,
+            "focused pane floating: {is_focused_pane_floating}"
+        );
+    }
+}
+
+#[test]
+fn modified_keys_folded_with_a_longer_key_name_are_separated_by_a_bar() {
+    let build_ctrl_hint_binding = |key, action_label: &str| {
+        build_hint_binding(
+            build_key_sequence(&[KeyChord::from_parts(BindingModifierFlags::CTRL, key)]),
+            action_label,
+            false,
+            false,
+        )
+    };
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_ctrl_hint_binding(Key::Named(NamedKey::Tab), "Next Tab"),
+            build_ctrl_hint_binding(Key::Char('n'), "Next Tab"),
+            build_ctrl_hint_binding(Key::Named(NamedKey::F(1)), "Help"),
+            build_ctrl_hint_binding(Key::Named(NamedKey::F(2)), "Help"),
+        ],
+        &[],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Ctrl +  F1|F2  Help  Tab|n  Next Tab"
+    );
+}
+
+#[test]
+fn a_bar_key_folded_with_a_longer_key_name_follows_its_separator() {
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_hint_binding(
+                build_key_sequence(&[build_plain_chord('|')]),
+                "Split",
+                false,
+                false,
+            ),
+            build_hint_binding(
+                build_key_sequence(&[KeyChord::from_parts(
+                    BindingModifierFlags::NONE,
+                    Key::Named(NamedKey::Tab),
+                )]),
+                "Split",
+                false,
+                false,
+            ),
+        ],
+        &[],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Tab||  Split"
+    );
+}
+
+#[test]
+fn pending_continuations_folded_with_a_longer_key_name_are_separated_by_a_bar() {
+    let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_hint_binding(
+                build_key_sequence(&[
+                    build_ctrl_chord('p'),
+                    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
+                ]),
+                "Next Floating Pane",
+                false,
+                false,
+            ),
+            build_hint_binding(
+                build_key_sequence(&[build_ctrl_chord('p'), build_plain_chord('n')]),
+                "Next Floating Pane",
+                false,
+                false,
+            ),
+        ],
+        &[(build_ctrl_chord('p'), "PANE")],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_pending_statusline(
+            &keymap_hints,
+            &pending_key_sequence,
+            80,
+        )),
+        " Ctrl +  p  PANE  ▶  Tab|n  Next Floating Pane"
     );
 }
 
@@ -465,7 +580,6 @@ fn removal_under_prefix_swaps_label_for_count() {
             build_ctrl_chord('p'),
             build_plain_chord('x'),
         ])],
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -492,7 +606,6 @@ fn unlabeled_group_shows_count() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -555,7 +668,6 @@ fn pending_prefix_without_label_shows_derived_count() {
         )],
         &[],
         Vec::new(),
-        false,
     );
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('t')]);
     assert_eq!(
@@ -595,7 +707,6 @@ fn nested_group_inside_pending_shows_count() {
         ],
         &[(build_ctrl_chord('p'), "PANE")],
         Vec::new(),
-        false,
     );
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
     assert_eq!(
@@ -627,7 +738,6 @@ fn chord_bound_and_extended_shows_action_with_count() {
         ],
         &[(build_ctrl_chord('p'), "PANE")],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -654,7 +764,6 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     // Wide: pinned first, ahead of `<C-a>`.
     assert_eq!(
@@ -692,7 +801,6 @@ fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -721,7 +829,6 @@ fn a_pinned_and_an_unpinned_hint_with_one_label_stay_two_ribbons() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -766,7 +873,6 @@ fn a_group_header_is_never_painted_without_its_first_ribbon() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     // The `Ctrl` group is 17 cells, the `Alt` group's ` Alt + ` header plus its
     // first ribbon is 18 more. One cell short of both, the header is skipped
@@ -830,19 +936,6 @@ fn the_overflow_marker_is_bold_dim_ramp_text_on_the_bar_background() {
 }
 
 #[test]
-fn the_revert_marker_is_bold_white_on_red() {
-    let keymap_hints = KeymapHints {
-        is_reverted_to_defaults: true,
-        ..build_pane_keymap_hints(false)
-    };
-    let render_buffer = render_statusline(&keymap_hints, 30);
-    assert_eq!(render_buffer[(24, 0)].symbol(), "k");
-    assert_eq!(render_buffer[(24, 0)].fg, Color::White);
-    assert_eq!(render_buffer[(24, 0)].bg, Color::Red);
-    assert!(render_buffer[(24, 0)].modifier.contains(Modifier::BOLD));
-}
-
-#[test]
 fn a_named_key_with_no_symbol_reads_as_its_chord_spelling() {
     let build_named_hint_binding = |named_key, action_label: &str| {
         build_hint_binding(
@@ -865,7 +958,6 @@ fn a_named_key_with_no_symbol_reads_as_its_chord_spelling() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
@@ -884,7 +976,6 @@ fn the_bar_paints_only_the_cells_of_the_area_it_is_given() {
         )],
         &[],
         Vec::new(),
-        false,
     );
     let buffer_area = RatatuiRect {
         x: 0,
@@ -945,7 +1036,7 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
 
     let keymap_hints_without_removal =
-        build_keymap_hints(create_hint_bindings(), prefix_labels, Vec::new(), false);
+        build_keymap_hints(create_hint_bindings(), prefix_labels, Vec::new());
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
             &keymap_hints_without_removal,
@@ -965,7 +1056,6 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
             build_plain_chord('n'),
             build_plain_chord('b'),
         ])],
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
@@ -975,19 +1065,6 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
         )),
         " Ctrl +  p  +1  ▶  n  +1"
     );
-}
-
-#[test]
-fn revert_marker_holds_right_edge_and_hints_stop_short() {
-    let keymap_hints = KeymapHints {
-        is_reverted_to_defaults: true,
-        ..build_pane_keymap_hints(false)
-    };
-    let render_buffer = render_statusline(&keymap_hints, 30);
-    let rendered_row_text = format_rendered_row(&render_buffer);
-    assert_eq!(rendered_row_text, " Ctrl +  l  Lock …      keys!");
-    // Marker text holds the right edge, with one background-padding cell.
-    assert_eq!(render_buffer[(28, 0)].symbol(), "!");
 }
 
 #[test]
@@ -1024,7 +1101,6 @@ fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
         ],
         &[],
         Vec::new(),
-        false,
     );
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 200)),
@@ -1064,7 +1140,6 @@ fn only_the_opening_chord_of_a_pending_sequence_shows_a_prefix_label() {
             (build_plain_chord('n'), "NESTED"),
         ],
         Vec::new(),
-        false,
     );
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p'), build_plain_chord('n')]);
     assert_eq!(
@@ -1098,7 +1173,6 @@ fn a_pending_sequence_that_is_itself_bound_lists_only_its_continuations() {
         ],
         &[(build_ctrl_chord('p'), "PANE")],
         Vec::new(),
-        false,
     );
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
     assert_eq!(
@@ -1136,20 +1210,6 @@ fn a_row_too_narrow_for_the_breadcrumb_shows_only_the_overflow_marker() {
 }
 
 #[test]
-fn the_revert_marker_and_the_overflow_marker_share_the_narrowest_row_that_fits_both() {
-    // ` keys! ` is 7 cells; at 8 the marker takes the right edge and the `…`
-    // for every dropped hint takes the one cell left of it.
-    let keymap_hints = KeymapHints {
-        is_reverted_to_defaults: true,
-        ..build_pane_keymap_hints(false)
-    };
-    let render_buffer = render_statusline(&keymap_hints, 8);
-    assert_eq!(format_rendered_row(&render_buffer), "… keys!");
-    assert_eq!(render_buffer[(0, 0)].symbol(), "…");
-    assert_eq!(render_buffer[(7, 0)].symbol(), " ");
-}
-
-#[test]
 fn a_zero_height_area_leaves_the_row_untouched() {
     let keymap_hints = build_pane_keymap_hints(false);
     let render_area = RatatuiRect {
@@ -1177,7 +1237,7 @@ fn a_zero_height_area_leaves_the_row_untouched() {
 
 #[test]
 fn empty_mode_blanks_the_row() {
-    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new(), false);
+    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new());
     let render_area = RatatuiRect {
         x: 0,
         y: 0,
@@ -1268,12 +1328,9 @@ fn a_custom_theme_recolors_the_bar() {
 
 #[test]
 fn the_overflow_marker_never_paints_left_of_the_area() {
-    // The revert marker fills the bar and pulls the right edge down to the
-    // area's own left edge, so the overflow marker has nowhere inside to go.
-    let keymap_hints = KeymapHints {
-        is_reverted_to_defaults: true,
-        ..build_pane_keymap_hints(false)
-    };
+    // The area starts at column 5 and is 6 cells wide, too narrow for the
+    // first ` Ctrl + ` group: the `…` takes the area's first cell.
+    let keymap_hints = build_pane_keymap_hints(false);
     let mut render_buffer = Buffer::empty(RatatuiRect {
         x: 0,
         y: 0,
@@ -1302,6 +1359,7 @@ fn the_overflow_marker_never_paints_left_of_the_area() {
         outside_area_text, "XXXXX",
         "columns 0 to 4 belong to the caller"
     );
+    assert_eq!(render_buffer[(5, 0)].symbol(), "…");
 }
 
 #[test]
@@ -1326,7 +1384,6 @@ fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
         ],
         &[],
         Vec::new(),
-        false,
     );
 
     assert_eq!(

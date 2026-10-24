@@ -874,6 +874,7 @@ fn sample_router_results() -> Vec<RouterResult> {
         RouterResult::Tokens(Vec::new()),
         RouterResult::RemoteStatus {
             remote_listen_address: None,
+            config_file_path: None,
             is_remote_access_enabled: false,
             is_listening: false,
             certificate_fingerprint: None,

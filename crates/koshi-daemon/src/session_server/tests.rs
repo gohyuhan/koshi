@@ -143,7 +143,6 @@ fn seed_test_session(server: &mut Server) {
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 }
@@ -201,7 +200,6 @@ fn the_session_answers_discovery_with_the_id_and_name_it_was_started_with() {
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 
@@ -236,7 +234,6 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 
@@ -456,7 +453,6 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
@@ -611,14 +607,30 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
     let resume_file_path = runtime_directory_fixture.path().join("session.resume");
     let (mut server, fake_pty_backend, _runtime_event_sender) = build_test_server();
     let session_id = SessionId::new();
-    let client_id = server
-        .bootstrap_local_named(
+    server
+        .bootstrap_session(
             session_id,
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::UNIX_EPOCH,
         )
         .expect("the session is seeded");
+    let first_tab_id = *server.list_sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .expect("the seeded tab");
+    let client_id = ClientId::new();
+    let _ = server.handle_client_attach(
+        session_id,
+        client_id,
+        STARTING_VIEWPORT,
+        None,
+        first_tab_id,
+        None,
+        SystemTime::UNIX_EPOCH,
+        false,
+    );
     let open_second_tab_command_id = CommandId::new();
     let command_envelope = CommandEnvelope::from_parts(
         open_second_tab_command_id,
@@ -1714,9 +1726,13 @@ fn a_rebuild_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
 
     // The address the rebuild binds is already held: the rebuild's own bind is
     // refused.
-    let held_session_socket =
-        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
-            .expect("the address binds once");
+    let held_session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds once");
 
     // The file the swap wrote before it withdrew the socket.
     let resume_file_path =
@@ -1812,9 +1828,13 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
     let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let session_socket =
-        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -1862,6 +1882,52 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
 
 #[cfg(unix)]
 #[test]
+fn a_bound_socket_lies_in_the_shared_directory_the_passed_koshi_kdl_layer_names() {
+    // The session start names no config directory. The `koshi.kdl` layer the
+    // caller passes in turns `allow-other-users` on and names the shared
+    // directory.
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let shared_directory_fixture = build_short_runtime_directory();
+    let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    let (_server, _, runtime_event_sender) = build_test_server();
+    let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+    let sharing_config = koshi_config::app_config::parse_app_config(
+        Path::new("koshi.kdl"),
+        &format!(
+            "version 2\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
+            shared_directory_fixture.path().display()
+        ),
+    )
+    .expect("the config parses");
+
+    let session_socket = bind_session_socket(
+        &session_start,
+        Some(&sharing_config.layer),
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds");
+
+    let own_user_id = std::fs::metadata(runtime_directory_fixture.path())
+        .expect("read the runtime directory")
+        .uid();
+    assert_eq!(
+        session_socket.get_socket_address(),
+        koshi_ipc::endpoint::compute_socket_address(
+            &shared_directory_fixture
+                .path()
+                .join(own_user_id.to_string()),
+            session_start.session_id,
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socket() {
     // The whole swap, run over a path with nothing at it: starting the new
     // image is the step that fails. The session comes back in this process with
@@ -1894,9 +1960,13 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
         .next()
         .expect("the session is seeded");
     let expected_tabs = server.list_sessions()[&session_id].tabs.clone();
-    let session_socket =
-        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds");
     let resume_file_path =
         resolve_resume_file_path(&session_start.runtime_directory, session_start.session_id);
 
@@ -1943,9 +2013,13 @@ fn a_swap_that_holds_no_session_to_carry_keeps_serving_under_a_fresh_token() {
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
     let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
-    let session_socket =
-        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2079,9 +2153,13 @@ fn start_session_with_a_prepared_request(
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
     let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
-    let session_socket =
-        bind_session_socket(session_start, &portable_pty_backend, runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        session_start,
+        None,
+        &portable_pty_backend,
+        runtime_event_sender,
+    )
+    .expect("the address binds");
     let (mut frame_reader, mut frame_writer) = connect_greeted_session(session_start);
     prepare_request(
         &mut server,
@@ -2282,8 +2360,9 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let session_socket = bind_session_socket(&session_start, &pty_owner, &runtime_event_sender)
-        .expect("the address binds");
+    let session_socket =
+        bind_session_socket(&session_start, None, &pty_owner, &runtime_event_sender)
+            .expect("the address binds");
     let (mut frame_reader, mut frame_writer) = connect_greeted_session(&session_start);
     prepare_request(
         &mut server,
@@ -2442,8 +2521,9 @@ fn assert_swap_waits_for_the_held_kill_of_a_closed_pane(session_start: SessionSt
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let session_socket = bind_session_socket(&session_start, &pty_owner, &runtime_event_sender)
-        .expect("the address binds");
+    let session_socket =
+        bind_session_socket(&session_start, None, &pty_owner, &runtime_event_sender)
+            .expect("the address binds");
 
     let (kill_record_sender, kill_record_receiver) = mpsc::channel();
     let swap_fake_pty_backend = fake_pty_backend.clone();
@@ -2496,9 +2576,13 @@ fn a_swap_that_can_write_neither_its_state_nor_a_fresh_token_ends_every_pane() {
     server.load_startup_config(Some(build_plain_shell_config()));
     seed_test_session(&mut server);
     let pane_child_process_id = get_only_pane_child_process_id(&portable_pty_backend);
-    let session_socket =
-        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2558,9 +2642,13 @@ fn a_swap_that_can_neither_start_nor_bind_its_socket_again_ends_every_pane() {
     server.load_startup_config(Some(build_plain_shell_config()));
     seed_test_session(&mut server);
     let pane_child_process_id = get_only_pane_child_process_id(&portable_pty_backend);
-    let session_socket =
-        bind_session_socket(&session_start, &portable_pty_backend, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &portable_pty_backend,
+        &runtime_event_sender,
+    )
+    .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2618,6 +2706,7 @@ fn a_first_run_that_cannot_bind_its_socket_ends_every_pane() {
     let start_error = match start_serving_session(
         &pty_owner,
         &session_start,
+        None,
         false,
         &runtime_event_sender,
         &mut std::io::sink(),
@@ -2665,6 +2754,7 @@ fn a_resume_run_with_a_fresh_shell_that_cannot_bind_its_socket_ends_every_pane()
     let start_error = match start_serving_session(
         &pty_owner,
         &session_start,
+        None,
         true,
         &runtime_event_sender,
         &mut std::io::sink(),
@@ -2738,6 +2828,7 @@ fn a_resume_run_with_a_carried_pane_that_cannot_bind_its_socket_ends_every_pane(
     let start_error = match start_serving_session(
         &pty_owner,
         &session_start,
+        None,
         true,
         &runtime_event_sender,
         &mut std::io::sink(),
@@ -2782,6 +2873,7 @@ fn a_first_run_that_cannot_print_its_ready_line_ends_every_pane() {
     let start_error = match start_serving_session(
         &pty_owner,
         &session_start,
+        None,
         false,
         &runtime_event_sender,
         &mut read_only_output,
@@ -3347,7 +3439,6 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
             "quiet-lake".to_string(),
             STARTING_VIEWPORT,
             SystemTime::now(),
-            None,
         )
         .expect("the session is seeded");
 
@@ -3603,7 +3694,6 @@ fn a_last_carried_pane_exit_keeps_a_new_stream_live_and_a_carried_quit_ending() 
                 session_start.session_name.clone(),
                 STARTING_VIEWPORT,
                 SystemTime::now(),
-                None,
             )
             .expect("the previous session has one pane");
         let previous_client_id = attach_test_client(&mut previous_server).client_id;

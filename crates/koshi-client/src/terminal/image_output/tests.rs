@@ -3083,21 +3083,313 @@ fn a_kitty_paint_skips_the_alpha_scan_and_an_iterm_paint_runs_it() {
 }
 
 #[test]
-fn an_iterm_host_resize_frees_no_kitty_image_and_clears_no_key() {
-    let mut output_state = ImageOutputState::from_output_kind(None, Arc::new(|| {}));
-    output_state.output_kind = Some(ImageOutputKind::Iterm);
-    let encode_key = build_output_encode_key(
+fn an_iterm_or_sixel_host_erase_writes_every_image_again_from_its_kept_units() {
+    for output_kind in list_cell_output_kinds() {
+        let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
+        let image_paint = build_placed_image_paint(
+            &source_output_paint,
+            source_output_paint.placement_key,
+            Rect::new(0, 0, 1, 1),
+        );
+        let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
+        let cell_size = PixelCellSize::from_pixel_dimensions(1, 1);
+        let (mut output_state, worker_request_receiver, worker_message_sender) =
+            build_output_state_with_worker_channels(output_kind);
+        let (_, _, first_frame_output_text) = encode_and_paint_frame(
+            &mut output_state,
+            &worker_request_receiver,
+            &worker_message_sender,
+            std::slice::from_ref(&image_paint),
+            cell_snapshot.clone(),
+            cell_size,
+        );
+        assert_eq!(
+            first_frame_output_text,
+            build_unit_frame_output(output_kind, 0, "unit 1:1"),
+            "{output_kind:?}"
+        );
+
+        output_state.clear_host_images();
+        output_state.prepare_frame(std::slice::from_ref(&image_paint), cell_snapshot, cell_size);
+
+        assert_eq!(
+            worker_request_receiver.try_recv().err(),
+            Some(TryRecvError::Empty),
+            "{output_kind:?} encoded the image again"
+        );
+        assert!(
+            !output_state.should_free_all_kitty_images,
+            "{output_kind:?} frees Kitty images"
+        );
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (String::new(), first_frame_output_text),
+            "{output_kind:?}"
+        );
+        assert!(!output_state.is_work_pending(), "{output_kind:?}");
+    }
+}
+
+#[test]
+fn a_host_erase_with_a_clipped_placement_writes_no_pixels_until_its_encode_ends() {
+    for output_kind in list_cell_output_kinds() {
+        let source_output_paint = build_output_paint(vec![255, 0, 0, 255, 0, 0, 255, 255], 2, 1, 0);
+        let clipped_image_paint = ImagePaint::from_image_placement(
+            source_output_paint.placement_key.0,
+            source_output_paint.placement_key.1,
+            source_output_paint.image_content_id,
+            Arc::clone(&source_output_paint.image_record),
+            Rect::new(0, 0, 1, 1),
+            ImageSourceRect {
+                pixel_x: 0,
+                pixel_y: 0,
+                pixel_width: 1,
+                pixel_height: 1,
+            },
+            0,
+        );
+        let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
+        let cell_size = PixelCellSize::from_pixel_dimensions(1, 1);
+        let (mut output_state, worker_request_receiver, worker_message_sender) =
+            build_output_state_with_worker_channels(output_kind);
+        encode_and_paint_frame(
+            &mut output_state,
+            &worker_request_receiver,
+            &worker_message_sender,
+            &[build_placed_image_paint(
+                &source_output_paint,
+                source_output_paint.placement_key,
+                Rect::new(0, 0, 2, 1),
+            )],
+            cell_snapshot.clone(),
+            cell_size,
+        );
+
+        output_state.clear_host_images();
+        output_state.prepare_frame(
+            std::slice::from_ref(&clipped_image_paint),
+            cell_snapshot.clone(),
+            cell_size,
+        );
+
+        let clipped_worker_request = worker_request_receiver
+            .try_recv()
+            .expect("the clipped image reaches the worker");
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (String::new(), String::new()),
+            "{output_kind:?}"
+        );
+
+        finish_request_with_units(&worker_message_sender, &clipped_worker_request);
+        output_state.prepare_frame(
+            std::slice::from_ref(&clipped_image_paint),
+            cell_snapshot,
+            cell_size,
+        );
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (
+                String::new(),
+                build_unit_frame_output(
+                    output_kind,
+                    0,
+                    &format!("unit {}:1", clipped_worker_request.frame_generation)
+                )
+            ),
+            "{output_kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_host_erase_with_no_image_left_writes_nothing_but_the_kitty_free() {
+    for (output_kind, expected_reset_text) in [
+        (ImageOutputKind::Kitty, "\x1b_Ga=d,d=A,q=2;\x1b\\"),
+        (ImageOutputKind::Iterm, ""),
+        (
+            ImageOutputKind::Sixel {
+                palette_color_count: 256,
+                maximum_pixel_width: None,
+                maximum_pixel_height: None,
+            },
+            "",
+        ),
+    ] {
+        let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
+        let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
+        let cell_size = PixelCellSize::from_pixel_dimensions(1, 1);
+        let (mut output_state, worker_request_receiver, worker_message_sender) =
+            build_output_state_with_worker_channels(output_kind);
+        encode_and_paint_frame(
+            &mut output_state,
+            &worker_request_receiver,
+            &worker_message_sender,
+            &[build_placed_image_paint(
+                &source_output_paint,
+                source_output_paint.placement_key,
+                Rect::new(0, 0, 1, 1),
+            )],
+            cell_snapshot.clone(),
+            cell_size,
+        );
+
+        output_state.clear_host_images();
+        output_state.prepare_frame(&[], cell_snapshot, cell_size);
+
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (String::from(expected_reset_text), String::new()),
+            "{output_kind:?}"
+        );
+        assert!(!output_state.has_host_pixels, "{output_kind:?}");
+        assert_eq!(
+            worker_request_receiver.try_recv().err(),
+            Some(TryRecvError::Empty),
+            "{output_kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_host_erase_and_a_failed_frame_in_either_order_leave_the_host_screen_unknown() {
+    for output_kind in [
+        ImageOutputKind::Kitty,
         ImageOutputKind::Iterm,
-        PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell"),
-        &build_output_paint(vec![255, 0, 0, 255], 1, 1, 0),
-    );
-    output_state.latest_encode_inputs.encode_keys = vec![encode_key.clone()];
-    output_state.set_host_terminal_size(80, 24);
+        ImageOutputKind::Sixel {
+            palette_color_count: 256,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
+        },
+    ] {
+        for is_erase_first in [true, false] {
+            let check_name = format!("{output_kind:?}, erase first: {is_erase_first}");
+            let (mut output_state, _worker_request_receiver, _worker_message_sender) =
+                build_output_state_with_worker_channels(output_kind);
+            if is_erase_first {
+                output_state.clear_host_images();
+                output_state.fail_frame_commit();
+            } else {
+                output_state.fail_frame_commit();
+                output_state.clear_host_images();
+            }
 
-    output_state.set_host_terminal_size(100, 30);
+            assert_eq!(
+                (
+                    output_state.is_host_screen_unknown,
+                    output_state.has_host_pixels,
+                    output_state.needs_screen_reset,
+                ),
+                (true, true, true),
+                "{check_name}"
+            );
 
-    assert!(!output_state.should_free_all_kitty_images);
-    assert_eq!(output_state.latest_encode_inputs.encode_keys, [encode_key]);
+            output_state.reset_connection();
+
+            assert_eq!(
+                (
+                    output_state.is_host_screen_unknown,
+                    output_state.has_host_pixels,
+                    output_state.needs_screen_reset,
+                ),
+                (true, true, true),
+                "{check_name}, after a connection reset"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_host_erase_while_an_encode_runs_writes_the_older_pixels_of_the_placement() {
+    for output_kind in list_cell_output_kinds() {
+        let red_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
+        let blue_output_paint = build_output_paint(vec![0, 0, 255, 255], 1, 1, 0);
+        let target_area = Rect::new(0, 0, 1, 1);
+        let blue_image_paint = build_placed_image_paint(
+            &blue_output_paint,
+            red_output_paint.placement_key,
+            target_area,
+        );
+        let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
+        let cell_size = PixelCellSize::from_pixel_dimensions(1, 1);
+        let (mut output_state, worker_request_receiver, worker_message_sender) =
+            build_output_state_with_worker_channels(output_kind);
+        let (_, _, red_frame_output_text) = encode_and_paint_frame(
+            &mut output_state,
+            &worker_request_receiver,
+            &worker_message_sender,
+            &[build_placed_image_paint(
+                &red_output_paint,
+                red_output_paint.placement_key,
+                target_area,
+            )],
+            cell_snapshot.clone(),
+            cell_size,
+        );
+        output_state.prepare_frame(
+            std::slice::from_ref(&blue_image_paint),
+            cell_snapshot.clone(),
+            cell_size,
+        );
+        let blue_worker_request = worker_request_receiver
+            .try_recv()
+            .expect("the blue image reaches the worker");
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (String::new(), String::new()),
+            "{output_kind:?}: the host keeps the red pixels"
+        );
+
+        output_state.clear_host_images();
+        output_state.prepare_frame(
+            std::slice::from_ref(&blue_image_paint),
+            cell_snapshot.clone(),
+            cell_size,
+        );
+
+        assert_eq!(
+            worker_request_receiver.try_recv().err(),
+            Some(TryRecvError::Empty),
+            "{output_kind:?}: the running encode started again"
+        );
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (String::new(), red_frame_output_text),
+            "{output_kind:?}"
+        );
+
+        finish_request_with_units(&worker_message_sender, &blue_worker_request);
+        output_state.prepare_frame(
+            std::slice::from_ref(&blue_image_paint),
+            cell_snapshot,
+            cell_size,
+        );
+        assert_eq!(
+            paint_prepared_frame(&mut output_state),
+            (
+                String::from("\x1b[2J"),
+                build_unit_frame_output(
+                    output_kind,
+                    0,
+                    &format!("unit {}:1", blue_worker_request.frame_generation)
+                )
+            ),
+            "{output_kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_client_with_no_image_protocol_waits_for_no_paint_after_a_host_erase_or_a_connection_reset() {
+    let mut output_state = ImageOutputState::from_output_kind(None, Arc::new(|| {}));
+
+    output_state.clear_host_images();
+    assert!(!output_state.has_unselected_results());
+
+    output_state.reset_connection();
+    assert!(!output_state.has_unselected_results());
+    assert!(!output_state.has_host_pixels);
+    assert!(!output_state.is_host_screen_unknown);
 }
 
 /// Prepare `image_paints` on `output_state` over `cell_snapshot` with
@@ -3821,7 +4113,7 @@ fn a_failed_kitty_upload_shows_the_unavailable_text_and_uploads_again_after_the_
 }
 
 #[test]
-fn a_host_resize_writes_every_kitty_image_again_from_its_kept_payload() {
+fn a_kitty_host_erase_writes_every_image_again_from_its_kept_payload() {
     let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let image_paints = [build_placed_image_paint(
         &source_output_paint,
@@ -3830,7 +4122,6 @@ fn a_host_resize_writes_every_kitty_image_again_from_its_kept_payload() {
     )];
     let (mut output_state, worker_request_receiver, worker_message_sender) =
         build_output_state_with_worker_channels(ImageOutputKind::Kitty);
-    output_state.set_host_terminal_size(80, 24);
     encode_and_paint_frame(
         &mut output_state,
         &worker_request_receiver,
@@ -3840,15 +4131,14 @@ fn a_host_resize_writes_every_kitty_image_again_from_its_kept_payload() {
         None,
     );
 
-    output_state.set_host_terminal_size(80, 24);
     output_state.prepare_frame(&image_paints, None, None);
     assert_eq!(
         worker_request_receiver.try_recv().err(),
         Some(TryRecvError::Empty),
-        "an unchanged size keeps the upload"
+        "a frame with no host erase keeps the upload"
     );
 
-    output_state.set_host_terminal_size(100, 24);
+    output_state.clear_host_images();
     assert!(output_state.should_free_all_kitty_images);
     output_state.prepare_frame(&image_paints, None, None);
 
@@ -3892,37 +4182,6 @@ fn a_host_resize_writes_every_kitty_image_again_from_its_kept_payload() {
             )
         )
     );
-}
-
-#[test]
-fn the_first_host_size_forgets_nothing() {
-    let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-    let (mut output_state, worker_request_receiver, worker_message_sender) =
-        build_output_state_with_worker_channels(ImageOutputKind::Kitty);
-    encode_and_paint_frame(
-        &mut output_state,
-        &worker_request_receiver,
-        &worker_message_sender,
-        &[build_placed_image_paint(
-            &source_output_paint,
-            source_output_paint.placement_key,
-            Rect::new(0, 0, 1, 1),
-        )],
-        None,
-        None,
-    );
-    assert_eq!(
-        output_state.held_kitty_image_id_by_content_id,
-        HashMap::from([(source_output_paint.image_content_id, 1)])
-    );
-
-    output_state.set_host_terminal_size(80, 24);
-
-    assert_eq!(
-        output_state.held_kitty_image_id_by_content_id,
-        HashMap::from([(source_output_paint.image_content_id, 1)])
-    );
-    assert!(!output_state.should_free_all_kitty_images);
 }
 
 #[test]

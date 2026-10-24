@@ -213,10 +213,9 @@ fn build_koshi_command_as_user(
 #[cfg(unix)]
 fn render_single_server_version_answer(session_id: SessionId, build_version: &str) -> String {
     format!(
-        "[\n  {{\n    \"server_kind\": \"Router\",\n    \"session_id\": null,\n    \
-         \"state\": \"NotRunning\"\n  }},\n  {{\n    \"server_kind\": \"Session\",\n    \
-         \"session_id\": \"{}\",\n    \"state\": \"Running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n",
-        session_id.get_uuid()
+        "[\n  {{\n    \"server_kind\": \"router\",\n    \"session_id\": null,\n    \
+         \"state\": \"not running\"\n  }},\n  {{\n    \"server_kind\": \"session\",\n    \
+         \"session_id\": \"{session_id}\",\n    \"state\": \"running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n"
     )
 }
 
@@ -392,6 +391,53 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
 /// Turning the switch on leaves the single-user flow alone: the session this
 /// user started is listed once, not asked twice and not counted as unanswered.
 /// The listing walks the shared directory, where this user's own session sits.
+/// `kill-session`, `detach` and `detach --all`, each given a session id this
+/// user's runtime directory does not hold, look the session up in the shared
+/// directory `koshi.kdl` names. That directory is a link to itself, so its read
+/// fails, and the failure names it.
+#[cfg(unix)]
+#[test]
+fn session_verbs_look_a_session_up_in_the_shared_directory_koshi_kdl_names() {
+    let home_directory = build_short_test_directory();
+    let shared_directory_link = home_directory.path().join("shared-link");
+    std::os::unix::fs::symlink(&shared_directory_link, &shared_directory_link)
+        .expect("link the path to itself");
+    let link_read_error =
+        std::fs::read_dir(&shared_directory_link).expect_err("a link to itself cannot be listed");
+    write_test_config(
+        home_directory.path(),
+        &build_switched_on_config(&shared_directory_link),
+    );
+    std::fs::create_dir_all(resolve_runtime_directory_under_home(home_directory.path()))
+        .expect("a runtime directory under the test home");
+    let session_id_text = SessionId::new().to_string();
+
+    for verb_arguments in [
+        vec!["kill-session", session_id_text.as_str()],
+        vec!["detach", session_id_text.as_str()],
+        vec!["detach", "--all", session_id_text.as_str()],
+    ] {
+        let verb_output = run_koshi_command(
+            build_koshi_command_under_home(home_directory.path()).args(&verb_arguments),
+        );
+
+        assert_eq!(
+            String::from_utf8_lossy(&verb_output.stderr),
+            format!(
+                "koshi: IPC unavailable: {} could not be read: {link_read_error}\n",
+                shared_directory_link.display()
+            ),
+            "koshi {verb_arguments:?}"
+        );
+        assert_eq!(
+            verb_output.status.code(),
+            Some(CliExitCode::IpcUnavailable.get_exit_code()),
+            "koshi {verb_arguments:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&verb_output.stdout), "");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn this_users_own_session_is_listed_once_while_the_switch_is_on() {

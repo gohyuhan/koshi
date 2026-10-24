@@ -162,8 +162,8 @@ pub enum IpcError {
     /// Nothing accepted the TCP connection at `server_address`.
     #[error(
         "{server_address} refused the connection: nothing is listening on that port. \
-         if remote access is not enabled on that machine, run `koshi share grant` \
-         there and answer yes to the offer to open the port"
+         if remote access is not enabled on that machine, run `koshi share open` \
+         there to open the port"
     )]
     ConnectRefused { server_address: String },
     /// The TCP connection to `server_address` was still unanswered when the
@@ -183,18 +183,42 @@ pub enum IpcError {
     },
     /// The server at `server_address` presented a certificate whose
     /// fingerprint is not the one the dial expected. The secret was not sent.
+    ///
+    /// `saved_server_label` is the name, else the address, of the saved
+    /// server the dial presented the saved secret of, or `None` for a dial of
+    /// a server that is not saved. With `Some("work")` the message ends in
+    /// ``give it with `koshi remote edit work`.``; with `None` it ends in
+    /// ``give it with --certificate-fingerprint, or with `koshi remote edit`
+    /// for a saved server.``
     #[error(
         "the certificate {server_address} presented is not the expected one: expected \
          {expected_certificate_fingerprint}, presented {presented_certificate_fingerprint}. the \
          secret was not sent. if that machine's certificate changed on purpose, `koshi share \
-         grant` there prints the new fingerprint: give it with --certificate-fingerprint, or \
-         with `koshi remote edit` for a saved server."
+         open` there prints the new fingerprint: {}.",
+        format_new_fingerprint_step(saved_server_label.as_deref())
     )]
     CertificateMismatch {
         server_address: String,
         expected_certificate_fingerprint: String,
         presented_certificate_fingerprint: String,
+        saved_server_label: Option<String>,
     },
+}
+
+/// The step that gives a dial the new fingerprint of a server's certificate.
+///
+/// Example — `Some("work")` gives ``give it with `koshi remote edit work` ``.
+/// `None` gives ``give it with --certificate-fingerprint, or with `koshi
+/// remote edit` for a saved server``.
+fn format_new_fingerprint_step(saved_server_label: Option<&str>) -> String {
+    match saved_server_label {
+        Some(saved_server_label) => {
+            format!("give it with `koshi remote edit {saved_server_label}`")
+        }
+        None => "give it with --certificate-fingerprint, or with `koshi remote edit` for a saved \
+                 server"
+            .to_string(),
+    }
 }
 
 /// Which of the four files under `remote/` an

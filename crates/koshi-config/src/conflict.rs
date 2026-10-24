@@ -1,22 +1,18 @@
 //! Keybinding conflict detection over ordered keymap layers.
 //!
 //! Bindings arrive in layers, lowest precedence first: the built-in
-//! defaults, then the user's own surfaces (user file, session, layout).
-//! [`detect_conflicts`] inspects the layers before the keymap-merge pass
-//! folds them into the runtime lookup map, and reports every finding as a
-//! typed [`ConflictDiagnostic`]. The report's
-//! [`get_verdict`](ConflictReport::get_verdict) tells the caller what to do with the
-//! user keymap as a whole:
+//! defaults, then the user's `keybinding.kdl`. [`detect_conflicts`] inspects
+//! the layers before the keymap-merge pass folds them into the runtime lookup
+//! map, and reports every finding as a typed [`ConflictDiagnostic`]. The
+//! report's [`get_verdict`](ConflictReport::get_verdict) tells the caller
+//! what to do with the user keymap as a whole:
 //!
 //! - **Warnings** (ambiguous prefix, orphan action or mode, an action that
 //!   needs CLI arguments, typeable keys, a binding shadowed by the reserved
 //!   unlock, a sequence past the chord-depth cap) inform; the keymap applies.
-//! - **A key collision** — the same key sequence bound to different actions
-//!   by two user-authored layers in one mode — reverts the whole user keymap
-//!   to the built-in defaults ([`KeymapVerdict::RevertToDefaults`]).
-//!   Non-keybinding config is unaffected. A user binding whose key is held
-//!   only by the defaults layer is a *steal*, not a collision: the user's
-//!   binding takes the key and the displaced default action becomes unbound.
+//!   A user binding on a key the defaults layer holds is a *steal* and draws
+//!   no finding: the user's binding takes the key and the displaced default
+//!   action becomes unbound.
 //! - **A fatal finding** — the locked-mode unlock escape is shadowed, missing,
 //!   or typeable, or the `pane-placement`, `pane-move-choice`,
 //!   `floating-pane-move` or `dock-undock` mode has no live cancellation
@@ -30,11 +26,9 @@
 //! longer than `maximum_chord_depth`, or when a higher layer `remove`s its
 //! key. The one-chord locked-mode `<C-l>` is the unlock binding itself and
 //! stays live. A dead binding is warned once per layer with the
-//! most specific reason, claims no key in the collision scan, and steals
-//! nothing. A binding voided by a `remove` gets no warning: removing a key
-//! in one layer and rebinding it in a higher layer moves the key between
-//! layers without a collision. A dead binding is judged again on every
-//! config load or reload.
+//! most specific reason, and steals nothing. A binding voided by a `remove`
+//! gets no warning. A dead binding is judged again on every config load or
+//! reload.
 //!
 //! Detection reads the layers and writes nothing. Applying the verdict is
 //! the caller's step.
@@ -50,6 +44,7 @@ use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, ResolveError};
 
 use crate::key::Leader;
+use crate::keybinding::{MAX_CHORD_DEPTH_SETTING_NAME, UNLOCK_ALTERNATIVE_SETTING_NAME};
 use crate::types::{
     build_default_mode_bindings, BoundAction, KeybindingsConfig, ModeBindings, ModeName,
 };
@@ -63,16 +58,12 @@ pub enum LayerOrigin {
     /// The user's own keymap file (`keybinding.kdl` in the koshi config
     /// directory).
     User,
-    /// Per-named-session overrides.
-    Session,
-    /// Bindings a layout file declares for itself.
-    Layout,
 }
 
 impl LayerOrigin {
     /// True for every origin the user wrote; false only for the built-in
-    /// defaults. Cross-layer collision and the typeable warning apply to
-    /// user-authored layers only.
+    /// defaults. The per-binding warnings apply to user-authored layers
+    /// only.
     #[must_use]
     pub fn is_user_authored(self) -> bool {
         !matches!(self, Self::Defaults)
@@ -84,8 +75,6 @@ impl fmt::Display for LayerOrigin {
         formatter.write_str(match self {
             Self::Defaults => "defaults",
             Self::User => "user",
-            Self::Session => "session",
-            Self::Layout => "layout",
         })
     }
 }
@@ -136,8 +125,6 @@ pub(crate) fn list_builtin_mode_names() -> BTreeSet<ModeName> {
 pub enum ConflictSeverity {
     /// Informational; the keymap still applies.
     Warning,
-    /// A user-vs-user key collision; the user keymap reverts to defaults.
-    Collision,
     /// The locked-mode unlock escape or a viewer-local mode's cancellation is
     /// broken; the keymap is refused.
     Fatal,
@@ -146,11 +133,8 @@ pub enum ConflictSeverity {
 /// What the caller does with the user keymap, decided by the worst finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeymapVerdict {
-    /// No collision and nothing fatal: apply every layer.
+    /// Nothing fatal: apply every layer.
     Apply,
-    /// A key collision: drop every user-authored layer and run the built-in
-    /// default bindings. Non-keybinding config is unaffected.
-    RevertToDefaults,
     /// A fatal finding: refuse the keymap outright.
     Reject,
 }
@@ -159,17 +143,6 @@ pub enum KeymapVerdict {
 /// message; [`get_severity`](Self::get_severity) gives its weight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictDiagnostic {
-    /// Two or more user-authored layers bind `key_sequence` in `mode_name` to
-    /// different actions. `binding_claims` holds one entry per distinct bound
-    /// action, in layer order.
-    KeyCollision {
-        /// The mode whose bindings collide.
-        mode_name: ModeName,
-        /// The key sequence both layers claim.
-        key_sequence: KeySequence,
-        /// Each distinct claim: the layer that made it and what it binds.
-        binding_claims: Vec<(LayerOrigin, BoundAction)>,
-    },
     /// `prefix_sequence` is bound, and so is `longer_sequence`, which starts
     /// with it. The prefix binding fires only on the chord timeout.
     AmbiguousPrefix {
@@ -298,7 +271,6 @@ impl ConflictDiagnostic {
     #[must_use]
     pub fn get_severity(&self) -> ConflictSeverity {
         match self {
-            Self::KeyCollision { .. } => ConflictSeverity::Collision,
             Self::ReservedUnlockShadowed { .. }
             | Self::ReservedUnlockMissing { .. }
             | Self::UnlockAlternativeTypeable { .. }
@@ -318,30 +290,6 @@ impl ConflictDiagnostic {
 impl fmt::Display for ConflictDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::KeyCollision {
-                mode_name,
-                key_sequence,
-                binding_claims,
-            } => {
-                write!(
-                    formatter,
-                    "key `{key_sequence}` in mode `{}` is bound",
-                    mode_name.get_name()
-                )?;
-                for (claim_index, (layer_origin, bound_action)) in
-                    binding_claims.iter().enumerate()
-                {
-                    if claim_index > 0 {
-                        formatter.write_str(" and")?;
-                    }
-                    write!(
-                        formatter,
-                        " by {layer_origin} to `{}`",
-                        bound_action.action_reference
-                    )?;
-                }
-                formatter.write_str("; all user keybindings revert to defaults")
-            }
             Self::AmbiguousPrefix {
                 mode_name,
                 prefix_sequence,
@@ -360,7 +308,7 @@ impl fmt::Display for ConflictDiagnostic {
             } => write!(
                 formatter,
                 "the reserved unlock key is bound by {layer_origin} to `{action_reference}` in locked mode; \
-                 declare `unlock_alternative` before rebinding it"
+                 declare `{UNLOCK_ALTERNATIVE_SETTING_NAME}` before rebinding it"
             ),
             Self::ReservedUnlockMissing {
                 reserved_unlock_chord,
@@ -373,7 +321,7 @@ impl fmt::Display for ConflictDiagnostic {
                 unlock_alternative_chord,
             } => write!(
                 formatter,
-                "`unlock_alternative` `{unlock_alternative_chord}` is a key plain typing produces; \
+                "`{UNLOCK_ALTERNATIVE_SETTING_NAME}` `{unlock_alternative_chord}` is a key plain typing produces; \
                  hold Ctrl, Alt, or Super"
             ),
             Self::ModeCancelBindingMissing {
@@ -404,7 +352,7 @@ impl fmt::Display for ConflictDiagnostic {
             } => write!(
                 formatter,
                 "`{key_sequence}` in mode `{}` ({layer_origin}, `{action_reference}`) is {} chords, over the \
-                 `maximum_chord_depth` cap of {maximum_chord_depth}; the binding can never fire",
+                 `{MAX_CHORD_DEPTH_SETTING_NAME}` cap of {maximum_chord_depth}; the binding can never fire",
                 mode_name.get_name(),
                 key_sequence.list_chords().len()
             ),
@@ -468,7 +416,7 @@ pub struct ConflictReport {
 
 impl ConflictReport {
     /// The keymap decision the worst finding demands: any fatal finding
-    /// rejects, any collision reverts to defaults, warnings alone apply.
+    /// rejects, warnings alone apply.
     #[must_use]
     pub fn get_verdict(&self) -> KeymapVerdict {
         let worst_severity = self
@@ -478,7 +426,6 @@ impl ConflictReport {
             .max();
         match worst_severity {
             Some(ConflictSeverity::Fatal) => KeymapVerdict::Reject,
-            Some(ConflictSeverity::Collision) => KeymapVerdict::RevertToDefaults,
             Some(ConflictSeverity::Warning) | None => KeymapVerdict::Apply,
         }
     }
@@ -537,14 +484,6 @@ pub fn detect_conflicts(
             &mut conflict_diagnostics,
         );
     }
-
-    scan_key_collisions(
-        layers,
-        &removal_layer_index_by_mode_and_key,
-        known_mode_names,
-        &firing_rules,
-        &mut conflict_diagnostics,
-    );
 
     let effective_bindings_by_mode = build_effective_bindings(
         layers,
@@ -658,8 +597,8 @@ pub(crate) struct FiringRules<'a> {
 
 /// True when the binding fires: the resolver accepts it as written, its
 /// sequence does not hold the reserved unlock chord in locked mode, and its
-/// sequence fits the chord-depth cap. Only firing bindings claim keys in the
-/// collision scan or enter the effective map. Removal by a higher layer is a
+/// sequence fits the chord-depth cap. Only firing bindings enter the
+/// effective map. Removal by a higher layer is a
 /// separate check the callers make with [`is_removed_by_higher_layer`]. The keymap-merge
 /// pass reads this same predicate.
 pub(crate) fn is_bound_action_firing(
@@ -780,71 +719,6 @@ fn scan_layer_bindings(
                     action_reference: bound_action.action_reference.clone(),
                 });
             }
-        }
-    }
-}
-
-/// Cross-layer key collisions: the same `(mode_name, key_sequence)` bound to different
-/// [`BoundAction`]s by two or more user-authored layers. Identical bound
-/// actions in several layers pass. The defaults layer never collides: a
-/// user binding on a defaulted key is a steal.
-///
-/// Only firing claims count ([`is_bound_action_firing`]): a binding that cannot
-/// fire claims no key, and [`scan_layer_bindings`] warns it instead. A claim a
-/// higher layer removes claims no key either: removing a key and rebinding it
-/// in a higher layer takes the key without a collision.
-fn scan_key_collisions(
-    layers: &[KeymapLayer],
-    removal_layer_index_by_mode_and_key: &BTreeMap<(&ModeName, &KeySequence), usize>,
-    known_mode_names: &BTreeSet<ModeName>,
-    firing_rules: &FiringRules<'_>,
-    conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
-) {
-    let mut binding_claims_by_mode_and_key: BTreeMap<
-        (&ModeName, &KeySequence),
-        Vec<(LayerOrigin, &BoundAction)>,
-    > = BTreeMap::new();
-    for (layer_index, layer) in layers
-        .iter()
-        .enumerate()
-        .filter(|(_, layer)| layer.origin.is_user_authored())
-    {
-        for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
-            if !known_mode_names.contains(mode_name) {
-                continue;
-            }
-            for (key_sequence, bound_action) in &mode_bindings.bound_action_by_key_sequence {
-                if is_removed_by_higher_layer(
-                    removal_layer_index_by_mode_and_key,
-                    mode_name,
-                    key_sequence,
-                    layer_index,
-                ) || !is_bound_action_firing(mode_name, key_sequence, bound_action, firing_rules)
-                {
-                    continue;
-                }
-                let binding_claimants = binding_claims_by_mode_and_key
-                    .entry((mode_name, key_sequence))
-                    .or_default();
-                if !binding_claimants
-                    .iter()
-                    .any(|(_, existing_bound_action)| *existing_bound_action == bound_action)
-                {
-                    binding_claimants.push((layer.origin, bound_action));
-                }
-            }
-        }
-    }
-    for ((mode_name, key_sequence), binding_claimants) in binding_claims_by_mode_and_key {
-        if binding_claimants.len() >= 2 {
-            conflict_diagnostics.push(ConflictDiagnostic::KeyCollision {
-                mode_name: mode_name.clone(),
-                key_sequence: key_sequence.clone(),
-                binding_claims: binding_claimants
-                    .into_iter()
-                    .map(|(layer_origin, bound_action)| (layer_origin, bound_action.clone()))
-                    .collect(),
-            });
         }
     }
 }

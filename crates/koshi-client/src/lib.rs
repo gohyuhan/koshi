@@ -57,8 +57,8 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::placement::{PlacedPreview, PlacementPreviewError};
 use koshi_renderer::region::solve_core_regions;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, PlacementPreview, PlacementSnapshot, Reconnecting, RenderSnapshot,
-    SessionSnapshot,
+    ClientSnapshot, LinkStatus, PlacementHandleHover, PlacementPreview, PlacementSnapshot,
+    RenderSnapshot, SessionSnapshot,
 };
 use koshi_renderer::theme::Theme;
 
@@ -130,12 +130,14 @@ pub(crate) struct PlacementTabHover {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum PlacementModeLifetime {
     /// Until Esc. `core:begin-pane-placement` (`<C-p> m` by default) opens
-    /// this lifetime. A mouse drop the session accepts switches to it while
-    /// `stay-in-pane-placement-mode-after-placement` is `#true`. With that
-    /// setting `#false`, an accepted placement ends it.
+    /// this lifetime. With `stay-in-pane-placement-mode-after-placement`
+    /// `#false`, an accepted placement also ends it.
     #[default]
     UntilCancelled,
-    /// Until the pane-handle drag that opened it ends.
+    /// Until the pane-handle drag that opened it ends. After a release that
+    /// confirmed a placement, it lasts until a frame shows that placement,
+    /// the session rejects it, or the first frame after a resync arrives,
+    /// whatever `stay-in-pane-placement-mode-after-placement` says.
     UntilDragEnds,
 }
 
@@ -270,20 +272,6 @@ pub(crate) struct ViewerRestorePoint {
     sent_floating_pane_move: Option<SentFloatingPaneMove>,
     /// Dock/undock mode and the tiled pane it selected.
     dock_undock_mode: Option<DockUndockMode>,
-}
-
-/// Whether a viewer holds a link to its session, and how it is getting one back
-/// when it does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LinkStatus {
-    /// The viewer's requests reach the session, and its frames arrive.
-    Linked,
-    /// The session is replacing its own process image, and the viewer waits
-    /// to join its new image. The tabline draws no tag.
-    AwaitingRestartedSession,
-    /// The link to a session on a server dropped, and the viewer dials that
-    /// server again. The tabline draws the tag this value describes.
-    Redialing(Reconnecting),
 }
 
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
@@ -428,8 +416,9 @@ pub struct Client {
     /// or off every pane. The renderer draws an unfocused hovered pane in the
     /// hover color.
     hovered_pane_id: Option<PaneId>,
-    /// The pane whose top border currently exposes the placement handle.
-    placement_handle_pane_id: Option<PaneId>,
+    /// Where this viewer's pointer rests on a pane's placement handle or on
+    /// the tiled top border that shows it, or `None` off both.
+    placement_handle_hover: Option<PlacementHandleHover>,
     /// Whether this viewer holds a link to its session, and how it is getting
     /// one back when it does not. The tabline draws
     /// `RECONNECTING (attempt 4, retry in 8s)` while it holds
@@ -498,7 +487,7 @@ impl Client {
             tabline_peek: None,
             selection_scroll_origin_row_index: None,
             hovered_pane_id: None,
-            placement_handle_pane_id: None,
+            placement_handle_hover: None,
             link_status: LinkStatus::Linked,
             placement_state: PlacementState::default(),
             active_tab_id: None,
@@ -521,10 +510,9 @@ impl Client {
     /// are all-or-nothing: conflict detection runs over the candidate against
     /// this viewer's action table, and it commits only on a
     /// [`KeymapVerdict::Apply`] — storing the layer, rebuilding the keymap,
-    /// and dropping any sequence being typed. A collision puts the built-in
-    /// defaults in place with the hint bar's revert marker set; a fatal
-    /// finding keeps the running keymap unmarked. Both put the stored layer
-    /// and the folded keybinding settings back on the built-ins.
+    /// and dropping any sequence being typed. A [`KeymapVerdict::Reject`]
+    /// keeps the running keymap, and puts the stored layer and the folded
+    /// keybinding settings back on the built-ins.
     ///
     /// Returns the conflict report when `keybindings_config_layer` is `Some`,
     /// and `None` when it is `None`.
@@ -566,14 +554,6 @@ impl Client {
             &self.registry,
         );
         if conflict_report.get_verdict() != KeymapVerdict::Apply {
-            // A collision reverts to the built-in defaults with the revert
-            // marker in the hint bar; a fatal finding keeps the running
-            // keymap unmarked.
-            if conflict_report.get_verdict() == KeymapVerdict::RevertToDefaults {
-                self.keymap_catalog =
-                    KeymapHintCatalog::from_registry(&self.registry).mark_reverted_to_defaults();
-                self.pending_key_sequence = None;
-            }
             return Some(conflict_report);
         }
         self.config_layers = tentative_config_layers;
@@ -871,11 +851,15 @@ impl Client {
     /// Settle the placement confirmation that waits for the session when the
     /// newest frame names it as `last_applied_placement_command_id`: that frame
     /// shows the placement, and [`set_frame_view`](Self::set_frame_view)
-    /// reconciles it. With `stay-in-pane-placement-mode-after-placement
-    /// #true`, pane placement mode stays on until Esc with no target; a mode
-    /// opened by a pane-handle drag switches to
-    /// [`PlacementModeLifetime::UntilCancelled`]. With `#false`, and in
-    /// dock/undock mode whatever the setting says, the mode ends.
+    /// reconciles it.
+    ///
+    /// - Pane placement mode that lasts until Esc stays on with no target while
+    ///   `stay-in-pane-placement-mode-after-placement` is `#true`, and ends
+    ///   while it is `#false`.
+    /// - Pane placement mode opened by a pane-handle drag
+    ///   ([`PlacementModeLifetime::UntilDragEnds`]) ends, whatever the setting
+    ///   says.
+    /// - In dock/undock mode, the mode ends whatever the setting says.
     ///
     /// A frame that names another placement, or none, changes nothing: the
     /// confirmation stays pending until the session rejects it or a frame
@@ -892,9 +876,6 @@ impl Client {
             && self
                 .client_config
                 .should_stay_in_pane_placement_mode_after_placement;
-        if should_stay_in_pane_placement_mode {
-            self.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
-        }
         self.clear_placement_draft();
         if is_placement_mode_active && !should_stay_in_pane_placement_mode {
             self.cancel_placement_mode();

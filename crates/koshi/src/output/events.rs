@@ -56,7 +56,7 @@ pub fn filter_recent_events(
 }
 
 /// One session's recent events, oldest first.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEvents {
     /// The session that remembered them.
     pub session_id: SessionId,
@@ -71,9 +71,9 @@ pub struct SessionEvents {
 /// pane and focused it results in:
 ///
 /// ```text
-/// session                name        at          event        ids
-/// session-…1             quiet-lake  1735600001  PaneCreated  tab-… pane-…
-/// session-…1             quiet-lake  1735600001  PaneFocused  client-… tab-… pane-…
+/// session                name        at                    event        ids
+/// session-…1             quiet-lake  2024-12-31T00:00:01Z  PaneCreated  tab-… pane-…
+/// session-…1             quiet-lake  2024-12-31T00:00:01Z  PaneFocused  client-… tab-… pane-…
 /// ```
 ///
 /// A session that remembered nothing contributes no row. An answer holding
@@ -83,22 +83,26 @@ pub fn render_recent_events(
     session_events: &[SessionEvents],
     output_format: OutputFormat,
 ) -> String {
+    let session_event_reports: Vec<SessionEventsReport> = session_events
+        .iter()
+        .map(build_session_events_report)
+        .collect();
     match output_format {
-        OutputFormat::Json => render_json(&session_events),
+        OutputFormat::Json => render_json(&session_event_reports),
         OutputFormat::Table => {
-            let event_rows: Vec<Vec<String>> = session_events
+            let event_rows: Vec<Vec<String>> = session_event_reports
                 .iter()
-                .flat_map(|session_event_group| {
-                    session_event_group
+                .flat_map(|session_events_report| {
+                    session_events_report
                         .recent_events
                         .iter()
-                        .map(|recent_event| {
+                        .map(|recent_event_row| {
                             vec![
-                                session_event_group.session_id.to_string(),
-                                session_event_group.session_name.clone(),
-                                format_time_cell(recent_event.occurred_at),
-                                recent_event.event_name.to_string(),
-                                render_event_identifier_cells(recent_event),
+                                session_events_report.session_id.clone(),
+                                session_events_report.session_name.clone(),
+                                recent_event_row.occurred_at.clone(),
+                                recent_event_row.event_name.clone(),
+                                render_event_identifier_cells(recent_event_row),
                             ]
                         })
                 })
@@ -108,26 +112,79 @@ pub fn render_recent_events(
     }
 }
 
+/// One session's recent events as both formats of `debug events` print them.
+#[derive(Serialize)]
+struct SessionEventsReport {
+    /// The session that remembered them, as `session-<uuid>`.
+    session_id: String,
+    /// That session's name.
+    session_name: String,
+    /// The events, oldest first.
+    recent_events: Vec<RecentEventRow>,
+}
+
+/// One remembered event as both formats print it. Each id is in its prefixed
+/// form, such as `pane-<uuid>`, or `None` when the event named no such id.
+#[derive(Serialize)]
+struct RecentEventRow {
+    /// When the record was stamped, as [`format_utc_timestamp`] writes it.
+    occurred_at: String,
+    /// The event's name, e.g. `PaneCreated`.
+    event_name: String,
+    /// The session the event named.
+    session_id: Option<String>,
+    /// The client the event named.
+    client_id: Option<String>,
+    /// The tab the event named.
+    tab_id: Option<String>,
+    /// The pane the event named.
+    pane_id: Option<String>,
+    /// The command the event named.
+    command_id: Option<String>,
+}
+
+/// One [`SessionEvents`] as both formats print it.
+fn build_session_events_report(session_event_group: &SessionEvents) -> SessionEventsReport {
+    SessionEventsReport {
+        session_id: session_event_group.session_id.to_string(),
+        session_name: session_event_group.session_name.clone(),
+        recent_events: session_event_group
+            .recent_events
+            .iter()
+            .map(|recent_event| RecentEventRow {
+                occurred_at: format_utc_timestamp(recent_event.occurred_at),
+                event_name: recent_event.event_name.to_string(),
+                session_id: recent_event
+                    .session_id
+                    .map(|session_id| session_id.to_string()),
+                client_id: recent_event
+                    .client_id
+                    .map(|client_id| client_id.to_string()),
+                tab_id: recent_event.tab_id.map(|tab_id| tab_id.to_string()),
+                pane_id: recent_event.pane_id.map(|pane_id| pane_id.to_string()),
+                command_id: recent_event
+                    .command_id
+                    .map(|command_id| command_id.to_string()),
+            })
+            .collect(),
+    }
+}
+
 /// Every id the event named, space separated, or `-` when it named none.
 ///
 /// The ids keep this order: session, client, tab, pane, command. Each prints its own
 /// kind, so `client-… tab-… pane-…` needs no column of its own to say which is which.
-fn render_event_identifier_cells(recent_event: &RecentEvent) -> String {
-    let event_identifiers: Vec<String> = [
-        recent_event
-            .session_id
-            .map(|session_id| session_id.to_string()),
-        recent_event
-            .client_id
-            .map(|client_id| client_id.to_string()),
-        recent_event.tab_id.map(|tab_id| tab_id.to_string()),
-        recent_event.pane_id.map(|pane_id| pane_id.to_string()),
-        recent_event
-            .command_id
-            .map(|command_id| command_id.to_string()),
+fn render_event_identifier_cells(recent_event_row: &RecentEventRow) -> String {
+    let event_identifiers: Vec<&str> = [
+        &recent_event_row.session_id,
+        &recent_event_row.client_id,
+        &recent_event_row.tab_id,
+        &recent_event_row.pane_id,
+        &recent_event_row.command_id,
     ]
     .into_iter()
     .flatten()
+    .map(String::as_str)
     .collect();
     if event_identifiers.is_empty() {
         return "-".to_string();

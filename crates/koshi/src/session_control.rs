@@ -21,13 +21,19 @@ use koshi_link::ipc_client;
 /// From the start, this process ignores `SIGHUP`, `SIGINT` and `SIGQUIT`, or
 /// Ctrl+C on Windows, through
 /// [`ignore_terminal_signals`](koshi_host::process_tree::ignore_terminal_signals).
+///
+/// `shared_sessions_base_directory` is the shared directory the `koshi.kdl`
+/// layer the caller read at this process's start names, as
+/// [`resolve_shared_sessions_base_directory_for_layer`](koshi_link::config::resolve_shared_sessions_base_directory_for_layer)
+/// gives it. `None` looks up only this user's sessions.
 pub fn kill_session(
     session_reference: Option<&SessionReference>,
+    shared_sessions_base_directory: Option<&Path>,
 ) -> Result<SessionEnding, CliError> {
     koshi_host::process_tree::ignore_terminal_signals();
     kill_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         session_reference,
     )
 }
@@ -108,10 +114,18 @@ fn resolve_discovered_session_target(
 /// session display name. A target that names a session rather than a client
 /// leaves the choice to that session, which detaches its only attached client
 /// and lists the attached ids when there are several.
-pub fn detach_client_or_session(detach_target_text: &str) -> Result<CommandResult, CliError> {
+///
+/// `shared_sessions_base_directory` is the shared directory the `koshi.kdl`
+/// layer the caller read at this process's start names, as
+/// [`resolve_shared_sessions_base_directory_for_layer`](koshi_link::config::resolve_shared_sessions_base_directory_for_layer)
+/// gives it. `None` looks up only this user's sessions.
+pub fn detach_client_or_session(
+    detach_target_text: &str,
+    shared_sessions_base_directory: Option<&Path>,
+) -> Result<CommandResult, CliError> {
     detach_client_or_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         detach_target_text,
     )
 }
@@ -242,12 +256,18 @@ fn find_session_for_client(
 ///
 /// An id, or `<user id>/<session id>`, goes straight to that session; a name
 /// is resolved against every running session first.
+///
+/// `shared_sessions_base_directory` is the shared directory the `koshi.kdl`
+/// layer the caller read at this process's start names, as
+/// [`resolve_shared_sessions_base_directory_for_layer`](koshi_link::config::resolve_shared_sessions_base_directory_for_layer)
+/// gives it. `None` looks up only this user's sessions.
 pub fn detach_all_session(
     session_reference: Option<&SessionReference>,
+    shared_sessions_base_directory: Option<&Path>,
 ) -> Result<CommandResult, CliError> {
     detach_all_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         session_reference,
     )
 }

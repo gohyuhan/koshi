@@ -389,8 +389,9 @@ impl fmt::Display for KeySequence {
     }
 }
 
-/// One incomplete multi-chord keybinding: the chords typed into it so far, and
-/// the instant an ambiguous one resolves.
+/// One incomplete multi-chord keybinding: the chords typed into it so far, the
+/// instant an ambiguous one resolves, and the instant the hint bar starts to
+/// show the chords that continue it.
 ///
 /// A chord held here is never written to a pane: it fires a binding, or it is
 /// dropped when the sequence is left. The pane a chord was typed into, and the
@@ -404,6 +405,12 @@ pub struct PendingKeySequence {
     /// complete binding. A prefix-only sequence carries `None` and waits for
     /// the next chord indefinitely.
     pub ambiguity_deadline: Option<Instant>,
+    /// The instant the hint bar starts to show this sequence and the chords
+    /// that continue it: `which-key-delay-ms` after the sequence's first
+    /// chord. Until then the hint bar keeps the face it had before the first
+    /// chord. `None` once the hint bar shows the sequence. Example: `<C-p>`
+    /// pressed at `t` with a delay of 300 ms holds `Some(t + 300 ms)`.
+    pub continuation_hint_hidden_until: Option<Instant>,
 }
 
 /// The modifier keys the outer terminal reported with one keyboard event,

@@ -37,7 +37,7 @@ impl ClientVersion {
 }
 
 /// Which koshi server one [`ServerVersionRow`] is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
     /// The one router this machine runs.
     Router,
@@ -46,8 +46,7 @@ pub enum ServerKind {
 }
 
 /// What asking one koshi server for its build produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "state")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerBuild {
     /// The server answered and named this build.
     Running {
@@ -66,14 +65,13 @@ pub enum ServerBuild {
 }
 
 /// One `server-version` row: a koshi server, and what asking it produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerVersionRow {
     /// Which server this row is about.
     pub server_kind: ServerKind,
     /// The session this row is about; absent on the router's row.
     pub session_id: Option<SessionId>,
     /// What asking it produced.
-    #[serde(flatten)]
     pub build: ServerBuild,
 }
 
@@ -203,12 +201,18 @@ pub fn build_unreachable_server_error(
 /// A server that could not be asked earns a row saying so, and the other rows
 /// still come back; [`build_unreachable_server_error`] turns those rows into the failure
 /// the caller ends with.
+///
+/// `shared_sessions_base_directory` is the shared directory the `koshi.kdl`
+/// layer the caller read at this process's start names, as
+/// [`resolve_shared_sessions_base_directory_for_layer`](koshi_link::config::resolve_shared_sessions_base_directory_for_layer)
+/// gives it. `None` looks up only this user's sessions.
 pub fn list_server_version_rows(
     session_reference: Option<&SessionReference>,
+    shared_sessions_base_directory: Option<&Path>,
 ) -> Result<ServerVersionReport, CliError> {
     list_server_version_rows_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         session_reference,
     )
 }

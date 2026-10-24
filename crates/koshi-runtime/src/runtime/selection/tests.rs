@@ -3,7 +3,7 @@
 //! stores, snaps, and copies what came back.
 
 use super::*;
-use crate::runtime::command::tests::attach_client_record;
+use crate::runtime::command::tests::{attach_client_record, create_session_with_attached_client};
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::snapshot::tests::find_selection_row_spans;
 
@@ -36,16 +36,16 @@ fn build_selection_server() -> (Server, ClientId, PaneId) {
         InboxSink::from_event_sender(event_sender),
     )));
     let mut server = Server::from_runtime_parts(fake_pty_backend, event_receiver);
-    let client_id = server
-        .bootstrap_local(
-            SessionId::new(),
-            Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("bootstrap");
+    let client_id = create_session_with_attached_client(
+        &mut server,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("bootstrap");
     let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
     (server, client_id, pane_id)
 }
@@ -2525,12 +2525,12 @@ fn ctrl_c_clears_the_highlight_like_any_key_reaching_the_pane() {
 
     // `<C-c>` binds nothing. The viewer passes it through and the session
     // writes it to the pane.
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(KeyChord::from_parts(
+        &[build_key_input_for_chord(KeyChord::from_parts(
             BindingModifierFlags::CTRL,
             Key::Char('c'),
-        )),
+        ))],
     );
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
@@ -2585,12 +2585,12 @@ fn typing_into_the_pane_clears_the_typists_highlight_there() {
         }
     );
 
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(KeyChord::from_parts(
+        &[build_key_input_for_chord(KeyChord::from_parts(
             BindingModifierFlags::NONE,
             Key::Char('x'),
-        )),
+        ))],
     );
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
@@ -2640,12 +2640,12 @@ fn typing_during_a_drag_cancels_the_highlight_and_the_gesture() {
     // The key reaches the pane's program. The viewer drops the gesture and the
     // session drops the highlight, in the order the binary's loop runs them.
     viewer.end_mouse_selection();
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(KeyChord::from_parts(
+        &[build_key_input_for_chord(KeyChord::from_parts(
             BindingModifierFlags::NONE,
             Key::Char('x'),
-        )),
+        ))],
     );
     assert_eq!(get_selection(&mut server, client_id, pane_id), None);
 
@@ -2680,12 +2680,12 @@ fn typing_after_a_press_cancels_the_empty_gesture() {
     assert_eq!(get_selection(&mut server, client_id, pane_id), None);
 
     viewer.end_mouse_selection();
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(KeyChord::from_parts(
+        &[build_key_input_for_chord(KeyChord::from_parts(
             BindingModifierFlags::NONE,
             Key::Char('x'),
-        )),
+        ))],
     );
 
     // The armed gesture is gone: a drag from here highlights nothing.
@@ -2728,12 +2728,12 @@ fn typing_leaves_another_panes_highlight_alone() {
     // The split focuses the new pane, and the key types into it.
     let other_pane_id = split_pane_rightward(&mut server, client_id);
     assert_ne!(other_pane_id, pane_id);
-    server.handle_key_input(
+    server.handle_key_inputs(
         client_id,
-        &build_key_input_for_chord(KeyChord::from_parts(
+        &[build_key_input_for_chord(KeyChord::from_parts(
             BindingModifierFlags::NONE,
             Key::Char('x'),
-        )),
+        ))],
     );
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),

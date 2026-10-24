@@ -2048,6 +2048,7 @@ fn a_due_restart_answers_each_request_already_queued_and_refuses_the_next_ones()
         status_receiver.try_recv(),
         Ok(RouterResult::RemoteStatus {
             remote_listen_address: None,
+            config_file_path: None,
             is_remote_access_enabled: false,
             is_listening: false,
             certificate_fingerprint: None,
@@ -2183,6 +2184,7 @@ fn a_lookup_waiting_on_a_silent_session_leaves_the_loop_serving_other_requests()
             .expect("the status is answered while the lookup waits"),
         RouterResult::RemoteStatus {
             remote_listen_address: None,
+            config_file_path: None,
             is_remote_access_enabled: false,
             is_listening: false,
             certificate_fingerprint: None,
@@ -5548,7 +5550,7 @@ fn a_request_that_would_wait_is_refused_while_a_restart_is_pending() {
             &mut remote_state,
             RouterRequestKind::RemoteStatus
         ),
-        Ok(build_remote_status_result(&remote_state)),
+        Ok(build_remote_status_result(&remote_state, None)),
         "a request that needs no wait is answered"
     );
     let (endpoint_sender, endpoint_receiver) = mpsc::channel();
@@ -7063,25 +7065,50 @@ fn a_grant_expires_the_given_span_after_the_clock_reading_it_was_issued_at() {
     );
 }
 
+/// The refusal a grant asked to work longer than 36500 days comes back with.
+const TOO_LONG_LIFETIME_REFUSAL_MESSAGE: &str =
+    "a token lasts at most 36500d; use never for a token that does not expire";
+
+/// The refusal a grant whose expiry falls past the latest time this
+/// machine's clock counts comes back with.
+const UNREPRESENTABLE_EXPIRY_REFUSAL_MESSAGE: &str =
+    "the expiry is further ahead than this machine's clock can represent";
+
+/// The latest whole second this platform's clock counts: `i64::MAX` seconds
+/// after 1970 on Unix, where the clock counts seconds in an `i64`, and
+/// 910692730085 seconds after 1970 on Windows, where the clock counts
+/// 100-nanosecond ticks from 1601 in an `i64`.
+fn build_latest_clock_second() -> SystemTime {
+    #[cfg(unix)]
+    let latest_second_count = i64::MAX.unsigned_abs();
+    #[cfg(windows)]
+    let latest_second_count: u64 = 910_692_730_085;
+    UNIX_EPOCH + Duration::from_secs(latest_second_count)
+}
+
 #[test]
-fn a_span_the_clock_cannot_represent_is_refused_and_leaves_the_store_alone() {
-    // An expiry past the clock's range is refused before any write: the store
-    // file stays absent, or keeps its bytes.
+fn a_lifetime_over_36500_days_is_refused_and_leaves_the_store_alone() {
+    // A lifetime one second over 36500 days, and u64::MAX seconds, are both
+    // refused before the store is read: the store file stays absent, or
+    // keeps its bytes.
     let runtime_directory = build_test_runtime_directory();
     let token_store_path = resolve_token_store_path(runtime_directory.path());
-    let unrepresentable_grant_request = build_grant_request(
-        "ada",
-        TokenScope::HostWide,
-        Some(Duration::from_secs(u64::MAX)),
-    );
-    let refusal_result = build_expected_refusal(
-        "the expiry is further ahead than this machine's clock can represent",
-    );
+    let refusal_result = build_expected_refusal(TOO_LONG_LIFETIME_REFUSAL_MESSAGE);
+    let too_long_lifetimes = [
+        Duration::from_secs(3_153_600_001),
+        Duration::from_secs(u64::MAX),
+    ];
 
-    assert_eq!(
-        answer_token_request(Some(&token_store_path), unrepresentable_grant_request),
-        refusal_result
-    );
+    for too_long_lifetime in too_long_lifetimes {
+        assert_eq!(
+            answer_token_request(
+                Some(&token_store_path),
+                build_grant_request("ada", TokenScope::HostWide, Some(too_long_lifetime)),
+            ),
+            refusal_result,
+            "for {too_long_lifetime:?}"
+        );
+    }
     assert!(
         !token_store_path.exists(),
         "the refusal came before the store was created"
@@ -7090,21 +7117,111 @@ fn a_span_the_clock_cannot_represent_is_refused_and_leaves_the_store_alone() {
     let _ = grant_token_for_test(&token_store_path, "ada", TokenScope::HostWide);
     let token_store_bytes_before_refused_request =
         rewrite_token_store_with_spacing(&token_store_path);
-    let unrepresentable_grant_request = build_grant_request(
-        "ada",
+
+    for too_long_lifetime in too_long_lifetimes {
+        assert_eq!(
+            answer_token_request(
+                Some(&token_store_path),
+                build_grant_request("ada", TokenScope::HostWide, Some(too_long_lifetime)),
+            ),
+            refusal_result,
+            "for {too_long_lifetime:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&token_store_path).expect("the store file is still there"),
+        token_store_bytes_before_refused_request,
+        "the refused grant wrote nothing"
+    );
+}
+
+#[test]
+fn a_lifetime_of_exactly_36500_days_is_granted_and_expires_that_long_after_issue() {
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(runtime_directory.path());
+
+    let grant_result = answer_token_request(
+        Some(&token_store_path),
+        build_grant_request(
+            "ada",
+            TokenScope::HostWide,
+            Some(Duration::from_secs(3_153_600_000)),
+        ),
+    );
+
+    let RouterResult::Granted { .. } = grant_result else {
+        panic!("the grant was refused: {grant_result:?}")
+    };
+    let written_token_store =
+        TokenStore::load_token_store_from_path(&token_store_path).expect("the store reads back");
+    assert_eq!(written_token_store.token_records.len(), 1);
+    let granted_token_record = &written_token_store.token_records[0];
+    assert_eq!(
+        granted_token_record
+            .expires_at
+            .expect("the grant carries an expiry")
+            .duration_since(granted_token_record.issued_at)
+            .expect("the expiry is after the issue time"),
+        Duration::from_secs(3_153_600_000)
+    );
+}
+
+#[test]
+fn an_expiry_past_the_latest_clock_second_is_refused_and_leaves_the_store_alone() {
+    // With the clock at the latest second it counts, a zero lifetime still
+    // fits and a one-second lifetime does not.
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(runtime_directory.path());
+    let latest_clock_second = build_latest_clock_second();
+    assert_eq!(
+        latest_clock_second.checked_add(Duration::from_secs(1)),
+        None,
+        "the clock counts no second after the latest one"
+    );
+    let _ = grant_token_for_test(&token_store_path, "ada", TokenScope::HostWide);
+    let token_store_bytes_before_refused_request =
+        rewrite_token_store_with_spacing(&token_store_path);
+
+    let refused_grant_result = grant_token(
+        Some(&token_store_path),
+        &mut build_no_remote_state(),
+        "ada".to_string(),
         TokenScope::HostWide,
-        Some(Duration::from_secs(u64::MAX)),
+        Some(Duration::from_secs(1)),
+        build_latest_clock_second,
     );
 
     assert_eq!(
-        answer_token_request(Some(&token_store_path), unrepresentable_grant_request),
-        refusal_result
+        refused_grant_result,
+        build_expected_refusal(UNREPRESENTABLE_EXPIRY_REFUSAL_MESSAGE)
     );
     assert_eq!(
         std::fs::read(&token_store_path).expect("the store file is still there"),
         token_store_bytes_before_refused_request,
         "the refused grant wrote nothing"
     );
+
+    let zero_lifetime_grant_result = grant_token(
+        Some(&token_store_path),
+        &mut build_no_remote_state(),
+        "grace".to_string(),
+        TokenScope::HostWide,
+        Some(Duration::ZERO),
+        build_latest_clock_second,
+    );
+
+    let RouterResult::Granted { .. } = zero_lifetime_grant_result else {
+        panic!("the grant was refused: {zero_lifetime_grant_result:?}")
+    };
+    let written_token_store =
+        TokenStore::load_token_store_from_path(&token_store_path).expect("the store reads back");
+    let grace_token_record = written_token_store
+        .token_records
+        .iter()
+        .find(|token_record| token_record.identity == "grace")
+        .expect("the grace grant is written");
+    assert_eq!(grace_token_record.issued_at, latest_clock_second);
+    assert_eq!(grace_token_record.expires_at, Some(latest_clock_second));
 }
 
 #[test]
@@ -7736,6 +7853,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let attaching_connection = remote_client::connect_remote_server(
         &remote_listen_address.to_string(),
         &connection_token,
+        None,
         &certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         None,
@@ -7756,6 +7874,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let mut listing_connection = remote_client::connect_remote_server(
         &remote_listen_address.to_string(),
         &connection_token,
+        None,
         &certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         None,
@@ -7919,6 +8038,7 @@ fn a_grant_cuts_only_the_standing_connection_of_its_identity_and_scope() {
         "alice".to_string(),
         TokenScope::HostWide,
         None,
+        SystemTime::now,
     );
 
     let RouterResult::Granted {
@@ -8864,8 +8984,8 @@ fn a_connection_that_ends_makes_room_for_the_next_one() {
 
 #[test]
 fn switching_remote_access_on_with_no_listen_address_is_refused() {
-    // With no `remote-listen` address in `koshi.kdl`, the refusal names the
-    // line to add.
+    // A router that read no `remote-listen` address when it started names
+    // the line to set and the restart that makes the router read it.
     let (router_events_sender, _router_events_receiver) = mpsc::channel();
     let mut remote_state = build_no_remote_state();
 
@@ -8878,7 +8998,8 @@ fn switching_remote_access_on_with_no_listen_address_is_refused() {
     assert_eq!(
         enable_result,
         build_expected_refusal(
-            "no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl"
+            "this router read no remote listen address from koshi.kdl when it started; set \
+             `remote-listen \"<ip>:<port>\"` in koshi.kdl, then run `koshi restart-servers`"
         )
     );
     assert_eq!(
@@ -9250,7 +9371,7 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
         is_listening,
         certificate_fingerprint,
         ..
-    } = build_remote_status_result(&remote_state)
+    } = build_remote_status_result(&remote_state, None)
     else {
         panic!("a status request is answered with a status");
     };
@@ -9263,11 +9384,12 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
 }
 
 #[test]
-fn the_status_names_the_served_certificate_and_how_many_connections_it_holds() {
+fn the_status_names_the_served_certificate_the_connection_count_and_the_config_file() {
     // The listener serves the certificate whose fingerprint is 64 `a`
     // characters, and no certificate file exists: the status names that
-    // fingerprint and the count of admitted connections. No remote access
-    // record reports `is_remote_access_enabled` as `false`.
+    // fingerprint, the count of admitted connections, and the `koshi.kdl` in
+    // the config directory. No remote access record reports
+    // `is_remote_access_enabled` as `false`.
     let runtime_directory = build_test_runtime_directory();
     let data_directory = runtime_directory.path().join("data");
     let mut remote_state = RemoteState {
@@ -9294,9 +9416,10 @@ fn the_status_names_the_served_certificate_and_how_many_connections_it_holds() {
         .collect();
 
     assert_eq!(
-        build_remote_status_result(&remote_state),
+        build_remote_status_result(&remote_state, Some(Path::new("/home/user/.config/koshi"))),
         RouterResult::RemoteStatus {
             remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
+            config_file_path: Some(PathBuf::from("/home/user/.config/koshi/koshi.kdl")),
             is_remote_access_enabled: false,
             is_listening: true,
             certificate_fingerprint: Some("a".repeat(64)),
