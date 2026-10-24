@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use kdl::KdlNode;
+use kdl::{KdlDocument, KdlNode};
 
 use crate::error::{build_validation_error, ConfigError};
 use crate::layer::{PartialColorPalette, PartialThemeConfig};
@@ -74,6 +74,18 @@ pub fn parse_theme(
     theme_source_text: &str,
 ) -> Result<(PartialThemeConfig, Vec<String>), ConfigError> {
     let theme_document = parse_kdl(theme_path, theme_source_text)?;
+    parse_theme_from_document(&theme_document, theme_source_text)
+}
+
+/// [`parse_theme`] on `theme_document`, the KDL document already parsed from
+/// `theme_source_text`.
+///
+/// # Errors
+/// Returns the [`ConfigError::Validation`] errors of [`parse_theme`].
+pub(crate) fn parse_theme_from_document(
+    theme_document: &KdlDocument,
+    theme_source_text: &str,
+) -> Result<(PartialThemeConfig, Vec<String>), ConfigError> {
     let mut partial_theme_config = PartialThemeConfig::default();
     let mut parse_warnings = ParseWarnings::default();
     let mut has_seen_version = false;

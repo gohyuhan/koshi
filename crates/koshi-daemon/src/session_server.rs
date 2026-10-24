@@ -335,13 +335,17 @@ enum ServeOutcome {
 /// before this call, or `None` when it did not fail. A failure is written to the
 /// session log at warn level, after the `logging started` line.
 ///
-/// `config_directory` holds the `koshi.kdl` and the profiles the session reads,
-/// at the start and again at every rebind and resume. `None` runs the session
-/// on the built-in config.
+/// `app_config_layer` is the `koshi.kdl` layer the caller read at this
+/// process's start. The session starts on it: its log settings, its first
+/// panes, and the reach of its first control socket. `config_directory` holds
+/// the profiles the session reads and the `koshi.kdl` it reads again: at every
+/// in-process rebuild, and for `allow-other-users` at each connection and each
+/// request on a shared socket. `None` runs the session on the built-in config.
 #[allow(clippy::too_many_arguments)]
 pub fn run_session_server(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
+    app_config_layer: Option<PartialKoshiConfig>,
     session_id: SessionId,
     session_name: String,
     profile_name: Option<&str>,
@@ -351,9 +355,8 @@ pub fn run_session_server(
     supervisor_process_id: Option<u32>,
     config_migration_error: Option<&CliError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let app_config = koshi_link::config::load_app_layer(config_directory);
     let logging_parameters =
-        koshi_link::config::build_logging_parameters(app_config.as_ref(), session_id);
+        koshi_link::config::build_logging_parameters(app_config_layer.as_ref(), session_id);
     let (log_level, log_format) = (logging_parameters.log_level, logging_parameters.log_format);
     let _ = initialize_tracing(logging_parameters);
     // The first line written: it names the level and format the session runs
@@ -418,13 +421,13 @@ pub fn run_session_server(
     };
     // The stand-in clipboard tools are in place before the first pane starts.
     #[cfg(unix)]
-    refresh_session_clipboard_tools(&session_start, app_config.as_ref());
+    refresh_session_clipboard_tools(&session_start, app_config_layer.as_ref());
 
     let built_session = match resume_file_path {
         Some(resume_file_path) => resume_from_file(
             resume_file_path,
             &mut session_start,
-            app_config,
+            app_config_layer.clone(),
             Arc::clone(&pty_sink),
             runtime_event_receiver,
             &runtime_event_sender,
@@ -432,7 +435,7 @@ pub fn run_session_server(
         None => seed_initial_session(
             &mut session_start,
             profile_name,
-            app_config,
+            app_config_layer.clone(),
             Arc::clone(&pty_sink),
             runtime_event_receiver,
         ),
@@ -441,6 +444,7 @@ pub fn run_session_server(
         let ipc_server = start_serving_session(
             &pty_owner,
             &session_start,
+            app_config_layer.as_ref(),
             resume_file_path.is_some(),
             &runtime_event_sender,
             &mut std::io::stdout(),
@@ -1489,9 +1493,9 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 }
 
 /// Bind this session's control socket and write the endpoint file advertising
-/// it, under the reach `--allow-other-users` and `koshi.kdl` give it on Linux
-/// and macOS. On Windows both have no effect: only this user reaches the
-/// socket.
+/// it, under the reach `--allow-other-users` and the `koshi.kdl` layer
+/// `app_config_layer` give it on Linux and macOS. On Windows both have no
+/// effect: only this user reaches the socket.
 ///
 /// Every bind of this session's socket goes through here: the first one, and
 /// the one a rebuilt session takes. The token a client waits for changes once
@@ -1506,18 +1510,16 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 /// file that could not be written.
 fn bind_session_socket(
     session_start: &SessionStart,
+    #[cfg_attr(not(unix), allow(unused_variables))] app_config_layer: Option<&PartialKoshiConfig>,
     pty_owner: &Arc<PtyOwner>,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<IpcServer, IpcError> {
     #[cfg(unix)]
-    let other_users_policy = {
-        let config_directory = session_start.config_directory.as_deref();
-        koshi_link::config::resolve_other_users_policy(
-            koshi_link::config::load_app_layer(config_directory).as_ref(),
-            session_start.is_other_user_access_allowed,
-            config_directory,
-        )
-    };
+    let other_users_policy = koshi_link::config::resolve_other_users_policy(
+        app_config_layer,
+        session_start.is_other_user_access_allowed,
+        session_start.config_directory.as_deref(),
+    );
     #[cfg(windows)]
     let other_users_policy = None;
     IpcServer::start(
@@ -1535,8 +1537,9 @@ fn bind_session_socket(
     )
 }
 
-/// Bind the session's control socket and print the ready line to
-/// `ready_output`, on the terms [`report_ready`] states for `is_resumed`.
+/// Bind the session's control socket under the `koshi.kdl` layer
+/// `app_config_layer`, and print the ready line to `ready_output`, on the terms
+/// [`report_ready`] states for `is_resumed`.
 ///
 /// # Errors
 /// Returns the failure of a control socket that could not be bound, or of a
@@ -1545,11 +1548,17 @@ fn bind_session_socket(
 fn start_serving_session(
     pty_owner: &Arc<PtyOwner>,
     session_start: &SessionStart,
+    app_config_layer: Option<&PartialKoshiConfig>,
     is_resumed: bool,
     runtime_event_sender: &Sender<RuntimeEvent>,
     ready_output: &mut dyn Write,
 ) -> Result<IpcServer, Box<dyn std::error::Error>> {
-    let ipc_server = match bind_session_socket(session_start, pty_owner, runtime_event_sender) {
+    let ipc_server = match bind_session_socket(
+        session_start,
+        app_config_layer,
+        pty_owner,
+        runtime_event_sender,
+    ) {
         Ok(ipc_server) => ipc_server,
         Err(bind_error) => {
             end_every_pane(pty_owner);
@@ -2140,8 +2149,9 @@ fn handle_held_runtime_event(
 /// the rebuilt server drives every pane the header names through that same
 /// backend.
 ///
-/// The control socket is bound again here, under a fresh token. The caller has
-/// already withdrawn the socket the session was serving on.
+/// The `koshi.kdl` now on disk is read once here. The rebuilt session runs on
+/// it, and the control socket is bound again under it, with a fresh token. The
+/// caller has already withdrawn the socket the session was serving on.
 ///
 /// The resume file is deleted on every way out of this call.
 ///
@@ -2156,15 +2166,22 @@ fn resume_readers_and_rebuild(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
+    let app_config_layer =
+        koshi_link::config::load_app_layer(session_start.config_directory.as_deref());
     let mut rebuilt_session = resume_session_readers(
         session_server,
         pty_owner,
         resume_header,
         resume_body,
-        session_start.config_directory.as_deref(),
+        app_config_layer.clone(),
     );
 
-    let bound_session_socket = bind_session_socket(session_start, pty_owner, runtime_event_sender);
+    let bound_session_socket = bind_session_socket(
+        session_start,
+        app_config_layer.as_ref(),
+        pty_owner,
+        runtime_event_sender,
+    );
     let _ = std::fs::remove_file(resolve_resume_file_path(
         &session_start.runtime_directory,
         session_start.session_id,
@@ -2181,7 +2198,7 @@ fn resume_readers_and_rebuild(
 }
 
 /// Put the session back on its feet in this process, on `session_socket`, from the
-/// state it had already carried out.
+/// state it had already carried out, on the `koshi.kdl` now on disk.
 ///
 /// `session_socket` keeps its address and rotates its connection token. The panes were
 /// never released, and the resume file is deleted.
@@ -2204,7 +2221,7 @@ fn resume_readers_and_keep_socket(
         pty_owner,
         resume_header,
         resume_body,
-        session_start.config_directory.as_deref(),
+        koshi_link::config::load_app_layer(session_start.config_directory.as_deref()),
     );
 
     let token_rotation_result = session_socket.rotate_token();
@@ -2232,22 +2249,21 @@ fn end_every_pane(pty_owner: &PtyOwner) {
 }
 
 /// Resume every pane's reader and build the session back from `resume_body`, on the
-/// `koshi.kdl` now on disk in `config_directory`. Touches no control socket.
+/// `koshi.kdl` layer `app_config_layer`. Touches no control socket.
 fn resume_session_readers(
     session_server: Server,
     pty_owner: &Arc<PtyOwner>,
     resume_header: &ResumeHeader,
     resume_body: ResumeBody,
-    config_directory: Option<&Path>,
+    app_config_layer: Option<PartialKoshiConfig>,
 ) -> Server {
     pty_owner.resume_readers();
 
     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
-    // The session comes back on the `koshi.kdl` that is on disk now.
     Server::resume(
         pty_backend,
         session_server.into_inbox_receiver(),
-        koshi_link::config::load_app_layer(config_directory),
+        app_config_layer,
         resume_body,
         build_carried_pty_sizes(resume_header),
         HashMap::new(),

@@ -130,6 +130,19 @@ pub fn parse_profile(
     profile_source_text: &str,
 ) -> Result<ProfileTemplate, ProfileError> {
     let profile_document = parse_kdl(profile_path, profile_source_text)?;
+    parse_profile_from_document(profile_path, profile_source_text, &profile_document)
+}
+
+/// [`parse_profile`] on `profile_document`, the KDL document already parsed
+/// from `profile_source_text`.
+///
+/// # Errors
+/// [`ProfileError::Invalid`] with every schema violation.
+pub(crate) fn parse_profile_from_document(
+    profile_path: &Path,
+    profile_source_text: &str,
+    profile_document: &KdlDocument,
+) -> Result<ProfileTemplate, ProfileError> {
     let mut profile_walker = ProfileDocumentWalker {
         profile_source: NamedSource::new(
             profile_path.display().to_string(),
@@ -139,7 +152,7 @@ pub fn parse_profile(
         tab_leaf_count: 0,
         focused_tab_leaf_spans: Vec::new(),
     };
-    let profile_template = profile_walker.parse_profile_document(&profile_document);
+    let profile_template = profile_walker.parse_profile_document(profile_document);
     profile_walker
         .profile_diagnostics
         .sort_by_key(|profile_diagnostic| profile_diagnostic.diagnostic_span.offset());

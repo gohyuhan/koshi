@@ -147,6 +147,23 @@ pub fn parse_keybindings(
     keybinding_source_text: &str,
 ) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
     let keybinding_document = parse_kdl(keybinding_path, keybinding_source_text)?;
+    parse_keybindings_from_document(
+        keybinding_path,
+        keybinding_source_text,
+        &keybinding_document,
+    )
+}
+
+/// [`parse_keybindings`] on `keybinding_document`, the KDL document already
+/// parsed from `keybinding_source_text`.
+///
+/// # Errors
+/// [`KeybindingParseError::Invalid`] with every schema violation.
+pub(crate) fn parse_keybindings_from_document(
+    keybinding_path: &Path,
+    keybinding_source_text: &str,
+    keybinding_document: &KdlDocument,
+) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
     let mut keybinding_document_walker = KeybindingDocumentWalker {
         keybinding_source: NamedSource::new(
             keybinding_path.display().to_string(),
@@ -155,7 +172,7 @@ pub fn parse_keybindings(
         diagnostics: Vec::new(),
     };
     let partial_keybindings_config =
-        keybinding_document_walker.parse_keybinding_document(&keybinding_document);
+        keybinding_document_walker.parse_keybinding_document(keybinding_document);
     keybinding_document_walker
         .diagnostics
         .sort_by_key(|keybinding_diagnostic| keybinding_diagnostic.diagnostic_span.offset());

@@ -11,6 +11,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use koshi_config::app_config::parse_app_config;
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::migration::{
     migrate_config, validate_config, ConfigFileKind, MigratedConfig, MigrationError,
 };
@@ -18,6 +20,7 @@ use koshi_config::parser::format_unknown_key;
 use koshi_storage::{atomic::write_atomic, error::StorageError};
 
 use crate::cli::{CliCommand, ConfigCommand};
+use koshi_link::config::load_app_layer;
 use koshi_link::error::CliError;
 
 #[cfg(test)]
@@ -33,6 +36,22 @@ struct ConfigFile {
 struct LoadedConfigFiles {
     config_files: Vec<ConfigFile>,
     config_file_read_errors: Vec<String>,
+}
+
+/// What migrating every config file in one directory produced.
+#[derive(Debug)]
+struct ConfigMigrationReport {
+    /// One line per file, in path order, each ending in `\n`:
+    /// `"/home/user/.config/koshi/koshi.kdl: migrated version 1 to 2"` for a
+    /// file written on the new schema, and
+    /// `"/home/user/.config/koshi/koshi.kdl: current (version 2)"` for one left
+    /// as it is. A directory holding no config file gives the one line
+    /// `"no config files found in <directory>"`.
+    config_report_text: String,
+    /// `koshi.kdl`'s text once the migration ends: the migrated text written
+    /// for a file on an older schema, and the text read for a file on the
+    /// current one. `None` when the directory holds no `koshi.kdl`.
+    app_config_source_text: Option<String>,
 }
 
 struct ConfigFieldHelp {
@@ -427,28 +446,50 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Migrate config before `serve-session` or `serve-router` runs. Every other
-/// command, `resume-support` among them, and an unresolved config directory
-/// make no changes.
+/// The `koshi.kdl` layer `command` starts on, and the error of a config
+/// migration that failed.
 ///
-/// # Errors
-/// Returns the errors of [`migrate_config_directory_for_update`].
-pub fn migrate_config_for_service_command(
+/// `serve-session` and `serve-router` first migrate the config files in
+/// `config_directory`, as [`migrate_config_directory_for_update`] states, and
+/// parse the layer from the `koshi.kdl` text that migration read or wrote. A
+/// migration that fails gives its error and the layer [`load_app_layer`]
+/// reads. Every other command, `resume-support` among them, and a
+/// `config_directory` of `None` migrate nothing and give the layer
+/// [`load_app_layer`] reads. A `koshi.kdl` that is absent or does not parse
+/// gives a layer of `None`. Warnings are dropped.
+pub fn load_app_layer_for_command(
     command: Option<&CliCommand>,
     config_directory: Option<&Path>,
-) -> Result<(), CliError> {
-    if matches!(
+) -> (Option<PartialKoshiConfig>, Option<CliError>) {
+    let is_service_command = matches!(
         command,
         Some(CliCommand::ServeSession { .. } | CliCommand::ServeRouter { .. })
-    ) {
-        if let Some(config_directory) = config_directory {
-            migrate_config_directory_for_update(config_directory)?;
+    );
+    let config_directory = match config_directory {
+        Some(config_directory) if is_service_command => config_directory,
+        _ => return (load_app_layer(config_directory), None),
+    };
+    match migrate_config_directory_for_update(config_directory) {
+        Ok(app_config_source_text) => {
+            let app_config_path = config_directory.join("koshi.kdl");
+            let app_config_layer = app_config_source_text.and_then(|app_config_source_text| {
+                parse_app_config(&app_config_path, &app_config_source_text)
+                    .ok()
+                    .map(|app_config_file| app_config_file.layer)
+            });
+            (app_config_layer, None)
         }
+        Err(migration_error) => (
+            load_app_layer(Some(config_directory)),
+            Some(migration_error),
+        ),
     }
-    Ok(())
 }
 
-/// Migrate saved KDL files before a replacement server reads config.
+/// Migrate saved KDL files before a replacement server reads config, and
+/// return `koshi.kdl`'s text once the migration ends: the migrated text
+/// written for a file on an older schema, and the text read for a file on the
+/// current one. `None` when the directory holds no `koshi.kdl`.
 ///
 /// A file with schema problems, such as an unknown key, is migrated with those
 /// problems left in its text. A directory whose files all use the current
@@ -457,7 +498,9 @@ pub fn migrate_config_for_service_command(
 /// # Errors
 /// Returns a read error for the directory or a file, any [`migrate_config`]
 /// error, and a lock or write error.
-pub fn migrate_config_directory_for_update(config_directory: &Path) -> Result<(), CliError> {
+pub fn migrate_config_directory_for_update(
+    config_directory: &Path,
+) -> Result<Option<String>, CliError> {
     let loaded_config_files = load_config_files(config_directory);
     let mut migration_errors = loaded_config_files.config_file_read_errors;
     let mut has_older_schema_file = false;
@@ -481,9 +524,14 @@ pub fn migrate_config_directory_for_update(config_directory: &Path) -> Result<()
         });
     }
     if !has_older_schema_file {
-        return Ok(());
+        return Ok(loaded_config_files
+            .config_files
+            .into_iter()
+            .find(|config_file| config_file.config_file_kind == ConfigFileKind::App)
+            .map(|config_file| config_file.config_source_text));
     }
-    migrate_config_directory_with_lock(config_directory).map(|_| ())
+    migrate_config_directory_with_lock(config_directory)
+        .map(|config_migration_report| config_migration_report.app_config_source_text)
 }
 
 fn run_config_command_in_directory(
@@ -494,11 +542,14 @@ fn run_config_command_in_directory(
         ConfigCommand::Path => Ok(format!("{}\n", config_directory.display())),
         ConfigCommand::Explain { config_key } => explain_config_key(config_key),
         ConfigCommand::Check => check_config_directory(config_directory),
-        ConfigCommand::Migrate => migrate_config_directory_with_lock(config_directory),
+        ConfigCommand::Migrate => migrate_config_directory_with_lock(config_directory)
+            .map(|config_migration_report| config_migration_report.config_report_text),
     }
 }
 
-fn migrate_config_directory_with_lock(config_directory: &Path) -> Result<String, CliError> {
+fn migrate_config_directory_with_lock(
+    config_directory: &Path,
+) -> Result<ConfigMigrationReport, CliError> {
     match fs::metadata(config_directory) {
         Ok(directory_metadata) if directory_metadata.is_dir() => {}
         Ok(_) => {
@@ -507,10 +558,13 @@ fn migrate_config_directory_with_lock(config_directory: &Path) -> Result<String,
             });
         }
         Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(format!(
-                "no config files found in {}\n",
-                config_directory.display()
-            ));
+            return Ok(ConfigMigrationReport {
+                config_report_text: format!(
+                    "no config files found in {}\n",
+                    config_directory.display()
+                ),
+                app_config_source_text: None,
+            });
         }
         Err(read_error) => {
             return Err(CliError::Config {
@@ -638,7 +692,7 @@ fn migrate_config_directory_with(
     config_directory: &Path,
     migrate_config_function: ConfigMigrationFunction,
     mut write_atomic_config_file: impl FnMut(&Path, &[u8]) -> Result<(), StorageError>,
-) -> Result<String, CliError> {
+) -> Result<ConfigMigrationReport, CliError> {
     let loaded_config_files = load_config_files(config_directory);
     let mut migration_plan = Vec::with_capacity(loaded_config_files.config_files.len());
     let mut migration_errors = loaded_config_files.config_file_read_errors;
@@ -649,6 +703,7 @@ fn migrate_config_directory_with(
             &config_file.config_source_text,
         ) {
             Ok(migrated_config) => migration_plan.push((
+                config_file.config_file_kind,
                 config_file.config_path,
                 config_file.config_write_path,
                 migrated_config,
@@ -667,7 +722,8 @@ fn migrate_config_directory_with(
 
     let mut config_report_lines = Vec::with_capacity(migration_plan.len());
     let mut completed_migration_lines = Vec::new();
-    for (config_path, config_write_path, migrated_config) in migration_plan {
+    let mut app_config_source_text = None;
+    for (config_file_kind, config_path, config_write_path, migrated_config) in migration_plan {
         let migration_report_line = if migrated_config.is_changed {
             if let Err(write_error) = write_atomic_config_file(
                 &config_write_path,
@@ -700,6 +756,9 @@ fn migrate_config_directory_with(
             )
         };
         config_report_lines.push(migration_report_line);
+        if config_file_kind == ConfigFileKind::App {
+            app_config_source_text = Some(migrated_config.migrated_source);
+        }
     }
     if config_report_lines.is_empty() {
         config_report_lines.push(format!(
@@ -707,7 +766,10 @@ fn migrate_config_directory_with(
             config_directory.display()
         ));
     }
-    Ok(config_report_lines.join("\n") + "\n")
+    Ok(ConfigMigrationReport {
+        config_report_text: config_report_lines.join("\n") + "\n",
+        app_config_source_text,
+    })
 }
 
 fn load_config_files(config_directory: &Path) -> LoadedConfigFiles {
