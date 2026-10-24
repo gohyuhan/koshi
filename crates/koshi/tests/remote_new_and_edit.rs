@@ -195,7 +195,7 @@ fn remote_new_saves_the_fingerprint_given_when_the_check_fails_and_the_answer_is
              sha256:{presented_certificate_fingerprint}. the secret was not sent. if that \
              machine's certificate changed on purpose, `koshi share open` there prints the new \
              fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` \
-             for a saved server.\nsave it anyway? [y/N]: "
+             for a saved server\nsave it anyway? [y/N]: "
         )
     );
     assert_eq!(

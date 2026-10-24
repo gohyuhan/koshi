@@ -3,8 +3,9 @@
 //! Each test starts the real `koshi` binary under a temporary home directory
 //! and writes the saved-server store that binary reads. No connection leaves
 //! this machine: a server holding no certificate fingerprint is not dialled,
-//! and every dialled server is a loopback port, either one that nothing
-//! listens on or a TLS server that the test runs.
+//! and every dialled server is a loopback port the test holds: one that closes
+//! each connection it accepts, one that never accepts, or a TLS server that
+//! the test runs.
 
 mod common;
 
@@ -37,12 +38,24 @@ fn run_list_sessions_with_saved_servers(saved_servers: Vec<SavedServer>) -> Outp
 
 #[test]
 fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
-    let closed_port_listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
-    let closed_server_address = closed_port_listener
+    let closing_listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let closing_server_address = closing_listener
         .local_addr()
         .expect("the bound loopback address")
         .to_string();
-    drop(closed_port_listener);
+    std::thread::spawn(move || {
+        // Each connection is accepted and closed before a byte is answered.
+        for accepted_connection in closing_listener.incoming() {
+            drop(accepted_connection);
+        }
+    });
+    // Bound and never accepted: the dial waits in its TLS handshake until the
+    // listing stops waiting.
+    let silent_listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let silent_server_address = silent_listener
+        .local_addr()
+        .expect("the bound loopback address")
+        .to_string();
     let (refusing_server_address, refusing_server_certificate_fingerprint) =
         spawn_stand_in_remote_server(vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
@@ -55,7 +68,12 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
     let listing_output = run_list_sessions_with_saved_servers(vec![
         build_saved_server(
             "lab",
-            closed_server_address,
+            closing_server_address.clone(),
+            Some(saved_certificate_fingerprint.clone()),
+        ),
+        build_saved_server(
+            "slow",
+            silent_server_address,
             Some(saved_certificate_fingerprint.clone()),
         ),
         build_saved_server("desk", "127.0.0.1:1".to_string(), None),
@@ -83,13 +101,20 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
              0.4.0, which cannot read this koshi's request. `koshi share list` on that machine \
              shows when each grant expires or was revoked. to replace the token, run `koshi \
              share grant` there, then store the new secret with `koshi remote set-secret gate`. \
-             if that machine runs koshi 0.3.0 or 0.4.0, update koshi there\n\
-             koshi: lab did not answer; its sessions are not listed\n\
-             koshi: mill: the certificate {reinstalled_server_address} presented is not the \
-             expected one: expected sha256:{saved_certificate_fingerprint}, presented \
+             if that machine runs koshi 0.3.0 or 0.4.0, update koshi there; its sessions are not \
+             listed\n\
+             koshi: lab: IPC unavailable: the connection to {closing_server_address} closed \
+             during the TLS handshake. a koshi server closes a connection this way when it \
+             restarts or stops, when 64 others wait to present a secret, and when the address it \
+             comes from opened 10 that were not admitted in 60 seconds. dial again in 60 seconds. \
+             if it keeps happening, run `koshi doctor` on that machine to check that koshi serves \
+             that port; its sessions are not listed\n\
+             koshi: mill: IPC unavailable: the certificate {reinstalled_server_address} presented \
+             is not the expected one: expected sha256:{saved_certificate_fingerprint}, presented \
              sha256:{reinstalled_server_certificate_fingerprint}. the secret was not sent. if that \
              machine's certificate changed on purpose, `koshi share open` there prints the new \
-             fingerprint: give it with `koshi remote edit mill`. its sessions are not listed\n"
+             fingerprint: give it with `koshi remote edit mill`; its sessions are not listed\n\
+             koshi: slow did not answer; its sessions are not listed\n"
         )
     );
     assert_eq!(

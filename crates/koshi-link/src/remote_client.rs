@@ -235,26 +235,20 @@ enum Reach {
         /// The sessions, in the order the server sent them.
         session_rows: Vec<RemoteSessionRow>,
     },
-    /// The server answered with a refusal: it did not admit the saved secret,
-    /// it settled on a remote protocol version outside the range this build
-    /// speaks, or it refused the listing.
-    Refused {
-        /// The server's name when it has one, else its address.
-        server_label: String,
-        /// The sentence a dial to that server reports for the same refusal.
-        refusal_detail: String,
-    },
-    /// The server presented a certificate other than the one its record
-    /// holds the fingerprint of.
-    CertificateMismatch {
-        /// The server's name when it has one, else its address.
-        server_label: String,
-        /// The sentence naming the expected and the presented certificate.
-        certificate_error_detail: String,
-    },
-    /// The server could not be reached, was still unanswered at the deadline,
+    /// The dial or the listing failed before the deadline: the server refused
+    /// the secret or the listing, presented a certificate other than the one
+    /// its record holds the fingerprint of, refused or closed the connection,
     /// or answered a frame the request cannot produce.
-    Unreachable {
+    Failed {
+        /// The server's name when it has one, else its address.
+        server_label: String,
+        /// The failure in the words a dial to that server prints for it: the
+        /// `Display` of its [`CliError`].
+        failure_message: String,
+    },
+    /// Nothing answered before the deadline: the dial or the listing was
+    /// still running when it passed, or failed at or after it.
+    Unanswered {
         /// The server's name when it has one, else its address.
         server_label: String,
     },
@@ -1008,9 +1002,6 @@ fn classify_dial_failure(ipc_error: IpcError, saved_server_label: Option<&str>) 
 /// [`sanitize_reported_text`], with `server_address` after it.
 ///
 /// Every refusal built here carries [`CliError::Runtime`].
-/// [`probe_saved_server`] reads a [`DialError::Refused`] carrying
-/// [`CliError::IpcUnavailable`] as the certificate check, and one
-/// carrying [`CliError::Runtime`] as a server refusal.
 ///
 /// Example — a `Refused` frame carrying `"the session is gone"` from
 /// `desk.local:7654` reads `"the session is gone (server desk.local:7654)"`.
@@ -1688,10 +1679,10 @@ fn run_remote_session_exchange<ExchangeAnswer>(
 ///
 /// Every other asked server prints one line on standard error and adds no row:
 ///
-/// - a refusal: `koshi: <server>: <the sentence a dial to it reports>`;
-/// - a certificate that is not the expected one: `koshi: <server>: <the
-///   certificate failure> its sessions are not listed`;
-/// - no answer: `koshi: <server> did not answer; its sessions are not listed`;
+/// - a dial or listing that failed before the deadline: `koshi: <server>:
+///   <the failure as a dial to it prints it>; its sessions are not listed`;
+/// - no answer before the deadline: `koshi: <server> did not answer; its
+///   sessions are not listed`;
 /// - no fingerprint: ``koshi: <server> holds no certificate fingerprint, so it
 ///   is not dialled; run `koshi remote edit <server>` and give the fingerprint
 ///   `koshi share grant` printed on that machine``.
@@ -1710,19 +1701,13 @@ pub fn list_saved_server_session_rows() -> Vec<(String, RemoteSessionRow)> {
                         .map(|remote_session_row| (server_label.clone(), remote_session_row)),
                 );
             }
-            Reach::Refused {
+            Reach::Failed {
                 server_label,
-                refusal_detail,
-            } => eprintln!("koshi: {server_label}: {refusal_detail}"),
-            Reach::CertificateMismatch {
-                server_label,
-                certificate_error_detail,
+                failure_message,
             } => {
-                eprintln!(
-                    "koshi: {server_label}: {certificate_error_detail} its sessions are not listed"
-                );
+                eprintln!("koshi: {server_label}: {failure_message}; its sessions are not listed");
             }
-            Reach::Unreachable { server_label } => {
+            Reach::Unanswered { server_label } => {
                 eprintln!("koshi: {server_label} did not answer; its sessions are not listed");
             }
             Reach::Unchecked { server_label } => eprintln!(
@@ -1747,10 +1732,9 @@ pub fn list_saved_server_session_rows() -> Vec<(String, RemoteSessionRow)> {
 /// secret is presented to it. Every other record presents the secret it holds.
 /// `KOSHI_REMOTE_SECRET` is not read.
 ///
-/// A server that answered with a refusal is [`Reach::Refused`]. A server that
-/// presented a certificate other than the one its record holds the fingerprint
-/// of is [`Reach::CertificateMismatch`]. A server that could not be reached or was
-/// still unanswered at the deadline is [`Reach::Unreachable`]. Every
+/// A server whose dial or listing failed before the deadline is
+/// [`Reach::Failed`], and a server still unanswered at the deadline is
+/// [`Reach::Unanswered`], as [`probe_saved_server`] states. Every
 /// record comes back as exactly one entry, sorted by server label. A store that
 /// cannot be read reads as no saved servers.
 #[must_use]
@@ -1812,20 +1796,19 @@ fn reach_all_saved_servers(reach_timeout: Duration) -> Vec<Reach> {
 fn get_reach_server_label(reach: &Reach) -> &str {
     match reach {
         Reach::Reached { server_label, .. }
-        | Reach::Refused { server_label, .. }
-        | Reach::CertificateMismatch { server_label, .. }
-        | Reach::Unreachable { server_label }
+        | Reach::Failed { server_label, .. }
+        | Reach::Unanswered { server_label }
         | Reach::Unchecked { server_label } => server_label,
     }
 }
 
 /// Every requested server as exactly one entry, sorted by server: the answers
-/// in `received_reaches`, plus one [`Reach::Unreachable`] per label in
+/// in `received_reaches`, plus one [`Reach::Unanswered`] per label in
 /// `requested_server_labels` that no answer names.
 ///
 /// Example — `received_reaches` naming only `desk` with
 /// `requested_server_labels` `["desk", "work"]` gives `desk`'s answer and
-/// `Unreachable { server_label: "work" }`, in that order.
+/// `Unanswered { server_label: "work" }`, in that order.
 fn complete_reach_results(
     mut received_reaches: Vec<Reach>,
     mut requested_server_labels: Vec<String>,
@@ -1841,7 +1824,7 @@ fn complete_reach_results(
     received_reaches.extend(
         requested_server_labels
             .into_iter()
-            .map(|server_label| Reach::Unreachable { server_label }),
+            .map(|server_label| Reach::Unanswered { server_label }),
     );
     received_reaches.sort_by(|left_reach, right_reach| {
         get_reach_server_label(left_reach).cmp(get_reach_server_label(right_reach))
@@ -1854,14 +1837,9 @@ fn complete_reach_results(
 /// address.
 ///
 /// A record holding no certificate fingerprint is [`Reach::Unchecked`] and is
-/// not dialled.
-///
-/// A failure carrying [`CliError::Runtime`] — every refusal the server sent —
-/// is [`Reach::Refused`]. A dial refused with [`CliError::IpcUnavailable`] is
-/// the certificate check and is [`Reach::CertificateMismatch`]:
-/// [`classify_dial_failure`] is the only place that builds one, and every
-/// refusal [`validate_remote_server_answer`] builds carries
-/// [`CliError::Runtime`]. Every other failure is [`Reach::Unreachable`].
+/// not dialled. A dial or listing that fails before `reach_deadline` is
+/// [`Reach::Failed`], carrying the `Display` of its [`CliError`]. One that
+/// fails at or after `reach_deadline` is [`Reach::Unanswered`].
 ///
 /// The time left until `reach_deadline` is given to the dial and again to the
 /// reply: this returns up to twice that after `reach_deadline` passes. Writes no
@@ -1874,47 +1852,26 @@ fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant
         return Reach::Unchecked { server_label };
     };
     let remaining_wait_duration = reach_deadline.saturating_duration_since(Instant::now());
-    let mut remote_link = match connect_remote_server(
+    let listing_result = connect_remote_server(
         &saved_server_record.server_address,
         &saved_server_record.connection_token,
         Some(&server_label),
         saved_certificate_fingerprint,
         remaining_wait_duration,
         Some(remaining_wait_duration),
-    ) {
-        Ok(remote_link) => remote_link,
-        Err(DialError::Refused(CliError::IpcUnavailable {
-            detail: certificate_error_detail,
-        })) => {
-            return Reach::CertificateMismatch {
-                server_label,
-                certificate_error_detail,
-            }
-        }
-        Err(dial_error) => match CliError::from(dial_error) {
-            CliError::Runtime {
-                detail: refusal_detail,
-            } => {
-                return Reach::Refused {
-                    server_label,
-                    refusal_detail,
-                }
-            }
-            _ => return Reach::Unreachable { server_label },
-        },
-    };
-    match list_remote_sessions(&mut remote_link) {
+    )
+    .map_err(CliError::from)
+    .and_then(|mut remote_link| list_remote_sessions(&mut remote_link));
+    match listing_result {
         Ok(session_rows) => Reach::Reached {
             server_label,
             session_rows,
         },
-        Err(CliError::Runtime {
-            detail: refusal_detail,
-        }) => Reach::Refused {
+        Err(_) if Instant::now() >= reach_deadline => Reach::Unanswered { server_label },
+        Err(listing_error) => Reach::Failed {
             server_label,
-            refusal_detail,
+            failure_message: listing_error.to_string(),
         },
-        Err(_) => Reach::Unreachable { server_label },
     }
 }
 

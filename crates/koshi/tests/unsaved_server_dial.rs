@@ -144,7 +144,7 @@ fn an_unsaved_server_whose_certificate_is_not_the_one_given_is_refused_and_not_s
              sha256:{presented_certificate_fingerprint}. the secret was not sent. if that \
              machine's certificate changed on purpose, `koshi share open` there prints the new \
              fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` \
-             for a saved server.\n"
+             for a saved server\n"
         )
     );
     assert_eq!(String::from_utf8_lossy(&listing_output.stdout), "");
@@ -354,7 +354,7 @@ fn attach_save_as_leaves_a_saved_server_unnamed_when_its_certificate_is_not_the_
              expected one: expected sha256:{saved_certificate_fingerprint}, presented \
              sha256:{presented_certificate_fingerprint}. the secret was not sent. if that \
              machine's certificate changed on purpose, `koshi share open` there prints the new \
-             fingerprint: give it with `koshi remote edit {server_address}`.\n"
+             fingerprint: give it with `koshi remote edit {server_address}`\n"
         )
     );
     assert_eq!(String::from_utf8_lossy(&attach_output.stdout), "");

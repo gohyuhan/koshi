@@ -69,6 +69,18 @@ pub fn sanitize_reported_text(raw_reported_text: &str) -> String {
     sanitized_text
 }
 
+/// `raw_text` with every character [`sanitize_reported_text`] removes removed,
+/// and nothing cut: the result is as long as `raw_text` less those characters.
+///
+/// Example — `"desk\u{1b}[2J.local:7654"` → `"desk[2J.local:7654"`.
+#[must_use]
+pub fn remove_refused_characters(raw_text: &str) -> String {
+    raw_text
+        .chars()
+        .filter(|character| !is_refused_character(*character))
+        .collect()
+}
+
 /// `quantity` and the noun for it: `singular_noun` when `quantity` is 1,
 /// `plural_noun` otherwise. `(2, "grant", "grants")` gives `"2 grants"`, and
 /// `(1, "process", "processes")` gives `"1 process"`.

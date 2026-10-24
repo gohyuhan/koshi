@@ -237,6 +237,35 @@ fn a_transport_fault_carries_the_faults_own_words() {
 }
 
 #[test]
+fn a_dial_to_the_longest_host_name_keeps_every_step_of_its_message() {
+    let longest_host_name = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    );
+    assert_eq!(longest_host_name.len(), 253);
+
+    let detail =
+        extract_ipc_unavailable_detail(build_ipc_unavailable_error(IpcError::TlsHandshakeClosed {
+            server_address: format!("{longest_host_name}:7654"),
+        }));
+
+    assert_eq!(
+        detail,
+        format!(
+            "the connection to {longest_host_name}:7654 closed during the TLS handshake. a \
+             koshi server closes a connection this way when it restarts or stops, when 64 \
+             others wait to present a secret, and when the address it comes from opened 10 \
+             that were not admitted in 60 seconds. dial again in 60 seconds. if it keeps \
+             happening, run `koshi doctor` on that machine to check that koshi serves that port"
+        )
+    );
+    assert!(detail.len() > koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT);
+}
+
+#[test]
 fn an_answer_from_a_server_of_koshi_0_4_0_or_older_names_the_step_that_moves_it() {
     let cli_error = build_ipc_unavailable_error(IpcError::PreviousReleaseAnswer);
 

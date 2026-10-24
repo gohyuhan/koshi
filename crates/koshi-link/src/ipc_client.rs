@@ -727,7 +727,7 @@ pub enum SessionRestart {
     /// it over, or the read of its answer, failed or ran out of time. The
     /// session may restart, or may have restarted.
     Unanswered {
-        /// That failure, filtered by [`sanitize_reported_text`].
+        /// That failure, as [`IpcError::render_sanitized_message`] renders it.
         failure_detail: String,
         /// The process image that took the Restart, as its Hello named it.
         /// `None` for a session of koshi 0.3.0 or 0.4.0, whose Hello names no
@@ -894,7 +894,7 @@ fn restart_previous_release_session(
     )
     .map_err(|ipc_error| build_session_exchange_error(ipc_error, Some(answer_deadline)))?;
     let build_unanswered_restart = |ipc_error: IpcError| SessionRestart::Unanswered {
-        failure_detail: sanitize_reported_text(&ipc_error.to_string()),
+        failure_detail: ipc_error.render_sanitized_message(),
         asked_process_image_id: None,
     };
     if let Err(restart_write_error) =

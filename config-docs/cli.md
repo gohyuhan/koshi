@@ -501,8 +501,8 @@ session. `--format json` carries the same value as `owner_user_id`, and `null`
 for every other session. A bare
 `koshi list-sessions` sweeps every saved server and appends what answered;
 `koshi list-sessions --remote <server>` lists that one server's sessions alone.
-A server that refused the saved secret, and a server that did not answer, are
-named on standard error and their sessions are left out. On macOS, a local
+A server whose connection failed, and a server that did not answer in time,
+are named on standard error and their sessions are left out. On macOS, a local
 session whose process runs but accepts no connection is named the same way, for
 example `koshi: session session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40 did not
 answer: IPC unavailable: process 5000 runs but accepts no connection`.
@@ -1173,14 +1173,14 @@ fingerprints. A first connection, and the check that `koshi remote new` and
 `koshi remote edit` run, end in both ways to give the new fingerprint:
 
 ```text
-koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server
 ```
 
 A connection to a saved server names that server, by its name or else its
 address:
 
 ```text
-koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with `koshi remote edit work`.
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with `koshi remote edit work`
 ```
 
 An address that is not saved needs `--certificate-fingerprint`. Without it,
@@ -1380,12 +1380,20 @@ granted, never the token itself. A token nobody kept is replaced by a fresh
 Bare `koshi attach` lists the sessions on every reachable saved server beside
 this machine's own, each row naming the server it belongs to. The remote check
 waits two seconds in total, not two seconds per server. A server not heard from
-inside that wait is left out. A server that answers with a refusal is not
-hidden. It prints the same sentence that `koshi attach --remote work` prints,
-which names what to do:
+inside that wait is left out, and one line names it:
 
 ```text
-koshi: work: the server 192.0.2.10:7654 did not admit the connection: the token expired, was revoked, or was never granted on that machine, or that machine already serves as many remote connections as it admits. `koshi share list` on that machine shows when each grant expires or was revoked. to replace the token, run `koshi share grant` there, then store the new secret with `koshi remote set-secret work`
+koshi: work did not answer; its sessions are not listed
+```
+
+A server whose connection fails inside that wait is left out too. Its line
+carries the sentence that `koshi attach --remote work` prints for the same
+failure, which names what to do. The failure can be a refusal, a certificate
+that is not the expected one, a port where nothing listens, or a connection
+closed during the TLS handshake:
+
+```text
+koshi: work: the server 192.0.2.10:7654 did not admit the connection: the token expired, was revoked, or was never granted on that machine, or that machine already serves as many remote connections as it admits. `koshi share list` on that machine shows when each grant expires or was revoked. to replace the token, run `koshi share grant` there, then store the new secret with `koshi remote set-secret work`; its sessions are not listed
 ```
 
 The serving machine sends the same refusal for each of these causes, and the

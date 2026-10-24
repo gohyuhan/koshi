@@ -249,3 +249,17 @@ fn format_counted_noun_takes_the_singular_for_one_alone() {
         "2 processes"
     );
 }
+
+#[test]
+fn removing_refused_characters_keeps_every_other_character_and_cuts_nothing() {
+    let long_text = format!("\u{1b}[2J{}", "a".repeat(5000));
+
+    assert_eq!(
+        remove_refused_characters("desk\u{1b}[2J.local:7654\u{202E}"),
+        "desk[2J.local:7654"
+    );
+    assert_eq!(
+        remove_refused_characters(&long_text),
+        format!("[2J{}", "a".repeat(5000))
+    );
+}
