@@ -132,8 +132,9 @@ pub enum RouterRequestKind {
     /// identity already holds on that same scope stops working.
     ///
     /// The router reads the clock once and stamps both the issue time and the
-    /// expiry time from that one reading. A span the clock cannot represent is
-    /// refused.
+    /// expiry time from that one reading. A span longer than
+    /// [`MAX_TOKEN_LIFETIME_DURATION`](crate::remote_tokens::MAX_TOKEN_LIFETIME_DURATION)
+    /// is refused, and so is an expiry the clock cannot represent.
     GrantToken {
         /// Who the grant is handed to, in the words the operator typed.
         identity: String,

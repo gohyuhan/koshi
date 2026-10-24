@@ -38,6 +38,7 @@ use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionI
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_ipc::remote_tokens::{MAX_TOKEN_LIFETIME_DURATION, TOKEN_LIFETIME_TOO_LONG_MESSAGE};
 
 /// A parsed `koshi` invocation.
 #[derive(Debug, PartialEq, Eq, Parser)]
@@ -191,14 +192,22 @@ pub enum Expiry {
 }
 
 /// Parse a duration argument: a decimal count followed by one unit character —
-/// `s` seconds, `m` minutes, `h` hours, `d` days. `30s` is thirty seconds.
+/// `s` seconds, `m` minutes, `h` hours, `d` days. `30s` is thirty seconds. The
+/// count is ASCII digits, with one leading `+` allowed.
 ///
-/// `expected_error_message` is reported for every value this cannot read: an empty value, a
-/// unit character that is none of the four, a count that is not a whole
-/// number, and a count times its unit that overflows `u64` seconds.
+/// `expected_error_message` is reported for a value that is not a count and a
+/// unit: an empty value, a unit character that is none of the four, and a
+/// count that is not ASCII digits. `too_long_error_message` is reported for a
+/// count and a unit longer than `maximum_duration`, and for a count, or a
+/// count times its unit, past `u64::MAX` seconds.
+///
+/// Example — with `maximum_duration` 60 seconds, `60s` gives 60 seconds, `2m`
+/// gives `too_long_error_message`, and `2w` gives `expected_error_message`.
 fn parse_duration_argument(
     duration_argument: &str,
+    maximum_duration: Duration,
     expected_error_message: &'static str,
+    too_long_error_message: &'static str,
 ) -> Result<Duration, String> {
     let mut duration_characters = duration_argument.chars();
     let duration_unit = duration_characters
@@ -211,20 +220,33 @@ fn parse_duration_argument(
         'd' => 86400,
         _ => return Err(expected_error_message.to_string()),
     };
-    let duration_unit_count: u64 = duration_characters
-        .as_str()
-        .parse()
-        .map_err(|_| expected_error_message)?;
-    let duration_seconds = duration_unit_count
-        .checked_mul(duration_unit_seconds)
-        .ok_or(expected_error_message)?;
-    Ok(Duration::from_secs(duration_seconds))
+    let duration_count_text = duration_characters.as_str();
+    let duration_count_digits = duration_count_text
+        .strip_prefix('+')
+        .unwrap_or(duration_count_text);
+    if duration_count_digits.is_empty()
+        || !duration_count_digits
+            .bytes()
+            .all(|count_byte| count_byte.is_ascii_digit())
+    {
+        return Err(expected_error_message.to_string());
+    }
+    let duration_seconds = duration_count_digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|duration_unit_count| duration_unit_count.checked_mul(duration_unit_seconds));
+    match duration_seconds.map(Duration::from_secs) {
+        Some(duration) if duration <= maximum_duration => Ok(duration),
+        _ => Err(too_long_error_message.to_string()),
+    }
 }
 
 /// Parse an expiry argument: the word `never`, or a decimal count followed by
 /// one unit character — `s` seconds, `m` minutes, `h` hours, `d` days.
 ///
-/// A count times its unit that overflows `u64` seconds is an error.
+/// A length longer than [`MAX_TOKEN_LIFETIME_DURATION`] is
+/// `Err(TOKEN_LIFETIME_TOO_LONG_MESSAGE)`: `36500d` parses, and `36501d` is
+/// refused.
 pub fn parse_expiry(expiry_argument: &str) -> Result<Expiry, String> {
     const EXPECTED_EXPIRY_ERROR_MESSAGE: &str =
         "expected a length such as 30s, 15m, 24h or 7d, or the word never";
@@ -234,17 +256,23 @@ pub fn parse_expiry(expiry_argument: &str) -> Result<Expiry, String> {
     }
     Ok(Expiry::After(parse_duration_argument(
         expiry_argument,
+        MAX_TOKEN_LIFETIME_DURATION,
         EXPECTED_EXPIRY_ERROR_MESSAGE,
+        TOKEN_LIFETIME_TOO_LONG_MESSAGE,
     )?))
 }
 
 /// Parse a `--since` flag value: a decimal count followed by one unit
-/// character — `s` seconds, `m` minutes, `h` hours, `d` days. Every value this
-/// cannot read is `Err("expected a length such as 30s, 15m, 24h or 7d")`.
+/// character — `s` seconds, `m` minutes, `h` hours, `d` days. A value that is
+/// not a count and a unit is
+/// `Err("expected a length such as 30s, 15m, 24h or 7d")`, and a length past
+/// `u64::MAX` seconds is `Err("a length is at most 18446744073709551615s")`.
 fn parse_event_age(event_age_argument: &str) -> Result<Duration, String> {
     parse_duration_argument(
         event_age_argument,
+        Duration::from_secs(u64::MAX),
         "expected a length such as 30s, 15m, 24h or 7d",
+        "a length is at most 18446744073709551615s",
     )
 }
 
@@ -1054,7 +1082,7 @@ pub enum ShareCommand {
         #[arg(long = "session", value_parser = parse_session_reference, value_name = "SESSION")]
         session_reference: Option<SessionReference>,
         /// How long the token works: a length such as `30s`, `15m`, `24h` or
-        /// `7d`, or the word `never`.
+        /// `7d`, at most `36500d`, or the word `never`.
         #[arg(
             long = "expires",
             value_parser = parse_expiry,
@@ -1174,7 +1202,7 @@ pub enum DebugCommand {
     /// content it carried.
     Events {
         /// Keep only the events recorded within this much of now, e.g. `30s`,
-        /// `5m`, `2h`, `7d`.
+        /// `5m`, `2h`, `7d`, at most `18446744073709551615s`.
         #[arg(long = "since", value_parser = parse_event_age, value_name = "LENGTH")]
         event_age_limit: Option<Duration>,
         /// Keep only the events whose name contains this text, matched

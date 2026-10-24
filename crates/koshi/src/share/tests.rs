@@ -31,9 +31,14 @@ const WATCHED_FROM_ANOTHER_MACHINE_HELP: &str =
     "someone is attached to this session from another machine, and they see this pane. Run \
      `koshi share` from a terminal outside koshi.";
 
-/// The one message every bad expiry value comes back with.
+/// The one message every expiry value that is not a count and a unit comes
+/// back with.
 const EXPECTED_EXPIRY_ERROR: &str =
     "expected a length such as 30s, 15m, 24h or 7d, or the word never";
+
+/// The one message every expiry longer than 36500 days comes back with.
+const TOO_LONG_EXPIRY_ERROR: &str =
+    "a token lasts at most 36500d; use never for a token that does not expire";
 
 /// The certificate fingerprint every `RemoteReady::On` in these tests carries.
 const TEST_CERTIFICATE_FINGERPRINT: &str =
@@ -154,23 +159,63 @@ fn a_count_written_with_a_leading_plus_reads_as_that_count() {
 }
 
 #[test]
-fn a_count_whose_unit_multiply_overflows_is_refused_rather_than_wrapping() {
-    // 18446744073709551615 days is u64::MAX days: the count fits in a u64,
-    // and the multiply by 86400 seconds overflows.
-    assert_eq!(
-        parse_expiry("18446744073709551615d"),
-        Err(EXPECTED_EXPIRY_ERROR.to_string())
-    );
+fn an_expiry_of_exactly_36500_days_parses_in_every_unit() {
+    // 36500 days is 876000 hours, 52560000 minutes and 3153600000 seconds.
+    let maximum_expiry = Ok(Expiry::After(Duration::from_secs(3_153_600_000)));
+    assert_eq!(parse_expiry("36500d"), maximum_expiry);
+    assert_eq!(parse_expiry("876000h"), maximum_expiry);
+    assert_eq!(parse_expiry("52560000m"), maximum_expiry);
+    assert_eq!(parse_expiry("3153600000s"), maximum_expiry);
 }
 
 #[test]
-fn a_huge_count_of_seconds_parses_because_seconds_need_no_multiply() {
+fn an_expiry_over_36500_days_is_refused_with_the_limit_and_never() {
+    for refused_text in [
+        "3153600001s",
+        "52560001m",
+        "876001h",
+        "36501d",
+        "99999999999999d",
+        "10000000000000000000s",
+    ] {
+        assert_eq!(
+            parse_expiry(refused_text),
+            Err(TOO_LONG_EXPIRY_ERROR.to_string()),
+            "for {refused_text:?}"
+        );
+    }
+}
+
+#[test]
+fn an_expiry_past_u64_seconds_is_refused_with_the_limit_and_never() {
+    // 213503982334601 days is the most days that fit in u64 seconds;
+    // 213503982334602 days and u64::MAX days do not. 18446744073709551616 is
+    // one more than u64::MAX, so the count itself does not fit.
+    for refused_text in [
+        "213503982334601d",
+        "213503982334602d",
+        "18446744073709551615d",
+        "18446744073709551616s",
+        "99999999999999999999999999999s",
+    ] {
+        assert_eq!(
+            parse_expiry(refused_text),
+            Err(TOO_LONG_EXPIRY_ERROR.to_string()),
+            "for {refused_text:?}"
+        );
+    }
+}
+
+#[test]
+fn an_overflowing_count_with_a_stray_character_is_refused_as_not_a_length() {
+    // The count is checked for digits before it is read as a number: a
+    // count too large for u64 that also holds a letter is not a length.
     assert_eq!(
-        parse_expiry("10000000000000000000s"),
-        Ok(Expiry::After(Duration::from_secs(
-            10_000_000_000_000_000_000
-        )))
+        parse_expiry("99999999999999999999x9s"),
+        Err(EXPECTED_EXPIRY_ERROR.to_string())
     );
+    assert_eq!(parse_expiry("+s"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
+    assert_eq!(parse_expiry("++1h"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
 }
 
 #[test]
@@ -203,6 +248,24 @@ fn a_grant_takes_a_session_name_and_a_never_expiry() {
             session_reference: Some(SessionReference::SessionName("quiet-lake".to_string())),
             token_expiry: Expiry::Never,
         }
+    );
+}
+
+#[test]
+fn a_grant_with_an_expiry_over_36500_days_is_a_usage_error_naming_the_limit() {
+    let parse_error = Cli::try_parse_from([
+        "koshi",
+        "share",
+        "grant",
+        "alice",
+        "--expires",
+        "99999999999999d",
+    ])
+    .expect_err("an expiry over 36500 days must not parse");
+    assert_eq!(parse_error.kind(), clap::error::ErrorKind::ValueValidation);
+    assert_eq!(
+        std::error::Error::source(&parse_error).map(ToString::to_string),
+        Some(TOO_LONG_EXPIRY_ERROR.to_string())
     );
 }
 
