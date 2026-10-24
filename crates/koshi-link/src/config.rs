@@ -75,12 +75,20 @@ pub struct LoadedAppConfig {
 /// What one read of `koshi.kdl` found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub enum AppConfigOutcome {
-    /// No text was read: no config directory is known, the file is absent, or
-    /// the file cannot be read.
+    /// No file was read: no config directory is known, or the file is absent.
     #[default]
-    Unread,
+    Absent,
+    /// The file exists and cannot be read, such as for a permission error or
+    /// for bytes that are not UTF-8.
+    Unreadable {
+        /// The read error, such as `Permission denied (os error 13)`.
+        read_error_text: String,
+    },
     /// The text was read and does not parse.
-    Refused,
+    Refused {
+        /// The text read.
+        app_config_source_text: String,
+    },
     /// The text parsed.
     Parsed {
         /// The settings the file overrides, to fold onto the built-in
@@ -89,6 +97,8 @@ pub enum AppConfigOutcome {
         /// The name from the `theme "<name>"` line. `None` when the file names
         /// no theme.
         theme_name: Option<String>,
+        /// The text read.
+        app_config_source_text: String,
     },
 }
 
@@ -101,7 +111,9 @@ impl LoadedAppConfig {
             AppConfigOutcome::Parsed {
                 app_config_layer, ..
             } => Some(app_config_layer.as_ref()),
-            AppConfigOutcome::Unread | AppConfigOutcome::Refused => None,
+            AppConfigOutcome::Absent
+            | AppConfigOutcome::Unreadable { .. }
+            | AppConfigOutcome::Refused { .. } => None,
         }
     }
 
@@ -113,24 +125,26 @@ impl LoadedAppConfig {
             AppConfigOutcome::Parsed {
                 app_config_layer, ..
             } => Some(*app_config_layer),
-            AppConfigOutcome::Unread | AppConfigOutcome::Refused => None,
+            AppConfigOutcome::Absent
+            | AppConfigOutcome::Unreadable { .. }
+            | AppConfigOutcome::Refused { .. } => None,
         }
     }
 }
 
 /// Read and parse `koshi.kdl` in `config_directory`. A file that is absent
-/// gives [`AppConfigOutcome::Unread`] and no warning. A file that cannot be
-/// read gives [`AppConfigOutcome::Unread`] and the warning
+/// gives [`AppConfigOutcome::Absent`] and no warning. A file that cannot be
+/// read gives [`AppConfigOutcome::Unreadable`] and the warning
 /// `could not read config file <path>: <read error>`. Text that is read is
 /// parsed as [`parse_app_config_text`] states. A `config_directory` of `None`
-/// reads nothing and gives the one warning
+/// reads nothing and gives [`AppConfigOutcome::Absent`] and the one warning
 /// `"no config directory found; using built-in defaults"`.
 #[must_use]
 pub fn load_app_config_file(config_directory: Option<&Path>) -> LoadedAppConfig {
     match config_directory {
         Some(config_directory) => load_app_config_at(&config_directory.join("koshi.kdl")),
         None => LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Unread,
+            app_config_outcome: AppConfigOutcome::Absent,
             config_warnings: vec!["no config directory found; using built-in defaults".to_string()],
         },
     }
@@ -141,11 +155,13 @@ pub fn load_app_config_file(config_directory: Option<&Path>) -> LoadedAppConfig 
 fn load_app_config_at(app_config_path: &Path) -> LoadedAppConfig {
     match read_config_file(app_config_path) {
         Ok(Some(app_config_source_text)) => {
-            parse_app_config_text(app_config_path, &app_config_source_text)
+            parse_app_config_text(app_config_path, app_config_source_text)
         }
         Ok(None) => LoadedAppConfig::default(),
         Err(read_error) => LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Unread,
+            app_config_outcome: AppConfigOutcome::Unreadable {
+                read_error_text: read_error.to_string(),
+            },
             config_warnings: vec![format_config_read_warning(app_config_path, &read_error)],
         },
     }
@@ -158,13 +174,14 @@ fn load_app_config_at(app_config_path: &Path) -> LoadedAppConfig {
 /// field-partial skip, prefixed with `app_config_path`. Text that does not
 /// parse (bad syntax, unknown version, bad `update`) gives
 /// [`AppConfigOutcome::Refused`] and the one warning
-/// `koshi.kdl not applied (<path>): <parse error>; using defaults`.
+/// `koshi.kdl not applied (<path>): <parse error>; using defaults`. Both
+/// outcomes keep `app_config_source_text`.
 #[must_use]
 pub fn parse_app_config_text(
     app_config_path: &Path,
-    app_config_source_text: &str,
+    app_config_source_text: String,
 ) -> LoadedAppConfig {
-    match parse_app_config(app_config_path, app_config_source_text) {
+    match parse_app_config(app_config_path, &app_config_source_text) {
         Ok(app_config_file) => {
             let mut config_warnings = Vec::new();
             append_config_field_warnings(
@@ -176,12 +193,15 @@ pub fn parse_app_config_text(
                 app_config_outcome: AppConfigOutcome::Parsed {
                     app_config_layer: Box::new(app_config_file.layer),
                     theme_name: app_config_file.theme_name,
+                    app_config_source_text,
                 },
                 config_warnings,
             }
         }
         Err(parse_error) => LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Refused,
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text,
+            },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): {parse_error}; using defaults",
                 app_config_path.display()
@@ -212,8 +232,11 @@ pub fn load_config_files_on_app_config(
         AppConfigOutcome::Parsed {
             app_config_layer,
             theme_name,
+            ..
         } => (Some(*app_config_layer), theme_name),
-        AppConfigOutcome::Unread | AppConfigOutcome::Refused => (None, None),
+        AppConfigOutcome::Absent
+        | AppConfigOutcome::Unreadable { .. }
+        | AppConfigOutcome::Refused { .. } => (None, None),
     };
     let Some(config_directory) = config_directory else {
         let loaded_config = LoadedConfig {
@@ -291,10 +314,7 @@ pub fn resolve_other_users_policy(
     is_other_user_access_forced: bool,
     config_directory: Option<&Path>,
 ) -> Option<OtherUsers> {
-    let server_config = merge_server(
-        ServerConfig::default(),
-        app_config_layer.cloned().into_iter().collect(),
-    );
+    let server_config = resolve_server_config(app_config_layer);
     if !is_other_user_access_forced && !server_config.should_allow_other_users {
         return None;
     }
@@ -330,18 +350,6 @@ pub fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> PathBu
         .shared_sessions_directory
         .clone()
         .unwrap_or_else(koshi_paths::resolve_shared_sessions_directory)
-}
-
-/// The `server` settings `koshi.kdl` in `config_directory` carries right now.
-/// Reads and parses the file again on each call: the answer is the one the
-/// file holds at this moment. A `config_directory` of `None` gives the
-/// built-in defaults.
-#[must_use]
-pub fn load_current_server_config(config_directory: Option<&Path>) -> ServerConfig {
-    match config_directory {
-        Some(config_directory) => load_server_config_file(&config_directory.join("koshi.kdl")),
-        None => ServerConfig::default(),
-    }
 }
 
 /// The `server` settings the `koshi.kdl` at `app_config_path` carries right
@@ -409,6 +417,18 @@ fn is_other_user_access_allowed(
     is_allowed
 }
 
+/// The server settings `app_config_layer` gives, folded onto the built-in
+/// defaults. `None` gives [`ServerConfig::default`]. Example: a layer that sets
+/// `remote-listen "127.0.0.1:7654"` gives `remote_listen_address`
+/// `127.0.0.1:7654`, with every other field at its default.
+#[must_use]
+pub fn resolve_server_config(app_config_layer: Option<&PartialKoshiConfig>) -> ServerConfig {
+    merge_server(
+        ServerConfig::default(),
+        app_config_layer.cloned().into_iter().collect(),
+    )
+}
+
 /// The machine-wide directory holding the sessions other local users started,
 /// as [`compute_shared_sessions_base_directory`] gives it for the `koshi.kdl`
 /// layer `app_config_layer` folded onto the built-in defaults. A layer of
@@ -417,10 +437,7 @@ fn is_other_user_access_allowed(
 pub fn resolve_shared_sessions_base_directory_for_layer(
     app_config_layer: Option<&PartialKoshiConfig>,
 ) -> Option<PathBuf> {
-    compute_shared_sessions_base_directory(&merge_server(
-        ServerConfig::default(),
-        app_config_layer.cloned().into_iter().collect(),
-    ))
+    compute_shared_sessions_base_directory(&resolve_server_config(app_config_layer))
 }
 
 /// The machine-wide directory holding the sessions other local users started,
@@ -431,7 +448,10 @@ pub fn resolve_shared_sessions_base_directory_for_layer(
 /// holds at this moment.
 #[must_use]
 pub fn find_shared_sessions_base_directory(config_directory: Option<&Path>) -> Option<PathBuf> {
-    compute_shared_sessions_base_directory(&load_current_server_config(config_directory))
+    let config_directory = config_directory?;
+    compute_shared_sessions_base_directory(&load_server_config_file(
+        &config_directory.join("koshi.kdl"),
+    ))
 }
 
 /// The machine-wide directory holding the sessions other local users started,

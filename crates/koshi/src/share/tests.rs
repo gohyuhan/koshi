@@ -593,13 +593,16 @@ fn build_remote_status(
 
 /// What `resolve_remote_access_ready` gives for a router that answers the
 /// status request with `remote_status` and asks nothing more, with this koshi
-/// reading `config_file_path`. A question or an enable request fails the test.
+/// having read `configured_address` from `config_file_path`. A question or an
+/// enable request fails the test.
 fn resolve_without_asking(
     config_file_path: Option<&Path>,
+    configured_address: Option<SocketAddr>,
     remote_status: RouterResult,
 ) -> RemoteReady {
     resolve_remote_access_ready(
         config_file_path,
+        configured_address,
         |prompt_text| panic!("nothing is asked, got {prompt_text:?}"),
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(remote_status.clone()),
@@ -612,10 +615,11 @@ fn resolve_without_asking(
 #[test]
 fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         build_remote_status(
             Some("192.0.2.20:7654"),
             Some(&config_file_path),
@@ -639,7 +643,7 @@ fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
 #[test]
 fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
     let remote_status = build_remote_status(
         Some("192.0.2.20:7654"),
         Some(&config_file_path),
@@ -650,6 +654,7 @@ fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
 
     let remote_ready_error = resolve_remote_access_ready(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         |_| panic!("a serving router is not asked to open anything"),
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(remote_status.clone()),
@@ -670,10 +675,11 @@ fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
 #[test]
 fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
     let mut asked_prompt_texts = Vec::new();
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         |prompt_text| {
             asked_prompt_texts.push(prompt_text.to_string());
             true
@@ -715,9 +721,10 @@ fn an_enable_the_router_refuses_carries_its_sentence_and_leaves_remote_access_of
     // The bind fails: the router writes no record, so remote access stays off,
     // and the block names the router's own sentence.
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         |_| true,
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(
@@ -767,10 +774,11 @@ fn an_enable_the_router_refuses_carries_its_sentence_and_leaves_remote_access_of
 #[test]
 fn a_no_to_trying_the_port_again_leaves_remote_access_on_and_the_port_shut() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
     let mut asked_prompt_texts = Vec::new();
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         |prompt_text| {
             asked_prompt_texts.push(prompt_text.to_string());
             false
@@ -815,9 +823,10 @@ fn a_no_to_trying_the_port_again_leaves_remote_access_on_and_the_port_shut() {
 #[test]
 fn a_no_to_switching_remote_access_on_names_share_open() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         |_| false,
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(
@@ -845,10 +854,11 @@ fn share_open_switches_remote_access_on_without_a_question() {
     // `share open` answers the offer itself: the enable is sent, and the block
     // names the secret `koshi share grant` printed and no saved name.
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("192.0.2.20:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
     let mut is_enable_sent = false;
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
+        Some(parse_listen_address("192.0.2.20:7654")),
         |_| true,
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(
@@ -888,10 +898,11 @@ fn share_open_switches_remote_access_on_without_a_question() {
 #[test]
 fn share_open_on_a_serving_router_sends_no_enable_and_prints_the_fingerprint() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        Some(parse_listen_address("127.0.0.1:7654")),
         build_remote_status(
             Some("127.0.0.1:7654"),
             Some(&config_file_path),
@@ -919,10 +930,11 @@ fn share_open_on_a_serving_router_sends_no_enable_and_prints_the_fingerprint() {
 #[test]
 fn no_address_in_the_router_or_the_file_asks_nothing_and_names_the_line_to_set() {
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), None);
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        None,
         build_remote_status(None, Some(&config_file_path), false, false, None),
     );
 
@@ -936,12 +948,14 @@ fn no_address_in_the_router_or_the_file_asks_nothing_and_names_the_line_to_set()
 
 #[test]
 fn a_router_started_before_remote_listen_was_set_names_the_restart_and_asks_nothing() {
-    // The router read no address when it started; the file names one now.
+    // The router read no address when it started; the koshi.kdl this koshi
+    // read names one.
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        Some(parse_listen_address("127.0.0.1:7654")),
         build_remote_status(None, Some(&config_file_path), false, false, None),
     );
 
@@ -969,12 +983,14 @@ fn a_router_started_before_remote_listen_was_set_names_the_restart_and_asks_noth
 
 #[test]
 fn a_router_whose_file_dropped_its_address_names_the_restart_and_no_open() {
-    // The router read an address it never opened; the file names none now.
+    // The router read an address it never opened; the koshi.kdl this koshi
+    // read names none.
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), None);
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        None,
         build_remote_status(
             Some("192.0.2.20:7654"),
             Some(&config_file_path),
@@ -998,12 +1014,13 @@ fn a_router_whose_file_dropped_its_address_names_the_restart_and_no_open() {
 #[test]
 fn a_serving_router_whose_file_now_names_another_address_keeps_serving_and_names_the_restart() {
     // A guest may be attached on 192.0.2.20:7654: the router keeps serving it,
-    // and the block names the address the file names now.
+    // and the block names the address the koshi.kdl this koshi read names.
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("0.0.0.0:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        Some(parse_listen_address("0.0.0.0:7654")),
         build_remote_status(
             Some("192.0.2.20:7654"),
             Some(&config_file_path),
@@ -1048,10 +1065,11 @@ fn a_router_reading_another_config_file_names_both_files_and_asks_nothing() {
     let router_config_file_path =
         write_koshi_config(router_config_directory.path(), Some("192.0.2.20:7654"));
     let config_directory = TempDir::new().expect("this koshi's config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        Some(parse_listen_address("127.0.0.1:7654")),
         build_remote_status(
             Some("192.0.2.20:7654"),
             Some(&router_config_file_path),
@@ -1089,10 +1107,11 @@ fn a_router_reading_another_config_file_names_both_files_and_asks_nothing() {
 fn a_router_naming_no_config_file_and_another_address_names_the_restart() {
     // A koshi 0.5.0 router names no file.
     let config_directory = TempDir::new().expect("a config directory");
-    let config_file_path = write_koshi_config(config_directory.path(), Some("127.0.0.1:7654"));
+    let config_file_path = config_directory.path().join("koshi.kdl");
 
     let remote_ready = resolve_without_asking(
         Some(&config_file_path),
+        Some(parse_listen_address("127.0.0.1:7654")),
         build_remote_status(Some("192.0.2.20:7654"), None, false, false, None),
     );
 
@@ -1105,6 +1124,31 @@ fn a_router_naming_no_config_file_and_another_address_names_the_restart() {
              open`.\n",
             config_file_path.display()
         )
+    );
+}
+
+#[test]
+fn the_address_compared_is_the_one_the_koshi_kdl_read_at_start_names_and_not_the_file_on_disk() {
+    // `koshi.kdl` on disk names no address; the read at start named
+    // 127.0.0.1:7654. The router read no address from that file.
+    let config_directory = TempDir::new().expect("a config directory");
+    let config_file_path = write_koshi_config(config_directory.path(), None);
+
+    let remote_ready = resolve_without_asking(
+        Some(&config_file_path),
+        Some(parse_listen_address("127.0.0.1:7654")),
+        build_remote_status(None, Some(&config_file_path), false, false, None),
+    );
+
+    assert_eq!(
+        remote_ready,
+        RemoteReady::ConfigMismatched {
+            router_listen_address: None,
+            config_mismatch: ConfigMismatch::FileChanged {
+                config_file_path: config_file_path.clone(),
+                configured_address: Some(parse_listen_address("127.0.0.1:7654")),
+            },
+        }
     );
 }
 

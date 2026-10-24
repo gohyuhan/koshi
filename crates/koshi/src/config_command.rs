@@ -18,7 +18,9 @@ use koshi_config::parser::format_unknown_key;
 use koshi_storage::{atomic::write_atomic, error::StorageError};
 
 use crate::cli::{CliCommand, ConfigCommand};
-use koshi_link::config::{load_app_config_file, parse_app_config_text, LoadedAppConfig};
+use koshi_link::config::{
+    load_app_config_file, parse_app_config_text, AppConfigOutcome, LoadedAppConfig,
+};
 use koshi_link::error::CliError;
 
 #[cfg(test)]
@@ -429,17 +431,23 @@ const fn build_config_field_help(
     }
 }
 
-/// Runs one config command and prints its result.
+/// Runs one config command and prints its result. `koshi config check`
+/// validates the `koshi.kdl` text `app_config_outcome` holds and reads every
+/// other config file from disk.
 ///
 /// # Errors
 /// Returns [`CliError::Config`] when the platform has no config directory or
 /// a file cannot be read, validated, explained, or replaced.
-pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
+pub fn run_config_command(
+    command: &ConfigCommand,
+    app_config_outcome: &AppConfigOutcome,
+) -> Result<(), CliError> {
     let config_directory =
         koshi_paths::resolve_config_directory().ok_or_else(|| CliError::Config {
             detail: "platform config directory is unavailable".to_string(),
         })?;
-    let config_command_output = run_config_command_in_directory(command, &config_directory)?;
+    let config_command_output =
+        run_config_command_in_directory(command, &config_directory, app_config_outcome)?;
     print!("{config_command_output}");
     Ok(())
 }
@@ -469,7 +477,7 @@ pub fn load_app_config_for_command(
     };
     match migrate_config_directory_for_update(config_directory) {
         Ok(Some(app_config_source_text)) => (
-            parse_app_config_text(&config_directory.join("koshi.kdl"), &app_config_source_text),
+            parse_app_config_text(&config_directory.join("koshi.kdl"), app_config_source_text),
             None,
         ),
         Ok(None) => (LoadedAppConfig::default(), None),
@@ -495,7 +503,7 @@ pub fn load_app_config_for_command(
 pub fn migrate_config_directory_for_update(
     config_directory: &Path,
 ) -> Result<Option<String>, CliError> {
-    let loaded_config_files = load_config_files(config_directory);
+    let loaded_config_files = load_config_files(config_directory, None);
     let mut migration_errors = loaded_config_files.config_file_read_errors;
     let mut has_older_schema_file = false;
     for config_file in &loaded_config_files.config_files {
@@ -531,11 +539,12 @@ pub fn migrate_config_directory_for_update(
 fn run_config_command_in_directory(
     command: &ConfigCommand,
     config_directory: &Path,
+    app_config_outcome: &AppConfigOutcome,
 ) -> Result<String, CliError> {
     match command {
         ConfigCommand::Path => Ok(format!("{}\n", config_directory.display())),
         ConfigCommand::Explain { config_key } => explain_config_key(config_key),
-        ConfigCommand::Check => check_config_directory(config_directory),
+        ConfigCommand::Check => check_config_directory(config_directory, app_config_outcome),
         ConfigCommand::Migrate => migrate_config_directory_with_lock(config_directory)
             .map(|config_migration_report| config_migration_report.config_report_text),
     }
@@ -626,12 +635,17 @@ pub(crate) struct ConfigReport {
     pub(crate) config_file_errors: Vec<String>,
 }
 
-/// Read and validate every known config file under `config_directory`.
+/// Validate every known config file under `config_directory`: `koshi.kdl`
+/// with the text `app_config_outcome` holds, and every other file as read from
+/// disk.
 ///
-/// Reads the filesystem and writes nothing. A directory with no config file
-/// gives empty `config_report_lines` and `config_file_errors`.
-pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport {
-    let loaded_config_files = load_config_files(config_directory);
+/// Writes nothing. A directory with no config file gives empty
+/// `config_report_lines` and `config_file_errors`.
+pub(crate) fn validate_config_directory(
+    config_directory: &Path,
+    app_config_outcome: &AppConfigOutcome,
+) -> ConfigReport {
+    let loaded_config_files = load_config_files(config_directory, Some(app_config_outcome));
     let mut config_report_lines = Vec::with_capacity(loaded_config_files.config_files.len());
     let mut config_file_errors = loaded_config_files.config_file_read_errors;
     for config_file in &loaded_config_files.config_files {
@@ -662,8 +676,11 @@ pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport
     }
 }
 
-fn check_config_directory(config_directory: &Path) -> Result<String, CliError> {
-    let config_report = validate_config_directory(config_directory);
+fn check_config_directory(
+    config_directory: &Path,
+    app_config_outcome: &AppConfigOutcome,
+) -> Result<String, CliError> {
+    let config_report = validate_config_directory(config_directory, app_config_outcome);
     if !config_report.config_file_errors.is_empty() {
         return Err(CliError::Config {
             detail: config_report.config_file_errors.join("\n"),
@@ -687,7 +704,7 @@ fn migrate_config_directory_with(
     migrate_config_function: ConfigMigrationFunction,
     mut write_atomic_config_file: impl FnMut(&Path, &[u8]) -> Result<(), StorageError>,
 ) -> Result<ConfigMigrationReport, CliError> {
-    let loaded_config_files = load_config_files(config_directory);
+    let loaded_config_files = load_config_files(config_directory, None);
     let mut migration_plan = Vec::with_capacity(loaded_config_files.config_files.len());
     let mut migration_errors = loaded_config_files.config_file_read_errors;
     for config_file in loaded_config_files.config_files {
@@ -766,7 +783,13 @@ fn migrate_config_directory_with(
     })
 }
 
-fn load_config_files(config_directory: &Path) -> LoadedConfigFiles {
+/// Every known config file under `config_directory`, in path order, and one
+/// message per file or directory that could not be read. `koshi.kdl` takes the
+/// text `app_config_outcome` holds; `None` reads `koshi.kdl` from disk.
+fn load_config_files(
+    config_directory: &Path,
+    app_config_outcome: Option<&AppConfigOutcome>,
+) -> LoadedConfigFiles {
     let mut config_file_paths = vec![
         (ConfigFileKind::App, config_directory.join("koshi.kdl")),
         (
@@ -793,7 +816,13 @@ fn load_config_files(config_directory: &Path) -> LoadedConfigFiles {
 
     let mut config_files = Vec::with_capacity(config_file_paths.len());
     for (config_file_kind, config_path) in config_file_paths {
-        match load_config_file(config_file_kind, config_path) {
+        let config_file_result = match (config_file_kind, app_config_outcome) {
+            (ConfigFileKind::App, Some(app_config_outcome)) => {
+                load_app_config_file_from_outcome(config_path, app_config_outcome)
+            }
+            _ => load_config_file(config_file_kind, config_path),
+        };
+        match config_file_result {
             Ok(Some(config_file)) => config_files.push(config_file),
             Ok(None) => {}
             Err(read_error) => config_file_read_errors.push(read_error),
@@ -809,26 +838,9 @@ fn load_config_file(
     config_file_kind: ConfigFileKind,
     config_path: PathBuf,
 ) -> Result<Option<ConfigFile>, String> {
-    let link_metadata = match fs::symlink_metadata(&config_path) {
-        Ok(link_metadata) => link_metadata,
-        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(io_error) => return Err(format!("read {}: {io_error}", config_path.display())),
+    let Some(config_write_path) = resolve_config_write_path(&config_path)? else {
+        return Ok(None);
     };
-    let (config_file_metadata, config_write_path) = if link_metadata.file_type().is_symlink() {
-        let config_write_path = fs::canonicalize(&config_path)
-            .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
-        let config_file_metadata = fs::metadata(&config_path)
-            .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
-        (config_file_metadata, config_write_path)
-    } else {
-        (link_metadata, config_path.clone())
-    };
-    if !config_file_metadata.is_file() {
-        return Err(format!(
-            "read {}: expected a regular file",
-            config_path.display()
-        ));
-    }
     let config_source_text = fs::read_to_string(&config_path)
         .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
     Ok(Some(ConfigFile {
@@ -837,6 +849,69 @@ fn load_config_file(
         config_write_path,
         config_source_text,
     }))
+}
+
+/// `koshi.kdl` at `config_path` with the text `app_config_outcome` holds. The
+/// path is checked as [`resolve_config_write_path`] states. Then
+/// [`AppConfigOutcome::Absent`] gives `Ok(None)`,
+/// [`AppConfigOutcome::Unreadable`] gives `read <path>: <read error>`, and a
+/// read text gives the file with a copy of that text.
+fn load_app_config_file_from_outcome(
+    config_path: PathBuf,
+    app_config_outcome: &AppConfigOutcome,
+) -> Result<Option<ConfigFile>, String> {
+    let Some(config_write_path) = resolve_config_write_path(&config_path)? else {
+        return Ok(None);
+    };
+    let config_source_text = match app_config_outcome {
+        AppConfigOutcome::Absent => return Ok(None),
+        AppConfigOutcome::Unreadable { read_error_text } => {
+            return Err(format!("read {}: {read_error_text}", config_path.display()));
+        }
+        AppConfigOutcome::Refused {
+            app_config_source_text,
+        }
+        | AppConfigOutcome::Parsed {
+            app_config_source_text,
+            ..
+        } => app_config_source_text.clone(),
+    };
+    Ok(Some(ConfigFile {
+        config_file_kind: ConfigFileKind::App,
+        config_path,
+        config_write_path,
+        config_source_text,
+    }))
+}
+
+/// The path a migration writes `config_path` through: the link target for a
+/// symbolic link, and `config_path` itself otherwise. `Ok(None)` when nothing
+/// is at `config_path`. `read <path>: <error>` when the path cannot be
+/// inspected or a link cannot be followed, and
+/// `read <path>: expected a regular file` when the path, or the link target,
+/// is not a regular file.
+fn resolve_config_write_path(config_path: &Path) -> Result<Option<PathBuf>, String> {
+    let link_metadata = match fs::symlink_metadata(config_path) {
+        Ok(link_metadata) => link_metadata,
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(io_error) => return Err(format!("read {}: {io_error}", config_path.display())),
+    };
+    let (config_file_metadata, config_write_path) = if link_metadata.file_type().is_symlink() {
+        let config_write_path = fs::canonicalize(config_path)
+            .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
+        let config_file_metadata = fs::metadata(config_path)
+            .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
+        (config_file_metadata, config_write_path)
+    } else {
+        (link_metadata, config_path.to_path_buf())
+    };
+    if !config_file_metadata.is_file() {
+        return Err(format!(
+            "read {}: expected a regular file",
+            config_path.display()
+        ));
+    }
+    Ok(Some(config_write_path))
 }
 
 fn append_kdl_file_paths(

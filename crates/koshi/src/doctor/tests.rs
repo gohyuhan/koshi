@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::{TokenRecord, TokenScope};
+use koshi_link::config::{load_app_config_file, parse_app_config_text};
 use koshi_link::router_client::RemoteAccessStatus;
 use tempfile::TempDir;
 
@@ -20,6 +21,7 @@ use super::*;
 fn build_doctor_context(root_directory: &Path) -> DoctorContext {
     DoctorContext {
         config_directory: Some(root_directory.join("config")),
+        app_config_outcome: AppConfigOutcome::Absent,
         runtime_directory: Some(root_directory.join("runtime")),
         runtime_directory_rule: Some(RuntimeDirectoryRule::EnvironmentVariable),
         runtime_directory_mode: Some(0o700),
@@ -96,9 +98,11 @@ fn config_fails_when_this_machine_reports_no_home_directory() {
 #[test]
 fn config_fails_on_a_file_that_does_not_validate() {
     let test_directory = TempDir::new().unwrap();
-    let doctor_context = build_doctor_context(test_directory.path());
+    let mut doctor_context = build_doctor_context(test_directory.path());
     let config_directory = build_config_directory(&doctor_context);
     fs::write(config_directory.join("koshi.kdl"), "pane {}\n").unwrap();
+    doctor_context.app_config_outcome =
+        load_app_config_file(Some(&config_directory)).app_config_outcome;
 
     assert_eq!(
         check_config(&doctor_context),
@@ -137,9 +141,11 @@ fn config_is_ok_when_the_directory_holds_no_config_file() {
 #[test]
 fn config_counts_one_validated_file_in_the_singular() {
     let test_directory = TempDir::new().unwrap();
-    let doctor_context = build_doctor_context(test_directory.path());
+    let mut doctor_context = build_doctor_context(test_directory.path());
     let config_directory = build_config_directory(&doctor_context);
     fs::write(config_directory.join("koshi.kdl"), "version 2\n").unwrap();
+    doctor_context.app_config_outcome =
+        load_app_config_file(Some(&config_directory)).app_config_outcome;
 
     assert_eq!(
         check_config(&doctor_context),
@@ -155,7 +161,7 @@ fn config_counts_one_validated_file_in_the_singular() {
 #[test]
 fn config_counts_two_validated_files_in_the_plural() {
     let test_directory = TempDir::new().unwrap();
-    let doctor_context = build_doctor_context(test_directory.path());
+    let mut doctor_context = build_doctor_context(test_directory.path());
     let config_directory = build_config_directory(&doctor_context);
     fs::write(config_directory.join("koshi.kdl"), "version 2\n").unwrap();
     fs::write(
@@ -163,12 +169,37 @@ fn config_counts_two_validated_files_in_the_plural() {
         "version 2\nmode \"normal\" {}\n",
     )
     .unwrap();
+    doctor_context.app_config_outcome =
+        load_app_config_file(Some(&config_directory)).app_config_outcome;
 
     assert_eq!(
         check_config(&doctor_context),
         DoctorOutcome {
             verdict: Verdict::Ok,
             reason: "2 config files validated".to_string(),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn config_validates_the_koshi_kdl_text_read_at_start_and_not_the_text_on_disk() {
+    // `koshi.kdl` on disk names no `version`; the text read at start is
+    // `version 2`.
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let config_directory = build_config_directory(&doctor_context);
+    let app_config_path = config_directory.join("koshi.kdl");
+    fs::write(&app_config_path, "pane {}\n").unwrap();
+    doctor_context.app_config_outcome =
+        parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+
+    assert_eq!(
+        check_config(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: "1 config file validated".to_string(),
             help: None,
             detail: None,
         }

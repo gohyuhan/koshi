@@ -2564,7 +2564,7 @@ fn attaching_searches_the_shared_directory_the_passed_koshi_kdl_names() {
         std::fs::read_dir(&shared_directory_link).expect_err("a link to itself cannot be listed");
     let loaded_app_config = koshi_link::config::parse_app_config_text(
         Path::new("koshi.kdl"),
-        &format!(
+        format!(
             "version 2\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
             shared_directory_link.display()
         ),

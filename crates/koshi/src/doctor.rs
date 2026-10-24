@@ -27,6 +27,7 @@ use koshi_ipc::remote_tokens::TokenStore;
 use crate::cli::OutputFormat;
 use crate::output::{self, ConfigMismatch};
 use crate::share::find_config_mismatch;
+use koshi_link::config::{AppConfigOutcome, LoadedAppConfig};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::SERVER_ANSWER_TIMEOUT_DURATION;
@@ -177,6 +178,9 @@ pub struct DoctorContext {
     /// The directory `koshi.kdl` lives in, or `None` when this machine
     /// reports no home directory.
     pub config_directory: Option<PathBuf>,
+    /// What the one read of `koshi.kdl` at start found. The config check
+    /// validates its text.
+    pub app_config_outcome: AppConfigOutcome,
     /// The private runtime directory holding the endpoint files, or `None`
     /// when this machine reports no home directory.
     /// [`DoctorContext::runtime_directory_rule`] names the rule that produced it.
@@ -221,25 +225,26 @@ pub struct DoctorContext {
     /// What asking the running router for its remote access status produced.
     pub router_remote_status: RunningRouterRemoteStatus,
     /// Why the listen address the running router read when it started is not
-    /// the one `koshi.kdl` names now, as `koshi share grant` finds it. `None`
-    /// when they agree, and when no router answered.
+    /// the one the `koshi.kdl` read at start names, as `koshi share grant`
+    /// finds it. `None` when they agree, and when no router answered.
     pub remote_config_mismatch: Option<ConfigMismatch>,
 }
 
 impl DoctorContext {
-    /// Read every fact the checks need from this machine: the platform
-    /// directories, the rule that produced the runtime directory, `koshi.kdl`,
-    /// the environment, the grant file, the running router, and the
-    /// `koshi.kdl` the running router names when it is not this one. Format 1
-    /// grants are counted in memory. Creates nothing and starts no router.
+    /// Gather every fact the checks need: `koshi.kdl` as `loaded_app_config`
+    /// read it at start, and from this machine the platform directories, the
+    /// rule that produced the runtime directory, the environment, the grant
+    /// file, the running router, and the `koshi.kdl` the running router names
+    /// when it is not this one. Format 1 grants are counted in memory. Creates
+    /// nothing and starts no router.
     #[must_use]
-    pub fn from_current_machine() -> DoctorContext {
+    pub fn from_current_machine(loaded_app_config: LoadedAppConfig) -> DoctorContext {
         let config_directory = koshi_paths::resolve_config_directory();
         let (runtime_directory, runtime_directory_rule) =
             koshi_paths::resolve_runtime_directory_with_rule().unzip();
         let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
         let server_config =
-            koshi_link::config::load_current_server_config(config_directory.as_deref());
+            koshi_link::config::resolve_server_config(loaded_app_config.find_app_config_layer());
         let shared_sessions_directory =
             koshi_link::config::compute_shared_sessions_base_directory(&server_config);
         let standing_grant_count = match koshi_paths::resolve_data_directory() {
@@ -270,6 +275,7 @@ impl DoctorContext {
         };
         DoctorContext {
             config_directory,
+            app_config_outcome: loaded_app_config.app_config_outcome,
             runtime_directory,
             runtime_directory_rule,
             runtime_directory_mode,
@@ -341,13 +347,17 @@ pub fn build_doctor_check_rows(doctor_context: &DoctorContext) -> Vec<DoctorChec
         .collect()
 }
 
-/// Check this machine's koshi installation and print one row per check.
+/// Check this machine's koshi installation, with `koshi.kdl` as
+/// `loaded_app_config` read it at start, and print one row per check.
 ///
 /// # Errors
 /// [`CliError::Runtime`] when any row is [`Verdict::Fail`], after the whole
 /// answer has been printed. A [`Verdict::Warn`] row never fails the run.
-pub fn run_doctor_checks(output_format: OutputFormat) -> Result<(), CliError> {
-    let doctor_context = DoctorContext::from_current_machine();
+pub fn run_doctor_checks(
+    output_format: OutputFormat,
+    loaded_app_config: LoadedAppConfig,
+) -> Result<(), CliError> {
+    let doctor_context = DoctorContext::from_current_machine(loaded_app_config);
     let check_rows = build_doctor_check_rows(&doctor_context);
     print!("{}", output::render_doctor(&check_rows, output_format));
     build_failure_outcome_from_check_rows(&check_rows).map_or(Ok(()), Err)
@@ -375,7 +385,10 @@ fn check_config(doctor_context: &DoctorContext) -> DoctorOutcome {
     let Some(config_directory) = doctor_context.config_directory.as_deref() else {
         return build_no_home_directory_outcome("config");
     };
-    let config_report = crate::config_command::validate_config_directory(config_directory);
+    let config_report = crate::config_command::validate_config_directory(
+        config_directory,
+        &doctor_context.app_config_outcome,
+    );
     if !config_report.config_file_errors.is_empty() {
         return DoctorOutcome::build_failure_outcome(
             config_report.config_file_errors.join("; "),

@@ -187,7 +187,7 @@ fn reading_a_file_that_is_not_utf8_warns_and_is_none() {
     );
 }
 
-// --- load_app_config_at: clean, absent, hard-error, and unknown-field files ---
+// --- load_app_config_at: clean, absent, unreadable, hard-error, and unknown-field files ---
 
 #[test]
 fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
@@ -200,6 +200,7 @@ fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
             app_config_outcome: AppConfigOutcome::Parsed {
                 app_config_layer: Box::new(PartialKoshiConfig::default()),
                 theme_name: None,
+                app_config_source_text: "version 1\n".to_string(),
             },
             config_warnings: Vec::new(),
         }
@@ -207,13 +208,36 @@ fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
 }
 
 #[test]
-fn loading_an_absent_app_file_is_unread_without_a_warning() {
+fn loading_an_absent_app_file_is_absent_without_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     assert_eq!(
         load_app_config_at(&test_directory.path().join("koshi.kdl")),
         LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Unread,
+            app_config_outcome: AppConfigOutcome::Absent,
             config_warnings: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn loading_an_app_file_that_cannot_be_read_keeps_the_read_error_with_a_warning() {
+    // `koshi.kdl` is a directory: reading it as a string fails on every
+    // platform.
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("koshi.kdl");
+    fs::create_dir(&config_file_path).expect("create dir");
+    let read_error =
+        fs::read_to_string(&config_file_path).expect_err("a directory reads as no string");
+    assert_eq!(
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Unreadable {
+                read_error_text: read_error.to_string(),
+            },
+            config_warnings: vec![format!(
+                "could not read config file {}: {read_error}",
+                config_file_path.display()
+            )],
         }
     );
 }
@@ -228,7 +252,9 @@ fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
     assert_eq!(
         load_app_config_at(&config_file_path),
         LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Refused,
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: "version 999\n".to_string(),
+            },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): {parse_error}; using defaults",
                 config_file_path.display()
@@ -248,7 +274,9 @@ fn an_empty_app_file_is_refused_with_a_warning() {
     assert_eq!(
         load_app_config_at(&config_file_path),
         LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Refused,
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: String::new(),
+            },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): {parse_error}; using defaults",
                 config_file_path.display()
@@ -274,6 +302,7 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
             app_config_outcome: AppConfigOutcome::Parsed {
                 app_config_layer: Box::new(PartialKoshiConfig::default()),
                 theme_name: Some("midnight".to_string()),
+                app_config_source_text: "version 1\nfrobnicate 1\ntheme \"midnight\"\n".to_string(),
             },
             config_warnings: vec![format!(
                 "{}: line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
@@ -1184,6 +1213,28 @@ fn an_absent_or_unparseable_server_config_file_gives_the_built_in_defaults() {
 }
 
 #[test]
+fn a_server_config_resolves_from_the_layer_folded_onto_the_built_in_defaults() {
+    let app_config_layer = PartialKoshiConfig {
+        remote_listen_address: Some(Some(std::net::SocketAddr::from(([127, 0, 0, 1], 7654)))),
+        ..PartialKoshiConfig::default()
+    };
+
+    assert_eq!(
+        resolve_server_config(Some(&app_config_layer)),
+        ServerConfig {
+            remote_listen_address: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 7654))),
+            ..ServerConfig::default()
+        },
+        "a layer naming an address"
+    );
+    assert_eq!(
+        resolve_server_config(None),
+        ServerConfig::default(),
+        "no layer"
+    );
+}
+
+#[test]
 fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
     let app_config_text = "version 2\ntheme \"midnight\"\nfrobnicate 1\n";
     let config_directory = build_config_directory_with_app_config(app_config_text);
@@ -1197,6 +1248,7 @@ fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
             app_config_outcome: AppConfigOutcome::Parsed {
                 app_config_layer: Box::new(PartialKoshiConfig::default()),
                 theme_name: Some("midnight".to_string()),
+                app_config_source_text: app_config_text.to_string(),
             },
             config_warnings: vec![format!(
                 "{}: line 3, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
@@ -1205,7 +1257,7 @@ fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
         }
     );
     assert_eq!(
-        parse_app_config_text(&app_config_path, app_config_text),
+        parse_app_config_text(&app_config_path, app_config_text.to_string()),
         loaded_app_config
     );
 }
@@ -1233,6 +1285,8 @@ fn config_files_build_on_the_koshi_kdl_already_read_and_read_its_theme() {
                 ..PartialKoshiConfig::default()
             }),
             theme_name: Some("passed".to_string()),
+            app_config_source_text: "version 2\ntheme \"passed\"\nallow-other-users #true\n"
+                .to_string(),
         },
         config_warnings: vec!["koshi.kdl: line 3, column 1: a warning of the read".to_string()],
     };

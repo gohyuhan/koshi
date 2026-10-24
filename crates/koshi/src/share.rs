@@ -19,8 +19,8 @@
 //! it opens nothing and prints the same commands, fingerprint included.
 //!
 //! The router reads `remote-listen` when it starts. Both verbs compare that
-//! address with the one `koshi.kdl` names now, and name the step that makes
-//! the router read the file again when the two differ.
+//! address with the one `koshi.kdl` names when the verb starts, and name the
+//! step that makes the router read the file again when the two differ.
 //!
 //! A verb run outside every pane is never refused, the revoke that cuts a live
 //! connection included. A verb run in a pane is refused while any client is
@@ -35,6 +35,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::client::ClientOrigin;
 use koshi_core::discovery::{ClientDiscovery, SessionOverview};
 use koshi_core::event::RejectReason;
@@ -48,7 +49,7 @@ use koshi_ipc::wire::WireName;
 use crate::cli::{Expiry, SessionReference, ShareCommand};
 use crate::output::{ConfigMismatch, RemoteReady};
 use crate::{output, prompt, targeting};
-use koshi_link::config::load_server_config_file;
+use koshi_link::config::{load_server_config_file, resolve_server_config};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::router_client::RemoteAccessStatus;
@@ -114,8 +115,10 @@ fn refuse_while_watched_from_another_machine(
 /// A grant with no `--session` reaches every session on this machine; a
 /// revoke or a listing with no `--session` covers every scope. A router that
 /// refuses the request is [`CliError::Runtime`] carrying the router's own
-/// message. `config_directory` holds the `koshi.kdl` a grant and an open
-/// compare with the address the router read; `None` names no file.
+/// message. `config_directory` holds the `koshi.kdl` this koshi read at start,
+/// and `app_config_layer` holds the settings that read gave. A grant and an
+/// open compare its `remote-listen` address with the address the router read.
+/// A `config_directory` of `None` names no file.
 ///
 /// An open that leaves the port shut prints nothing on standard output and is
 /// [`CliError::Runtime`] carrying the block [`output::render_remote_ready`]
@@ -124,10 +127,12 @@ pub fn run_share_command(
     command: &ShareCommand,
     in_session_context: Option<&InSessionContext>,
     config_directory: Option<&Path>,
+    app_config_layer: Option<&PartialKoshiConfig>,
 ) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let config_file_path: Option<PathBuf> =
         config_directory.map(|config_directory| config_directory.join("koshi.kdl"));
+    let configured_address = resolve_server_config(app_config_layer).remote_listen_address;
     if let Some(in_session_context) = in_session_context {
         // The pane's own session advertises in this user's runtime directory.
         refuse_while_watched_from_another_machine(in_session_context, |session_id| {
@@ -172,6 +177,7 @@ pub fn run_share_command(
                         || {
                             resolve_remote_ready_or_unknown(resolve_remote_access_ready(
                                 config_file_path.as_deref(),
+                                configured_address,
                                 prompt::read_yes_answer,
                                 |router_request_kind| {
                                     router_client::submit_router_request(
@@ -193,6 +199,7 @@ pub fn run_share_command(
             // The offer is answered yes, and no question is printed.
             let remote_ready = resolve_remote_access_ready(
                 config_file_path.as_deref(),
+                configured_address,
                 |_| true,
                 |router_request_kind| {
                     router_client::submit_router_request(&runtime_directory, router_request_kind)
@@ -429,8 +436,9 @@ fn resolve_remote_ready_or_unknown(
 /// Asks the router for the listen address it read when it started, the
 /// `koshi.kdl` it read it from, whether remote access is switched on, whether
 /// the port is held right now, and the fingerprint of the certificate the
-/// listener presents. Then compares that address with the one the `koshi.kdl`
-/// at `config_file_path` names now, as [`find_config_mismatch`] does, and:
+/// listener presents. Then compares that address with `configured_address`,
+/// the address the `koshi.kdl` at `config_file_path` named when this koshi
+/// read it at start, as [`find_config_mismatch`] does, and:
 ///
 /// - on and listening — [`RemoteReady::On`] carrying that fingerprint and the
 ///   mismatch, if any, nothing asked; a router that names no fingerprint then
@@ -465,15 +473,13 @@ fn resolve_remote_ready_or_unknown(
 /// cannot produce.
 fn resolve_remote_access_ready(
     config_file_path: Option<&Path>,
+    configured_address: Option<SocketAddr>,
     confirm_enable: impl FnOnce(&str) -> bool,
     mut request_router: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
 ) -> Result<RemoteReady, CliError> {
     let remote_access_status =
         RemoteAccessStatus::from_router_result(request_router(RouterRequestKind::RemoteStatus)?)
             .map_err(|unexpected_router_result| build_router_refusal(&unexpected_router_result))?;
-    let configured_address = config_file_path.and_then(|config_file_path| {
-        load_server_config_file(config_file_path).remote_listen_address
-    });
     let config_mismatch = find_config_mismatch(
         remote_access_status.remote_listen_address,
         remote_access_status.config_file_path.as_deref(),
@@ -563,12 +569,12 @@ fn resolve_remote_access_ready(
 }
 
 /// Why the listen address the running router read when it started is not the
-/// one `koshi.kdl` names now, or `None` when they agree.
+/// one `koshi.kdl` names, or `None` when they agree.
 ///
 /// `router_listen_address` and `router_config_file_path` are what the router
 /// answered: the address it read and the `koshi.kdl` it read it from.
-/// `config_file_path` is the `koshi.kdl` this koshi reads, and
-/// `configured_address` the address that file names now.
+/// `config_file_path` is the `koshi.kdl` this koshi read at start, and
+/// `configured_address` the address that read gave.
 ///
 /// 1. The router's file is this koshi's file: a `configured_address` that
 ///    differs is [`ConfigMismatch::FileChanged`].

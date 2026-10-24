@@ -201,7 +201,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Config { command }) = &cli.command {
-        return config_command::run_config_command(command);
+        return config_command::run_config_command(command, &loaded_app_config.app_config_outcome);
     }
 
     if let Some(CliCommand::Share { command }) = &cli.command {
@@ -213,6 +213,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             command,
             InSessionContext::from_env()?.as_ref(),
             config_directory.as_deref(),
+            loaded_app_config.find_app_config_layer(),
         );
     }
 
@@ -225,7 +226,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     if let Some(CliCommand::Doctor { output_format }) = &cli.command {
         // Doctor reads this machine's own files and asks the running router
         // one question. It dispatches no command and starts no router.
-        return doctor::run_doctor_checks(*output_format);
+        return doctor::run_doctor_checks(*output_format, loaded_app_config);
     }
 
     if let Some(CliCommand::ServeRouter {
