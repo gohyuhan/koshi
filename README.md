@@ -85,7 +85,7 @@ same machine or another one, and the panes are where you left them.
 - 🎨 **Themes** — use the built-in colors or copy one of 25 included themes.
 - ⚙️ **Config files** — keep app settings, themes, keybindings, and layouts separate.
 - 💾 **Saved layouts** — start tabs, panes, commands, directories, environment values, and locked input from a profile.
-- 🪵 **Logging** — write optional per-session and router text or JSON logs without terminal content.
+- 🪵 **Logging** — write optional per-session and router text or JSON logs without terminal content, each file capped in size, with the logs of old sessions deleted.
 - 🌐 **Remote sessions** — attach to a session on another machine over TLS 1.3 with hybrid post-quantum key exchange, a certificate fingerprint check, and an access token.
 - 🔑 **Access tokens** — grant, revoke, and list the tokens that reach your sessions; each grant covers one session or every session.
 - 🔁 **Reconnect** — a dropped remote link dials again for two minutes and puts your tabs, focus, and scroll position back.

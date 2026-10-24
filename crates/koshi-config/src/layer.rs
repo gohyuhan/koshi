@@ -641,6 +641,8 @@ pub struct PartialLoggingConfig {
     pub log_level: Option<LogLevel>,
     /// How each written log line is rendered.
     pub log_format: Option<LogFormat>,
+    /// The size a log file may reach, in mebibytes.
+    pub max_log_file_size_in_mb: Option<u32>,
 }
 
 impl PartialLoggingConfig {
@@ -648,6 +650,10 @@ impl PartialLoggingConfig {
         merge_override_field(&mut logging_config.is_enabled, self.is_enabled);
         merge_override_field(&mut logging_config.log_level, self.log_level);
         merge_override_field(&mut logging_config.log_format, self.log_format);
+        merge_override_field(
+            &mut logging_config.max_log_file_size_in_mb,
+            self.max_log_file_size_in_mb,
+        );
     }
 }
 

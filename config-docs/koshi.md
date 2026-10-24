@@ -427,6 +427,17 @@ Koshi writes its log files in `logs/` below the state directory:
 - `koshi-log-router.log`, one file for the router. It holds the lines of the
   router, such as a restart into a new koshi that failed.
 
+A line that takes a log file over `max-log-file-size-in-mb` moves the file to
+`<name>.1`, such as `koshi-log-router.log.1`. The move replaces the `.1` file
+before it, and the next line starts a new file. Each name holds about two
+times the size at most. If two processes with different sizes write one file,
+the smaller size moves it. Each process reads the size when it starts.
+
+Each start of a session server deletes the files of old sessions, with logging
+on or off. It keeps its own files, the router's files, and the files of the 20
+sessions written last. A session's age is the newest modification time of its
+`.log` and `.log.1` files.
+
 A failure that ends the router, a session server, or the process that holds a
 session's panes is written to that process's log file at `error` level, such
 as `the router ends, runtime_error: File exists (os error 17)`.
@@ -439,6 +450,7 @@ Disabled logging creates no log file.
 | `enabled` | boolean — write a log file at all | `#false` | ≥ 0.1.0 |
 | `level` | `"info"` \| `"warning"` \| `"error"` — lowest severity written: `info` writes everything, `warning` writes warnings and errors, `error` writes only errors | `"warning"` | ≥ 0.1.0 |
 | `format` | `"pretty"` \| `"json"` — `pretty` is human-readable, `json` is one JSON object per line for a machine to parse | `"pretty"` | ≥ 0.1.0 |
+| `max-log-file-size-in-mb` | integer, `1` to `1024` — the size of a log file in MiB (1,048,576 bytes) before it moves to `<name>.1` | `4` | ≥ 0.6.0 |
 
 `info` includes normal lifecycle events. `warning` includes recoverable
 problems. `error` includes failures that stop Koshi. Each level includes higher
@@ -987,6 +999,7 @@ logging {
     enabled #false
     level "warning"
     format "pretty"
+    max-log-file-size-in-mb 4
 }
 
 update {

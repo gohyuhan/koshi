@@ -766,16 +766,18 @@ fn build_logging_parameters_with_no_config_file_are_the_defaults() {
     assert_eq!(logging_parameters.log_level, LogLevel::Warning);
     assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
     assert_eq!(logging_parameters.log_file_owner, LogFileOwner::Router);
+    assert_eq!(logging_parameters.max_log_file_size_bytes, 4_194_304);
 }
 
 #[test]
-fn build_logging_parameters_take_the_level_and_format_the_config_names() {
+fn build_logging_parameters_take_the_level_format_and_size_the_config_names() {
     let session_id = SessionId::new();
     let app_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
             is_enabled: Some(true),
             log_level: Some(LogLevel::Info),
             log_format: Some(LogFormat::Json),
+            max_log_file_size_in_mb: Some(16),
         }),
         ..Default::default()
     };
@@ -790,6 +792,7 @@ fn build_logging_parameters_take_the_level_and_format_the_config_names() {
         logging_parameters.log_file_owner,
         LogFileOwner::Session { session_id }
     );
+    assert_eq!(logging_parameters.max_log_file_size_bytes, 16_777_216);
 }
 
 #[test]
@@ -800,6 +803,7 @@ fn build_logging_parameters_keep_the_defaults_for_every_field_the_config_leaves_
             is_enabled: Some(true),
             log_level: None,
             log_format: None,
+            max_log_file_size_in_mb: None,
         }),
         ..Default::default()
     };
@@ -814,6 +818,7 @@ fn build_logging_parameters_keep_the_defaults_for_every_field_the_config_leaves_
         logging_parameters.log_file_owner,
         LogFileOwner::Session { session_id }
     );
+    assert_eq!(logging_parameters.max_log_file_size_bytes, 4_194_304);
 }
 
 // --- The direction a pane-opening verb uses with no `--direction` ---

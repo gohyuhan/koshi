@@ -58,7 +58,7 @@ use crate::parser::{
     parse_kdl, parse_nonempty_string_kdl_value, parse_string_kdl_value, parse_u16_kdl_value,
     parse_u32_kdl_value, set_parsed_field, validate_version_node, ParseWarnings,
 };
-use crate::types::WheelScroll;
+use crate::types::{WheelScroll, HIGHEST_MAX_LOG_FILE_SIZE_IN_MB, LOWEST_MAX_LOG_FILE_SIZE_IN_MB};
 
 /// The top-level node names. Each may appear at most once; an unknown name is
 /// matched against these for the `did you mean` hint.
@@ -694,13 +694,25 @@ fn parse_logging_config(
                 field_node,
                 parse_warnings,
             ),
+            "max-log-file-size-in-mb" => set_parsed_field(
+                &mut partial_logging_config.max_log_file_size_in_mb,
+                parse_max_log_file_size_in_mb(field_node),
+                "logging",
+                field_node,
+                parse_warnings,
+            ),
             unknown_field_name => parse_warnings.record_warning(
                 field_node.span(),
                 format!(
                     "ignored {}",
                     format_unknown_key(
                         &format!("logging.{unknown_field_name}"),
-                        &["logging.enabled", "logging.level", "logging.format"],
+                        &[
+                            "logging.enabled",
+                            "logging.level",
+                            "logging.format",
+                            "logging.max-log-file-size-in-mb",
+                        ],
                     )
                 ),
             ),
@@ -811,6 +823,25 @@ fn parse_direction(field_node: &KdlNode) -> Result<Direction, String> {
         "up" => Ok(Direction::Up),
         "down" => Ok(Direction::Down),
         _ => Err(r#"expected "left", "right", "up", or "down""#.to_string()),
+    }
+}
+
+/// Reads the size in mebibytes a log file may reach. A value outside
+/// [`LOWEST_MAX_LOG_FILE_SIZE_IN_MB`]..=[`HIGHEST_MAX_LOG_FILE_SIZE_IN_MB`]
+/// gives `must be between 1 and 1024`. `max-log-file-size-in-mb 0` is an
+/// error, and `max-log-file-size-in-mb 1` yields `1`.
+fn parse_max_log_file_size_in_mb(field_node: &KdlNode) -> Result<u32, String> {
+    let max_log_file_size_in_mb = parse_integer_kdl_value(field_node)?;
+    match u32::try_from(max_log_file_size_in_mb) {
+        Ok(max_log_file_size_in_mb)
+            if (LOWEST_MAX_LOG_FILE_SIZE_IN_MB..=HIGHEST_MAX_LOG_FILE_SIZE_IN_MB)
+                .contains(&max_log_file_size_in_mb) =>
+        {
+            Ok(max_log_file_size_in_mb)
+        }
+        _ => Err(format!(
+            "must be between {LOWEST_MAX_LOG_FILE_SIZE_IN_MB} and {HIGHEST_MAX_LOG_FILE_SIZE_IN_MB}"
+        )),
     }
 }
 

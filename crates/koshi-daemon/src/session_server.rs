@@ -72,7 +72,9 @@ use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
-use koshi_observability::logging::{initialize_tracing, LogFileOwner};
+use koshi_observability::logging::{
+    delete_stale_session_log_files, initialize_tracing, LogFileOwner,
+};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_runtime::executable_watch::{read_first_output_line, ExecutableWatch, OutputLineError};
 use koshi_runtime::ipc_server::{ImageReplacement, IpcServer};
@@ -334,6 +336,12 @@ enum ServeOutcome {
 /// before this call, or `None` when it did not fail. A failure is written to the
 /// session log at warn level, after the `logging started` line.
 ///
+/// Every start, a first run and a resume run alike, then deletes the log files
+/// of old sessions, as [`delete_stale_session_log_files`] states, whether or
+/// not logging is on. The first file or directory that
+/// cannot be read or deleted is written to the session log at warn level, and
+/// the session starts.
+///
 /// `app_config_layer` is the `koshi.kdl` layer the caller read at this
 /// process's start. The session starts on it: its log settings, its first
 /// panes, and the reach of its first control socket. `config_directory` holds
@@ -372,6 +380,12 @@ pub fn run_session_server(
         tracing::warn!(
             %config_migration_error,
             "the config files could not be migrated; the session starts with them as they are"
+        );
+    }
+    if let Err(session_log_delete_error) = delete_stale_session_log_files(session_id) {
+        tracing::warn!(
+            %session_log_delete_error,
+            "old session log files could not all be deleted; the session starts"
         );
     }
 
