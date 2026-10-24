@@ -13,6 +13,12 @@
 //! to save what they typed anyway. Either way the saved server holds the
 //! fingerprint the user typed.
 //!
+//! A refused answer is never printed back: the reason names the shape the
+//! answer must have. The secret is read without being printed. A fingerprint
+//! is typed and offered as `sha256:` followed by 64 lowercase hex characters,
+//! and an answer of 64 hex characters alone, the shape of a secret, is
+//! refused at the name and the fingerprint questions.
+//!
 //! `forget` and `set-secret` open no connection. A server that is switched
 //! off is still forgotten, and still takes a fresh secret.
 
@@ -20,14 +26,15 @@ use std::time::SystemTime;
 
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_servers::{SavedServer, SavedServerLookup, ServerStore};
+use koshi_ipc::tls::format_certificate_fingerprint;
 
 use crate::cli::RemoteCommand;
 use crate::{output, prompt};
 use koshi_link::error::CliError;
 use koshi_link::remote_client::{
-    self, is_server_address, load_saved_server_store, prompt_line, prompt_secret,
-    update_saved_server_store, validate_certificate_fingerprint, validate_saved_server_name,
-    DIAL_TIMEOUT_DURATION, REPLY_TIMEOUT_DURATION,
+    self, is_server_address, load_saved_server_store, parse_certificate_fingerprint, prompt_line,
+    prompt_secret, update_saved_server_store, validate_saved_server_name, DIAL_TIMEOUT_DURATION,
+    REPLY_TIMEOUT_DURATION,
 };
 
 #[cfg(test)]
@@ -100,10 +107,10 @@ pub fn run_remote_command(command: &RemoteCommand) -> Result<(), CliError> {
 /// fingerprint of its certificate and the secret, check them against that
 /// server, and write the saved server.
 ///
-/// Every answer is needed, and an empty one asks again. A fingerprint that is
-/// not 64 lowercase hex characters asks again. A saved server whose check did
-/// not pass is saved with the fingerprint typed, once the user answers to save
-/// it.
+/// Every answer is needed, and an empty one asks again. A fingerprint that
+/// fails [`parse_certificate_fingerprint`] asks again. A saved server whose
+/// check did not pass is saved with the fingerprint typed, once the user
+/// answers to save it.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, when the
@@ -113,13 +120,15 @@ pub fn run_remote_command(command: &RemoteCommand) -> Result<(), CliError> {
 fn create_saved_server_from_prompts(server_store: &ServerStore) -> Result<(), CliError> {
     println!("every answer is needed. Ctrl-C stops without saving.");
     let server_name = prompt_until_valid_answer("name", None, |entered_name| {
-        validate_server_name_available(server_store, entered_name)
+        validate_server_name_available(server_store, entered_name)?;
+        Ok(entered_name.to_string())
     })?;
     let server_address = prompt_until_valid_answer("address", None, |entered_address| {
-        validate_saved_server_address_is_available(server_store, entered_address)
+        validate_saved_server_address_is_available(server_store, entered_address)?;
+        Ok(entered_address.to_string())
     })?;
     let certificate_fingerprint =
-        prompt_until_valid_answer("fingerprint", None, validate_certificate_fingerprint)?;
+        prompt_until_valid_answer("fingerprint", None, parse_certificate_fingerprint)?;
     let connection_token = ask_secret(None)?;
 
     let server_check_outcome = check_saved_server_connection(
@@ -152,8 +161,9 @@ fn create_saved_server_from_prompts(server_store: &ServerStore) -> Result<(), Cl
 /// offered, check them against that server, and write the saved server back.
 ///
 /// An empty answer keeps the value in brackets, and an empty secret keeps the
-/// saved secret. A saved server holding no fingerprint offers none, and an
-/// empty answer to that question asks again. The saved server leaves the store
+/// saved secret. The saved fingerprint is offered as `sha256:` followed by its
+/// hex. A saved server holding no fingerprint offers none, and an empty answer
+/// to that question asks again. The saved server leaves the store
 /// before the questions, so its own name and address are free to keep. It goes
 /// back once every answer has settled, and nothing is written before that.
 ///
@@ -186,22 +196,28 @@ fn edit_saved_server_from_prompts(
         "name",
         saved_server.server_name.as_deref(),
         |entered_name| {
-            if entered_name.is_empty() {
-                Ok(())
-            } else {
-                validate_server_name_available(server_store, entered_name)
+            if !entered_name.is_empty() {
+                validate_server_name_available(server_store, entered_name)?;
             }
+            Ok(entered_name.to_string())
         },
     )?;
     let server_address = prompt_until_valid_answer(
         "address",
         Some(&saved_server.server_address),
-        |entered_address| validate_saved_server_address_is_available(server_store, entered_address),
+        |entered_address| {
+            validate_saved_server_address_is_available(server_store, entered_address)?;
+            Ok(entered_address.to_string())
+        },
     )?;
+    let saved_certificate_fingerprint_text = saved_server
+        .certificate_fingerprint
+        .as_deref()
+        .map(format_certificate_fingerprint);
     let certificate_fingerprint = prompt_until_valid_answer(
         "fingerprint",
-        saved_server.certificate_fingerprint.as_deref(),
-        validate_certificate_fingerprint,
+        saved_certificate_fingerprint_text.as_deref(),
+        parse_certificate_fingerprint,
     )?;
     let connection_token = ask_secret(Some(&saved_server.connection_token))?;
 
@@ -308,15 +324,17 @@ fn save_saved_server(
     Ok(())
 }
 
-/// Ask for one value until `validate_entered_answer` accepts it, and return what it settled on.
+/// Ask for one value until `parse_entered_answer` accepts it, and return the
+/// value it gives.
 ///
 /// `previous_answer` is printed in brackets, and an empty answer keeps it.
 /// With no `previous_answer` an empty answer uses the empty string, which
-/// `validate_entered_answer` checks. Surrounding whitespace is trimmed. A
-/// `validate_entered_answer` failure prints its reason and the question is asked again.
+/// `parse_entered_answer` checks. Surrounding whitespace is trimmed. A
+/// `parse_entered_answer` failure prints its reason and the question is asked
+/// again.
 ///
 /// Example — `prompt_until_valid_answer("name", Some("work"), …)` prints `name [work]: `, and
-/// pressing Enter settles on `work`.
+/// pressing Enter settles on what `parse_entered_answer` gives for `work`.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
@@ -324,7 +342,7 @@ fn save_saved_server(
 fn prompt_until_valid_answer(
     prompt_label: &str,
     previous_answer: Option<&str>,
-    validate_entered_answer: impl Fn(&str) -> Result<(), CliError>,
+    parse_entered_answer: impl Fn(&str) -> Result<String, CliError>,
 ) -> Result<String, CliError> {
     let prompt_text = match previous_answer {
         Some(previous_answer) => format!("{prompt_label} [{previous_answer}]: "),
@@ -337,9 +355,9 @@ fn prompt_until_valid_answer(
         } else {
             &entered_answer
         };
-        match validate_entered_answer(accepted_answer) {
-            Ok(()) => return Ok(accepted_answer.to_string()),
-            Err(validation_error) => eprintln!("koshi: {validation_error}"),
+        match parse_entered_answer(accepted_answer) {
+            Ok(settled_answer) => return Ok(settled_answer),
+            Err(parse_error) => eprintln!("koshi: {parse_error}"),
         }
     }
 }
@@ -442,17 +460,16 @@ fn validate_server_name_available(
 /// `Ok(())` when `server_address` is an address this store can give to a saved server.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when `server_address` is not `host:port`, and when
-/// another saved server already answers to it by its own name or its own address.
+/// [`CliError::InvalidArgs`] when `server_address` is not `host:port`, naming
+/// the shape and not `server_address`, and when another saved server already
+/// answers to it by its own name or its own address.
 fn validate_saved_server_address_is_available(
     server_store: &ServerStore,
     server_address: &str,
 ) -> Result<(), CliError> {
     if !is_server_address(server_address) {
         return Err(CliError::InvalidArgs {
-            detail: format!(
-                "an address is host:port, such as laptop.local:7654, and {server_address} is not"
-            ),
+            detail: "an address is host:port, such as laptop.local:7654".to_string(),
         });
     }
     validate_saved_server_reference_is_available(

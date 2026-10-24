@@ -489,7 +489,8 @@ The global `--remote <SERVER>` flag runs one invocation against the machine
 `list-sessions`, and with the verbs that act on panes, tabs, and input.
 Every other verb refuses it. A server this machine has not saved also needs
 the global `--certificate-fingerprint <FINGERPRINT>` flag, with the
-fingerprint `koshi share grant` prints on that machine. A saved server
+fingerprint `koshi share grant` prints on that machine: `sha256:` followed by
+64 lowercase hex characters. A saved server
 takes that flag when it gives the fingerprint the server was saved with, and
 refuses any other fingerprint. A saved server presents the secret it saved,
 and refuses a `KOSHI_REMOTE_SECRET` that holds a secret no saved server holds;

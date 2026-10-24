@@ -38,6 +38,7 @@ use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionI
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::{MAX_TOKEN_LIFETIME_DURATION, TOKEN_LIFETIME_TOO_LONG_MESSAGE};
 
 /// A parsed `koshi` invocation.
@@ -76,10 +77,10 @@ pub struct Cli {
     pub remote_server_reference: Option<String>,
 
     /// The fingerprint of the certificate the server `--remote` names must
-    /// present: 64 lowercase hex characters, as `koshi share grant` prints it
-    /// on that machine. Needed for a server this machine has not saved. A
-    /// server it has saved takes the fingerprint it holds, and refuses any
-    /// other.
+    /// present: `sha256:` followed by 64 lowercase hex characters, as `koshi
+    /// share grant` prints it on that machine. Needed for a server this
+    /// machine has not saved. A server it has saved takes the fingerprint it
+    /// holds, and refuses any other.
     #[arg(
         long = "certificate-fingerprint",
         global = true,
@@ -87,7 +88,7 @@ pub struct Cli {
         value_name = "FINGERPRINT",
         display_order = 998
     )]
-    pub certificate_fingerprint: Option<String>,
+    pub certificate_fingerprint_text: Option<String>,
 
     /// The verb to run; absent on the bare interactive launch.
     #[command(subcommand)]
@@ -1025,8 +1026,8 @@ pub enum CliCommand {
         resume_state_path: Option<PathBuf>,
         /// The secret the link to the process holding this session's panes
         /// presents. Windows only, and only on a resume run.
-        #[arg(long, value_name = "TOKEN")]
-        supervisor_token: Option<String>,
+        #[arg(long, value_name = "TOKEN", value_parser = parse_supervisor_token)]
+        supervisor_token: Option<ConnectionToken>,
         /// The process id of the process holding this session's panes, which
         /// its link address is derived from. Windows only, and only on a
         /// resume run.
@@ -1041,8 +1042,8 @@ pub enum CliCommand {
         session_id: SessionId,
         /// The secret a link presents at Hello, which the session server
         /// generated.
-        #[arg(value_name = "TOKEN")]
-        supervisor_token: String,
+        #[arg(value_name = "TOKEN", value_parser = parse_supervisor_token)]
+        supervisor_token: ConnectionToken,
         /// Runtime directory to serve; defaults to this user's own.
         #[arg(long = "runtime-dir", value_name = "DIRECTORY")]
         runtime_directory: Option<PathBuf>,
@@ -2167,6 +2168,14 @@ fn build_spawn_spec_from_arguments(command_arguments: &[String]) -> SpawnSpec {
         environment_variables: BTreeMap::new(),
         shell_kind,
     }
+}
+
+/// Wrap a supervisor secret argument in a [`ConnectionToken`], whose `Debug`
+/// writes `ConnectionToken(***)`. Every argument is taken.
+fn parse_supervisor_token(
+    supervisor_token_argument: &str,
+) -> Result<ConnectionToken, std::convert::Infallible> {
+    Ok(ConnectionToken::from_secret(supervisor_token_argument))
 }
 
 // Each id parser takes the id exactly as koshi prints it (`<prefix>-<uuid>`)

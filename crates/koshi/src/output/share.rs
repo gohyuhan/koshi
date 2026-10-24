@@ -12,6 +12,7 @@ use koshi_core::text::sanitize_reported_text;
 use koshi_host::host_addresses::HostAddress;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::{TokenEntry, TokenScope};
+use koshi_ipc::tls::format_certificate_fingerprint;
 
 /// What this machine's remote access leaves a fresh grant able to do, which
 /// decides the block a `share grant` and a `share open` close with.
@@ -57,7 +58,8 @@ pub enum RemoteReady {
         /// other address.
         host_addresses: Vec<HostAddress>,
         /// The fingerprint of the certificate the remote listener presents,
-        /// as 64 lowercase hex characters.
+        /// as 64 lowercase hex characters. The connect commands print it as
+        /// `sha256:` followed by those characters.
         certificate_fingerprint: String,
         /// Which `koshi.kdl` names another listen address than
         /// `remote_listen_address`, or `None` when `koshi.kdl` names that one.
@@ -362,7 +364,7 @@ const GRANTED_SECRET_LINE: &str =
 
 /// Render the commands that connect to this machine's remote listener at
 /// `remote_listen_address`. Each command carries
-/// `--certificate-fingerprint {certificate_fingerprint}`, and
+/// `--certificate-fingerprint sha256:{certificate_fingerprint}`, and
 /// `--save-as {token_identity}` when `token_identity` is one word without the
 /// `host:port` shape. A `token_identity` of `None`, for `koshi share open`,
 /// gives no `--save-as`, and the secret line names the secret `koshi share
@@ -384,7 +386,7 @@ const GRANTED_SECRET_LINE: &str =
 /// Example: `0.0.0.0:7654`, `ada`, `192.0.2.20` on `en0`, and the fingerprint
 /// `9c1e` give one line: two spaces, this command, three spaces, and `# en0`:
 ///
-/// `koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 9c1e --save-as ada [SESSION]`
+/// `koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:9c1e --save-as ada [SESSION]`
 fn render_connect_commands(
     token_identity: Option<&str>,
     remote_listen_address: SocketAddr,
@@ -395,8 +397,10 @@ fn render_connect_commands(
         Some(token_identity) => (build_save_as_option(token_identity), REMOTE_SECRET_LINE),
         None => (String::new(), GRANTED_SECRET_LINE),
     };
-    let connect_options =
-        format!(" --certificate-fingerprint {certificate_fingerprint}{save_as_option}");
+    let connect_options = format!(
+        " --certificate-fingerprint {}{save_as_option}",
+        format_certificate_fingerprint(certificate_fingerprint)
+    );
     let listen_ip_address = remote_listen_address.ip().to_canonical();
     let listen_port = remote_listen_address.port();
     if !listen_ip_address.is_unspecified() {

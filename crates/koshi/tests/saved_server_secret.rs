@@ -61,6 +61,7 @@ fn a_remote_verb_refuses_a_secret_variable_no_saved_server_holds_before_any_dial
     // Nothing listens on the address: a dial would end in a refusal of its own.
     let server_address = "127.0.0.1:1".to_string();
     let saved_certificate_fingerprint = "0".repeat(64);
+    let saved_certificate_fingerprint_text = format!("sha256:{saved_certificate_fingerprint}");
     let refused_command_cases: [Vec<&str>; 4] = [
         vec!["attach", "--remote", "work"],
         vec!["list-sessions", "--remote", "work"],
@@ -70,7 +71,7 @@ fn a_remote_verb_refuses_a_secret_variable_no_saved_server_holds_before_any_dial
             "--remote",
             &server_address,
             "--certificate-fingerprint",
-            &saved_certificate_fingerprint,
+            &saved_certificate_fingerprint_text,
             "--save-as",
             "work",
         ],

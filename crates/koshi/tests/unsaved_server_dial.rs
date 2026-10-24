@@ -43,7 +43,7 @@ fn list_sessions_lists_an_unsaved_server_and_saves_it_holding_the_fingerprint_gi
             "--remote",
             &server_address,
             "--certificate-fingerprint",
-            &certificate_fingerprint,
+            &format!("sha256:{certificate_fingerprint}"),
         ])
         .env("KOSHI_REMOTE_SECRET", "test-secret")
         .output()
@@ -94,7 +94,7 @@ fn an_action_verb_reaches_an_unsaved_server_and_saves_it_holding_the_fingerprint
             "--remote",
             &server_address,
             "--certificate-fingerprint",
-            &certificate_fingerprint,
+            &format!("sha256:{certificate_fingerprint}"),
         ])
         .env("KOSHI_REMOTE_SECRET", "test-secret")
         .output()
@@ -130,7 +130,7 @@ fn an_unsaved_server_whose_certificate_is_not_the_one_given_is_refused_and_not_s
             "--remote",
             &server_address,
             "--certificate-fingerprint",
-            &given_certificate_fingerprint,
+            &format!("sha256:{given_certificate_fingerprint}"),
         ])
         .env("KOSHI_REMOTE_SECRET", "test-secret")
         .output()
@@ -140,9 +140,9 @@ fn an_unsaved_server_whose_certificate_is_not_the_one_given_is_refused_and_not_s
         String::from_utf8_lossy(&listing_output.stderr),
         format!(
             "koshi: IPC unavailable: the certificate {server_address} presented is not the \
-             expected one: expected {given_certificate_fingerprint}, presented \
-             {presented_certificate_fingerprint}. the secret was not sent. if that machine's \
-             certificate changed on purpose, `koshi share open` there prints the new \
+             expected one: expected sha256:{given_certificate_fingerprint}, presented \
+             sha256:{presented_certificate_fingerprint}. the secret was not sent. if that \
+             machine's certificate changed on purpose, `koshi share open` there prints the new \
              fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` \
              for a saved server.\n"
         )
@@ -153,6 +153,66 @@ fn an_unsaved_server_whose_certificate_is_not_the_one_given_is_refused_and_not_s
         Some(CliExitCode::IpcUnavailable.get_exit_code())
     );
     assert_eq!(list_saved_server_records(home_directory.path()), Vec::new());
+}
+
+#[test]
+fn a_secret_at_the_fingerprint_or_save_as_flag_is_refused_before_any_dial_and_not_printed() {
+    let secret_text = "f00d".repeat(16);
+    let (server_address, certificate_fingerprint) =
+        spawn_stand_in_remote_server(vec![RemoteServerFrame::Welcome {
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION,
+        }]);
+    let certificate_fingerprint_text = format!("sha256:{certificate_fingerprint}");
+    let home_directory = build_short_test_directory();
+    let refused_argument_cases: [(Vec<&str>, &str); 2] = [
+        (
+            vec![
+                "attach",
+                "--remote",
+                &server_address,
+                "--certificate-fingerprint",
+                &secret_text,
+            ],
+            "koshi: invalid arguments: a certificate fingerprint is sha256: followed by 64 \
+             lowercase hex characters, as `koshi share grant` prints it on the machine that \
+             serves. 64 hex characters alone is the shape of a secret, and a secret is never \
+             given here\n",
+        ),
+        (
+            vec![
+                "attach",
+                "--remote",
+                &server_address,
+                "--certificate-fingerprint",
+                &certificate_fingerprint_text,
+                "--save-as",
+                &secret_text,
+            ],
+            "koshi: invalid arguments: a saved name must not be 64 hex characters, the shape of \
+             a secret. Pick a plain name.\n",
+        ),
+    ];
+
+    for (command_arguments, expected_stderr) in refused_argument_cases {
+        let refused_output = build_koshi_command_under_home(home_directory.path())
+            .args(&command_arguments)
+            .env("KOSHI_REMOTE_SECRET", "test-secret")
+            .output()
+            .expect("the koshi binary runs");
+
+        assert_eq!(
+            String::from_utf8_lossy(&refused_output.stderr),
+            expected_stderr,
+            "{command_arguments:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&refused_output.stdout), "");
+        assert_eq!(
+            refused_output.status.code(),
+            Some(CliExitCode::UsageOrConfig.get_exit_code()),
+            "{command_arguments:?}"
+        );
+        assert_eq!(list_saved_server_records(home_directory.path()), Vec::new());
+    }
 }
 
 #[test]
@@ -291,9 +351,9 @@ fn attach_save_as_leaves_a_saved_server_unnamed_when_its_certificate_is_not_the_
         String::from_utf8_lossy(&attach_output.stderr),
         format!(
             "koshi: IPC unavailable: the certificate {server_address} presented is not the \
-             expected one: expected {saved_certificate_fingerprint}, presented \
-             {presented_certificate_fingerprint}. the secret was not sent. if that machine's \
-             certificate changed on purpose, `koshi share open` there prints the new \
+             expected one: expected sha256:{saved_certificate_fingerprint}, presented \
+             sha256:{presented_certificate_fingerprint}. the secret was not sent. if that \
+             machine's certificate changed on purpose, `koshi share open` there prints the new \
              fingerprint: give it with `koshi remote edit {server_address}`.\n"
         )
     );
@@ -413,6 +473,7 @@ fn the_connect_command_a_grant_prints_runs_twice_with_the_same_answer_and_one_sa
             config_mismatch: None,
         },
     );
+    let certificate_fingerprint_text = format!("sha256:{certificate_fingerprint}");
     let connect_command_line = grant_output
         .lines()
         .find(|grant_line| grant_line.trim_start().starts_with("koshi attach"))
@@ -431,7 +492,7 @@ fn the_connect_command_a_grant_prints_runs_twice_with_the_same_answer_and_one_sa
             "--remote",
             &server_address,
             "--certificate-fingerprint",
-            &certificate_fingerprint,
+            &certificate_fingerprint_text,
             "--save-as",
             "alice"
         ]

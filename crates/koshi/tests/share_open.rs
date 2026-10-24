@@ -96,7 +96,7 @@ fn build_expected_loopback_block(
     format!(
         "connect from this machine:\n\
          \x20 koshi attach --remote {remote_listen_address} --certificate-fingerprint \
-         {certificate_fingerprint} [SESSION]\n\
+         sha256:{certificate_fingerprint} [SESSION]\n\
          set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
          asked.\n\
          the router listens on {remote_listen_address}, a loopback address, so no other machine \

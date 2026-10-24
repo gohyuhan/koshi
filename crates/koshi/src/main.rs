@@ -27,7 +27,6 @@ use koshi_core::ids::parse_owned_session_id;
 use koshi_daemon::pty_supervisor;
 use koshi_daemon::router;
 use koshi_daemon::session_server::{self, ResumeSupport};
-use koshi_ipc::protocol::ConnectionToken;
 use koshi_link::config;
 use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
@@ -278,7 +277,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             profile_name.as_deref(),
             should_allow_other_users.then_some(true),
             resume_state_path.as_deref(),
-            supervisor_token.as_deref(),
+            supervisor_token.as_ref(),
             *supervisor_pid,
             config_migration_error.as_ref(),
         )
@@ -322,7 +321,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         return pty_supervisor::run_pty_supervisor(
             &runtime_directory,
             *session_id,
-            ConnectionToken::from_secret(supervisor_token.clone()),
+            supervisor_token.clone(),
         )
         .map_err(|runtime_error| CliError::Runtime {
             detail: runtime_error.to_string(),
@@ -393,7 +392,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         return run_discovery(
             command,
             cli.remote_server_reference.as_deref(),
-            cli.certificate_fingerprint.as_deref(),
+            cli.certificate_fingerprint_text.as_deref(),
             loaded_app_config.find_app_config_layer(),
         );
     }
@@ -462,7 +461,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         if let Some(server_reference) = &cli.remote_server_reference {
             return attach::attach_remote_session(
                 server_reference,
-                cli.certificate_fingerprint.as_deref(),
+                cli.certificate_fingerprint_text.as_deref(),
                 save_as.as_deref(),
                 session_argument.as_deref(),
                 loaded_app_config,
@@ -551,7 +550,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     let command_result = match &cli.remote_server_reference {
         Some(server_reference) => targeting::submit_remote(
             server_reference,
-            cli.certificate_fingerprint.as_deref(),
+            cli.certificate_fingerprint_text.as_deref(),
             cli_command,
             config::resolve_new_pane_direction(app_config_layer),
         )?,
@@ -626,7 +625,7 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// `list-sessions` also lists the sessions on the saved servers: a bare one
 /// sweeps every saved server and appends each session that answered, named
 /// under its server in the `server` column; `--remote <server>` lists that one
-/// server's sessions alone, and `certificate_fingerprint` is the
+/// server's sessions alone, and `certificate_fingerprint_text` is the
 /// `--certificate-fingerprint` value a server not saved yet needs. A saved
 /// server that refused, did not answer, or holds no certificate fingerprint is
 /// named on stderr and its sessions are left out;
@@ -641,14 +640,14 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 fn run_discovery(
     command: &CliCommand,
     remote_server_reference: Option<&str>,
-    certificate_fingerprint: Option<&str>,
+    certificate_fingerprint_text: Option<&str>,
     app_config_layer: Option<&PartialKoshiConfig>,
 ) -> Result<(), CliError> {
     if let (CliCommand::ListSessions { output_format }, Some(remote_server_reference)) =
         (command, remote_server_reference)
     {
         let saved_server_argument =
-            remote_client::resolve_server(remote_server_reference, certificate_fingerprint)?;
+            remote_client::resolve_server(remote_server_reference, certificate_fingerprint_text)?;
         let (mut remote_link, _) = remote_client::connect_saved_server(
             &saved_server_argument,
             None,

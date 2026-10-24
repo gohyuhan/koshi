@@ -60,7 +60,7 @@ fn bare_koshi_is_the_interactive_launch() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
-            certificate_fingerprint: None,
+            certificate_fingerprint_text: None,
             command: None,
         }
     );
@@ -84,7 +84,7 @@ fn headless_creates_a_session_without_the_interactive_launch() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
-            certificate_fingerprint: None,
+            certificate_fingerprint_text: None,
             command: None,
         }
     );
@@ -101,7 +101,7 @@ fn headless_takes_the_other_users_flag_beside_it() {
             should_allow_other_users: true,
             profile_name: None,
             remote_server_reference: None,
-            certificate_fingerprint: None,
+            certificate_fingerprint_text: None,
             command: None,
         }
     );
@@ -125,7 +125,7 @@ fn attach_without_a_session_picks_one_at_runtime() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
-            certificate_fingerprint: None,
+            certificate_fingerprint_text: None,
             command: Some(CliCommand::Attach {
                 session_argument: None,
                 save_as: None,
@@ -199,7 +199,7 @@ fn a_certificate_fingerprint_beside_a_server_reaches_each_verb_that_dials() {
             "{verb}"
         );
         assert_eq!(
-            cli.certificate_fingerprint,
+            cli.certificate_fingerprint_text,
             Some(certificate_fingerprint_text.clone()),
             "{verb}"
         );
@@ -329,7 +329,7 @@ fn bare_detach_names_no_target_and_no_session() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: None,
-            certificate_fingerprint: None,
+            certificate_fingerprint_text: None,
             command: Some(CliCommand::Detach {
                 detach_target: None,
                 should_detach_all_clients: false,
@@ -1250,7 +1250,7 @@ fn serve_session_parses_its_two_positionals_and_every_flag() {
             profile_name: Some("dev".to_string()),
             should_allow_other_users: true,
             resume_state_path: Some(PathBuf::from("image.bin")),
-            supervisor_token: Some("secret".to_string()),
+            supervisor_token: Some(ConnectionToken::from_secret("secret")),
             supervisor_pid: Some(4321),
         }
     );
@@ -1318,7 +1318,7 @@ fn serve_pty_supervisor_parses_its_session_token_and_runtime_dir() {
         parse_cli_command(&["koshi", "serve-pty-supervisor", &session_id_text, "secret"]),
         CliCommand::ServePtySupervisor {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            supervisor_token: "secret".to_string(),
+            supervisor_token: ConnectionToken::from_secret("secret"),
             runtime_directory: None,
         }
     );
@@ -1333,7 +1333,7 @@ fn serve_pty_supervisor_parses_its_session_token_and_runtime_dir() {
         ]),
         CliCommand::ServePtySupervisor {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            supervisor_token: "secret".to_string(),
+            supervisor_token: ConnectionToken::from_secret("secret"),
             runtime_directory: Some(PathBuf::from("R")),
         }
     );
@@ -1341,6 +1341,52 @@ fn serve_pty_supervisor_parses_its_session_token_and_runtime_dir() {
         parse_cli_error(&["koshi", "serve-pty-supervisor", &session_id_text]).kind(),
         ErrorKind::MissingRequiredArgument
     );
+}
+
+#[test]
+fn a_parsed_supervisor_secret_writes_stars_in_debug() {
+    let session_id_text = format!("session-{}", build_fixed_test_uuid());
+    let supervisor_command = parse_cli_command(&[
+        "koshi",
+        "serve-pty-supervisor",
+        &session_id_text,
+        "k7QxSecret",
+    ]);
+    let CliCommand::ServePtySupervisor {
+        supervisor_token, ..
+    } = &supervisor_command
+    else {
+        panic!("serve-pty-supervisor parses to ServePtySupervisor");
+    };
+    assert_eq!(supervisor_token.expose_secret(), "k7QxSecret");
+    assert_eq!(format!("{supervisor_token:?}"), "ConnectionToken(***)");
+    assert!(!format!("{supervisor_command:?}").contains("k7QxSecret"));
+
+    let session_command = parse_cli_command(&[
+        "koshi",
+        "serve-session",
+        &session_id_text,
+        "amber-fox",
+        "--supervisor-token",
+        "k7QxSecret",
+    ]);
+    let CliCommand::ServeSession {
+        supervisor_token, ..
+    } = &session_command
+    else {
+        panic!("serve-session parses to ServeSession");
+    };
+    assert_eq!(
+        supervisor_token
+            .as_ref()
+            .map(ConnectionToken::expose_secret),
+        Some("k7QxSecret")
+    );
+    assert_eq!(
+        format!("{supervisor_token:?}"),
+        "Some(ConnectionToken(***))"
+    );
+    assert!(!format!("{session_command:?}").contains("k7QxSecret"));
 }
 
 #[test]
@@ -1518,8 +1564,9 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          Run this invocation against the machine SERVER names — the name it was saved under, \
          or the `host:port` it listens on — instead of this one\n\n      \
          --certificate-fingerprint <FINGERPRINT>\n          \
-         The fingerprint of the certificate the server `--remote` names must present: 64 \
-         lowercase hex characters, as `koshi share grant` prints it on that machine. Needed \
+         The fingerprint of the certificate the server `--remote` names must present: \
+         `sha256:` followed by 64 lowercase hex characters, as `koshi share grant` prints it on \
+         that machine. Needed \
          for a server this machine has not saved. A server it has saved takes the fingerprint \
          it holds, and refuses any other\n\n  \
          -h, --help\n          Print help (see a summary with '-h')\n"
@@ -4850,7 +4897,7 @@ fn a_bare_invocation_naming_a_server_is_not_the_interactive_launch() {
             should_allow_other_users: false,
             profile_name: None,
             remote_server_reference: Some("work".to_string()),
-            certificate_fingerprint: None,
+            certificate_fingerprint_text: None,
             command: None,
         }
     );

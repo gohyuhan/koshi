@@ -108,9 +108,9 @@ fn a_listing_renders_one_table_row_per_saved_server_with_an_absent_value_as_a_da
         output::render_remote_list(&build_two_saved_server_records(), OutputFormat::Table),
         format!(
             "name  address            fingerprint{}  last_used\n\
-             work  laptop.local:7654  {}  1970-01-01T00:00:20Z\n\
-             -     192.0.2.4:7654     {}  -\n",
-            " ".repeat(64 - "fingerprint".len()),
+             work  laptop.local:7654  sha256:{}  1970-01-01T00:00:20Z\n\
+             -     192.0.2.4:7654     sha256:{}  -\n",
+            " ".repeat("sha256:".len() + 64 - "fingerprint".len()),
             "aa".repeat(32),
             "bb".repeat(32)
         )
@@ -126,13 +126,13 @@ fn a_listing_renders_every_saved_server_as_json_with_the_time_the_table_prints()
   {{
     "server_name": "work",
     "server_address": "laptop.local:7654",
-    "certificate_fingerprint": "{}",
+    "certificate_fingerprint": "sha256:{}",
     "last_used_at": "1970-01-01T00:00:20Z"
   }},
   {{
     "server_name": null,
     "server_address": "192.0.2.4:7654",
-    "certificate_fingerprint": "{}",
+    "certificate_fingerprint": "sha256:{}",
     "last_used_at": null
   }}
 ]
@@ -365,6 +365,20 @@ fn a_name_with_the_shape_of_an_address_is_refused() {
 }
 
 #[test]
+fn a_name_with_the_shape_of_a_secret_is_refused_without_repeating_it() {
+    let server_store = build_server_store(build_two_saved_server_records());
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
+
+    assert_eq!(
+        validate_server_name_available(&server_store, &secret_text)
+            .expect_err("a name must not have the shape of a secret")
+            .to_string(),
+        "invalid arguments: a saved name must not be 64 hex characters, the shape of a secret. \
+         Pick a plain name."
+    );
+}
+
+#[test]
 fn a_name_another_record_answers_to_is_refused() {
     let server_store = build_server_store(build_two_saved_server_records());
 
@@ -393,18 +407,21 @@ fn a_name_that_is_another_record_s_address_is_refused_for_its_shape() {
 }
 
 #[test]
-fn an_address_that_is_not_host_port_is_refused_naming_the_shape() {
+fn an_address_that_is_not_host_port_is_refused_naming_the_shape_and_not_the_answer() {
     let server_store = build_server_store(build_two_saved_server_records());
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
 
-    for invalid_address in ["", "laptop.local", "laptop.local:door"] {
+    for invalid_address in [
+        "",
+        "laptop.local",
+        "laptop.local:door",
+        secret_text.as_str(),
+    ] {
         assert_eq!(
             validate_saved_server_address_is_available(&server_store, invalid_address)
                 .expect_err("that is not an address")
                 .to_string(),
-            format!(
-                "invalid arguments: an address is host:port, such as laptop.local:7654, \
-                 and {invalid_address} is not"
-            )
+            "invalid arguments: an address is host:port, such as laptop.local:7654"
         );
     }
     validate_saved_server_address_is_available(&server_store, "desk.local:7654")

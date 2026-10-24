@@ -2291,9 +2291,10 @@ pub fn attach_selected_session(
 /// Join a session on the machine `server` names in this terminal.
 ///
 /// `server` is either the name this machine saved that server under or the
-/// `host:port` it listens on. `certificate_fingerprint` is the fingerprint the
-/// certificate of the server must have: a server reached for the first time
-/// needs it, and a saved server takes the one it holds and refuses any other.
+/// `host:port` it listens on. `certificate_fingerprint_text` names the
+/// fingerprint the certificate of the server must have, as `sha256:` followed
+/// by 64 lowercase hex characters: a server reached for the first time needs
+/// it, and a saved server takes the one it holds and refuses any other.
 /// `save_as` is the name to save the server under: a server reached for the
 /// first time, or a saved server that holds no name, takes it; a saved server
 /// that holds that name already takes it too; a saved server that holds
@@ -2319,12 +2320,12 @@ pub fn attach_selected_session(
 /// secret no saved server holds.
 pub fn attach_remote_session(
     server: &str,
-    certificate_fingerprint: Option<&str>,
+    certificate_fingerprint_text: Option<&str>,
     save_as: Option<&str>,
     selector: Option<&str>,
     loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
-    let server_reference = remote_client::resolve_server(server, certificate_fingerprint)?;
+    let server_reference = remote_client::resolve_server(server, certificate_fingerprint_text)?;
     // This connection carries one listing. The attachment below dials its own.
     let (mut server_connection, saved_server) = remote_client::connect_saved_server(
         &server_reference,

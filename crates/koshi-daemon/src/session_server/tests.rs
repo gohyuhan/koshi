@@ -974,7 +974,7 @@ fn the_resume_command_line_keeps_the_reach_this_session_was_started_with() {
     // `--allow-other-users` is passed on to the resume run.
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), true);
-    session_start.supervisor_token = Some("a-secret".to_string());
+    session_start.supervisor_token = Some(ConnectionToken::from_secret("a-secret"));
     session_start.supervisor_process_id = Some(4821);
     let resume_file_path = runtime_directory_fixture.path().join("session.resume");
 
@@ -1410,7 +1410,7 @@ fn a_resume_run_that_was_passed_no_link_secret_refuses_to_take_its_panes_back() 
 fn a_resume_run_that_was_passed_no_helper_process_id_refuses_to_take_its_panes_back() {
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
-    session_start.supervisor_token = Some("a-secret".to_string());
+    session_start.supervisor_token = Some(ConnectionToken::from_secret("a-secret"));
     assert_eq!(
         session_start.supervisor_process_id, None,
         "no process id was passed on"

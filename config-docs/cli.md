@@ -1044,9 +1044,9 @@ connects as soon as the port opens.
 
 With the port open, the grant prints the command that connects to this
 machine. Each command carries `--certificate-fingerprint` with the fingerprint
-of the certificate this machine's listener presents: the sha256 of it, as 64
-lowercase hex characters. The address in that command depends on
-`remote-listen`:
+of the certificate this machine's listener presents: the sha256 of it, as
+`sha256:` followed by 64 lowercase hex characters. The address in that command
+depends on `remote-listen`:
 
 - `0.0.0.0:7654` gives one command for each IPv4 address of this machine, and
   `[::]:7654` gives one for each IPv6 address. Koshi lists the addresses of each
@@ -1070,8 +1070,8 @@ gives the same command as `192.0.2.20:7654`.
 
 ```text
 connect from another machine, at the address of this one it can reach:
-  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # en0
-  koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # utun3
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # en0
+  koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # utun3
 set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.
 ```
 
@@ -1091,7 +1091,7 @@ error, as the grant does, and the command exits 1. Example, after a grant whose
 ```text
 koshi share open
 connect from another machine:
-  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 [SESSION]
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 [SESSION]
 set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when asked.
 this machine accepts connections on 192.0.2.20 only; the other machine must connect to that address.
 ```
@@ -1129,7 +1129,7 @@ The first connection to a server names its address and the fingerprint of its
 certificate, and `--save-as` gives it a short name:
 
 ```text
-koshi attach --remote laptop.local:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as work web
+koshi attach --remote laptop.local:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as work web
 ```
 
 After that the name stands in for the address and the fingerprint, and
@@ -1143,9 +1143,17 @@ The secret never appears on a command line. koshi reads it from the
 environment variable `KOSHI_REMOTE_SECRET`, and with that unset asks for it at
 the terminal without printing what is typed. No flag takes a secret.
 
-The fingerprint is the sha256 of the server's certificate, as 64 lowercase hex
-characters. `koshi share grant` and `koshi share open` on the serving machine
-print it in each connect command. Both machines speak TLS 1.3 only, and a peer that offers
+The fingerprint is the sha256 of the server's certificate, written as `sha256:`
+followed by 64 lowercase hex characters. `koshi share grant` and `koshi share
+open` on the serving machine print it in each connect command, `koshi remote
+list` prints it in that form, and `--certificate-fingerprint` takes only that
+form. A secret is 64 lowercase hex characters with nothing in front, so a
+secret given where the fingerprint goes is refused, and the refusal does not
+repeat it:
+
+```text
+koshi: invalid arguments: a certificate fingerprint is sha256: followed by 64 lowercase hex characters, as `koshi share grant` prints it on the machine that serves. 64 hex characters alone is the shape of a secret, and a secret is never given here
+``` Both machines speak TLS 1.3 only, and a peer that offers
 TLS 1.2 alone is refused during the handshake.
 
 koshi 0.5.0 and older print no fingerprint, so a first connection from this
@@ -1163,14 +1171,14 @@ fingerprints. A first connection, and the check that `koshi remote new` and
 `koshi remote edit` run, end in both ways to give the new fingerprint:
 
 ```text
-koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with --certificate-fingerprint, or with `koshi remote edit` for a saved server.
 ```
 
 A connection to a saved server names that server, by its name or else its
 address:
 
 ```text
-koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with `koshi remote edit work`.
+koshi: IPC unavailable: the certificate laptop.local:7654 presented is not the expected one: expected sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, presented sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c. the secret was not sent. if that machine's certificate changed on purpose, `koshi share open` there prints the new fingerprint: give it with `koshi remote edit work`.
 ```
 
 An address that is not saved needs `--certificate-fingerprint`. Without it,
@@ -1185,7 +1193,7 @@ fingerprint the server was saved with, and the connection checks that
 fingerprint. Any other fingerprint is refused before a connection opens:
 
 ```text
-koshi: invalid arguments: work expects the certificate fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, and --certificate-fingerprint gives 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c; run `koshi remote edit work` to change the fingerprint it expects
+koshi: invalid arguments: work expects the certificate fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, and --certificate-fingerprint gives sha256:0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c; run `koshi remote edit work` to change the fingerprint it expects
 ```
 
 `koshi remote edit <SERVER>` changes the fingerprint a saved server expects.
@@ -1201,7 +1209,7 @@ first connection with no `--save-as` saves the server with no name, and
 once the server admits the connection:
 
 ```text
-koshi list-sessions --remote laptop.local:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
+koshi list-sessions --remote laptop.local:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
 koshi attach --remote laptop.local:7654 --save-as work
 ```
 
@@ -1240,19 +1248,30 @@ $ koshi remote new
 every answer is needed. Ctrl-C stops without saving.
 name: work
 address: laptop.local:7654
-fingerprint: 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
+fingerprint: sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
 secret:
 checking laptop.local:7654 …
 saved work at laptop.local:7654.
 ```
 
-A fingerprint that is not 64 lowercase hex characters is refused, and the
-question is asked again:
+A fingerprint that is not `sha256:` followed by 64 lowercase hex characters is
+refused, and the question is asked again:
 
 ```text
 fingerprint: 3F6A
-koshi: invalid arguments: a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` prints it on the machine that serves
+koshi: invalid arguments: a certificate fingerprint is sha256: followed by 64 lowercase hex characters, as `koshi share grant` prints it on the machine that serves
 fingerprint:
+```
+
+A refused answer is never printed back. An address that is not `host:port`
+reads `koshi: invalid arguments: an address is host:port, such as
+laptop.local:7654`. A name or a fingerprint of 64 hex characters alone has the
+shape of a secret and is refused, at the questions and at `--save-as`:
+
+```text
+name: f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d
+koshi: invalid arguments: a saved name must not be 64 hex characters, the shape of a secret. Pick a plain name.
+name:
 ```
 
 A server that does not pass the check is named, and the last question is
@@ -1277,7 +1296,7 @@ $ koshi remote edit work
 press Enter to keep the value in brackets. An empty secret keeps the saved one. Ctrl-C stops without saving.
 name [work]:
 address [laptop.local:7654]: laptop.local:7655
-fingerprint [3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0]:
+fingerprint [sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0]:
 secret:
 checking laptop.local:7655 …
 updated work at laptop.local:7655.
@@ -1563,7 +1582,7 @@ answered. It never reads `fail`. Its reasons:
 
 | Reason | Verdict | Help |
 |---|---|---|
-| `the router serves 0.0.0.0:7654 with the certificate fingerprint 3f6a…` | `ok` | - |
+| `the router serves 0.0.0.0:7654 with the certificate fingerprint sha256:3f6a…` | `ok` | - |
 | ``remote access is off, so nothing is listening; `koshi share open` opens 0.0.0.0:7654`` | `ok` | - |
 | `the router read no remote listen address when it started, so nothing is listening` | `ok` | - |
 | `remote access is on, and nothing is listening on 0.0.0.0:7654: the router could not open it when it started` | `warn` | `run: koshi share open` |

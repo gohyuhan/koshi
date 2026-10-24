@@ -140,7 +140,8 @@ fn the_expected_fingerprint_is_taken_and_every_other_one_is_refused() {
     assert_eq!(
         verification_error,
         rustls::Error::General(format!(
-            "the expected certificate is {expected_certificate_fingerprint}, the server presented {}",
+            "the expected certificate is sha256:{expected_certificate_fingerprint}, the server \
+             presented sha256:{}",
             compute_certificate_fingerprint(b"another certificate")
         ))
     );
@@ -1256,6 +1257,14 @@ fn the_fingerprint_of_three_bytes_is_their_sha256() {
     assert_eq!(
         compute_certificate_fingerprint(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn a_fingerprint_a_user_reads_starts_with_sha256() {
+    assert_eq!(
+        format_certificate_fingerprint(&compute_certificate_fingerprint(b"abc")),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
 
@@ -2390,7 +2399,8 @@ fn the_expected_fingerprint_is_compared_byte_for_byte() {
     assert_eq!(
         verification_error,
         rustls::Error::General(format!(
-            "the expected certificate is {uppercase_certificate_fingerprint}, the server presented {lowercase_certificate_fingerprint}"
+            "the expected certificate is sha256:{uppercase_certificate_fingerprint}, the server \
+             presented sha256:{lowercase_certificate_fingerprint}"
         ))
     );
     assert_eq!(

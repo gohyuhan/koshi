@@ -8,6 +8,7 @@
 
 use super::*;
 use koshi_ipc::remote_servers::SavedServer;
+use koshi_ipc::tls::format_certificate_fingerprint;
 
 /// Render a `remote list` answer.
 #[must_use]
@@ -81,8 +82,9 @@ struct RemoteServerRow {
     server_name: Option<String>,
     /// Where the server listens, as `host:port`.
     server_address: String,
-    /// The sha256 of the certificate this server must present, as 64
-    /// lowercase hex characters, or `None` when the record holds none.
+    /// The sha256 of the certificate this server must present, as `sha256:`
+    /// followed by 64 lowercase hex characters, or `None` when the record
+    /// holds none.
     certificate_fingerprint: Option<String>,
     /// When a connection to this server last opened, as
     /// [`format_utc_timestamp`] writes it, or `None` when none has since it was
@@ -99,7 +101,10 @@ fn build_remote_server_row(saved_server: &SavedServer) -> RemoteServerRow {
     RemoteServerRow {
         server_name: saved_server.server_name.clone(),
         server_address: saved_server.server_address.clone(),
-        certificate_fingerprint: saved_server.certificate_fingerprint.clone(),
+        certificate_fingerprint: saved_server
+            .certificate_fingerprint
+            .as_deref()
+            .map(format_certificate_fingerprint),
         last_used_at: saved_server.last_used_at.map(format_utc_timestamp),
     }
 }
