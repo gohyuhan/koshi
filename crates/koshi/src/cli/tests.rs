@@ -3319,16 +3319,38 @@ fn parse_event_age_reads_a_count_and_one_unit_character() {
             "for {refused_text:?}"
         );
     }
-    // u64::MAX days: the count parses, the multiply by 86400 does not.
+    // The count is checked for digits before it is read as a number.
     assert_eq!(
-        parse_event_age("18446744073709551615d"),
+        parse_event_age("99999999999999999999x9s"),
         Err(EXPECTED_DURATION_ERROR.to_string())
     );
-    // Seconds need no multiply, so the same count is taken.
+}
+
+#[test]
+fn parse_event_age_takes_up_to_u64_seconds_and_names_that_limit_past_it() {
+    const TOO_LONG_DURATION_ERROR: &str = "a length is at most 18446744073709551615s";
+
     assert_eq!(
         parse_event_age("18446744073709551615s"),
         Ok(Duration::from_secs(u64::MAX))
     );
+    // 213503982334601 days is the most days that fit in u64 seconds.
+    assert_eq!(
+        parse_event_age("213503982334601d"),
+        Ok(Duration::from_secs(18_446_744_073_709_526_400))
+    );
+    // One day more, u64::MAX days, and a count one past u64::MAX.
+    for refused_text in [
+        "213503982334602d",
+        "18446744073709551615d",
+        "18446744073709551616s",
+    ] {
+        assert_eq!(
+            parse_event_age(refused_text),
+            Err(TOO_LONG_DURATION_ERROR.to_string()),
+            "for {refused_text:?}"
+        );
+    }
 }
 
 #[test]

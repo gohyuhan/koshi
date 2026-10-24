@@ -50,6 +50,15 @@ pub const TOKEN_STORE_FORMAT: u32 = koshi_core::compat::TOKEN_STORE_FORMAT.maxim
 /// out, that long ago or longer.
 pub const TOKEN_RECORD_RETENTION_DURATION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// The longest a grant works: 36500 days. A grant asked to work longer is
+/// refused with [`TOKEN_LIFETIME_TOO_LONG_MESSAGE`].
+pub const MAX_TOKEN_LIFETIME_DURATION: Duration = Duration::from_secs(36_500 * 24 * 60 * 60);
+
+/// The refusal a grant asked to work longer than
+/// [`MAX_TOKEN_LIFETIME_DURATION`] comes back with.
+pub const TOKEN_LIFETIME_TOO_LONG_MESSAGE: &str =
+    "a token lasts at most 36500d; use never for a token that does not expire";
+
 /// How far one grant reaches.
 ///
 /// Decoding rejects a variant this build does not know; a scope from a newer

@@ -131,7 +131,7 @@ use koshi_ipc::remote_state::{
 };
 use koshi_ipc::remote_tokens::{
     hash_connection_token, resolve_token_store_lock_path, resolve_token_store_path, TokenScope,
-    TokenStore,
+    TokenStore, MAX_TOKEN_LIFETIME_DURATION, TOKEN_LIFETIME_TOO_LONG_MESSAGE,
 };
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
@@ -1825,7 +1825,14 @@ fn serve_router_request(
             identity,
             scope,
             expires_in,
-        } => grant_token(token_store_path, remote_state, identity, scope, expires_in),
+        } => grant_token(
+            token_store_path,
+            remote_state,
+            identity,
+            scope,
+            expires_in,
+            SystemTime::now,
+        ),
         RouterRequestKind::RevokeToken { identity, scope } => {
             revoke_token(token_store_path, remote_state, &identity, scope.as_ref())
         }
@@ -2227,10 +2234,14 @@ fn load_locked_token_store(
 /// Hand `identity` a fresh secret on `scope` and write the store back, holding
 /// the store lock from the read to the write ([`load_locked_token_store`]).
 ///
-/// The clock is read once, and both the issue time and the expiry are stamped
-/// from that one reading. `expires_in` is added to the issue time with a
-/// checked add. A span the clock cannot represent is refused before anything
-/// is written: the store file is left as it stood.
+/// An `expires_in` longer than [`MAX_TOKEN_LIFETIME_DURATION`] is refused with
+/// [`TOKEN_LIFETIME_TOO_LONG_MESSAGE`] before the store is read.
+///
+/// `read_current_time` is called once, after the lock is taken, and both the
+/// issue time and the expiry are stamped from that one reading. The router
+/// passes [`SystemTime::now`]. `expires_in` is added to the issue time with a
+/// checked add. An expiry the clock cannot represent is refused before
+/// anything is written: the store file is left as it stood.
 ///
 /// A grant takes the place of whatever `identity` held on `scope`. Every
 /// connection the replaced secret admitted ends once the new record is
@@ -2241,13 +2252,17 @@ fn grant_token(
     identity: String,
     scope: TokenScope,
     expires_in: Option<Duration>,
+    read_current_time: fn() -> SystemTime,
 ) -> RouterResult {
+    if expires_in.is_some_and(|expiry_duration| expiry_duration > MAX_TOKEN_LIFETIME_DURATION) {
+        return build_refused_result(TOKEN_LIFETIME_TOO_LONG_MESSAGE.to_string());
+    }
     let (token_store_path, _store_lock_file, mut token_store) =
         match load_locked_token_store(token_store_path) {
             Ok(locked_token_store) => locked_token_store,
             Err(refusal_result) => return refusal_result,
         };
-    let issued_at = SystemTime::now();
+    let issued_at = read_current_time();
     let expires_at = match expires_in {
         None => None,
         Some(expiry_duration) => match issued_at.checked_add(expiry_duration) {

@@ -936,21 +936,20 @@ A count of `0` is taken as written too: the grant runs out at the instant it is
 made, so `koshi share grant alice --expires 0s` prints a token that admits
 nothing. Revoke it or grant again to hand alice one that works.
 
-A length koshi cannot represent is refused, and no token is granted:
+A token lasts at most `36500d`, 100 years of 365 days. A longer length is
+refused, and no token is granted:
 
 ```text
-koshi share grant alice --expires 18446744073709551615d
+koshi share grant alice --expires 36501d
 ```
 
-is refused by the command: the count times its unit does not fit the length
-koshi carries.
+is refused with `a token lasts at most 36500d; use never for a token that does
+not expire`. The same refusal comes for every longer length, such as
+`99999999999999d`, on Linux, macOS and Windows. Use `--expires never` for a
+token that does not expire.
 
-```text
-koshi share grant alice --expires 10000000000000000000s
-```
-
-is refused by the router: the expiry lands further ahead than this machine's
-clock can represent.
+A grant whose expiry falls past the latest time this machine's clock counts is
+refused by the router, and no token is granted.
 
 A grant prints its token once, so copy it from that one printing. Anyone
 holding the token can run anything the granting user can.
@@ -1606,9 +1605,10 @@ Each row names the session by id and by name, so two sessions sharing a name
 stay apart.
 
 `--since` keeps the events recorded within a length of now — `30s`, `5m`, `2h`,
-`7d`. `--filter` keeps the events whose name contains the text given, matched
-ignoring case, so `--filter pane` keeps `PaneCreated` and `PaneFocused`. An
-empty `--filter` is a usage error.
+`7d`. A length over `18446744073709551615s` is refused with `a length is at
+most 18446744073709551615s`. `--filter` keeps the events whose name contains
+the text given, matched ignoring case, so `--filter pane` keeps `PaneCreated`
+and `PaneFocused`. An empty `--filter` is a usage error.
 
 Example: `koshi debug events --since 30s --filter tab` prints the tab events of
 the last thirty seconds and nothing else.
