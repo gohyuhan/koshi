@@ -200,7 +200,8 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
         };
         if border_side == Direction::Up
             && frame_layout.viewer_chrome.placement_handle_pane_id == Some(pane_slot.pane_id)
-            && compute_placement_handle_rect(pane_slot.outer_rect)
+            && compute_tiled_pane_top_border(pane_slot.outer_rect)
+                .placement_handle_rect
                 .is_some_and(|handle_rect| handle_rect.is_point_inside(layout_point))
         {
             return HitRegion::PlacementHandle {
@@ -274,25 +275,70 @@ fn compute_pane_area_point(frame_pane_area: RatatuiRect, screen_point: Point) ->
     })
 }
 
-/// The number of cells painted for one placement handle.
-pub const PLACEMENT_HANDLE_COLUMN_COUNT: u16 = 3;
+/// The column, counted from the outer rect's left edge, of the first
+/// placement handle cell: the cell after the top-left corner.
+const PLACEMENT_HANDLE_START_COLUMN: u16 = 1;
 
-/// Return the placement handle's cells in layout coordinates.
+/// The cells the placement handle `⠿⠿⠿` takes.
+const PLACEMENT_HANDLE_COLUMN_COUNT: u16 = 3;
+
+/// The column, counted from the outer rect's left edge, where the pane label
+/// starts: the cell after the last placement handle cell.
+const TILED_PANE_TITLE_START_COLUMN: u16 =
+    PLACEMENT_HANDLE_START_COLUMN + PLACEMENT_HANDLE_COLUMN_COUNT;
+
+/// The cells at the right end of the top border that the pane label leaves
+/// to the border: one `─` and the top-right corner.
+const TILED_PANE_TITLE_END_COLUMN_OFFSET: u16 = 2;
+
+/// The cells of the parts of a tiled pane's top border, each one row tall on
+/// the top border row, in the coordinates of the outer rect they come from.
+/// A part with no room is `None`, and its cells are plain border cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TiledPaneTopBorder {
+    /// The placement handle `⠿⠿⠿`, three cells.
+    pub placement_handle_rect: Option<Rect>,
+    /// The cells the pane label ` <title> ` may take, at least one.
+    pub title_rect: Option<Rect>,
+}
+
+/// The top border parts of a tiled pane whose outer rect is `outer_rect`.
+///
+/// The top border reads `┌⠿⠿⠿ <title> ─┐` while the handle shows and
+/// `┌─── <title> ─┐` while it does not: the handle in columns 1 to 3, and
+/// the pane label from column 4 to the column before the last `─`. The
+/// handle needs 5 columns and the label 7. A pane 5 or 6 columns wide keeps
+/// the handle and draws no label. A pane 4 columns wide or narrower has
+/// neither.
+///
+/// A `20`-column outer rect at `(0, 0)` gives the handle at `(1, 0)` `3x1`
+/// and the label at `(4, 0)` `14x1`.
 #[must_use]
-pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
-    let minimum_column_count = PLACEMENT_HANDLE_COLUMN_COUNT.saturating_add(2);
-    (outer_rect.size.column_count >= minimum_column_count).then(|| {
+pub fn compute_tiled_pane_top_border(outer_rect: Rect) -> TiledPaneTopBorder {
+    let outer_column_count = outer_rect.size.column_count;
+    let build_top_border_rect = |start_column: u16, part_column_count: u16| {
         Rect::from_origin_and_size(
             Point {
-                column: outer_rect.origin.column.saturating_add(1),
+                column: outer_rect.origin.column.saturating_add(start_column),
                 row: outer_rect.origin.row,
             },
             Size {
-                column_count: PLACEMENT_HANDLE_COLUMN_COUNT,
+                column_count: part_column_count,
                 row_count: 1,
             },
         )
-    })
+    };
+    let has_placement_handle_room =
+        outer_column_count > PLACEMENT_HANDLE_START_COLUMN + PLACEMENT_HANDLE_COLUMN_COUNT;
+    let title_column_count = outer_column_count
+        .saturating_sub(TILED_PANE_TITLE_START_COLUMN + TILED_PANE_TITLE_END_COLUMN_OFFSET);
+    TiledPaneTopBorder {
+        placement_handle_rect: has_placement_handle_room.then(|| {
+            build_top_border_rect(PLACEMENT_HANDLE_START_COLUMN, PLACEMENT_HANDLE_COLUMN_COUNT)
+        }),
+        title_rect: (title_column_count > 0)
+            .then(|| build_top_border_rect(TILED_PANE_TITLE_START_COLUMN, title_column_count)),
+    }
 }
 
 /// Classify a cell on the tabline row at `column`: a scroll arrow, the tab

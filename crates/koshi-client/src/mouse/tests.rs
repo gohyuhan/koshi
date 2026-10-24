@@ -5,7 +5,8 @@
 //! highlighting text; the run of clicks that picks a highlight's shape; the
 //! capture that keeps a gesture with the pane its press landed on; plain pane
 //! drags swap, Shift-pane drags insert, edge scroll a held text drag drives on
-//! the clock; and the gestures a new frame ends. For floating panes: the
+//! the clock; the three top border cells whose hover marks a tiled pane's
+//! handle; and the gestures a new frame ends. For floating panes: the
 //! grab-handle move, the pin toggle, minimize and close buttons, a corner
 //! resize, floating pane move mode, and dock/undock mode.
 //!
@@ -6995,6 +6996,44 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle() {
             .build_viewer_chrome(active_tab_id)
             .placement_handle_pane_id,
         None
+    );
+}
+
+#[test]
+fn hovering_the_three_handle_cells_of_a_tiled_pane_marks_its_handle_and_its_title_cells_do_not() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+
+    // The pane's box starts at screen (0, 1).
+    let marked_handle_pane_ids: Vec<Option<PaneId>> = (0..6)
+        .map(|screen_column| {
+            client.handle_mouse(
+                build_mouse_motion(Point {
+                    column: screen_column,
+                    row: 1,
+                }),
+                &mouse_frame,
+                current_time,
+            );
+            client
+                .build_viewer_chrome(active_tab_id)
+                .placement_handle_pane_id
+        })
+        .collect();
+
+    assert_eq!(
+        marked_handle_pane_ids,
+        [
+            None,
+            Some(pane_id),
+            Some(pane_id),
+            Some(pane_id),
+            None,
+            None
+        ]
     );
 }
 
