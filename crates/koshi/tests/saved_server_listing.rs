@@ -46,6 +46,7 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
     let (refusing_server_address, refusing_server_certificate_fingerprint) =
         spawn_stand_in_remote_server(vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }]);
     let (reinstalled_server_address, reinstalled_server_certificate_fingerprint) =
         spawn_stand_in_remote_server(Vec::new());
@@ -76,10 +77,13 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
             "koshi: desk holds no certificate fingerprint, so it is not dialled; run `koshi \
              remote edit desk` and give the fingerprint `koshi share grant` printed on that \
              machine\n\
-             koshi: gate: the server {refusing_server_address} did not admit the connection. if \
-             that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was \
-             rejected or revoked: re-grant it on that machine with `koshi share grant`, then \
-             store the new secret with `koshi remote set-secret gate`\n\
+             koshi: gate: the server {refusing_server_address} did not admit the connection: \
+             the token expired, was revoked, or was never granted on that machine, that machine \
+             already serves as many remote connections as it admits, or it runs koshi 0.3.0 or \
+             0.4.0, which cannot read this koshi's request. `koshi share list` on that machine \
+             shows when each grant expires or was revoked. to replace the token, run `koshi \
+             share grant` there, then store the new secret with `koshi remote set-secret gate`. \
+             if that machine runs koshi 0.3.0 or 0.4.0, update koshi there\n\
              koshi: lab did not answer; its sessions are not listed\n\
              koshi: mill: the certificate {reinstalled_server_address} presented is not the \
              expected one: expected sha256:{saved_certificate_fingerprint}, presented \

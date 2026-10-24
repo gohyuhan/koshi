@@ -990,14 +990,19 @@ fn classify_dial_failure(ipc_error: IpcError, saved_server_label: Option<&str>) 
 ///
 /// A `Refused` frame carrying
 /// [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) gives a refusal
-/// that names two causes and the step for each:
+/// that names these causes, in this order, and the steps for them:
 ///
-/// - The server runs koshi 0.3.0 or 0.4.0: update koshi on that machine.
-/// - The token was rejected or revoked: run `koshi share grant` on that
-///   machine, then store the new secret with `koshi remote set-secret
-///   <saved_server_label>` when `saved_server_label` is `Some`. With `None`
-///   the step reads: store the new secret with `koshi remote set-secret` for
-///   a saved server, or give it when the next dial asks.
+/// - The token expired, was revoked, or was never granted on that machine, or
+///   that machine already serves as many remote connections as it admits:
+///   `koshi share list` there shows when each grant expires or was revoked.
+///   Run `koshi share grant` there, then store the new secret with `koshi
+///   remote set-secret <saved_server_label>` when `saved_server_label` is
+///   `Some`. With `None` the step reads: store the new secret with `koshi
+///   remote set-secret` for a saved server, or give it when the next dial
+///   asks.
+/// - Only when the frame carries no `remote_protocol_version`: that machine
+///   runs koshi 0.3.0 or 0.4.0, which cannot read this koshi's request.
+///   Update koshi there.
 ///
 /// Any other refusal message is the server's own sentence, filtered by
 /// [`sanitize_reported_text`], with `server_address` after it.
@@ -1034,7 +1039,21 @@ fn validate_remote_server_answer(
         })),
         RemoteServerFrame::Refused {
             message: refusal_message,
+            remote_protocol_version,
         } if refusal_message == remote_wire::REMOTE_REFUSED => {
+            let (refusal_causes, previous_release_step) = match remote_protocol_version {
+                Some(_) => (
+                    "the token expired, was revoked, or was never granted on that machine, or \
+                     that machine already serves as many remote connections as it admits",
+                    "",
+                ),
+                None => (
+                    "the token expired, was revoked, or was never granted on that machine, that \
+                     machine already serves as many remote connections as it admits, or it runs \
+                     koshi 0.3.0 or 0.4.0, which cannot read this koshi's request",
+                    ". if that machine runs koshi 0.3.0 or 0.4.0, update koshi there",
+                ),
+            };
             let new_secret_step = match saved_server_label {
                 Some(saved_server_label) => {
                     format!("`koshi remote set-secret {saved_server_label}`")
@@ -1045,15 +1064,16 @@ fn validate_remote_server_answer(
             };
             Err(DialError::Refused(CliError::Runtime {
                 detail: format!(
-                    "the server {server_address} did not admit the connection. if that machine \
-                     runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was \
-                     rejected or revoked: re-grant it on that machine with `koshi share grant`, \
-                     then store the new secret with {new_secret_step}"
+                    "the server {server_address} did not admit the connection: {refusal_causes}. \
+                     `koshi share list` on that machine shows when each grant expires or was \
+                     revoked. to replace the token, run `koshi share grant` there, then store \
+                     the new secret with {new_secret_step}{previous_release_step}"
                 ),
             }))
         }
         RemoteServerFrame::Refused {
             message: refusal_message,
+            ..
         } => Err(DialError::Refused(CliError::Runtime {
             detail: format!(
                 "{} (server {server_address})",
@@ -1296,7 +1316,7 @@ pub fn list_remote_sessions(
         .map_err(build_ipc_unavailable_error)?
     {
         RemoteServerFrame::Sessions { session_rows } => Ok(session_rows),
-        RemoteServerFrame::Refused { message } => Err(CliError::Runtime {
+        RemoteServerFrame::Refused { message, .. } => Err(CliError::Runtime {
             detail: sanitize_reported_text(&message),
         }),
         RemoteServerFrame::Welcome { .. } => Err(CliError::IpcUnavailable {
@@ -1374,6 +1394,7 @@ pub fn read_forwarded_hello_answer(
         .map_err(|ipc_error| DialError::Unreachable(build_ipc_unavailable_error(ipc_error)))?;
     if let Ok(RemoteServerFrame::Refused {
         message: refusal_message,
+        ..
     }) = serde_json::from_str(hello_answer_frame.get())
     {
         if refusal_message == ROUTER_RESTARTING_MESSAGE {

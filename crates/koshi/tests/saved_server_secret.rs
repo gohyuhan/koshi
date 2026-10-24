@@ -174,6 +174,7 @@ fn a_saved_server_that_refuses_its_secret_names_set_secret_with_its_name() {
     let (server_address, certificate_fingerprint) =
         spawn_stand_in_remote_server(vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: Some(REMOTE_PROTOCOL_VERSION),
         }]);
     let home_directory = build_short_test_directory();
     write_saved_server_store(
@@ -193,10 +194,11 @@ fn a_saved_server_that_refuses_its_secret_names_set_secret_with_its_name() {
     assert_eq!(
         String::from_utf8_lossy(&listing_output.stderr),
         format!(
-            "koshi: the server {server_address} did not admit the connection. if that machine \
-             runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or \
-             revoked: re-grant it on that machine with `koshi share grant`, then store the new \
-             secret with `koshi remote set-secret work`\n"
+            "koshi: the server {server_address} did not admit the connection: the token \
+             expired, was revoked, or was never granted on that machine, or that machine already \
+             serves as many remote connections as it admits. `koshi share list` on that machine \
+             shows when each grant expires or was revoked. to replace the token, run `koshi share \
+             grant` there, then store the new secret with `koshi remote set-secret work`\n"
         )
     );
     assert_eq!(String::from_utf8_lossy(&listing_output.stdout), "");
@@ -259,6 +261,7 @@ fn a_session_picked_from_a_bare_attach_is_dialled_without_reading_the_secret_var
                 },
                 RemoteServerFrame::Refused {
                     message: "that session is not granted".to_string(),
+                    remote_protocol_version: None,
                 },
             ],
         ]

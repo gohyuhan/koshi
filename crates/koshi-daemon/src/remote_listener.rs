@@ -39,10 +39,12 @@
 //! whatever its selector names. A caller that opens with the Hello of koshi
 //! 0.3.0 or 0.4.0 gets the refusal naming both version ranges, and no secret
 //! is read from it. Every other refusal but the one naming both version ranges
-//! is [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED). A wrong secret,
-//! a revoked secret, a session that does not exist, a session the secret holds
-//! no grant for, and a session another local user started produce the same
-//! bytes and the same work: no caller-supplied name
+//! is [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED). The refusal
+//! of a secret also carries the remote protocol version settled from the
+//! Hello. A wrong secret, a revoked secret, and an expired secret produce the
+//! same bytes and the same work. A session that does not exist, a session the
+//! secret holds no grant for, and a session another local user started also
+//! produce the same bytes and the same work: no caller-supplied name
 //! reaches a socket connect, a wait, or a file until the admitted scope has
 //! been proven to cover it. Order is `admit_remote_token` → the wait for every
 //! unlisted session of this user's to describe itself, whatever the selector
@@ -678,6 +680,7 @@ fn serve_remote_connection(
             send_refusal_message(
                 &mut writer,
                 &format_version_refusal(minimum_remote_version, maximum_remote_version),
+                None,
                 admission_deadline,
             );
             return;
@@ -700,6 +703,7 @@ fn serve_remote_connection(
         send_refusal_message(
             &mut writer,
             &format_version_refusal(minimum_remote_version, maximum_remote_version),
+            None,
             admission_deadline,
         );
         return;
@@ -716,7 +720,12 @@ fn serve_remote_connection(
         }
     });
     let Some(Some(admitted_connection)) = admission_response else {
-        send_refusal_with_deadline(&mut writer, compute_refusal_deadline(admission_deadline));
+        send_refusal_message(
+            &mut writer,
+            REMOTE_REFUSED,
+            Some(agreed_remote_protocol_version),
+            compute_refusal_deadline(admission_deadline),
+        );
         return;
     };
 
@@ -878,6 +887,7 @@ fn process_admitted_remote_frames(
                         send_refusal_message(
                             writer,
                             ROUTER_RESTARTING_MESSAGE,
+                            None,
                             Instant::now() + REFUSAL_WINDOW_DURATION,
                         );
                         None
@@ -1155,14 +1165,16 @@ fn ask_router_dispatcher<Response>(
 /// A write that fails is dropped, and so is one whose `refusal_deadline` has
 /// already passed.
 fn send_refusal_with_deadline(writer: &mut (impl Write + Deadlined), refusal_deadline: Instant) {
-    send_refusal_message(writer, REMOTE_REFUSED, refusal_deadline);
+    send_refusal_message(writer, REMOTE_REFUSED, None, refusal_deadline);
 }
 
-/// Write one [`RemoteServerFrame::Refused`] frame carrying `refusal_message`,
-/// giving the write until `refusal_deadline`.
+/// Write one [`RemoteServerFrame::Refused`] frame carrying `refusal_message`
+/// and `settled_remote_protocol_version`, giving the write until
+/// `refusal_deadline`.
 fn send_refusal_message(
     writer: &mut (impl Write + Deadlined),
     refusal_message: &str,
+    settled_remote_protocol_version: Option<u32>,
     refusal_deadline: Instant,
 ) {
     writer.set_deadline(Some(refusal_deadline));
@@ -1170,6 +1182,7 @@ fn send_refusal_message(
         writer,
         &RemoteServerFrame::Refused {
             message: refusal_message.to_string(),
+            remote_protocol_version: settled_remote_protocol_version,
         },
     );
 }

@@ -799,9 +799,10 @@ fn a_saved_server_holding_no_fingerprint_is_refused_before_any_dial() {
 }
 
 #[test]
-fn the_refusal_every_rejected_token_carries_names_an_old_server_and_both_ways_to_replace_it() {
+fn a_refusal_naming_the_settled_version_names_expiry_and_no_old_koshi() {
     let server_frame = RemoteServerFrame::Refused {
         message: remote_wire::REMOTE_REFUSED.to_string(),
+        remote_protocol_version: Some(2),
     };
 
     let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
@@ -812,18 +813,20 @@ fn the_refusal_every_rejected_token_carries_names_an_old_server_and_both_ways_to
     };
     assert_eq!(
         detail,
-        "the server desk.local:7654 did not admit the connection. if that machine runs \
-         koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or \
-         revoked: re-grant it on that machine with `koshi share grant`, then store the new \
-         secret with `koshi remote set-secret` for a saved server, or give it when the \
-         next dial asks"
+        "the server desk.local:7654 did not admit the connection: the token expired, was \
+         revoked, or was never granted on that machine, or that machine already serves as many \
+         remote connections as it admits. `koshi share list` on that machine shows when each \
+         grant expires or was revoked. to replace the token, run `koshi share grant` there, \
+         then store the new secret with `koshi remote set-secret` for a saved server, or give \
+         it when the next dial asks"
     );
 }
 
 #[test]
-fn the_refusal_of_a_saved_servers_secret_names_set_secret_with_that_servers_label() {
+fn a_refusal_naming_the_settled_version_to_a_saved_server_names_set_secret_with_its_label() {
     let server_frame = RemoteServerFrame::Refused {
         message: remote_wire::REMOTE_REFUSED.to_string(),
+        remote_protocol_version: Some(2),
     };
 
     let refusal = validate_remote_server_answer("desk.local:7654", Some("work"), &server_frame)
@@ -834,10 +837,61 @@ fn the_refusal_of_a_saved_servers_secret_names_set_secret_with_that_servers_labe
     };
     assert_eq!(
         detail,
-        "the server desk.local:7654 did not admit the connection. if that machine runs \
-         koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or \
-         revoked: re-grant it on that machine with `koshi share grant`, then store the new \
-         secret with `koshi remote set-secret work`"
+        "the server desk.local:7654 did not admit the connection: the token expired, was \
+         revoked, or was never granted on that machine, or that machine already serves as many \
+         remote connections as it admits. `koshi share list` on that machine shows when each \
+         grant expires or was revoked. to replace the token, run `koshi share grant` there, \
+         then store the new secret with `koshi remote set-secret work`"
+    );
+}
+
+#[test]
+fn a_refusal_naming_no_version_names_the_token_first_and_an_old_koshi_last() {
+    let server_frame = RemoteServerFrame::Refused {
+        message: remote_wire::REMOTE_REFUSED.to_string(),
+        remote_protocol_version: None,
+    };
+
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
+        .expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(
+        detail,
+        "the server desk.local:7654 did not admit the connection: the token expired, was \
+         revoked, or was never granted on that machine, that machine already serves as many \
+         remote connections as it admits, or it runs koshi 0.3.0 or 0.4.0, which cannot read \
+         this koshi's request. `koshi share list` on that machine shows when each grant \
+         expires or was revoked. to replace the token, run `koshi share grant` there, then \
+         store the new secret with `koshi remote set-secret` for a saved server, or give it \
+         when the next dial asks. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there"
+    );
+}
+
+#[test]
+fn a_refusal_naming_no_version_to_a_saved_server_names_set_secret_with_its_label() {
+    let server_frame = RemoteServerFrame::Refused {
+        message: remote_wire::REMOTE_REFUSED.to_string(),
+        remote_protocol_version: None,
+    };
+
+    let refusal = validate_remote_server_answer("desk.local:7654", Some("work"), &server_frame)
+        .expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(
+        detail,
+        "the server desk.local:7654 did not admit the connection: the token expired, was \
+         revoked, or was never granted on that machine, that machine already serves as many \
+         remote connections as it admits, or it runs koshi 0.3.0 or 0.4.0, which cannot read \
+         this koshi's request. `koshi share list` on that machine shows when each grant \
+         expires or was revoked. to replace the token, run `koshi share grant` there, then \
+         store the new secret with `koshi remote set-secret work`. if that machine runs koshi \
+         0.3.0 or 0.4.0, update koshi there"
     );
 }
 
@@ -845,6 +899,7 @@ fn the_refusal_of_a_saved_servers_secret_names_set_secret_with_that_servers_labe
 fn any_other_refusal_keeps_the_servers_own_sentence_and_names_the_server() {
     let server_frame = RemoteServerFrame::Refused {
         message: "the session is gone".to_string(),
+        remote_protocol_version: None,
     };
 
     let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
@@ -1225,6 +1280,7 @@ fn a_server_holding_no_session_lists_nothing() {
 fn a_refused_listing_carries_the_sentence_the_server_sent() {
     let mut remote_link = build_link_with_server_response(&RemoteServerFrame::Refused {
         message: "the session is gone".to_string(),
+        remote_protocol_version: None,
     });
 
     let refusal = list_remote_sessions(&mut remote_link).expect_err("the listing is refused");
@@ -1551,6 +1607,7 @@ fn a_lock_its_holder_released_is_taken_by_the_next_caller() {
 fn a_refused_listing_loses_what_a_terminal_would_act_on() {
     let mut remote_link = build_link_with_server_response(&RemoteServerFrame::Refused {
         message: "\u{1b}[2Jthe session\u{7f} is gone".to_string(),
+        remote_protocol_version: None,
     });
 
     let refusal = list_remote_sessions(&mut remote_link).expect_err("the listing is refused");
@@ -1565,6 +1622,7 @@ fn a_refused_listing_loses_what_a_terminal_would_act_on() {
 fn a_refused_dial_loses_what_a_terminal_would_act_on() {
     let server_frame = RemoteServerFrame::Refused {
         message: "\u{1b}[2Jthe session\u{7f} is gone".to_string(),
+        remote_protocol_version: None,
     };
 
     let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
@@ -1580,6 +1638,7 @@ fn a_refused_dial_loses_what_a_terminal_would_act_on() {
 fn a_refusal_longer_than_the_cap_is_cut_to_it() {
     let server_frame = RemoteServerFrame::Refused {
         message: "n".repeat(MAX_REPORTED_TEXT_BYTE_COUNT + 100),
+        remote_protocol_version: None,
     };
 
     let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
@@ -1630,6 +1689,7 @@ fn a_forwarded_answer_carrying_the_restarting_sentence_reads_as_restarting() {
     let mut frame_reader =
         build_frame_reader(serialize_server_frame(&RemoteServerFrame::Refused {
             message: ROUTER_RESTARTING_MESSAGE.to_string(),
+            remote_protocol_version: None,
         }));
 
     let forwarded_answer_result = read_forwarded_hello_answer(
@@ -1649,6 +1709,7 @@ fn any_other_forwarded_refusal_reads_as_the_token_not_reaching_the_session() {
     let mut frame_reader =
         build_frame_reader(serialize_server_frame(&RemoteServerFrame::Refused {
             message: remote_wire::REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }));
 
     let forwarded_answer_result = read_forwarded_hello_answer(
