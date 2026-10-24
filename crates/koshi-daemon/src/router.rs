@@ -79,10 +79,12 @@
 //! restarts. On Unix it removes its program file and replaces its own running
 //! image, and keeps the same process id. On Windows it starts the new koshi,
 //! which waits for the router lock, and then runs its own shutdown and exits.
-//! A restart that fails resumes serving, still ignoring the SIGPIPE signal on
-//! Unix, and the first check 30 seconds or more after the failure reads the
-//! program file again. Every serving thread blocks SIGPIPE on its own mask; a
-//! write to a peer that hung up returns an error in every disposition state.
+//! A restart that fails logs the exec or spawn error at warn level and resumes
+//! serving under the same endpoint file and token, still ignoring the SIGPIPE
+//! signal on Unix, and the first check 30 seconds or more after the failure
+//! reads the program file again. Every serving thread blocks SIGPIPE on its
+//! own mask; a write to a peer that hung up returns an error in every
+//! disposition state.
 //!
 //! With no session left, the dispatcher waits one idle window for a request.
 //! A window that passes with no connection open ends the router, and a
@@ -815,9 +817,11 @@ impl std::error::Error for ChildReapError {}
 /// `check_router_executable_file` states. A due restart ends the dispatcher
 /// and restarts this router into the program file at the path
 /// [`resolve_program_path`](koshi_host::program_path::resolve_program_path)
-/// gives. A restart that fails writes the program file again, calls
-/// [`ExecutableWatch::schedule_restart_retry`], and resumes the dispatcher
-/// with everything the router holds untouched. The router removes its program
+/// gives. A restart that fails logs the exec error, or on Windows the spawn
+/// error, at warn level with the program file's path, writes the program file
+/// again, calls [`ExecutableWatch::schedule_restart_retry`], and resumes the
+/// dispatcher with everything the router holds untouched: the same socket,
+/// endpoint file and connection token. The router removes its program
 /// file and its endpoint file when it ends.
 ///
 /// On Unix, from the program file's write until the files are removed, the
@@ -1036,10 +1040,16 @@ pub fn run_router(
                 {
                     // The program file is removed before the exec: the image
                     // that follows writes its own. The call returns only when
-                    // the exec failed, having put the SIGPIPE ignore back; the
-                    // loop serves on with the program file written again.
+                    // the exec failed, having put the SIGPIPE ignore back. The
+                    // failure is logged, and the loop serves on with the
+                    // program file written again.
                     let _ = std::fs::remove_file(&program_file_path);
-                    let _ = restart_by_exec(&executable_path, runtime_directory);
+                    let exec_error = restart_by_exec(&executable_path, runtime_directory);
+                    tracing::warn!(
+                        executable_path = %executable_path.display(),
+                        %exec_error,
+                        "the router could not restart into its program file; it keeps serving its build"
+                    );
                     if let Err(program_file_write_error) = executable_watch
                         .build_server_program_file()
                         .write_to_path(&program_file_path)
@@ -1052,10 +1062,15 @@ pub fn run_router(
                     runtime_file_keeper = start_router_file_keeper(runtime_directory);
                 }
                 #[cfg(windows)]
-                // The new router waits for the lock this one drops last; a
-                // spawn that failed leaves this router serving.
-                if hand_over_router_to_next_process(&executable_path, runtime_directory).is_ok() {
-                    break Ok(());
+                // The new router waits for the lock this one drops last. A
+                // spawn that failed is logged, and this router serves on.
+                match hand_over_router_to_next_process(&executable_path, runtime_directory) {
+                    Ok(()) => break Ok(()),
+                    Err(handover_error) => tracing::warn!(
+                        executable_path = %executable_path.display(),
+                        %handover_error,
+                        "the next router could not start; this router keeps serving its build"
+                    ),
                 }
                 remote_state.token_use_writer =
                     token_store_path.clone().and_then(TokenUseWriter::start);
