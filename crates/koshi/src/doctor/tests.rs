@@ -27,6 +27,7 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         runtime_directory_mode: Some(0o700),
         log_directory: Some(root_directory.join("log")),
         session_log_file: Ok(None),
+        router_log_file: root_directory.join("log").join("koshi-log-router.log"),
         shared_sessions_directory: None,
         shell: root_directory.join("shell"),
         shell_source: ShellSource::Environment,
@@ -875,7 +876,7 @@ fn session_log_file_is_named_when_run_inside_a_pane() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
     let session_id = SessionId::new();
-    let session_log_file = koshi_observability::logging::resolve_session_log_path(session_id);
+    let session_log_file = resolve_log_file_path(LogFileOwner::Session { session_id });
     doctor_context.session_log_file = Ok(Some(session_log_file.clone()));
 
     assert_eq!(
@@ -953,6 +954,32 @@ fn an_unreadable_identity_does_not_hide_a_failing_log_directory() {
             ("log directory", Verdict::Fail),
             ("session log file", Verdict::Warn)
         ]
+    );
+}
+
+// -------------------------------------------------------- router log file
+
+// The row names the router's file, the same in a pane and outside one.
+#[test]
+fn router_log_file_names_the_file_the_router_writes() {
+    let test_directory = TempDir::new().unwrap();
+    let doctor_context = build_doctor_context(test_directory.path());
+
+    assert_eq!(
+        check_router_log_file(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: format!(
+                "the router writes {}",
+                test_directory
+                    .path()
+                    .join("log")
+                    .join("koshi-log-router.log")
+                    .display()
+            ),
+            help: None,
+            detail: None,
+        }
     );
 }
 
@@ -1711,6 +1738,7 @@ fn build_doctor_check_rows_runs_every_check_in_print_order() {
             "runtime directory",
             "log directory",
             "session log file",
+            "router log file",
             "router",
             "session directory",
             "remote access",

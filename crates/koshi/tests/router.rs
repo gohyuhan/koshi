@@ -26,9 +26,10 @@ mod common;
 use common::RunningProcess;
 use common::{
     build_koshi_command_under_home, build_no_such_session_result, build_short_test_directory,
-    connect_to_router, copy_koshi_binary, create_session, resolve_runtime_directory_under_home,
-    send_attach_lookup, send_router_request, start_router_from_binary, start_router_process,
-    terminate_process, wait_for_session_lookup_refusal, RunningRouter, RunningSessions,
+    connect_to_router, copy_koshi_binary, create_session, resolve_log_directory_under_home,
+    resolve_runtime_directory_under_home, send_attach_lookup, send_router_request,
+    start_router_from_binary, start_router_process, terminate_process,
+    wait_for_session_lookup_refusal, write_test_config, RunningRouter, RunningSessions,
     POLL_INTERVAL_DURATION, WAIT_DURATION,
 };
 use koshi_test_support::fixtures::build_test_runtime_directory;
@@ -930,6 +931,108 @@ fn a_router_that_restarted_restarts_again() {
 
     // The session started before either restart is still registered.
     assert_router_finds_session(&mut connection, &created_session);
+}
+
+/// The image a restart starts reads `koshi.kdl` again and takes its log
+/// settings from that read. The router starts with logging off and a remote
+/// listen address whose remote access was never switched on, and creates no log
+/// directory. `koshi.kdl` then turns logging on at `info` in `json`, and the
+/// restarted router writes its remote listen note to `koshi-log-router.log` as
+/// the one line of that file.
+///
+/// Each read of the log directory follows a lookup. The dispatcher answers a
+/// lookup, and starts after the router writes the remote listen note.
+#[test]
+fn a_restarted_router_takes_its_log_settings_from_koshi_kdl_again() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_test_runtime_directory();
+    let binary_path = copy_koshi_binary(runtime_directory.path());
+    write_test_config(
+        test_home_directory.path(),
+        "version 2\nremote-listen \"127.0.0.1:7654\"\n",
+    );
+    let mut router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
+    let mut connection = connect_to_router(runtime_directory.path());
+    let missing_session_id = SessionId::new();
+    assert_eq!(
+        send_attach_lookup(
+            &mut connection,
+            &SessionSelector::SessionId(missing_session_id)
+        ),
+        build_no_such_session_result(missing_session_id)
+    );
+    let log_directory = resolve_log_directory_under_home(test_home_directory.path());
+    assert!(
+        !log_directory.exists(),
+        "a router with logging off created {}",
+        log_directory.display()
+    );
+
+    write_test_config(
+        test_home_directory.path(),
+        "version 2\n\
+         remote-listen \"127.0.0.1:7654\"\n\
+         logging {\n    enabled #true\n    level \"info\"\n    format \"json\"\n}\n",
+    );
+    let endpoint_before_restart =
+        EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory.path()))
+            .expect("the router advertises its socket");
+    assert_eq!(
+        send_router_request(&mut connection, RouterRequestKind::Restart),
+        RouterResult::Restarting
+    );
+    drop(connection);
+    let restarted_endpoint = wait_for_restarted_router_endpoint(
+        runtime_directory.path(),
+        &endpoint_before_restart,
+        &mut router_process,
+    );
+    #[cfg(windows)]
+    let _restarted_router_process = RunningProcess {
+        process_id: restarted_endpoint.process_id,
+    };
+    #[cfg(unix)]
+    // The restart replaced the running image: the process id stays.
+    assert_eq!(
+        restarted_endpoint.process_id,
+        endpoint_before_restart.process_id
+    );
+    let mut connection = connect_to_router(runtime_directory.path());
+    assert_eq!(
+        send_attach_lookup(
+            &mut connection,
+            &SessionSelector::SessionId(missing_session_id)
+        ),
+        build_no_such_session_result(missing_session_id)
+    );
+
+    let router_log_path = log_directory.join("koshi-log-router.log");
+    let router_log_text = std::fs::read_to_string(&router_log_path)
+        .unwrap_or_else(|read_error| panic!("read {}: {read_error}", router_log_path.display()));
+    let router_log_lines: Vec<&str> = router_log_text.lines().collect();
+    assert_eq!(router_log_lines.len(), 1, "{router_log_text}");
+    let mut logged_line: serde_json::Value =
+        serde_json::from_str(router_log_lines[0]).expect("the line is one JSON object");
+    logged_line
+        .as_object_mut()
+        .expect("the line is one JSON object")
+        .remove("timestamp")
+        .expect("the line carries a timestamp");
+    assert_eq!(
+        logged_line,
+        serde_json::json!({
+            "level": "INFO",
+            "fields": {
+                "message": "remote listen address 127.0.0.1:7654 is set, but remote access was \
+                            never switched on; run `koshi share open` to switch it on"
+            },
+            "target": "koshi_daemon::router"
+        })
+    );
 }
 
 /// Unix only: the restart replaces the router's running image with the

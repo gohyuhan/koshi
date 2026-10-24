@@ -33,7 +33,7 @@ use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::SERVER_ANSWER_TIMEOUT_DURATION;
 use koshi_link::router_client::{query_running_router_remote_status, RunningRouterRemoteStatus};
-use koshi_observability::logging::resolve_session_log_path;
+use koshi_observability::logging::{resolve_log_file_path, LogFileOwner};
 use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
@@ -135,6 +135,10 @@ const DOCTOR_CHECKS: &[DoctorCheck] = &[
         run_check: check_session_log_file,
     },
     DoctorCheck {
+        check_name: "router log file",
+        run_check: check_router_log_file,
+    },
+    DoctorCheck {
         check_name: "router",
         run_check: check_router,
     },
@@ -201,6 +205,11 @@ pub struct DoctorContext {
     /// the message naming what is wrong when `KOSHI` is set and the rest of
     /// the in-session identity is missing or malformed.
     pub session_log_file: Result<Option<PathBuf>, String>,
+    /// The log file the router writes: `koshi-log-router.log` in
+    /// [`DoctorContext::log_directory`]. When this machine reports no home
+    /// directory, the bare file name, which names a file in the directory the
+    /// router runs in.
+    pub router_log_file: PathBuf,
     /// The machine-wide directory your sessions are also advertised in while
     /// `koshi.kdl`'s `allow-other-users` is on, as
     /// [`compute_shared_sessions_base_directory`](koshi_link::config::compute_shared_sessions_base_directory)
@@ -284,10 +293,13 @@ impl DoctorContext {
             session_log_file: InSessionContext::from_env()
                 .map(|in_session_context| {
                     in_session_context.map(|in_session_context| {
-                        resolve_session_log_path(in_session_context.session_id)
+                        resolve_log_file_path(LogFileOwner::Session {
+                            session_id: in_session_context.session_id,
+                        })
                     })
                 })
                 .map_err(|in_session_error| in_session_error.to_string()),
+            router_log_file: resolve_log_file_path(LogFileOwner::Router),
             shared_sessions_directory,
             shell: match &server_config.terminal.default_shell {
                 Some(program) => PathBuf::from(program),
@@ -574,6 +586,14 @@ fn check_session_log_file(doctor_context: &DoctorContext) -> DoctorOutcome {
             "run koshi doctor from a shell koshi started, or unset KOSHI",
         ),
     }
+}
+
+/// Name the log file the router writes: `the router writes <path>`.
+fn check_router_log_file(doctor_context: &DoctorContext) -> DoctorOutcome {
+    DoctorOutcome::build_success_outcome(format!(
+        "the router writes {}",
+        doctor_context.router_log_file.display()
+    ))
 }
 
 fn check_session_directory(doctor_context: &DoctorContext) -> DoctorOutcome {

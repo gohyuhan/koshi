@@ -29,6 +29,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_ipc::error::IpcError;
@@ -41,6 +42,7 @@ use koshi_ipc::supervisor::{
 };
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
 use koshi_ipc::wire::MaybeKnown;
+use koshi_observability::logging::{initialize_tracing, LogFileOwner};
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::portable::PortablePtyBackend;
@@ -455,6 +457,12 @@ enum LinkOutcome {
 
 /// Keep `session_id`'s panes alive until the session ends.
 ///
+/// First installs the tracing subscriber from `app_config_layer`'s `logging`
+/// section: with logging on, every line this process writes goes to the
+/// session's own log file, `koshi-log-<uuid>.log`. `app_config_layer` is the
+/// `koshi.kdl` layer the caller read at this process's start, and `None` keeps
+/// logging off.
+///
 /// Binds the supervisor link at [`compute_supervisor_socket_address`], under this
 /// process's own id, and serves one linked session server at a time, opening
 /// and closing every pane here. `connection_token` is the secret a link presents
@@ -468,9 +476,14 @@ enum LinkOutcome {
 /// Returns [`IpcError`] when the link address cannot be bound.
 pub fn run_pty_supervisor(
     runtime_directory: &Path,
+    app_config_layer: Option<&PartialKoshiConfig>,
     session_id: SessionId,
     connection_token: ConnectionToken,
 ) -> Result<(), IpcError> {
+    let _ = initialize_tracing(koshi_link::config::build_logging_parameters(
+        app_config_layer,
+        LogFileOwner::Session { session_id },
+    ));
     let supervisor_socket_address =
         compute_supervisor_socket_address(runtime_directory, session_id, std::process::id());
     let supervisor_listener = Listener::bind(&supervisor_socket_address)?;

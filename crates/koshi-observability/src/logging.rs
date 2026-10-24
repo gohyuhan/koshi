@@ -8,13 +8,17 @@
 //! - **Should this line be written?** [`logging::LoggingParameters::is_enabled`] — disabled
 //!   installs no subscriber at all, so no line is written and no file or
 //!   `logs/` directory is ever created.
-//! - **Where does it go?** A per-session file `logs/koshi-log-<id>.log` under
-//!   the user's state directory ([`logging::resolve_log_directory`]). The file is
-//!   created on the *first* line written and re-created if it is removed while
-//!   koshi runs; on Unix it is created as `0600` inside a `0700` directory.
-//!   Two processes write one session's file — the session server
-//!   and the client attached to it — and every line is one open-append-close;
-//!   the two processes' lines interleave whole.
+//! - **Where does it go?** The file its [`logging::LogFileOwner`] names, in
+//!   `logs/` under the user's state directory ([`logging::resolve_log_directory`]):
+//!   `koshi-log-<id>.log` for one session, `koshi-log-router.log` for the
+//!   router. The file is created on the *first* line written and re-created if
+//!   it is removed while koshi runs; on Unix it is created as `0600` inside a
+//!   `0700` directory. Several processes write one session's file — the
+//!   session server, each client attached to it, and on Windows the process
+//!   holding its panes. Every router under one state directory writes the one
+//!   router file; two routers run at once only with two runtime directories.
+//!   Every line is one open-append-close, so the lines of two processes
+//!   interleave whole.
 //! - **What passes the bar?** [`logging::LoggingParameters::log_level`] — the lowest severity
 //!   that gets written; a line below it is dropped before it reaches the file.
 //!
@@ -76,8 +80,23 @@ pub struct LoggingParameters {
     pub log_level: LogLevel,
     /// How each written line is rendered.
     pub log_format: LogFormat,
-    /// The session this run logs under; names the per-session log file.
-    pub session_id: SessionId,
+    /// The process that writes the log file, which names that file.
+    pub log_file_owner: LogFileOwner,
+}
+
+/// The process a log file belongs to. [`resolve_log_file_path`] gives the
+/// file it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFileOwner {
+    /// A process serving one session, or attached to it: the session server,
+    /// each client attached to it, and on Windows the process holding its
+    /// panes. Names `koshi-log-<uuid>.log`.
+    Session {
+        /// The session the process serves or is attached to.
+        session_id: SessionId,
+    },
+    /// The router. Names `koshi-log-router.log`.
+    Router,
 }
 
 /// The directory every log file goes in: `logs/` under the user's state
@@ -91,15 +110,21 @@ pub fn resolve_log_directory() -> Option<PathBuf> {
         .map(|state_directory_path| state_directory_path.join("logs"))
 }
 
-/// The log file for `session_id`: `koshi-log-<uuid>.log` in [`resolve_log_directory`]. If no
-/// home directory can be found at all, the file lands in the current directory
-/// as a last resort.
+/// The log file `log_file_owner` writes, in [`resolve_log_directory`]:
+/// `koshi-log-<uuid>.log` for [`LogFileOwner::Session`] and
+/// `koshi-log-router.log` for [`LogFileOwner::Router`]. If no home directory
+/// can be found at all, the file lands in the current directory as a last
+/// resort.
 ///
 /// Example: session `…446655440000` resolves on Linux to
-/// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
+/// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`, and the router to
+/// `~/.local/state/koshi/logs/koshi-log-router.log`.
 #[must_use]
-pub fn resolve_session_log_path(session_id: SessionId) -> PathBuf {
-    let log_file_name = format!("koshi-log-{}.log", session_id.get_uuid());
+pub fn resolve_log_file_path(log_file_owner: LogFileOwner) -> PathBuf {
+    let log_file_name = match log_file_owner {
+        LogFileOwner::Session { session_id } => format!("koshi-log-{}.log", session_id.get_uuid()),
+        LogFileOwner::Router => "koshi-log-router.log".to_string(),
+    };
     match resolve_log_directory() {
         Some(log_directory) => log_directory.join(log_file_name),
         None => PathBuf::from(log_file_name),
@@ -118,7 +143,8 @@ pub enum TracingError {
 ///
 /// Disabled installs nothing and touches no disk: with no global subscriber,
 /// every event is dropped and no file or directory is created. Enabled installs
-/// a subscriber that writes the per-session file lazily on the first line.
+/// a subscriber that writes the file [`resolve_log_file_path`] names for the
+/// [`LoggingParameters::log_file_owner`], lazily on the first line.
 ///
 /// Returns [`TracingError::AlreadyInitialized`] if a subscriber is already
 /// installed.
@@ -127,20 +153,20 @@ pub fn initialize_tracing(logging_parameters: LoggingParameters) -> Result<(), T
         return Ok(());
     }
     initialize_tracing_at_path(
-        &resolve_session_log_path(logging_parameters.session_id),
+        &resolve_log_file_path(logging_parameters.log_file_owner),
         logging_parameters.log_level,
         logging_parameters.log_format,
     )
 }
 
 /// Install a subscriber writing to `log_file_path`. [`initialize_tracing`] resolves the path
-/// from the session id; this takes the path as given.
+/// from the log file owner; this takes the path as given.
 fn initialize_tracing_at_path(
     log_file_path: &Path,
     log_level: LogLevel,
     log_format: LogFormat,
 ) -> Result<(), TracingError> {
-    let log_writer = SessionLogMaker {
+    let log_writer = LogFileMaker {
         log_file_path: log_file_path.to_path_buf(),
     };
     // `with_ansi(false)` keeps the file plain text. The format method
@@ -166,44 +192,44 @@ fn resolve_maximum_tracing_level(log_level: LogLevel) -> Level {
     }
 }
 
-/// A [`MakeWriter`] that appends formatted events to a per-session log file.
+/// A [`MakeWriter`] that appends formatted events to one log file.
 /// The subscriber creates one writer for each event. Each write creates the
 /// file when it is missing and attempts to create its parent when the open
 /// fails, so a removed file or directory comes back on the next event. For
 /// `logs/koshi-log-abc.log`, a missing `logs` directory is recreated after the
 /// open fails.
-struct SessionLogMaker {
+struct LogFileMaker {
     log_file_path: PathBuf,
 }
 
-impl<'a> MakeWriter<'a> for SessionLogMaker {
-    type Writer = SessionLogWriter;
+impl<'a> MakeWriter<'a> for LogFileMaker {
+    type Writer = LogFileWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        SessionLogWriter {
+        LogFileWriter {
             log_file_path: self.log_file_path.clone(),
         }
     }
 }
 
-/// The `io::Write` half of [`SessionLogMaker`]: opens the file in
+/// The `io::Write` half of [`LogFileMaker`]: opens the file in
 /// create-and-append mode for one event's bytes, writes them, and closes it.
 /// Every line is written out before the next event.
 ///
 /// On Unix a file this writer creates is mode `0600` and a directory it
 /// creates is mode `0700`, so no other local user reads the log. A file or
 /// directory that already exists keeps the mode it has.
-struct SessionLogWriter {
+struct LogFileWriter {
     log_file_path: PathBuf,
 }
 
-impl io::Write for SessionLogWriter {
+impl io::Write for LogFileWriter {
     fn write(&mut self, log_bytes: &[u8]) -> io::Result<usize> {
         if append_log_bytes_to_file(&self.log_file_path, log_bytes).is_ok() {
             return Ok(log_bytes.len());
         }
 
-        // A `logs/` directory removed mid-session makes the open fail;
+        // A `logs/` directory removed while koshi runs makes the open fail;
         // creating the parent and appending again brings the file back.
         // An error from either step is returned.
         if let Some(parent_directory_path) = self.log_file_path.parent() {

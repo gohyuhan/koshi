@@ -133,8 +133,9 @@ starts. A file with an unknown key or a bad value migrates and keeps that
 setting in its text. If a file cannot be read, holds KDL that does not parse, or
 declares an unusable version, or the lock file `.migration.lock` in the config
 directory cannot be opened or locked, migration writes no file and prints the
-error on standard error. A session server also writes the error to its log when
-`koshi.kdl` turns logging on. The session still restarts and the router still
+error on standard error. When `koshi.kdl` turns logging on, a session server
+also writes the error to its session's log file, and a router to
+`koshi-log-router.log`. The session still restarts and the router still
 starts, each with the files as they are, and the next start migrates them again.
 `koshi config check` reports each file problem. It does not report a lock
 problem. A file that does not parse applies no settings, as before the update.
@@ -207,7 +208,9 @@ command prints one line per server, such as
 `session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40 restarted into koshi 0.5.0; its
 panes keep running`. If any server does not come back on that version, it exits
 1 with `not every running koshi server now runs koshi 0.5.0; see the lines
-above`.
+above`. A router that cannot start the new koshi keeps serving its own build.
+When `koshi.kdl` turns logging on, it writes the cause to
+`koshi-log-router.log` in the log directory at warn level.
 
 A session or router that koshi 0.3.0 or 0.4.0 started does not restart by
 itself when a package manager replaces its program file. A koshi command that
@@ -1563,17 +1566,19 @@ session.
 
 ```text
 koshi doctor
-check               verdict  reason                                                                              help
-config              ok       3 config files validated                                                            -
-shell               ok       a new pane runs /bin/zsh                                                            -
-terminal            warn     TERM is not set                                                                     set TERM before running koshi, for example TERM=xterm-256color
-runtime directory   ok       /tmp/koshi-1000 is ready; koshi names it after your user id                         -
-log directory       ok       /home/you/.local/state/koshi/logs is writable and logging is off                    -
-router              ok       no koshi is running                                                                 -
-session directory   ok       sessions are advertised in /tmp/koshi-1000 (mode 700), which only you may reach     -
-remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants  -
-remote listener     ok       no koshi is running, so nothing is listening                                        -
-remote connections  ok       no koshi is running, so nothing from another machine is connected                   -
+check               verdict  reason                                                                                                                              help
+config              ok       3 config files validated                                                                                                            -
+shell               ok       a new pane runs /bin/zsh                                                                                                            -
+terminal            warn     TERM is not set                                                                                                                     set TERM before running koshi, for example TERM=xterm-256color
+runtime directory   ok       /tmp/koshi-1000 is ready; koshi names it after your user id                                                                         -
+log directory       ok       /home/you/.local/state/koshi/logs is writable and logging is off                                                                    -
+session log file    ok       not inside a koshi pane; each session writes koshi-log-<session-id>.log in the log directory, and koshi list-sessions names the id  -
+router log file     ok       the router writes /home/you/.local/state/koshi/logs/koshi-log-router.log                                                            -
+router              ok       no koshi is running                                                                                                                 -
+session directory   ok       sessions are advertised in /tmp/koshi-1000 (mode 700), which only you may reach                                                     -
+remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants                                                  -
+remote listener     ok       no koshi is running, so nothing is listening                                                                                        -
+remote connections  ok       no koshi is running, so nothing from another machine is connected                                                                   -
 ```
 
 The verdict column reads:
@@ -1596,14 +1601,17 @@ The checks run in this order:
 | `terminal` | `TERM` and `COLORTERM` |
 | `runtime directory` | The runtime directory: which directory it is, that it can be read, that it is private, and which rule produced its path |
 | `log directory` | The log directory: that a file can be written there, and whether `koshi.kdl` turns logging on |
+| `session log file` | Inside a pane, the log file of that pane's session, read from `KOSHI_SESSION_ID`; outside one, the `koshi-log-<session-id>.log` name |
+| `router log file` | The log file of the router, `koshi-log-router.log` in the log directory |
 | `router` | Whether a router answers on its control socket within 5 seconds |
 | `session directory` | Where sessions are advertised, and who may reach that directory |
 | `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
 | `remote listener` | The address the running router read when it started, whether it serves on it, the fingerprint of the certificate it presents, and whether `koshi.kdl` names that address now |
 | `remote connections` | How many open connections the running router holds from another machine |
 
-The `session directory` and `remote connections` rows report facts and rate
-nothing. The `remote access` row rates one thing: it reads `warn` when the
+The `router log file`, `session directory` and `remote connections` rows
+report facts and rate nothing. The `session log file` row reads `warn` when
+`KOSHI` is set and the rest of the pane identity is missing or malformed. The `remote access` row rates one thing: it reads `warn` when the
 grants could not be read. A format `1` grant file is counted without changing
 it; the router converts it when it starts. `koshi doctor` starts no koshi and
 creates no directory. The `log directory` row writes one empty file in the log
