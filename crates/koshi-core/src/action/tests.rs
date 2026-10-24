@@ -989,10 +989,11 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
     }
 }
 
-/// Pins which seeds are continuous: the resize-pane, focus-pane, floating
-/// focus, and scroll action families. A new member of a family added without the `continuous`
-/// flag — or the flag appearing on any other action — changes this list and
-/// fails the assert.
+/// Pins which seeds are continuous: the resize-pane and focus-pane direction
+/// families, floating focus, and scroll up and down. Bare `resize-pane`,
+/// `focus-pane` and `scroll-pane` are not. A new member of a family added
+/// without the `continuous` flag — or the flag appearing on any other action —
+/// changes this list and fails the assert.
 #[test]
 fn continuous_action_seeds_are_stable() {
     let mut continuous_action_names: Vec<String> = build_core_action_seeds()
@@ -1003,12 +1004,10 @@ fn continuous_action_seeds_are_stable() {
     continuous_action_names.sort();
 
     let mut expected_continuous_action_names = [
-        "core:resize-pane",
         "core:resize-pane-left",
         "core:resize-pane-down",
         "core:resize-pane-up",
         "core:resize-pane-right",
-        "core:focus-pane",
         "core:focus-pane-left",
         "core:focus-pane-down",
         "core:focus-pane-up",

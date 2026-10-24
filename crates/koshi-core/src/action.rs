@@ -366,8 +366,8 @@ pub struct ActionMetadata {
     pub handler: ActionHandlerReference,
     /// Whether the action repeats from a held prefix: fired from a
     /// multi-chord binding, the binding's prefix stays armed and the next
-    /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
-    /// per action here, never in a binding.
+    /// chord alone fires again (`<C-s> <Left> <Left> <Left>` resizes three
+    /// times). Declared per action here, never in a binding.
     pub is_continuous: bool,
     /// The hint bar's label for the action in place of `display_name`, or
     /// `None` to show `display_name`. The four actions of one direction family
@@ -446,9 +446,11 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `SetPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`.
 ///
-/// The `resize-pane*`, `focus-pane*`, `focus-next-floating-pane`,
-/// `focus-previous-floating-pane`, and `scroll-pane-up`/`scroll-pane-down`
-/// actions are `is_continuous`; every other action is not.
+/// The `resize-pane-*` and `focus-pane-*` direction families,
+/// `focus-next-floating-pane`, `focus-previous-floating-pane`, and
+/// `scroll-pane-up`/`scroll-pane-down` are `is_continuous`; every other
+/// action is not, bare `resize-pane`, `focus-pane` and `scroll-pane`
+/// included.
 ///
 /// Each direction family carries one hint label: `new-pane-*` reads
 /// `Split Pane`, `resize-pane-*` `Resize Pane`, `select-pane-target-*`
@@ -1104,17 +1106,15 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
     ];
 
     // Repeat-from-prefix actions: fired from a multi-chord binding, the
-    // prefix stays armed and the next chord alone fires again (`<C-s> h h h`,
-    // `<C-p> ← ← ←`).
+    // prefix stays armed and the next chord alone fires again
+    // (`<C-s> ← ← ←`, `<C-p> ← ← ←`).
     for (action_reference, action_metadata) in &mut action_seeds {
         if matches!(
             action_reference.action_name.get_name(),
-            "resize-pane"
-                | "resize-pane-left"
+            "resize-pane-left"
                 | "resize-pane-down"
                 | "resize-pane-up"
                 | "resize-pane-right"
-                | "focus-pane"
                 | "focus-pane-left"
                 | "focus-pane-down"
                 | "focus-pane-up"

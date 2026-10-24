@@ -308,8 +308,10 @@ The default leader is Ctrl.
 | `<C-p> h` / `j` / `k` / `l` | Open pane left / down / up / right |
 | `<C-p> s` | Open pane in the focused pane's stack |
 | `<C-p> m` | Enter pane placement mode: pick a pane and a destination, then Enter |
+| `<C-p> u` | Enter dock/undock mode: float the selected tiled pane, or dock the selected floating pane |
 | `<C-p> x` | Close pane and its process tree |
 | `<C-p> ←` / `↓` / `↑` / `→` | Focus nearby pane |
+| `<C-p> Tab` / `Shift+Tab` | Show and focus the next / previous floating pane |
 | `<C-s> ←` / `↓` / `↑` / `→` | Move pane border one cell |
 | `<C-t> n` | Open tab |
 | `<C-t> x` | Close tab |
@@ -318,6 +320,13 @@ The default leader is Ctrl.
 | `<C-g>` | Toggle mouse selection |
 | `<C-l>` | Lock or unlock input |
 | `<C-q>` | Quit |
+
+The arrows under `<C-p>` and `<C-s>`, and `Tab` / `Shift+Tab` under `<C-p>`,
+repeat: after one fires, its prefix stays open. For example, `<C-p> ← ← ↓`
+focuses left, left again, then down. The prefix stays open until a key fires
+an action that does not repeat, or you press `Esc`. Until then, no key reaches
+the program, and a key bound to nothing is discarded. See
+[config-docs/keybinding.md](config-docs/keybinding.md#repeating-keys).
 
 In locked mode, `<C-l>`, `<C-g>`, and `<C-q>` keep their actions, and every
 other key goes to the program in the focused pane.
