@@ -187,76 +187,73 @@ fn reading_a_file_that_is_not_utf8_warns_and_is_none() {
     );
 }
 
-// --- load_app_config: clean, absent, hard-error, and unknown-field files ---
+// --- load_app_config_at: clean, absent, hard-error, and unknown-field files ---
 
 #[test]
 fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 1\n").expect("write");
-    let mut config_warnings = Vec::new();
-    let app_config_file =
-        load_app_config(&config_file_path, &mut config_warnings).expect("the file loads");
-    assert_eq!(app_config_file.layer, PartialKoshiConfig::default());
-    assert_eq!(app_config_file.theme_name, None);
-    assert_eq!(app_config_file.parse_warnings, Vec::<String>::new());
-    assert_eq!(config_warnings, Vec::<String>::new());
-}
-
-#[test]
-fn loading_an_absent_app_file_is_none_without_a_warning() {
-    let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(
-            &test_directory.path().join("koshi.kdl"),
-            &mut config_warnings
-        ),
-        None
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Parsed {
+                app_config_layer: Box::new(PartialKoshiConfig::default()),
+                theme_name: None,
+            },
+            config_warnings: Vec::new(),
+        }
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
-fn an_app_file_with_an_unsupported_version_drops_to_defaults_with_a_warning() {
+fn loading_an_absent_app_file_is_unread_without_a_warning() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    assert_eq!(
+        load_app_config_at(&test_directory.path().join("koshi.kdl")),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Unread,
+            config_warnings: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 999\n").expect("write");
     let parse_error =
         parse_app_config(&config_file_path, "version 999\n").expect_err("version 999 is refused");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "koshi.kdl not applied ({}): {parse_error}; using defaults",
-            config_file_path.display()
-        )]
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused,
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                config_file_path.display()
+            )],
+        }
     );
 }
 
 #[test]
-fn an_empty_app_file_drops_to_defaults_with_a_warning() {
+fn an_empty_app_file_is_refused_with_a_warning() {
     // An empty file names no `version`, which `parse_app_config` refuses.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "").expect("write");
     let parse_error =
         parse_app_config(&config_file_path, "").expect_err("a missing version is refused");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "koshi.kdl not applied ({}): {parse_error}; using defaults",
-            config_file_path.display()
-        )]
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused,
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                config_file_path.display()
+            )],
+        }
     );
 }
 
@@ -271,16 +268,18 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
         "version 1\nfrobnicate 1\ntheme \"midnight\"\n",
     )
     .expect("write");
-    let mut config_warnings = Vec::new();
-    let app_config_file =
-        load_app_config(&config_file_path, &mut config_warnings).expect("the file loads");
-    assert_eq!(app_config_file.theme_name, Some("midnight".to_string()));
     assert_eq!(
-        config_warnings,
-        vec![format!(
-            "{}: line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
-            config_file_path.display()
-        )]
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Parsed {
+                app_config_layer: Box::new(PartialKoshiConfig::default()),
+                theme_name: Some("midnight".to_string()),
+            },
+            config_warnings: vec![format!(
+                "{}: line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
+                config_file_path.display()
+            )],
+        }
     );
 }
 
@@ -739,27 +738,21 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     apply_beta_gate(None);
     assert!(!koshi_beta::should_allow_beta_features());
 
-    // Text on disk → `load_app_config` → `apply_beta_gate` → a
+    // Text on disk → `load_app_config_at` → `apply_beta_gate` → a
     // `#[beta_feature]` function.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
 
     fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").expect("write");
-    let mut config_warnings = Vec::new();
-    apply_beta_gate(
-        load_app_config(&config_file_path, &mut config_warnings)
-            .map(|app_config_file| app_config_file.layer),
-    );
-    assert_eq!(config_warnings, Vec::<String>::new());
+    let loaded_app_config = load_app_config_at(&config_file_path);
+    assert_eq!(loaded_app_config.config_warnings, Vec::<String>::new());
+    apply_beta_gate(loaded_app_config.into_app_config_layer());
     assert_eq!(mock_beta_entry_point(), 1);
 
     fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").expect("write");
-    let mut config_warnings = Vec::new();
-    apply_beta_gate(
-        load_app_config(&config_file_path, &mut config_warnings)
-            .map(|app_config_file| app_config_file.layer),
-    );
-    assert_eq!(config_warnings, Vec::<String>::new());
+    let loaded_app_config = load_app_config_at(&config_file_path);
+    assert_eq!(loaded_app_config.config_warnings, Vec::<String>::new());
+    apply_beta_gate(loaded_app_config.into_app_config_layer());
     assert_eq!(mock_beta_entry_point(), 0);
 }
 
@@ -1029,7 +1022,8 @@ fn build_config_directory_with_app_config(app_config_text: &str) -> tempfile::Te
 
 #[test]
 fn no_config_directory_reads_no_file_and_keeps_every_default() {
-    let (loaded_config, config_warnings) = load_config_files(None);
+    let (loaded_config, config_warnings) =
+        load_config_files_on_app_config(None, load_app_config_file(None));
 
     assert_eq!(loaded_config.app_config_layer, None);
     assert_eq!(loaded_config.theme_config_layer, None);
@@ -1075,7 +1069,10 @@ fn a_config_turning_the_switch_on_loads_with_no_warning() {
         "version 2\nallow-other-users #true\nshared-sessions-dir \"/var/run/koshi\"\n",
     );
 
-    let (loaded_config, config_warnings) = load_config_files(Some(config_directory.path()));
+    let (loaded_config, config_warnings) = load_config_files_on_app_config(
+        Some(config_directory.path()),
+        load_app_config_file(Some(config_directory.path())),
+    );
 
     assert_eq!(config_warnings, Vec::<String>::new());
     let app_config_layer = loaded_config.app_config_layer.expect("koshi.kdl applies");
@@ -1184,4 +1181,103 @@ fn an_absent_or_unparseable_server_config_file_gives_the_built_in_defaults() {
         ServerConfig::default(),
         "a file that does not parse"
     );
+}
+
+#[test]
+fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
+    let app_config_text = "version 2\ntheme \"midnight\"\nfrobnicate 1\n";
+    let config_directory = build_config_directory_with_app_config(app_config_text);
+    let app_config_path = config_directory.path().join("koshi.kdl");
+
+    let loaded_app_config = load_app_config_file(Some(config_directory.path()));
+
+    assert_eq!(
+        loaded_app_config,
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Parsed {
+                app_config_layer: Box::new(PartialKoshiConfig::default()),
+                theme_name: Some("midnight".to_string()),
+            },
+            config_warnings: vec![format!(
+                "{}: line 3, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
+                app_config_path.display()
+            )],
+        }
+    );
+    assert_eq!(
+        parse_app_config_text(&app_config_path, app_config_text),
+        loaded_app_config
+    );
+}
+
+#[test]
+fn config_files_build_on_the_koshi_kdl_already_read_and_read_its_theme() {
+    // `koshi.kdl` on disk names the theme `disk` and leaves `allow-other-users`
+    // off. The `koshi.kdl` already read names the theme `passed` and turns it
+    // on. Only the one already read applies.
+    let config_directory = build_config_directory_with_app_config("version 2\ntheme \"disk\"\n");
+    write_theme_file(
+        config_directory.path(),
+        "disk",
+        "version 1\ncolors {\n    accent \"#000000\"\n}\n",
+    );
+    write_theme_file(
+        config_directory.path(),
+        "passed",
+        "version 1\ncolors {\n    accent \"#f5c2ff\"\n}\n",
+    );
+    let loaded_app_config = LoadedAppConfig {
+        app_config_outcome: AppConfigOutcome::Parsed {
+            app_config_layer: Box::new(PartialKoshiConfig {
+                should_allow_other_users: Some(true),
+                ..PartialKoshiConfig::default()
+            }),
+            theme_name: Some("passed".to_string()),
+        },
+        config_warnings: vec!["koshi.kdl: line 3, column 1: a warning of the read".to_string()],
+    };
+
+    let (loaded_config, config_warnings) =
+        load_config_files_on_app_config(Some(config_directory.path()), loaded_app_config);
+
+    assert_eq!(
+        loaded_config.app_config_layer,
+        Some(PartialKoshiConfig {
+            should_allow_other_users: Some(true),
+            ..PartialKoshiConfig::default()
+        })
+    );
+    let theme_config_layer = loaded_config
+        .theme_config_layer
+        .expect("the passed theme loads");
+    assert_eq!(theme_config_layer.theme_name, Some("passed".to_string()));
+    assert_eq!(
+        theme_config_layer.colors.expect("colors set").accent,
+        Some(RgbColor {
+            red: 0xf5,
+            green: 0xc2,
+            blue: 0xff
+        })
+    );
+    assert_eq!(loaded_config.keybindings_config_layer, None);
+    assert_eq!(
+        config_warnings,
+        vec!["koshi.kdl: line 3, column 1: a warning of the read".to_string()]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_layer_turning_the_switch_on_names_its_shared_directory() {
+    let app_config_layer = PartialKoshiConfig {
+        should_allow_other_users: Some(true),
+        shared_sessions_directory: Some(Some(PathBuf::from("/var/run/koshi"))),
+        ..PartialKoshiConfig::default()
+    };
+
+    assert_eq!(
+        resolve_shared_sessions_base_directory_for_layer(Some(&app_config_layer)),
+        Some(PathBuf::from("/var/run/koshi"))
+    );
+    assert_eq!(resolve_shared_sessions_base_directory_for_layer(None), None);
 }

@@ -11,8 +11,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use koshi_config::app_config::parse_app_config;
-use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::migration::{
     migrate_config, validate_config, ConfigFileKind, MigratedConfig, MigrationError,
 };
@@ -20,7 +18,7 @@ use koshi_config::parser::format_unknown_key;
 use koshi_storage::{atomic::write_atomic, error::StorageError};
 
 use crate::cli::{CliCommand, ConfigCommand};
-use koshi_link::config::load_app_layer;
+use koshi_link::config::{load_app_config_file, parse_app_config_text, LoadedAppConfig};
 use koshi_link::error::CliError;
 
 #[cfg(test)]
@@ -446,41 +444,37 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The `koshi.kdl` layer `command` starts on, and the error of a config
-/// migration that failed.
+/// The `koshi.kdl` `command` starts on, and the error of a config migration
+/// that failed.
 ///
 /// `serve-session` and `serve-router` first migrate the config files in
 /// `config_directory`, as [`migrate_config_directory_for_update`] states, and
-/// parse the layer from the `koshi.kdl` text that migration read or wrote. A
-/// migration that fails gives its error and the layer [`load_app_layer`]
-/// reads. Every other command, `resume-support` among them, and a
-/// `config_directory` of `None` migrate nothing and give the layer
-/// [`load_app_layer`] reads. A `koshi.kdl` that is absent or does not parse
-/// gives a layer of `None`. Warnings are dropped.
-pub fn load_app_layer_for_command(
+/// parse the `koshi.kdl` text that migration read or wrote with
+/// [`parse_app_config_text`]. A migration that fails gives its error and the
+/// `koshi.kdl` [`load_app_config_file`] reads. Every other command,
+/// `resume-support` among them, and a `config_directory` of `None` migrate
+/// nothing and give the `koshi.kdl` [`load_app_config_file`] reads. A
+/// `koshi.kdl` that is absent gives no layer and no warning.
+pub fn load_app_config_for_command(
     command: Option<&CliCommand>,
     config_directory: Option<&Path>,
-) -> (Option<PartialKoshiConfig>, Option<CliError>) {
+) -> (LoadedAppConfig, Option<CliError>) {
     let is_service_command = matches!(
         command,
         Some(CliCommand::ServeSession { .. } | CliCommand::ServeRouter { .. })
     );
     let config_directory = match config_directory {
         Some(config_directory) if is_service_command => config_directory,
-        _ => return (load_app_layer(config_directory), None),
+        _ => return (load_app_config_file(config_directory), None),
     };
     match migrate_config_directory_for_update(config_directory) {
-        Ok(app_config_source_text) => {
-            let app_config_path = config_directory.join("koshi.kdl");
-            let app_config_layer = app_config_source_text.and_then(|app_config_source_text| {
-                parse_app_config(&app_config_path, &app_config_source_text)
-                    .ok()
-                    .map(|app_config_file| app_config_file.layer)
-            });
-            (app_config_layer, None)
-        }
+        Ok(Some(app_config_source_text)) => (
+            parse_app_config_text(&config_directory.join("koshi.kdl"), &app_config_source_text),
+            None,
+        ),
+        Ok(None) => (LoadedAppConfig::default(), None),
         Err(migration_error) => (
-            load_app_layer(Some(config_directory)),
+            load_app_config_file(Some(config_directory)),
             Some(migration_error),
         ),
     }

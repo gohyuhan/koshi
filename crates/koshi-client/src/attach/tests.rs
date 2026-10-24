@@ -497,8 +497,13 @@ fn attaching_by_id_skips_the_selector_lookup() {
     let recorded_request_kind_names = build_recording_router(runtime_directory.path());
     let session_id = SessionId::new();
 
-    let attach_error = attach_session(runtime_directory.path(), None, session_id)
-        .expect_err("no endpoint file advertises that session");
+    let attach_error = attach_session(
+        runtime_directory.path(),
+        None,
+        session_id,
+        LoadedAppConfig::default(),
+    )
+    .expect_err("no endpoint file advertises that session");
 
     let request_kind_names = recorded_request_kind_names
         .lock()
@@ -2542,6 +2547,46 @@ fn a_target_with_a_slash_that_is_not_an_owned_session_id_is_refused() {
     assert_eq!(
         detail,
         "expected `<user id>/session-<uuid>`, such as `1001/session-<uuid>`"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn attaching_searches_the_shared_directory_the_passed_koshi_kdl_names() {
+    // No config directory is given: only the passed `koshi.kdl` names a shared
+    // directory. That directory is a link to itself, so its read fails and the
+    // failure names it.
+    let runtime_directory = build_test_runtime_directory();
+    let shared_directory_link = runtime_directory.path().join("shared-link");
+    std::os::unix::fs::symlink(&shared_directory_link, &shared_directory_link)
+        .expect("link the path to itself");
+    let link_read_error =
+        std::fs::read_dir(&shared_directory_link).expect_err("a link to itself cannot be listed");
+    let loaded_app_config = koshi_link::config::parse_app_config_text(
+        Path::new("koshi.kdl"),
+        &format!(
+            "version 2\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
+            shared_directory_link.display()
+        ),
+    );
+
+    let attach_error = attach_session(
+        runtime_directory.path(),
+        None,
+        SessionId::new(),
+        loaded_app_config,
+    )
+    .expect_err("the shared directory cannot be read");
+
+    let CliError::IpcUnavailable { detail } = attach_error else {
+        panic!("expected IpcUnavailable, got {attach_error:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{} could not be read: {link_read_error}",
+            shared_directory_link.display()
+        )
     );
 }
 
