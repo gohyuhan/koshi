@@ -84,9 +84,10 @@ struct RemoteServerRow {
     /// The sha256 of the certificate this server must present, as 64
     /// lowercase hex characters, or `None` when the record holds none.
     certificate_fingerprint: Option<String>,
-    /// When a connection to this server last opened, or `None` when none has
-    /// since it was saved.
-    last_used_at: Option<SystemTime>,
+    /// When a connection to this server last opened, as
+    /// [`format_utc_timestamp`] writes it, or `None` when none has since it was
+    /// saved.
+    last_used_at: Option<String>,
 }
 
 /// Column headers for saved-server listings, matching
@@ -99,7 +100,7 @@ fn build_remote_server_row(saved_server: &SavedServer) -> RemoteServerRow {
         server_name: saved_server.server_name.clone(),
         server_address: saved_server.server_address.clone(),
         certificate_fingerprint: saved_server.certificate_fingerprint.clone(),
-        last_used_at: saved_server.last_used_at,
+        last_used_at: saved_server.last_used_at.map(format_utc_timestamp),
     }
 }
 
@@ -109,6 +110,6 @@ fn render_remote_server_row_cells(remote_server_row: &RemoteServerRow) -> Vec<St
         format_optional_cell(remote_server_row.server_name.as_ref()),
         remote_server_row.server_address.clone(),
         format_optional_cell(remote_server_row.certificate_fingerprint.as_ref()),
-        format_optional_time_cell(remote_server_row.last_used_at),
+        format_optional_cell(remote_server_row.last_used_at.as_ref()),
     ]
 }

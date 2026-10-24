@@ -506,16 +506,48 @@ pub fn render_revoke_host_wide_warning(token_identity: &str, session_scope: &Tok
 /// Render a `share list` answer.
 #[must_use]
 pub fn render_share_list(token_entries: &[TokenEntry], output_format: OutputFormat) -> String {
+    let grant_rows: Vec<GrantRow> = token_entries.iter().map(build_grant_row).collect();
     match output_format {
-        OutputFormat::Json => render_json(&token_entries),
+        OutputFormat::Json => render_json(&grant_rows),
         OutputFormat::Table => render_table(
             SHARE_HEADERS,
-            token_entries.iter().map(render_share_row_cells).collect(),
+            grant_rows.iter().map(render_share_row_cells).collect(),
         ),
     }
 }
 
-/// Column headers for [`TokenEntry`] listings, matching [`render_share_row_cells`].
+/// One grant as both formats of `share list` print it.
+#[derive(Serialize)]
+struct GrantRow {
+    /// Who the grant was handed to.
+    identity: String,
+    /// How far the grant reaches, as [`format_scope_cell`] names it.
+    scope: String,
+    /// When the grant was made, as [`format_utc_timestamp`] writes it.
+    issued_at: String,
+    /// When the grant stops working on its own, or `None` when it never does.
+    expires_at: Option<String>,
+    /// When a presented secret last reached a session through the grant, or
+    /// `None` when none ever has.
+    last_used_at: Option<String>,
+    /// When an operator stopped the grant, or `None` while it still stands.
+    revoked_at: Option<String>,
+}
+
+/// One [`TokenEntry`] as both formats print it, every time written by
+/// [`format_utc_timestamp`].
+fn build_grant_row(token_entry: &TokenEntry) -> GrantRow {
+    GrantRow {
+        identity: token_entry.identity.clone(),
+        scope: format_scope_cell(&token_entry.scope),
+        issued_at: format_utc_timestamp(token_entry.issued_at),
+        expires_at: token_entry.expires_at.map(format_utc_timestamp),
+        last_used_at: token_entry.last_used_at.map(format_utc_timestamp),
+        revoked_at: token_entry.revoked_at.map(format_utc_timestamp),
+    }
+}
+
+/// Column headers for [`GrantRow`] listings, matching [`render_share_row_cells`].
 const SHARE_HEADERS: &[&str] = &[
     "identity",
     "scope",
@@ -525,15 +557,15 @@ const SHARE_HEADERS: &[&str] = &[
     "revoked",
 ];
 
-/// One [`TokenEntry`] as table cells, in [`SHARE_HEADERS`] order.
-fn render_share_row_cells(token_entry: &TokenEntry) -> Vec<String> {
+/// One [`GrantRow`] as table cells, in [`SHARE_HEADERS`] order.
+fn render_share_row_cells(grant_row: &GrantRow) -> Vec<String> {
     vec![
-        token_entry.identity.clone(),
-        format_scope_cell(&token_entry.scope),
-        format_time_cell(token_entry.issued_at),
-        format_optional_time_cell(token_entry.expires_at),
-        format_optional_time_cell(token_entry.last_used_at),
-        format_optional_time_cell(token_entry.revoked_at),
+        grant_row.identity.clone(),
+        grant_row.scope.clone(),
+        grant_row.issued_at.clone(),
+        format_optional_cell(grant_row.expires_at.as_ref()),
+        format_optional_cell(grant_row.last_used_at.as_ref()),
+        format_optional_cell(grant_row.revoked_at.as_ref()),
     ]
 }
 
