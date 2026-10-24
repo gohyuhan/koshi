@@ -170,6 +170,7 @@ use crate::input::{InputReadClock, KeyOutcome};
 use crate::mouse::MouseAction;
 use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client, LinkStatus, PlacementTargetOutcome};
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
@@ -214,6 +215,10 @@ use crate::terminal;
 use crate::terminal::TerminalInput;
 use koshi_core::ids::{format_session_target, parse_owned_session_id, parse_prefixed_uuid};
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
+use koshi_link::config::{
+    load_app_config_file, load_config_files_on_app_config,
+    resolve_shared_sessions_base_directory_for_layer, LoadedAppConfig,
+};
 use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
@@ -2244,18 +2249,26 @@ fn resolve_local_session_target(
 /// this machine is taken straight away, and anything else — several sessions,
 /// or one session on a saved server — is printed as a numbered list to answer
 /// on stdin.
-pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
+///
+/// `loaded_app_config` is the `koshi.kdl` the caller read at this process's
+/// start. Its layer names the shared directory, and the first attachment runs
+/// on it.
+pub fn attach_selected_session(
+    selector: Option<&str>,
+    loaded_app_config: LoadedAppConfig,
+) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let config_directory = koshi_paths::resolve_config_directory();
     let Some(selector) = selector else {
         return attach_selected_session_from_listing(
             runtime_directory,
             config_directory.as_deref(),
+            loaded_app_config,
         );
     };
     let (session_id, owner_user_id) = resolve_local_session_target(
         &runtime_directory,
-        koshi_link::config::find_shared_sessions_base_directory(config_directory.as_deref())
+        resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer())
             .as_deref(),
         selector,
     )?;
@@ -2266,6 +2279,7 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
         },
         SessionSelector::SessionId(session_id),
         config_directory.as_deref(),
+        loaded_app_config,
     )
 }
 
@@ -2286,6 +2300,9 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// and more than one is printed as a numbered list to answer on stdin. Nothing
 /// here creates a session.
 ///
+/// `loaded_app_config` is the `koshi.kdl` the caller read at this process's
+/// start. The first attachment runs on it.
+///
 /// # Errors
 /// [`CliError::Runtime`] when the server does not admit the secret, and when
 /// nothing this secret reaches is running on it. [`CliError::IpcUnavailable`]
@@ -2300,6 +2317,7 @@ pub fn attach_remote_session(
     certificate_fingerprint: Option<&str>,
     save_as: Option<&str>,
     selector: Option<&str>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     let server_reference = remote_client::resolve_server(server, certificate_fingerprint)?;
     // This connection carries one listing. The attachment below dials its own.
@@ -2323,6 +2341,7 @@ pub fn attach_remote_session(
         },
         session_selector,
         koshi_paths::resolve_config_directory().as_deref(),
+        loaded_app_config,
     )
 }
 
@@ -2336,11 +2355,14 @@ pub fn attach_remote_session(
 /// is joined through the saved server that listed it, which presents the
 /// secret it holds. `KOSHI_REMOTE_SECRET` is not read.
 ///
-/// `config_directory` holds the `koshi.kdl` that names the shared directory
-/// other users' sessions are listed from, and the config the attachment reads.
+/// `loaded_app_config` is the `koshi.kdl` read at this process's start. Its
+/// layer names the shared directory other users' sessions are listed from,
+/// and the first attachment runs on it. `config_directory` holds the config
+/// files every attachment reads.
 fn attach_selected_session_from_listing(
     runtime_directory: PathBuf,
     config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     let reachable_session_rows = remote_client::list_saved_server_session_rows();
     let remote_session_rows = reachable_session_rows
@@ -2354,7 +2376,7 @@ fn attach_selected_session_from_listing(
         })
         .collect();
     let shared_sessions_base_directory =
-        koshi_link::config::find_shared_sessions_base_directory(config_directory);
+        resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer());
     let (server_label, selected_session_row) = match select_session(
         &runtime_directory,
         shared_sessions_base_directory.as_deref(),
@@ -2373,6 +2395,7 @@ fn attach_selected_session_from_listing(
                 },
                 SessionSelector::SessionId(session_id),
                 config_directory,
+                loaded_app_config,
             );
         }
         SessionSelection::Remote(remote_session_index) => {
@@ -2385,6 +2408,7 @@ fn attach_selected_session_from_listing(
         },
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
+        loaded_app_config,
     )
 }
 
@@ -2430,12 +2454,16 @@ fn select_remote_session(
 /// UUID, a session display name, or `<user id>/<session id>`, and `None` picks
 /// one from the sessions running for this user. A session on another machine
 /// is never offered. The session moves the client this terminal already holds.
+/// `app_config_layer` is the `koshi.kdl` layer the caller read at this
+/// process's start, which names the shared directory.
 pub fn switch_in_session(
     session_context: &InSessionContext,
     selector: Option<&str>,
+    app_config_layer: Option<&PartialKoshiConfig>,
 ) -> Result<CommandResult, CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
+    let shared_sessions_base_directory =
+        resolve_shared_sessions_base_directory_for_layer(app_config_layer);
     let (session_id, owner_user_id) = resolve_session(
         &runtime_directory,
         shared_sessions_base_directory.as_deref(),
@@ -2460,18 +2488,22 @@ pub fn switch_in_session(
 /// cause and how to reattach, and exits non-zero; the other endings print what
 /// happened and exit zero.
 ///
-/// `config_directory` holds the `koshi.kdl` that names the shared directory
-/// searched when `runtime_directory` advertises no `session_id`, and the
-/// config the attachment reads. `None` searches `runtime_directory` alone and
-/// attaches with the built-in config.
+/// `loaded_app_config` is the `koshi.kdl` read at this process's start. Its
+/// layer names the shared directory searched when `runtime_directory`
+/// advertises no `session_id`, and the first attachment runs on it. A layer of
+/// `None` searches `runtime_directory` alone. `config_directory` holds the
+/// config files every attachment reads; `None` attaches with the built-in
+/// config.
 pub(crate) fn attach_session(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
     session_id: SessionId,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     ipc_client::load_session_endpoint(
         runtime_directory,
-        koshi_link::config::find_shared_sessions_base_directory(config_directory).as_deref(),
+        resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer())
+            .as_deref(),
         session_id,
         None,
     )?;
@@ -2482,6 +2514,7 @@ pub(crate) fn attach_session(
         },
         SessionSelector::SessionId(session_id),
         config_directory,
+        loaded_app_config,
     )
 }
 
@@ -2500,19 +2533,30 @@ pub(crate) fn attach_session(
 /// reads it, is read once, here, before the first attachment. `None` when the
 /// platform cannot report it. `config_directory` is handed to every
 /// attachment.
+///
+/// The first attachment runs on `loaded_app_config`, the `koshi.kdl` read at
+/// this process's start. Every attachment after the first reads `koshi.kdl` in
+/// `config_directory` again when it starts.
 fn attach_home(
     mut home: Home,
     session_selector: SessionSelector,
     config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<(), CliError> {
     let client_executable_path = koshi_host::program_path::resolve_program_path().ok();
     let mut next_session_selector = session_selector;
+    let mut first_loaded_app_config = Some(loaded_app_config);
     loop {
+        let attachment_app_config = match first_loaded_app_config.take() {
+            Some(loaded_app_config) => loaded_app_config,
+            None => load_app_config_file(config_directory),
+        };
         let attach_result = attach_once(
             &home,
             &next_session_selector,
             client_executable_path.as_deref(),
             config_directory,
+            attachment_app_config,
         );
         end_process_after_termination_signal();
         let Some((next_session_id, next_owner_user_id)) = attach_result? else {
@@ -2546,16 +2590,19 @@ fn attach_home(
 /// [`report_attachment_ending`] runs `koshi attach` from when the session
 /// restarted into a build that refused this client's protocol version.
 ///
-/// `config_directory` holds the config files read at the start of each
-/// attachment, and the `koshi.kdl` each dial on this machine reads for the
-/// shared directory.
+/// The attachment runs on `loaded_app_config`, the `koshi.kdl` already read
+/// for it, and on the theme it names and the `keybinding.kdl` read here from
+/// `config_directory`. The layer of `loaded_app_config` names the shared
+/// directory the dial on this machine searches.
 fn attach_once(
     home: &Home,
     session_selector: &SessionSelector,
     client_executable_path: Option<&Path>,
     config_directory: Option<&Path>,
+    loaded_app_config: LoadedAppConfig,
 ) -> Result<Option<(SessionId, Option<u32>)>, CliError> {
-    let (loaded_config, config_warnings) = koshi_link::config::load_config_files(config_directory);
+    let (loaded_config, config_warnings) =
+        load_config_files_on_app_config(config_directory, loaded_app_config);
     let client_config =
         koshi_link::config::resolve_client_config(loaded_config.app_config_layer.clone());
     let mut terminal_owner =
@@ -2572,7 +2619,8 @@ fn attach_once(
         session_selector,
         attach_settings,
         cell_size_query.get_current_cell_size(),
-        config_directory,
+        resolve_shared_sessions_base_directory_for_layer(loaded_config.app_config_layer.as_ref())
+            .as_deref(),
         client_config.remote_link_timeout_ms,
     )?;
     let client_id = joined_session.client_id;
@@ -3344,10 +3392,10 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// On this machine the session's endpoint file names the socket and holds the
 /// token the Hello presents, and a display name is resolved by the router
 /// first. A session with no endpoint file in the runtime directory is looked
-/// up in the shared directory `koshi.kdl` in `config_directory` names, read
-/// again on every dial. A home that names another user's id reads only that
-/// user's folder of the shared directory. A session of this user's that
-/// refuses this build's protocol version is dialed again once it has
+/// up in `shared_sessions_base_directory`, the shared directory the
+/// attachment's `koshi.kdl` names. A home that names another user's id reads
+/// only that user's folder of the shared directory. A session of this user's
+/// that refuses this build's protocol version is dialed again once it has
 /// restarted, and one that refuses the connection token is dialed again once
 /// it advertises another, as
 /// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait)
@@ -3368,7 +3416,7 @@ fn dial_session(
     session_selector: &SessionSelector,
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
-    config_directory: Option<&Path>,
+    shared_sessions_base_directory: Option<&Path>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, CliError> {
     match home {
@@ -3387,8 +3435,7 @@ fn dial_session(
             };
             ipc_client::run_session_exchange_across_restart(
                 runtime_directory,
-                koshi_link::config::find_shared_sessions_base_directory(config_directory)
-                    .as_deref(),
+                shared_sessions_base_directory,
                 session_id,
                 *owner_user_id,
                 None,

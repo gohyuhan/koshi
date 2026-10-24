@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use koshi::cli::Cli;
-use koshi::config_command::load_app_layer_for_command;
+use koshi::config_command::load_app_config_for_command;
 use koshi_config::app_config::parse_app_config;
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::ids::SessionId;
@@ -70,9 +70,9 @@ fn run_config_migration_step(
     config_directory: &Path,
 ) -> Result<Option<PartialKoshiConfig>, koshi_link::error::CliError> {
     let parsed_cli = Cli::try_parse_from(cli_arguments).expect("parse command");
-    match load_app_layer_for_command(parsed_cli.command.as_ref(), Some(config_directory)) {
+    match load_app_config_for_command(parsed_cli.command.as_ref(), Some(config_directory)) {
         (_, Some(config_migration_error)) => Err(config_migration_error),
-        (app_config_layer, None) => Ok(app_config_layer),
+        (loaded_app_config, None) => Ok(loaded_app_config.into_app_config_layer()),
     }
 }
 
@@ -306,11 +306,11 @@ fn a_service_command_whose_migration_fails_starts_on_koshi_kdl_as_it_is_on_every
         fs::write(&keybinding_config_path, "version 1\nnormal {").expect("write keybinding config");
         let parsed_cli = Cli::try_parse_from(cli_arguments).expect("parse command");
 
-        let (app_config_layer, config_migration_error) =
-            load_app_layer_for_command(parsed_cli.command.as_ref(), Some(&config_directory));
+        let (loaded_app_config, config_migration_error) =
+            load_app_config_for_command(parsed_cli.command.as_ref(), Some(&config_directory));
 
         assert_eq!(
-            app_config_layer,
+            loaded_app_config.into_app_config_layer(),
             Some(parse_app_layer(
                 &app_config_path,
                 "version 2\nallow-beta-features #true\n"

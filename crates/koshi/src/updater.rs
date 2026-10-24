@@ -14,7 +14,8 @@
 //!
 //! Two files back this. `koshi.kdl` holds the preferences koshi reads:
 //! `update.auto-check`, `update.check-interval-days`, and
-//! `update.allow-prerelease`. `update.json` in the state directory holds the
+//! `update.allow-prerelease`, taken from the `koshi.kdl` the caller read at
+//! this process's start. `update.json` in the state directory holds the
 //! last-check time and the release waiting to be offered, the two values this
 //! module writes. This module does not write `koshi.kdl`.
 //!
@@ -41,7 +42,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use koshi_config::app_config::parse_app_config;
 use koshi_config::layer::merge_client;
 use koshi_config::types::{ClientConfig, UpdateConfig};
 use koshi_core::ids::SessionId;
@@ -59,6 +59,7 @@ use ureq::tls::TlsConfig;
 use ureq::Agent;
 
 use koshi_core::text::sanitize_reported_text;
+use koshi_link::config::AppConfigOutcome;
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::{
@@ -136,11 +137,15 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// `RestartScope::ServersNotOnVersion` for a release install, and with
 /// `RestartScope::EveryServer` for a build from source.
 ///
+/// `app_config_outcome` is the `koshi.kdl` the caller read at this process's
+/// start. Its `update.allow-prerelease` decides whether a pre-release is
+/// installed.
+///
 /// # Errors
 /// Returns [`CliError::Update`] when the path of this koshi cannot be read,
 /// and when the update fails: the network check, no release binary for this
 /// platform, the download or install step, or `brew`.
-pub fn run_update_command() -> Result<(), CliError> {
+pub fn run_update_command(app_config_outcome: &AppConfigOutcome) -> Result<(), CliError> {
     let program_path =
         koshi_host::program_path::resolve_program_path().map_err(|program_path_error| {
             build_update_error(format!(
@@ -159,7 +164,7 @@ pub fn run_update_command() -> Result<(), CliError> {
             (Ok(()), RestartScope::EveryServer)
         }
         InstallSource::Release(release_install) => (
-            update_release_install(&release_install),
+            update_release_install(&release_install, app_config_outcome),
             RestartScope::ServersNotOnVersion {
                 program_path: &program_path,
             },
@@ -182,7 +187,10 @@ pub fn run_update_command() -> Result<(), CliError> {
 ///
 /// # Errors
 /// The failure of `brew`, of the check, or of [`install_update`].
-fn update_release_install(release_install: &ReleaseInstall) -> Result<(), String> {
+fn update_release_install(
+    release_install: &ReleaseInstall,
+    app_config_outcome: &AppConfigOutcome,
+) -> Result<(), String> {
     if let ReleaseInstall::Homebrew {
         brew_path,
         formula_name,
@@ -190,8 +198,9 @@ fn update_release_install(release_install: &ReleaseInstall) -> Result<(), String
     {
         return upgrade_through_homebrew(brew_path, formula_name);
     }
-    let available_release_tag =
-        check_for_update(load_update_config().should_allow_prerelease_updates)?;
+    let available_release_tag = check_for_update(
+        resolve_update_config(app_config_outcome).should_allow_prerelease_updates,
+    )?;
     let mut update_state = load_update_state();
     update_state.last_check_unix_seconds = Some(get_current_unix_seconds());
     let _ = save_update_state(&update_state);
@@ -245,9 +254,12 @@ pub fn run_restart_servers_command() -> Result<(), CliError> {
 /// `RestartScope::ServersNotOnVersion`, whatever the install did. An
 /// install that worked then prints `relaunch koshi to use the new version`
 /// and ends this process with status `0`.
-pub fn prompt_startup_update() {
+///
+/// `app_config_outcome` is the `koshi.kdl` the caller read at this process's
+/// start. Its `update` section is read as `resolve_update_config` states.
+pub fn prompt_startup_update(app_config_outcome: &AppConfigOutcome) {
     delete_stale_backups();
-    let update_config = load_update_config();
+    let update_config = resolve_update_config(app_config_outcome);
     if !update_config.should_auto_check_for_updates {
         return;
     }
@@ -2649,31 +2661,25 @@ fn is_update_due(update_state: &UpdateState, check_interval_day_count: u32) -> b
 // Config (user-owned): koshi.kdl `update` section
 // ---------------------------------------------------------------------------
 
-/// Reads the `update` section of `koshi.kdl`. A missing or unreadable file
-/// gives the defaults, auto-check on. A file that is present and does not
-/// parse gives auto-check off.
-fn load_update_config() -> UpdateConfig {
-    let Some(config_file_path) = koshi_paths::resolve_config_directory()
-        .map(|config_directory| config_directory.join("koshi.kdl"))
-    else {
-        return UpdateConfig::default();
-    };
-    let Ok(config_file_text) = fs::read_to_string(&config_file_path) else {
-        return UpdateConfig::default();
-    };
-    match parse_app_config(&config_file_path, &config_file_text) {
-        // Only the `update` section is read, and the field warnings of a file
-        // that parsed are ignored. A file that does not parse turns the
-        // automatic check off.
-        Ok(parsed_config_file) => {
-            merge_client(ClientConfig::default(), vec![parsed_config_file.layer]).update
-        }
-        Err(config_parse_error) => {
-            tracing::warn!(%config_parse_error, "koshi.kdl did not parse; disabling auto update check");
-            UpdateConfig {
-                should_auto_check_for_updates: false,
-                ..UpdateConfig::default()
-            }
+/// The `update` section of the `koshi.kdl` read as `app_config_outcome`. A
+/// file that was not read, such as a missing or unreadable one, gives the
+/// defaults, auto-check on. A file that was read and does not parse gives
+/// auto-check off. Only the `update` section of a file that parsed is read.
+fn resolve_update_config(app_config_outcome: &AppConfigOutcome) -> UpdateConfig {
+    match app_config_outcome {
+        AppConfigOutcome::Unread => UpdateConfig::default(),
+        AppConfigOutcome::Refused => UpdateConfig {
+            should_auto_check_for_updates: false,
+            ..UpdateConfig::default()
+        },
+        AppConfigOutcome::Parsed {
+            app_config_layer, ..
+        } => {
+            merge_client(
+                ClientConfig::default(),
+                vec![app_config_layer.as_ref().clone()],
+            )
+            .update
         }
     }
 }
