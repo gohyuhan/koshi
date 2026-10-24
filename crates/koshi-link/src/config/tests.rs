@@ -278,7 +278,7 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "{}: ignored unknown key `frobnicate`; did you mean `update`?",
+            "{}: line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
             config_file_path.display()
         )]
     );
@@ -428,7 +428,8 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "{}: ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
+            "{}: line 3, column 5: ignored unknown key `colors.foreground`; did you mean \
+             `colors.ramp-end`?",
             theme_file_path.display()
         )]
     );

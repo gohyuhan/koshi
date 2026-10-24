@@ -88,10 +88,14 @@ and marks the failed file as possibly changed.
 - **`koshi.kdl` and themes are field-partial.** A bad field keeps its default;
   other valid fields still apply. Koshi logs each skipped field.
 - **Keybindings and profiles are all-or-nothing.** Any error drops the whole
-  file. Each of their problems names the line and column of the node at fault,
-  in file order: two misplaced `size` nodes in one profile give
-  ``line 2, column 14: sizing applies only to children of `horizontal` or
-  `vertical` `` and the same message at `line 2, column 23`.
+  file.
+- **Every problem names its line and column.** In each file, problems come in
+  file order, each with the line and column of the node at fault. Two
+  misplaced `size` nodes in one profile give ``line 2, column 14: sizing
+  applies only to children of `horizontal` or `vertical` `` and the same
+  message at `line 2, column 23`. Two `bogus` keys in the `pane` block of
+  `koshi.kdl` give ``line 3, column 5: ignored unknown key `pane.bogus`; did
+  you mean `pane.gap`?`` and the same message at `line 4, column 5`.
 - **Unknown keys name the nearest valid key.** `min-col 2` inside `pane`
   results in ``unknown key `pane.min-col`; did you mean `pane.min-cols`?``.
   `koshi config check` treats that typo as an error even though normal startup

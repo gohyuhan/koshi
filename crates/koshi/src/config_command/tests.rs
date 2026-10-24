@@ -471,7 +471,7 @@ fn check_collects_errors_from_all_files() {
     assert_eq!(
         config_error,
         format!(
-            "config failed: invalid config version in {}: file must declare `version`\ninvalid config file {}: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
+            "config failed: invalid config version in {}: file must declare `version`\ninvalid config file {}: line 2, column 10: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
             config_directory.path().join("koshi.kdl").display(),
             config_directory.path().join("themes").join("bad.kdl").display(),
         )
@@ -562,6 +562,32 @@ fn check_prints_the_same_profile_problem_once_per_file() {
              sizing applies only to children of `horizontal` or `vertical`",
             profile_directory.join("a.kdl").display(),
             profile_directory.join("b.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_names_the_location_of_the_same_app_config_warning_on_two_nodes() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        "version 2\npane {\n    bogus 1\n    bogus 2\n}\npane {}\n",
+    )
+    .unwrap();
+
+    let config_error = check_config_directory(config_directory.path())
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        config_error,
+        format!(
+            "config failed: invalid config file {}: line 3, column 5: ignored unknown key \
+             `pane.bogus`; did you mean `pane.gap`?; line 4, column 5: ignored unknown key \
+             `pane.bogus`; did you mean `pane.gap`?; line 6, column 1: ignored duplicate `pane` \
+             section",
+            app_config_path.display(),
         )
     );
 }

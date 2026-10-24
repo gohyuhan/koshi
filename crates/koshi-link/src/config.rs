@@ -539,7 +539,8 @@ fn load_keybindings_config(
 }
 
 /// Appends each field-partial skip from a parsed file to `config_warnings`,
-/// prefixed with the file it came from.
+/// prefixed with the file it came from, such as ``<path>: line 2, column 1:
+/// ignored unknown key `frobnicate`; did you mean `update`?``.
 fn append_config_field_warnings(
     config_path: &Path,
     field_warnings: &[String],
