@@ -159,6 +159,21 @@ fn tls_handshake_failed_display_names_the_address_and_detail() {
 }
 
 #[test]
+fn tls_handshake_closed_display_names_the_address_every_cause_and_the_next_step() {
+    let ipc_error = IpcError::TlsHandshakeClosed {
+        server_address: "laptop.local:7654".to_string(),
+    };
+    assert_eq!(
+        ipc_error.to_string(),
+        "the connection to laptop.local:7654 closed during the TLS handshake. a koshi server \
+         closes a connection this way when it restarts or stops, when 64 others wait to \
+         present a secret, and when the address it comes from opened 10 that were not \
+         admitted in 60 seconds. dial again in 60 seconds. if it keeps happening, run `koshi \
+         doctor` on that machine to check that koshi serves that port"
+    );
+}
+
+#[test]
 fn each_remote_file_displays_as_its_own_name() {
     assert_eq!(RemoteFile::SavedServers.to_string(), "saved servers file");
     assert_eq!(

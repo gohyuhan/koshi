@@ -2289,26 +2289,33 @@ fn is_no_listener_error(io_error: &io::Error) -> bool {
     false
 }
 
-/// Classify an IO failure: the kinds that mean "the peer is gone" become
-/// [`IpcError::Disconnected`]; everything else keeps its text as
-/// [`IpcError::Transport`].
-///
-/// The peer-gone kinds are [`UnexpectedEof`](io::ErrorKind::UnexpectedEof),
+/// Whether `io_error` means the peer is gone: its kind is
+/// [`UnexpectedEof`](io::ErrorKind::UnexpectedEof),
 /// [`BrokenPipe`](io::ErrorKind::BrokenPipe),
 /// [`ConnectionReset`](io::ErrorKind::ConnectionReset),
-/// [`ConnectionAborted`](io::ErrorKind::ConnectionAborted) and
+/// [`ConnectionAborted`](io::ErrorKind::ConnectionAborted) or
 /// [`NotConnected`](io::ErrorKind::NotConnected) (`ENOTCONN`, `Socket is not
 /// connected`).
-fn convert_io_error(io_error: io::Error) -> IpcError {
-    match io_error.kind() {
+pub(crate) fn is_peer_gone_error(io_error: &io::Error) -> bool {
+    matches!(
+        io_error.kind(),
         io::ErrorKind::UnexpectedEof
-        | io::ErrorKind::BrokenPipe
-        | io::ErrorKind::ConnectionReset
-        | io::ErrorKind::ConnectionAborted
-        | io::ErrorKind::NotConnected => IpcError::Disconnected,
-        _ => IpcError::Transport {
-            error_detail: io_error.to_string(),
-        },
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+    )
+}
+
+/// Classify an IO failure: the kinds [`is_peer_gone_error`] names become
+/// [`IpcError::Disconnected`]; everything else keeps its text as
+/// [`IpcError::Transport`].
+fn convert_io_error(io_error: io::Error) -> IpcError {
+    if is_peer_gone_error(&io_error) {
+        return IpcError::Disconnected;
+    }
+    IpcError::Transport {
+        error_detail: io_error.to_string(),
     }
 }
 

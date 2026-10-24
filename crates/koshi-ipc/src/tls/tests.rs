@@ -909,12 +909,11 @@ fn a_dial_offers_tls_1_3_alone() {
     .expect_err("a server that hangs up after the first record never finishes the handshake");
     let (record_type, record_body) = capture_thread.join().expect("the capture thread finished");
 
-    let IpcError::TlsHandshakeFailed {
+    let IpcError::TlsHandshakeClosed {
         server_address: named_server_address,
-        ..
     } = ipc_error
     else {
-        panic!("a peer gone mid-handshake is a handshake failure: {ipc_error}");
+        panic!("a peer gone mid-handshake is a connection closed during it: {ipc_error}");
     };
     assert_eq!(named_server_address, server_address.to_string());
     // Record type 22 is a handshake record, and handshake type 1 a ClientHello.
@@ -1329,12 +1328,13 @@ fn an_address_whose_port_is_not_a_number_is_a_lookup_failure() {
 }
 
 #[test]
-fn a_server_that_hangs_up_during_the_handshake_is_a_handshake_failure() {
+fn a_server_that_hangs_up_during_the_handshake_is_a_connection_closed_during_it() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let server_address = listener.local_addr().expect("read the bound address");
 
     let server_thread = std::thread::spawn(move || {
-        // Accepted, and dropped before a byte is answered.
+        // Accepted, and dropped before a byte is answered: the client reads
+        // end of file or a reset connection, whichever arrives first.
         let _ = listener.accept();
     });
 
@@ -1345,17 +1345,13 @@ fn a_server_that_hangs_up_during_the_handshake_is_a_handshake_failure() {
     )
     .expect_err("a server that hangs up never finishes the handshake");
 
-    let IpcError::TlsHandshakeFailed {
+    let IpcError::TlsHandshakeClosed {
         server_address: named_server_address,
-        error_detail,
     } = ipc_error
     else {
-        panic!("a peer gone mid-handshake is a handshake failure, not a transport failure");
+        panic!("a peer gone mid-handshake is a connection closed during it: {ipc_error}");
     };
     assert_eq!(named_server_address, server_address.to_string());
-    // The words are the operating system's: end of file on one platform, a
-    // reset connection on another.
-    assert_ne!(error_detail, "the TLS handshake did not finish in time");
     let _ = server_thread.join();
 }
 
@@ -1405,6 +1401,58 @@ fn a_deadline_already_reached_is_timed_out_and_the_socket_timeouts_stay_unset() 
     assert_eq!(timeout_error.to_string(), "this step ran out of time");
     assert_eq!(socket.read_timeout().expect("read the timeout"), None);
     assert_eq!(socket.write_timeout().expect("read the timeout"), None);
+}
+
+#[test]
+fn a_timeout_refused_as_an_invalid_argument_reads_as_a_socket_no_longer_connected() {
+    let (socket, _peer) = build_loopback_socket_pair();
+
+    let timeout_error = set_socket_timeout_until(
+        &socket,
+        Some(Instant::now() + LOOPBACK_TIMEOUT_DURATION),
+        |_, _| Err(io::Error::from(io::ErrorKind::InvalidInput)),
+    )
+    .expect_err("a refused timeout is a failure");
+
+    assert_eq!(timeout_error.kind(), io::ErrorKind::NotConnected);
+    assert_eq!(
+        timeout_error.to_string(),
+        "the socket can neither read nor write any more"
+    );
+}
+
+#[test]
+fn a_timeout_refused_for_another_reason_keeps_its_own_kind() {
+    let (socket, _peer) = build_loopback_socket_pair();
+
+    let timeout_error = set_socket_timeout_until(
+        &socket,
+        Some(Instant::now() + LOOPBACK_TIMEOUT_DURATION),
+        |_, _| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+    )
+    .expect_err("a refused timeout is a failure");
+
+    assert_eq!(timeout_error.kind(), io::ErrorKind::PermissionDenied);
+}
+
+/// macOS refuses a socket timeout with `EINVAL` once the socket is shut both
+/// ways, as a local shutdown or a reset from the peer leaves it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_timeout_on_a_socket_macos_shut_both_ways_reads_as_a_socket_no_longer_connected() {
+    let (socket, _peer) = build_loopback_socket_pair();
+    socket
+        .shutdown(std::net::Shutdown::Both)
+        .expect("shut the socket both ways");
+
+    let timeout_error = set_socket_timeout_until(
+        &socket,
+        Some(Instant::now() + LOOPBACK_TIMEOUT_DURATION),
+        TcpStream::set_read_timeout,
+    )
+    .expect_err("macOS refuses a timeout on a socket shut both ways");
+
+    assert_eq!(timeout_error.kind(), io::ErrorKind::NotConnected);
 }
 
 #[test]

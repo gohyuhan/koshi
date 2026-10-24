@@ -977,6 +977,27 @@ fn a_certificate_that_is_not_the_expected_one_on_a_saved_server_names_the_edit_o
 }
 
 #[test]
+fn a_connection_closed_during_the_handshake_is_unreachable_so_a_redial_dials_again() {
+    let handshake_closed_error = classify_dial_failure(
+        IpcError::TlsHandshakeClosed {
+            server_address: "desk.local:7654".to_string(),
+        },
+        Some("work"),
+    );
+
+    let DialError::Unreachable(CliError::IpcUnavailable { detail }) = handshake_closed_error else {
+        panic!("a connection closed during the handshake can open on the next dial");
+    };
+    assert_eq!(
+        detail,
+        IpcError::TlsHandshakeClosed {
+            server_address: "desk.local:7654".to_string(),
+        }
+        .to_string()
+    );
+}
+
+#[test]
 fn a_sweep_answer_names_its_server_whatever_it_says() {
     assert_eq!(
         get_reach_server_label(&Reach::CertificateMismatch {

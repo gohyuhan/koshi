@@ -1663,8 +1663,16 @@ mod admission_answers {
             None,
         );
 
-        let Err(IpcError::TlsHandshakeFailed { server_address, .. }) = dropped_dial else {
-            panic!("the dial past the limit is dropped before its TLS handshake");
+        let server_address = match dropped_dial {
+            Err(IpcError::TlsHandshakeClosed { server_address }) => server_address,
+            Err(dial_error) => panic!(
+                "the dial past the limit is closed before its TLS handshake finishes, \
+                 not refused with: {dial_error:?}"
+            ),
+            Ok((_, _, response_frame)) => panic!(
+                "the dial past the limit is closed before its TLS handshake finishes, \
+                 not answered with {response_frame:?}"
+            ),
         };
         assert_eq!(server_address, test_remote_listener.remote_listen_address);
     }
