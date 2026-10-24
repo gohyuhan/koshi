@@ -5015,3 +5015,68 @@ fn every_cli_action_name_is_a_registered_core_action() {
     .collect();
     assert_eq!(cli_action_names, expected_registered_action_names);
 }
+
+#[test]
+fn every_id_the_json_output_prints_parses_back_through_its_target_flag() {
+    let session_id = SessionId::from_uuid(Uuid::from_u128(1));
+    let tab_id = TabId::from_uuid(Uuid::from_u128(2));
+    let pane_id = PaneId::from_uuid(Uuid::from_u128(3));
+    let client_id = ClientId::from_uuid(Uuid::from_u128(4));
+    let pane_listing_json: serde_json::Value = serde_json::from_str(&crate::output::render_panes(
+        &[koshi_link::discovery::PaneRow {
+            pane_id,
+            pane_name: None,
+            tab_id: Some(tab_id),
+            tab_name: Some("editor".to_string()),
+            session_id,
+            session_name: "quiet-lake".to_string(),
+        }],
+        OutputFormat::Json,
+    ))
+    .expect("the listing is JSON");
+    let client_listing_json: serde_json::Value =
+        serde_json::from_str(&crate::output::render_clients(
+            &[koshi_link::discovery::ClientRow {
+                client_id,
+                session_id,
+                session_name: "quiet-lake".to_string(),
+            }],
+            OutputFormat::Json,
+        ))
+        .expect("the listing is JSON");
+    let grant_listing_json: serde_json::Value =
+        serde_json::from_str(&crate::output::render_share_list(
+            &[koshi_ipc::remote_tokens::TokenEntry {
+                identity: "alice".to_string(),
+                scope: koshi_ipc::remote_tokens::TokenScope::Session(session_id),
+                issued_at: std::time::SystemTime::UNIX_EPOCH,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+            }],
+            OutputFormat::Json,
+        ))
+        .expect("the listing is JSON");
+
+    let printed_pane_id = pane_listing_json[0]["pane_id"].as_str().expect("an id");
+    let printed_tab_id = pane_listing_json[0]["tab_id"].as_str().expect("an id");
+    let printed_session_id = pane_listing_json[0]["session_id"].as_str().expect("an id");
+    let printed_client_id = client_listing_json[0]["client_id"].as_str().expect("an id");
+    let printed_scope = grant_listing_json[0]["scope"].as_str().expect("a scope");
+
+    assert_eq!(printed_pane_id, "pane-00000000-0000-0000-0000-000000000003");
+    assert_eq!(parse_pane_id(printed_pane_id), Ok(pane_id));
+    assert_eq!(
+        parse_tab_reference(printed_tab_id),
+        Ok(TabReference::TabId(tab_id))
+    );
+    assert_eq!(
+        parse_session_reference(printed_session_id),
+        Ok(SessionReference::SessionId(session_id))
+    );
+    assert_eq!(parse_client_id(printed_client_id), Ok(client_id));
+    assert_eq!(
+        parse_session_reference(printed_scope),
+        Ok(SessionReference::SessionId(session_id))
+    );
+}

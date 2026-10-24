@@ -37,7 +37,7 @@ impl ClientVersion {
 }
 
 /// Which koshi server one [`ServerVersionRow`] is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerKind {
     /// The one router this machine runs.
     Router,
@@ -46,8 +46,7 @@ pub enum ServerKind {
 }
 
 /// What asking one koshi server for its build produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "state")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerBuild {
     /// The server answered and named this build.
     Running {
@@ -66,14 +65,13 @@ pub enum ServerBuild {
 }
 
 /// One `server-version` row: a koshi server, and what asking it produced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerVersionRow {
     /// Which server this row is about.
     pub server_kind: ServerKind,
     /// The session this row is about; absent on the router's row.
     pub session_id: Option<SessionId>,
     /// What asking it produced.
-    #[serde(flatten)]
     pub build: ServerBuild,
 }
 

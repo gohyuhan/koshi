@@ -397,7 +397,9 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 
 ### Sessions and discovery
 
-List and inspect commands accept `--format table` or `--format json`.
+List and inspect commands accept `--format table` or `--format json`. Both
+print ids, times, and states as the same text: `pane-0192f0c1-…`,
+`2025-01-01T00:00:00Z`, `running`.
 `NAME_OR_ID` takes the target's generated name or its printed id; an id is
 never treated as a name, and a name several targets share is refused with
 every matching id listed.

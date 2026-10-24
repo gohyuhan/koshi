@@ -23,7 +23,6 @@ use std::time::{Instant, SystemTime};
 use koshi_core::process::SpawnSpec;
 use koshi_core::text::format_counted_noun;
 use koshi_ipc::remote_tokens::TokenStore;
-use serde::Serialize;
 
 use crate::cli::OutputFormat;
 use crate::output::{self, ConfigMismatch};
@@ -36,7 +35,7 @@ use koshi_observability::logging::resolve_session_log_path;
 use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// The check found what it looks for.
     Ok,
@@ -47,7 +46,7 @@ pub enum Verdict {
 }
 
 /// One check's answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorOutcome {
     /// What the check concluded.
     pub verdict: Verdict,
@@ -322,13 +321,11 @@ fn load_standing_grant_count(
 }
 
 /// One row of the answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorCheckRow {
     /// The check's name.
     pub check_name: &'static str,
-    /// What the check concluded. `--format json` prints its fields beside
-    /// `check_name` in the same object.
-    #[serde(flatten)]
+    /// What the check concluded.
     pub outcome: DoctorOutcome,
 }
 

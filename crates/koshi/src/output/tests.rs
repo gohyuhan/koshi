@@ -27,7 +27,7 @@ use koshi_ipc::layout::{
     SolvedPane, SolvedTab, TabLayout,
 };
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::size::SizeWeight;
+use koshi_layout::size::{SizeConstraint, SizeWeight};
 use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::logging::recent_events::MAX_RECENT_EVENT_COUNT;
@@ -143,14 +143,11 @@ fn build_test_client_discovery() -> ClientDiscovery {
 #[test]
 fn session_json_schema_is_stable() {
     let expected_text = r#"{
-  "session_id": "00000000-0000-0000-0000-000000000001",
+  "session_id": "session-00000000-0000-0000-0000-000000000001",
   "session_name": "quiet-lake",
-  "created_at": {
-    "secs_since_epoch": 1234,
-    "nanos_since_epoch": 0
-  },
+  "created_at": "1970-01-01T00:20:34Z",
   "attached_client_ids": [
-    "00000000-0000-0000-0000-000000000001"
+    "client-00000000-0000-0000-0000-000000000001"
   ],
   "pane_count": 3
 }
@@ -165,7 +162,7 @@ fn session_json_schema_is_stable() {
 fn session_list_json_is_an_array_of_id_name_server_and_owner() {
     let expected_text = r#"[
   {
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake",
     "server_name_or_address": null,
     "owner_user_id": null
@@ -184,7 +181,7 @@ fn session_list_json_names_the_server_of_a_remote_row() {
     remote_session_row.server_name_or_address = Some("desk".to_string());
     let expected_text = r#"[
   {
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake",
     "server_name_or_address": "desk",
     "owner_user_id": null
@@ -203,7 +200,7 @@ fn session_list_json_names_the_owner_of_another_users_session() {
     foreign_session_row.owner_user_id = Some(1001);
     let expected_text = r#"[
   {
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake",
     "server_name_or_address": null,
     "owner_user_id": 1001
@@ -220,9 +217,9 @@ fn session_list_json_names_the_owner_of_another_users_session() {
 fn tab_list_json_carries_the_owning_session() {
     let expected_text = r#"[
   {
-    "tab_id": "00000000-0000-0000-0000-000000000001",
+    "tab_id": "tab-00000000-0000-0000-0000-000000000001",
     "tab_name": "amber-fox",
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -237,11 +234,11 @@ fn tab_list_json_carries_the_owning_session() {
 fn pane_list_json_carries_the_whole_id_chain() {
     let expected_text = r#"[
   {
-    "pane_id": "00000000-0000-0000-0000-000000000001",
+    "pane_id": "pane-00000000-0000-0000-0000-000000000001",
     "pane_name": "htop",
-    "tab_id": "00000000-0000-0000-0000-000000000001",
+    "tab_id": "tab-00000000-0000-0000-0000-000000000001",
     "tab_name": "amber-fox",
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -262,11 +259,11 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
         render_panes(&[untitled_pane_row], OutputFormat::Json),
         r#"[
   {
-    "pane_id": "00000000-0000-0000-0000-000000000001",
+    "pane_id": "pane-00000000-0000-0000-0000-000000000001",
     "pane_name": null,
-    "tab_id": "00000000-0000-0000-0000-000000000001",
+    "tab_id": "tab-00000000-0000-0000-0000-000000000001",
     "tab_name": "amber-fox",
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -278,8 +275,8 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
 fn client_list_json_carries_the_owning_session() {
     let expected_text = r#"[
   {
-    "client_id": "00000000-0000-0000-0000-000000000001",
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "client_id": "client-00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -293,11 +290,11 @@ fn client_list_json_carries_the_owning_session() {
 #[test]
 fn tab_json_schema_is_stable() {
     let expected_text = r#"{
-  "tab_id": "00000000-0000-0000-0000-000000000001",
-  "session_id": "00000000-0000-0000-0000-000000000001",
+  "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+  "session_id": "session-00000000-0000-0000-0000-000000000001",
   "tab_name": "amber-fox",
   "tab_index": 1,
-  "active_pane_id": "00000000-0000-0000-0000-000000000001",
+  "active_pane_id": "pane-00000000-0000-0000-0000-000000000001",
   "pane_count": 2
 }
 "#;
@@ -310,18 +307,18 @@ fn tab_json_schema_is_stable() {
 #[test]
 fn pane_json_schema_is_stable() {
     let expected_text = r#"{
-  "pane_id": "00000000-0000-0000-0000-000000000001",
-  "tab_id": "00000000-0000-0000-0000-000000000001",
-  "session_id": "00000000-0000-0000-0000-000000000001",
+  "pane_id": "pane-00000000-0000-0000-0000-000000000001",
+  "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+  "session_id": "session-00000000-0000-0000-0000-000000000001",
   "pane_title": "htop",
   "working_directory": "/home/user",
   "command_argv": [
     "htop",
     "--tree"
   ],
-  "lifecycle": "Running",
+  "lifecycle": "running",
   "focused_by_client_ids": [
-    "00000000-0000-0000-0000-000000000001"
+    "client-00000000-0000-0000-0000-000000000001"
   ]
 }
 "#;
@@ -336,18 +333,18 @@ fn a_non_utf8_working_directory_renders_lossily_in_json() {
     let mut pane_discovery = build_test_pane_discovery();
     pane_discovery.working_directory = Some(build_non_utf8_path());
     let expected_text = r#"{
-  "pane_id": "00000000-0000-0000-0000-000000000001",
-  "tab_id": "00000000-0000-0000-0000-000000000001",
-  "session_id": "00000000-0000-0000-0000-000000000001",
+  "pane_id": "pane-00000000-0000-0000-0000-000000000001",
+  "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+  "session_id": "session-00000000-0000-0000-0000-000000000001",
   "pane_title": "htop",
   "working_directory": "/tmp/f�oo",
   "command_argv": [
     "htop",
     "--tree"
   ],
-  "lifecycle": "Running",
+  "lifecycle": "running",
   "focused_by_client_ids": [
-    "00000000-0000-0000-0000-000000000001"
+    "client-00000000-0000-0000-0000-000000000001"
   ]
 }
 "#;
@@ -378,20 +375,17 @@ fn build_non_utf8_path() -> PathBuf {
 #[test]
 fn client_json_schema_is_stable() {
     let expected_text = r#"{
-  "client_id": "00000000-0000-0000-0000-000000000001",
-  "session_id": "00000000-0000-0000-0000-000000000001",
-  "attached_at": {
-    "secs_since_epoch": 1234,
-    "nanos_since_epoch": 0
-  },
+  "client_id": "client-00000000-0000-0000-0000-000000000001",
+  "session_id": "session-00000000-0000-0000-0000-000000000001",
+  "attached_at": "1970-01-01T00:20:34Z",
   "viewport_size": {
     "column_count": 120,
     "row_count": 40
   },
-  "active_tab_id": "00000000-0000-0000-0000-000000000001",
+  "active_tab_id": "tab-00000000-0000-0000-0000-000000000001",
   "focused_pane_id": null,
-  "lock_mode": "Normal",
-  "origin": "Local",
+  "lock_mode": "normal",
+  "origin": "local",
   "pane_area": null
 }
 "#;
@@ -402,7 +396,7 @@ fn client_json_schema_is_stable() {
 }
 
 #[test]
-fn a_reported_pane_area_json_is_a_tagged_size() {
+fn a_reported_pane_area_json_is_the_size_object() {
     let reported_client_discovery = ClientDiscovery {
         pane_area: Some(PaneArea::Reported(Size {
             column_count: 100,
@@ -414,29 +408,96 @@ fn a_reported_pane_area_json_is_a_tagged_size() {
     assert_eq!(
         render_client(&reported_client_discovery, OutputFormat::Json),
         r#"{
-  "client_id": "00000000-0000-0000-0000-000000000001",
-  "session_id": "00000000-0000-0000-0000-000000000001",
-  "attached_at": {
-    "secs_since_epoch": 1234,
-    "nanos_since_epoch": 0
-  },
+  "client_id": "client-00000000-0000-0000-0000-000000000001",
+  "session_id": "session-00000000-0000-0000-0000-000000000001",
+  "attached_at": "1970-01-01T00:20:34Z",
   "viewport_size": {
     "column_count": 120,
     "row_count": 40
   },
-  "active_tab_id": "00000000-0000-0000-0000-000000000001",
+  "active_tab_id": "tab-00000000-0000-0000-0000-000000000001",
   "focused_pane_id": null,
-  "lock_mode": "Normal",
-  "origin": "Local",
+  "lock_mode": "normal",
+  "origin": "local",
   "pane_area": {
-    "Reported": {
-      "column_count": 100,
-      "row_count": 30
-    }
+    "column_count": 100,
+    "row_count": 30
   }
 }
 "#
     );
+}
+
+#[test]
+fn a_starving_pane_area_json_is_the_word_starving() {
+    let starving_client_discovery = ClientDiscovery {
+        pane_area: Some(PaneArea::Starving),
+        ..build_test_client_discovery()
+    };
+    let parsed_json: serde_json::Value = serde_json::from_str(&render_client(
+        &starving_client_discovery,
+        OutputFormat::Json,
+    ))
+    .expect("the record is JSON");
+
+    assert_eq!(parsed_json["pane_area"], serde_json::json!("starving"));
+}
+
+#[test]
+fn a_remote_client_json_names_its_origin_and_an_unsaid_origin_is_null() {
+    let remote_client_discovery = ClientDiscovery {
+        origin: Some(ClientOrigin::Remote),
+        ..build_test_client_discovery()
+    };
+    let unsaid_origin_client_discovery = ClientDiscovery {
+        origin: None,
+        ..build_test_client_discovery()
+    };
+
+    let remote_json: serde_json::Value =
+        serde_json::from_str(&render_client(&remote_client_discovery, OutputFormat::Json))
+            .expect("the record is JSON");
+    let unsaid_origin_json: serde_json::Value = serde_json::from_str(&render_client(
+        &unsaid_origin_client_discovery,
+        OutputFormat::Json,
+    ))
+    .expect("the record is JSON");
+
+    assert_eq!(remote_json["origin"], serde_json::json!("remote"));
+    assert_eq!(unsaid_origin_json["origin"], serde_json::Value::Null);
+}
+
+#[test]
+fn every_lock_mode_prints_its_keymap_name_in_the_table_and_in_json() {
+    let expected_mode_words = [
+        (LockMode::Normal, "normal"),
+        (LockMode::Locked, "locked"),
+        (LockMode::PanePlacement, "pane-placement"),
+        (LockMode::PaneMoveChoice, "pane-move-choice"),
+        (LockMode::FloatingPaneMove, "floating-pane-move"),
+        (LockMode::DockUndock, "dock-undock"),
+    ];
+    assert_eq!(expected_mode_words.len(), LockMode::ALL.len());
+
+    for (lock_mode, expected_mode_word) in expected_mode_words {
+        let client_discovery = ClientDiscovery {
+            lock_mode,
+            ..build_test_client_discovery()
+        };
+        let rendered_table = render_client(&client_discovery, OutputFormat::Table);
+        let parsed_json: serde_json::Value =
+            serde_json::from_str(&render_client(&client_discovery, OutputFormat::Json))
+                .expect("the record is JSON");
+
+        assert_eq!(
+            rendered_table.lines().last(),
+            Some(format!("lock: {expected_mode_word}").as_str())
+        );
+        assert_eq!(
+            parsed_json["lock_mode"],
+            serde_json::json!(expected_mode_word)
+        );
+    }
 }
 
 // --- Table renderings ---
@@ -531,11 +592,11 @@ fn a_floating_pane_lists_a_null_tab_in_json() {
         render_panes(&[floating_pane_row], OutputFormat::Json),
         r#"[
   {
-    "pane_id": "00000000-0000-0000-0000-000000000001",
+    "pane_id": "pane-00000000-0000-0000-0000-000000000001",
     "pane_name": "htop",
     "tab_id": null,
     "tab_name": null,
-    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -601,12 +662,12 @@ fn client_fields_render_as_lines() {
     let expected_text = "\
 id: client-00000000-0000-0000-0000-000000000001
 session: session-00000000-0000-0000-0000-000000000001
-attached_at: 1234
+attached_at: 1970-01-01T00:20:34Z
 viewport: 120x40
 pane_area: -
 active_tab: tab-00000000-0000-0000-0000-000000000001
 focused_pane: -
-lock: Normal
+lock: normal
 ";
     assert_eq!(
         render_client(&build_test_client_discovery(), OutputFormat::Table),
@@ -625,12 +686,12 @@ fn a_starving_client_prints_starving_in_the_pane_area_column() {
         render_client(&starving_client_discovery, OutputFormat::Table),
         r#"id: client-00000000-0000-0000-0000-000000000001
 session: session-00000000-0000-0000-0000-000000000001
-attached_at: 1234
+attached_at: 1970-01-01T00:20:34Z
 viewport: 120x40
 pane_area: starving
 active_tab: tab-00000000-0000-0000-0000-000000000001
 focused_pane: -
-lock: Normal
+lock: normal
 "#
     );
 }
@@ -649,12 +710,12 @@ fn a_reported_pane_area_prints_as_columns_by_rows() {
         render_client(&reported_client_discovery, OutputFormat::Table),
         r#"id: client-00000000-0000-0000-0000-000000000001
 session: session-00000000-0000-0000-0000-000000000001
-attached_at: 1234
+attached_at: 1970-01-01T00:20:34Z
 viewport: 120x40
 pane_area: 100x30
 active_tab: tab-00000000-0000-0000-0000-000000000001
 focused_pane: -
-lock: Normal
+lock: normal
 "#
     );
 }
@@ -803,10 +864,134 @@ fn a_joined_cell_renders_an_empty_list_as_a_dash_and_joins_the_rest_with_commas(
 
 // --- Cell helpers ---
 
+/// The moment `unix_seconds` whole seconds after the Unix epoch.
+fn build_time_after_epoch(unix_seconds: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(unix_seconds)
+}
+
 #[test]
-fn format_time_cell_before_the_unix_epoch_renders_as_a_dash() {
-    let time_before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
-    assert_eq!(format_time_cell(time_before_epoch), "-");
+fn a_utc_timestamp_of_the_epoch_is_its_first_second() {
+    assert_eq!(
+        format_utc_timestamp(SystemTime::UNIX_EPOCH),
+        "1970-01-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn a_utc_timestamp_names_the_date_and_the_time_of_day() {
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(1_735_689_600)),
+        "2025-01-01T00:00:00Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(1234)),
+        "1970-01-01T00:20:34Z"
+    );
+}
+
+#[test]
+fn a_utc_timestamp_prints_a_leap_day_and_the_day_after_a_century_leap_day() {
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(1_709_210_096)),
+        "2024-02-29T12:34:56Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(951_868_800)),
+        "2000-03-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn a_utc_timestamp_skips_february_29_in_a_century_year_not_divisible_by_400() {
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(951_782_400)),
+        "2000-02-29T00:00:00Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(4_107_542_399)),
+        "2100-02-28T23:59:59Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(4_107_542_400)),
+        "2100-03-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn a_utc_timestamp_drops_the_part_of_a_second() {
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(1_735_689_600) + Duration::from_millis(999)),
+        "2025-01-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn a_utc_timestamp_keeps_four_year_digits_through_9999_and_widens_after() {
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(253_402_300_799)),
+        "9999-12-31T23:59:59Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(build_time_after_epoch(253_402_300_800)),
+        "+10000-01-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn a_utc_timestamp_before_the_epoch_floors_to_the_earlier_second() {
+    assert_eq!(
+        format_utc_timestamp(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
+        "1969-12-31T23:59:59Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(SystemTime::UNIX_EPOCH - Duration::from_millis(500)),
+        "1969-12-31T23:59:59Z"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_utc_timestamp_prints_year_zero_with_four_digits_and_year_minus_one_widened() {
+    assert_eq!(
+        format_utc_timestamp(SystemTime::UNIX_EPOCH - Duration::from_secs(62_167_219_200)),
+        "0000-01-01T00:00:00Z"
+    );
+    assert_eq!(
+        format_utc_timestamp(SystemTime::UNIX_EPOCH - Duration::from_secs(62_167_219_201)),
+        "-00001-12-31T23:59:59Z"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_utc_timestamp_prints_the_latest_moment_a_unix_clock_holds() {
+    let latest_unix_time =
+        SystemTime::UNIX_EPOCH + Duration::new(9_223_372_036_854_775_807, 999_999_999);
+    assert_eq!(
+        format_utc_timestamp(latest_unix_time),
+        "+292277026596-12-04T15:30:07Z"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_utc_timestamp_prints_the_earliest_moment_a_unix_clock_holds() {
+    let earliest_unix_time =
+        SystemTime::UNIX_EPOCH - Duration::from_secs(9_223_372_036_854_775_808);
+    assert_eq!(
+        format_utc_timestamp(earliest_unix_time),
+        "-292277022657-01-27T08:29:52Z"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_utc_timestamp_prints_the_latest_moment_a_windows_clock_holds() {
+    let latest_windows_time = SystemTime::UNIX_EPOCH + Duration::new(910_692_730_085, 477_580_700);
+    assert_eq!(
+        format_utc_timestamp(latest_windows_time),
+        "+30828-09-14T02:48:05Z"
+    );
 }
 
 #[test]
@@ -1611,7 +1796,7 @@ fn session_inspect_renders_as_field_lines() {
     let expected_text = "\
 id: session-00000000-0000-0000-0000-000000000001
 name: quiet-lake
-created_at: 1234
+created_at: 1970-01-01T00:20:34Z
 clients: 1
 panes: 3
 ";
@@ -1804,8 +1989,8 @@ fn dump_state_table_prints_one_named_table_per_record_kind() {
     // Each section is its own table, and a blank line closes it.
     let expected_text = "\
 sessions
-id                                            name        created_at  clients  panes
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234        1        3
+id                                            name        created_at            clients  panes
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  1        3
 
 tabs
 id                                        session                                       name       index  active_pane                                panes
@@ -1816,8 +2001,8 @@ id                                         tab                                  
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
-id                                           session                                       attached_at  viewport  pane_area  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
+id                                           session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
 
 ";
     assert_eq!(
@@ -1858,8 +2043,8 @@ fn dump_state_table_prints_a_hidden_argument_as_it_was_given() {
     assert_eq!(
         render_dump_state(&[hidden_session_overview], OutputFormat::Table),
         r#"sessions
-id                                            name        created_at  clients  panes
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234        1        3
+id                                            name        created_at            clients  panes
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  1        3
 
 tabs
 id                                        session                                       name       index  active_pane                                panes
@@ -1870,8 +2055,8 @@ id                                         tab                                  
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  mysql ***  running  1
 
 clients
-id                                           session                                       attached_at  viewport  pane_area  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
+id                                           session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
 
 "#
     );
@@ -1893,9 +2078,9 @@ fn dump_state_table_spans_every_session_given() {
             OutputFormat::Table,
         ),
         r#"sessions
-id                                            name             created_at  clients  panes
-session-00000000-0000-0000-0000-000000000001  quiet-lake       1234        1        3
-session-00000000-0000-0000-0000-000000000001  wandering-heron  1234        1        3
+id                                            name             created_at            clients  panes
+session-00000000-0000-0000-0000-000000000001  quiet-lake       1970-01-01T00:20:34Z  1        3
+session-00000000-0000-0000-0000-000000000001  wandering-heron  1970-01-01T00:20:34Z  1        3
 
 tabs
 id                                        session                                       name       index  active_pane                                panes
@@ -1908,9 +2093,9 @@ pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
-id                                           session                                       attached_at  viewport  pane_area  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
+id                                           session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
 
 "#
     );
@@ -1926,39 +2111,39 @@ fn dump_state_json_is_an_array_of_whole_overviews() {
         parsed_json,
         serde_json::json!([{
             "session": {
-                "session_id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "session-00000000-0000-0000-0000-000000000001",
                 "session_name": "quiet-lake",
-                "created_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
-                "attached_client_ids": ["00000000-0000-0000-0000-000000000001"],
+                "created_at": "1970-01-01T00:20:34Z",
+                "attached_client_ids": ["client-00000000-0000-0000-0000-000000000001"],
                 "pane_count": 3
             },
             "tabs": [{
-                "tab_id": "00000000-0000-0000-0000-000000000001",
-                "session_id": "00000000-0000-0000-0000-000000000001",
+                "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+                "session_id": "session-00000000-0000-0000-0000-000000000001",
                 "tab_name": "amber-fox",
                 "tab_index": 1,
-                "active_pane_id": "00000000-0000-0000-0000-000000000001",
+                "active_pane_id": "pane-00000000-0000-0000-0000-000000000001",
                 "pane_count": 2
             }],
             "panes": [{
-                "pane_id": "00000000-0000-0000-0000-000000000001",
-                "tab_id": "00000000-0000-0000-0000-000000000001",
-                "session_id": "00000000-0000-0000-0000-000000000001",
+                "pane_id": "pane-00000000-0000-0000-0000-000000000001",
+                "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+                "session_id": "session-00000000-0000-0000-0000-000000000001",
                 "pane_title": "htop",
                 "working_directory": "/home/user",
                 "command_argv": ["htop", "--tree"],
-                "lifecycle": "Running",
-                "focused_by_client_ids": ["00000000-0000-0000-0000-000000000001"]
+                "lifecycle": "running",
+                "focused_by_client_ids": ["client-00000000-0000-0000-0000-000000000001"]
             }],
             "clients": [{
-                "client_id": "00000000-0000-0000-0000-000000000001",
-                "session_id": "00000000-0000-0000-0000-000000000001",
-                "attached_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
+                "client_id": "client-00000000-0000-0000-0000-000000000001",
+                "session_id": "session-00000000-0000-0000-0000-000000000001",
+                "attached_at": "1970-01-01T00:20:34Z",
                 "viewport_size": { "column_count": 120, "row_count": 40 },
-                "active_tab_id": "00000000-0000-0000-0000-000000000001",
+                "active_tab_id": "tab-00000000-0000-0000-0000-000000000001",
                 "focused_pane_id": null,
-                "lock_mode": "Normal",
-                "origin": "Local",
+                "lock_mode": "normal",
+                "origin": "local",
                 "pane_area": null
             }]
         }])
@@ -1977,8 +2162,8 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
   tab tab-00000000-0000-0000-0000-000000000002 editor index 0
     tree
       horizontal split
-        pane pane-00000000-0000-0000-0000-000000000004
-        pane pane-00000000-0000-0000-0000-000000000005
+        pane pane-00000000-0000-0000-0000-000000000004, weight 1
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1
     client client-00000000-0000-0000-0000-000000000003 tiled viewport 80x22
       pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 40x22
       pane pane-00000000-0000-0000-0000-000000000005 rect 40,0 40x22
@@ -2059,8 +2244,8 @@ fn dump_layout_table_lists_the_panes_with_no_room() {
   tab tab-00000000-0000-0000-0000-000000000002 editor index 0
     tree
       horizontal split
-        pane pane-00000000-0000-0000-0000-000000000004
-        pane pane-00000000-0000-0000-0000-000000000005
+        pane pane-00000000-0000-0000-0000-000000000004, weight 1
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1
     client client-00000000-0000-0000-0000-000000000003 tiled viewport 6x4
       pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 6x4
       pane pane-00000000-0000-0000-0000-000000000005 rect 0,0 0x0
@@ -2117,8 +2302,8 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
   tab tab-00000000-0000-0000-0000-000000000002 editor index 0
     tree
       stacked split, active member 0
-        pane pane-00000000-0000-0000-0000-000000000004
-        pane pane-00000000-0000-0000-0000-000000000005 (collapsed)
+        pane pane-00000000-0000-0000-0000-000000000004, weight 1
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1 (collapsed)
     client client-00000000-0000-0000-0000-000000000003 tiled viewport 80x22
       pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 80x21
       pane pane-00000000-0000-0000-0000-000000000005 rect 0,21 80x1
@@ -2199,8 +2384,8 @@ fn dump_layout_table_marks_every_member_but_the_active_one() {
   tab tab-00000000-0000-0000-0000-000000000002 editor index 0
     tree
       stacked split, active member 9
-        pane pane-00000000-0000-0000-0000-000000000004 (collapsed)
-        pane pane-00000000-0000-0000-0000-000000000005
+        pane pane-00000000-0000-0000-0000-000000000004, weight 1 (collapsed)
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1
     no client views this tab
   clients
     client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
@@ -2227,8 +2412,8 @@ fn dump_layout_table_shows_a_vertical_split_by_name() {
   tab tab-00000000-0000-0000-0000-000000000002 editor index 0
     tree
       vertical split
-        pane pane-00000000-0000-0000-0000-000000000004
-        pane pane-00000000-0000-0000-0000-000000000005
+        pane pane-00000000-0000-0000-0000-000000000004, weight 1
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1
     no client views this tab
   clients
     client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
@@ -2258,8 +2443,8 @@ fn dump_layout_table_shows_a_fullscreen_client_and_its_pane() {
   tab tab-00000000-0000-0000-0000-000000000002 editor index 0
     tree
       horizontal split
-        pane pane-00000000-0000-0000-0000-000000000004
-        pane pane-00000000-0000-0000-0000-000000000005
+        pane pane-00000000-0000-0000-0000-000000000004, weight 1
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1
     client client-00000000-0000-0000-0000-000000000003 fullscreen pane-00000000-0000-0000-0000-000000000005 viewport 80x22
       pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 40x22
       pane pane-00000000-0000-0000-0000-000000000005 rect 40,0 40x22
@@ -2407,19 +2592,23 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
     assert_eq!(
         parsed_json,
         serde_json::json!([{
-            "session_id": "00000000-0000-0000-0000-000000000001",
+            "session_id": "session-00000000-0000-0000-0000-000000000001",
             "session_name": "quiet-lake",
             "tabs": [{
-                "tab_id": "00000000-0000-0000-0000-000000000002",
+                "tab_id": "tab-00000000-0000-0000-0000-000000000002",
                 "tab_name": "editor",
                 "tab_index": 0,
-                "layout_tree": { "Pane": "00000000-0000-0000-0000-000000000004" },
+                "layout_tree": {
+                    "node": "pane",
+                    "pane_id": "pane-00000000-0000-0000-0000-000000000004",
+                    "is_collapsed": false
+                },
                 "solved_tabs": [{
-                    "client_id": "00000000-0000-0000-0000-000000000003",
+                    "client_id": "client-00000000-0000-0000-0000-000000000003",
                     "viewport_size": { "column_count": 80, "row_count": 22 },
-                    "layout_mode": "Tiled",
+                    "layout_mode": "tiled",
                     "pane_rects": [{
-                        "pane_id": "00000000-0000-0000-0000-000000000004",
+                        "pane_id": "pane-00000000-0000-0000-0000-000000000004",
                         "outer_rect": {
                             "origin": { "column": 0, "row": 0 },
                             "size": { "column_count": 80, "row_count": 22 }
@@ -2432,9 +2621,9 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
             }],
             "floating_panes": [],
             "clients": [{
-                "client_id": "00000000-0000-0000-0000-000000000003",
-                "active_tab_id": "00000000-0000-0000-0000-000000000002",
-                "focused_pane_id": "00000000-0000-0000-0000-000000000004"
+                "client_id": "client-00000000-0000-0000-0000-000000000003",
+                "active_tab_id": "tab-00000000-0000-0000-0000-000000000002",
+                "focused_pane_id": "pane-00000000-0000-0000-0000-000000000004"
             }]
         }])
     );
@@ -2600,67 +2789,351 @@ fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
     assert_eq!(
         parsed_json,
         serde_json::json!([{
-            "session_id": "00000000-0000-0000-0000-000000000001",
+            "session_id": "session-00000000-0000-0000-0000-000000000001",
             "session_name": "quiet-lake",
             "tabs": [{
-                "tab_id": "00000000-0000-0000-0000-000000000002",
+                "tab_id": "tab-00000000-0000-0000-0000-000000000002",
                 "tab_name": "editor",
                 "tab_index": 0,
-                "layout_tree": { "Pane": "00000000-0000-0000-0000-000000000004" },
+                "layout_tree": {
+                    "node": "pane",
+                    "pane_id": "pane-00000000-0000-0000-0000-000000000004",
+                    "is_collapsed": false
+                },
                 "solved_tabs": []
             }],
             "floating_panes": [
                 {
-                    "pane_id": "00000000-0000-0000-0000-000000000006",
-                    "desired_size": { "width": { "Percent": 60 }, "height": { "Percent": 60 } },
+                    "pane_id": "pane-00000000-0000-0000-0000-000000000006",
+                    "desired_size": { "width": "60%", "height": "60%" },
                     "solved_size": { "column_count": 48, "row_count": 13 },
                     "client_views": [
                         {
-                            "client_id": "00000000-0000-0000-0000-000000000003",
-                            "position": "Default",
-                            "visibility": {
-                                "Drawn": {
-                                    "top_left_cell": { "column": 16, "row": 4 },
-                                    "layer_index": 0
-                                }
-                            }
+                            "client_id": "client-00000000-0000-0000-0000-000000000003",
+                            "position": "default",
+                            "visibility": "drawn",
+                            "top_left_cell": { "column": 16, "row": 4 },
+                            "layer_index": 0
                         },
                         {
-                            "client_id": "00000000-0000-0000-0000-000000000007",
-                            "position": { "Pinned": { "column": 20, "row": 5 } },
-                            "visibility": "Minimized"
+                            "client_id": "client-00000000-0000-0000-0000-000000000007",
+                            "position": "pinned",
+                            "stored_cell": { "column": 20, "row": 5 },
+                            "visibility": "minimized"
                         }
                     ]
                 },
                 {
-                    "pane_id": "00000000-0000-0000-0000-000000000008",
-                    "desired_size": { "width": { "Cells": 30 }, "height": { "Percent": 50 } },
+                    "pane_id": "pane-00000000-0000-0000-0000-000000000008",
+                    "desired_size": { "width": "30", "height": "50%" },
                     "solved_size": { "column_count": 30, "row_count": 11 },
                     "client_views": [
                         {
-                            "client_id": "00000000-0000-0000-0000-000000000003",
-                            "position": { "Moved": { "column": 2, "row": 1 } },
-                            "visibility": {
-                                "Drawn": {
-                                    "top_left_cell": { "column": 2, "row": 1 },
-                                    "layer_index": 1
-                                }
-                            }
+                            "client_id": "client-00000000-0000-0000-0000-000000000003",
+                            "position": "moved",
+                            "stored_cell": { "column": 2, "row": 1 },
+                            "visibility": "drawn",
+                            "top_left_cell": { "column": 2, "row": 1 },
+                            "layer_index": 1
                         },
                         {
-                            "client_id": "00000000-0000-0000-0000-000000000007",
-                            "position": "Default",
-                            "visibility": "NoFloatingViewport"
+                            "client_id": "client-00000000-0000-0000-0000-000000000007",
+                            "position": "default",
+                            "visibility": "no floating viewport"
                         }
                     ]
                 }
             ],
             "clients": [{
-                "client_id": "00000000-0000-0000-0000-000000000003",
-                "active_tab_id": "00000000-0000-0000-0000-000000000002",
-                "focused_pane_id": "00000000-0000-0000-0000-000000000008"
+                "client_id": "client-00000000-0000-0000-0000-000000000003",
+                "active_tab_id": "tab-00000000-0000-0000-0000-000000000002",
+                "focused_pane_id": "pane-00000000-0000-0000-0000-000000000008"
             }]
         }])
+    );
+}
+
+#[test]
+fn dump_layout_json_names_each_split_and_marks_a_collapsed_stack_member() {
+    let nested_layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutNode::Pane(build_test_first_pane_id()),
+            LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                vec![
+                    build_test_second_pane_id(),
+                    PaneId::from_uuid(build_test_uuid_with_suffix(6)),
+                ],
+                0,
+            )),
+        ],
+    ));
+    let solved_tab = SolvedTab {
+        stack_headers: vec![StackHeader {
+            pane_id: PaneId::from_uuid(build_test_uuid_with_suffix(6)),
+            header_rect: Rect::from_origin_and_size(
+                Point {
+                    column: 40,
+                    row: 21,
+                },
+                Size {
+                    column_count: 40,
+                    row_count: 1,
+                },
+            ),
+            member_index: 1,
+            member_count: 2,
+        }],
+        ..build_test_tiled_solve()
+    };
+    let session_layout = build_test_session_layout(nested_layout_tree, vec![solved_tab], None);
+
+    let parsed_json: serde_json::Value =
+        serde_json::from_str(&render_layouts(&[session_layout], OutputFormat::Json))
+            .expect("the dump is JSON");
+
+    assert_eq!(
+        parsed_json[0]["tabs"][0]["layout_tree"],
+        serde_json::json!({
+            "node": "split",
+            "split_direction": "horizontal",
+            "active_child_index": null,
+            "weights": ["weight 1", "weight 1"],
+            "is_collapsed": false,
+            "children": [
+                {
+                    "node": "pane",
+                    "pane_id": "pane-00000000-0000-0000-0000-000000000004",
+                    "is_collapsed": false
+                },
+                {
+                    "node": "split",
+                    "split_direction": "stacked",
+                    "active_child_index": 0,
+                    "weights": ["weight 1", "weight 1"],
+                    "is_collapsed": false,
+                    "children": [
+                        {
+                            "node": "pane",
+                            "pane_id": "pane-00000000-0000-0000-0000-000000000005",
+                            "is_collapsed": false
+                        },
+                        {
+                            "node": "pane",
+                            "pane_id": "pane-00000000-0000-0000-0000-000000000006",
+                            "is_collapsed": true
+                        }
+                    ]
+                }
+            ]
+        })
+    );
+    assert_eq!(
+        parsed_json[0]["tabs"][0]["solved_tabs"][0]["stack_headers"],
+        serde_json::json!([{
+            "pane_id": "pane-00000000-0000-0000-0000-000000000006",
+            "header_rect": {
+                "origin": { "column": 40, "row": 21 },
+                "size": { "column_count": 40, "row_count": 1 }
+            },
+            "member_index": 1,
+            "member_count": 2
+        }])
+    );
+}
+
+/// A horizontal split of the panes `pane_ids`, each sized by the weight at
+/// the same index of `weights`.
+fn build_test_weighted_split(pane_ids: Vec<PaneId>, weights: Vec<SizeWeight>) -> LayoutNode {
+    LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children: pane_ids.into_iter().map(LayoutNode::Pane).collect(),
+        weights,
+        active_child_index: 0,
+    })
+}
+
+#[test]
+fn dump_layout_prints_each_child_weight_in_layout_file_words_in_the_table_and_json() {
+    let weighted_split = build_test_weighted_split(
+        vec![
+            build_test_first_pane_id(),
+            build_test_second_pane_id(),
+            PaneId::from_uuid(build_test_uuid_with_suffix(6)),
+        ],
+        vec![
+            SizeWeight {
+                primary_constraint: SizeConstraint::Flex(2),
+                minimum_cell_count: Some(10),
+                preferred_cell_count: None,
+                resize_delta: 5,
+            },
+            SizeWeight::from_primary_constraint(SizeConstraint::Fixed(30)),
+            SizeWeight {
+                primary_constraint: SizeConstraint::Percent(60),
+                minimum_cell_count: None,
+                preferred_cell_count: Some(20),
+                resize_delta: -3,
+            },
+        ],
+    );
+    let session_layout = SessionLayout {
+        clients: Vec::new(),
+        ..build_test_session_layout(weighted_split, Vec::new(), None)
+    };
+
+    let rendered_table = render_layouts(std::slice::from_ref(&session_layout), OutputFormat::Table);
+    let parsed_json: serde_json::Value =
+        serde_json::from_str(&render_layouts(&[session_layout], OutputFormat::Json))
+            .expect("the dump is JSON");
+
+    assert_eq!(
+        rendered_table,
+        "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split
+        pane pane-00000000-0000-0000-0000-000000000004, weight 2 min 10 resize +5
+        pane pane-00000000-0000-0000-0000-000000000005, size 30
+        pane pane-00000000-0000-0000-0000-000000000006, size 60% preferred 20 resize -3
+    no client views this tab
+  clients
+"
+    );
+    assert_eq!(
+        parsed_json[0]["tabs"][0]["layout_tree"]["weights"],
+        serde_json::json!([
+            "weight 2 min 10 resize +5",
+            "size 30",
+            "size 60% preferred 20 resize -3"
+        ])
+    );
+}
+
+#[test]
+fn dump_layout_prints_a_floor_or_target_that_is_the_whole_constraint_alone() {
+    let weighted_split = build_test_weighted_split(
+        vec![build_test_first_pane_id(), build_test_second_pane_id()],
+        vec![
+            SizeWeight::from_primary_constraint(SizeConstraint::Minimum(10)),
+            SizeWeight {
+                primary_constraint: SizeConstraint::Preferred(20),
+                minimum_cell_count: Some(5),
+                preferred_cell_count: None,
+                resize_delta: 0,
+            },
+        ],
+    );
+    let session_layout = build_test_session_layout(weighted_split, Vec::new(), None);
+
+    let parsed_json: serde_json::Value =
+        serde_json::from_str(&render_layouts(&[session_layout], OutputFormat::Json))
+            .expect("the dump is JSON");
+
+    assert_eq!(
+        parsed_json[0]["tabs"][0]["layout_tree"]["weights"],
+        serde_json::json!(["min 10", "preferred 20 min 5"])
+    );
+}
+
+#[test]
+fn dump_layout_names_a_split_whose_weights_do_not_number_one_per_child() {
+    let extra_weight_split = build_test_weighted_split(
+        vec![build_test_first_pane_id(), build_test_second_pane_id()],
+        vec![
+            SizeWeight::from_primary_constraint(SizeConstraint::Flex(2)),
+            SizeWeight::default(),
+            SizeWeight::from_primary_constraint(SizeConstraint::Fixed(7)),
+        ],
+    );
+    let missing_weight_split = build_test_weighted_split(
+        vec![build_test_first_pane_id(), build_test_second_pane_id()],
+        vec![SizeWeight::from_primary_constraint(SizeConstraint::Flex(2))],
+    );
+
+    let extra_weight_layout = SessionLayout {
+        clients: Vec::new(),
+        ..build_test_session_layout(extra_weight_split, Vec::new(), None)
+    };
+    let missing_weight_layout = SessionLayout {
+        clients: Vec::new(),
+        ..build_test_session_layout(missing_weight_split, Vec::new(), None)
+    };
+    let extra_weight_json: serde_json::Value = serde_json::from_str(&render_layouts(
+        std::slice::from_ref(&extra_weight_layout),
+        OutputFormat::Json,
+    ))
+    .expect("the dump is JSON");
+
+    assert_eq!(
+        render_layouts(&[extra_weight_layout], OutputFormat::Table),
+        "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split, 3 weights for 2 children
+        pane pane-00000000-0000-0000-0000-000000000004, weight 2
+        pane pane-00000000-0000-0000-0000-000000000005, weight 1
+    no client views this tab
+  clients
+"
+    );
+    assert_eq!(
+        extra_weight_json[0]["tabs"][0]["layout_tree"]["weights"],
+        serde_json::json!(["weight 2", "weight 1", "size 7"])
+    );
+    assert_eq!(
+        render_layouts(&[missing_weight_layout], OutputFormat::Table),
+        "\
+session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split, 1 weight for 2 children
+        pane pane-00000000-0000-0000-0000-000000000004, weight 2
+        pane pane-00000000-0000-0000-0000-000000000005
+    no client views this tab
+  clients
+"
+    );
+}
+
+#[test]
+fn dump_layout_json_names_a_fullscreen_client_its_pane_and_the_panes_with_no_room() {
+    let solved_tab = SolvedTab {
+        layout_mode: LayoutMode::Fullscreen {
+            focused_pane_id: build_test_second_pane_id(),
+        },
+        suppressed_pane_ids: vec![build_test_first_pane_id()],
+        is_every_pane_suppressed: true,
+        ..build_test_tiled_solve()
+    };
+    let session_layout = build_test_session_layout(
+        build_test_horizontal_split(),
+        vec![solved_tab],
+        Some(build_test_second_pane_id()),
+    );
+
+    let parsed_json: serde_json::Value =
+        serde_json::from_str(&render_layouts(&[session_layout], OutputFormat::Json))
+            .expect("the dump is JSON");
+    let solved_tab_json = &parsed_json[0]["tabs"][0]["solved_tabs"][0];
+
+    assert_eq!(
+        solved_tab_json["layout_mode"],
+        serde_json::json!("fullscreen")
+    );
+    assert_eq!(
+        solved_tab_json["fullscreen_pane_id"],
+        serde_json::json!("pane-00000000-0000-0000-0000-000000000005")
+    );
+    assert_eq!(
+        solved_tab_json["suppressed_pane_ids"],
+        serde_json::json!(["pane-00000000-0000-0000-0000-000000000004"])
+    );
+    assert_eq!(
+        solved_tab_json["is_every_pane_suppressed"],
+        serde_json::json!(true)
     );
 }
 
@@ -2694,9 +3167,9 @@ fn build_pane_created_event() -> RecentEvent {
 #[test]
 fn debug_events_table_shows_when_what_and_which_ids() {
     let expected_text = "\
-session                                       name        at    event        ids
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  Quit         -
+session                                       name        at                    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  Quit         -
 ";
     let rendered_text = render_recent_events(
         &[build_session_events(vec![
@@ -2739,9 +3212,9 @@ fn debug_events_table_tells_two_sessions_sharing_a_name_apart() {
     assert_eq!(
         rendered_text,
         "\
-session                                       name        at    event        ids
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
-session-00000000-0000-0000-0000-000000000009  quiet-lake  1234  Restarting   -
+session                                       name        at                    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000009  quiet-lake  1970-01-01T00:20:34Z  Restarting   -
 "
     );
 }
@@ -2758,15 +3231,15 @@ fn debug_events_json_carries_the_name_the_ids_and_the_time() {
     assert_eq!(
         parsed_json,
         serde_json::json!([{
-            "session_id": "00000000-0000-0000-0000-000000000001",
+            "session_id": "session-00000000-0000-0000-0000-000000000001",
             "session_name": "quiet-lake",
             "recent_events": [{
-                "occurred_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
+                "occurred_at": "1970-01-01T00:20:34Z",
                 "event_name": "PaneCreated",
                 "session_id": null,
                 "client_id": null,
-                "tab_id": "00000000-0000-0000-0000-000000000002",
-                "pane_id": "00000000-0000-0000-0000-000000000004",
+                "tab_id": "tab-00000000-0000-0000-0000-000000000002",
+                "pane_id": "pane-00000000-0000-0000-0000-000000000004",
                 "command_id": null
             }]
         }])
@@ -2793,8 +3266,8 @@ fn debug_events_table_lists_the_client_tab_and_pane_ids_in_that_order() {
     assert_eq!(
         rendered_text,
         "\
-session                                       name        at    event        ids
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneFocused  client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session                                       name        at                    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  PaneFocused  client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
 "
     );
 }
@@ -3001,9 +3474,9 @@ fn debug_events_table_pads_a_wide_session_name_by_terminal_columns() {
     assert_eq!(
         rendered_text,
         "\
-session                                       name           at    event        ids
-session-00000000-0000-0000-0000-000000000001  quiet-lake     1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
-session-00000000-0000-0000-0000-000000000009  S-ふるい-みず  1234  Quit         -
+session                                       name           at                    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake     1970-01-01T00:20:34Z  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000009  S-ふるい-みず  1970-01-01T00:20:34Z  Quit         -
 "
     );
 }
@@ -3016,8 +3489,8 @@ fn debug_events_table_renders_a_row_for_every_event_a_full_ring_holds() {
         render_recent_events(&[build_session_events(recent_events)], OutputFormat::Table);
 
     let header_line =
-        "session                                       name        at    event        ids\n";
-    let pane_created_line = "session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004\n";
+        "session                                       name        at                    event        ids\n";
+    let pane_created_line = "session-00000000-0000-0000-0000-000000000001  quiet-lake  1970-01-01T00:20:34Z  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004\n";
     assert_eq!(
         rendered_text,
         header_line.to_string() + &pane_created_line.repeat(MAX_RECENT_EVENT_COUNT)

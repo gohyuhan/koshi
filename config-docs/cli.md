@@ -460,6 +460,25 @@ id line.
 Every list and inspect command accepts `--format table` or `--format json`.
 Table is the default.
 
+Both formats print the same text for an id, a time, and a state:
+
+- An id prints in the form a target flag takes: `pane-0192f0c1-…`, so a
+  `--pane` flag takes the `pane_id` that `--format json` prints.
+- A time prints as RFC 3339 UTC text, rounded down to the whole second:
+  `2025-01-01T00:00:00Z`. A year before 0 or after 9999 prints with a sign
+  and at least five digits: `-00001-12-31T23:59:59Z`, `+10000-01-01T00:00:00Z`.
+- A state prints as the word the table prints: `running`, `host`,
+  `not running`. A client's input mode prints as its keymap name, such as
+  `normal` or `pane-placement`.
+
+In a table, an absent value prints as `-` and a list of ids prints as its
+count. In JSON, an absent value is `null`, a list of ids is the whole list,
+and a size, a rectangle, or a cell is an object of numbers:
+`"viewport_size": {"column_count": 120, "row_count": 40}`. `koshi inspect
+client --format json` writes `pane_area` as `null` for no report,
+`"starving"`, or a size object, and `origin` as `"local"`, `"remote"`, or
+`null`.
+
 `koshi list-panes` lists the tiled panes of each session in tab order, then
 its floating panes in the order they became floating. A floating pane prints
 `float` in the `tab` column and `-` in the `tab_name` column, and `--format
@@ -1059,8 +1078,9 @@ The `koshi share list` columns read:
 | `last_used` | When a presented token last reached a session through this grant. The time is written to the store right after the connection opens |
 | `revoked` | When an operator stopped the grant |
 
-In table cells a time prints as whole seconds since the Unix epoch, and an
-absent value prints as `-`.
+A time prints as RFC 3339 UTC text, such as `2025-01-01T00:00:00Z`, in the
+table and in JSON. An absent value prints as `-` in a table and `null` in JSON.
+`--format json` writes `scope` as `"host"` or the session id.
 
 ### Connecting to another machine
 
@@ -1422,6 +1442,10 @@ The version column reads:
 | `not running` | Nothing is listening there |
 | `unreachable` | The server could not be asked, the session is restarting, the router did not answer within 5 seconds, or a session did not answer within 5 seconds after the router was checked; the reason prints on standard error |
 
+`--format json` writes each row's `state`: `"running"` with the build in
+`version`, `"not running"`, or `"unreachable"` with the reason in `detail`. A
+server too old to name its build is `"running"` with `"version": null`.
+
 A server that could not be asked does not stop the rest of the answer: the
 other rows still print, and the command exits 4. Up to 16 sessions are asked
 at the same time. Sessions of other users that the shared directory holds past its
@@ -1588,6 +1612,23 @@ Example: one 80x24 terminal shows a floating pane that `koshi new-pane
 --floating` opened. The pane prints as `pane pane-… asks 60%x60% size 48x13`,
 and the client line under it prints as `client client-… rect 16,4 48x13 layer 0
 position default`.
+
+Each line under a split ends with how that child is sized, in the words a
+layout file uses: `weight 2`, `size 30` for 30 cells, or `size 60%`, then
+`min <cells>` and `preferred <cells>` when set, then `resize <cells>` after a
+user resize. Example: `pane pane-…, weight 2 min 10 resize +5`. A split whose
+weights do not number one per child says so: `horizontal split, 3 weights for
+2 children`.
+
+`dump-layout --format json` writes the same words as fields. Each tree node
+has `"node": "pane"` or `"node": "split"`, and a split has `split_direction`
+(`horizontal`, `vertical` or `stacked`) and `weights`, one sizing per child in
+the words above. Each client solve has `layout_mode`
+(`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each client view of a
+floating pane has `position` (`default`, or `moved` or `pinned` with
+`stored_cell`) and `visibility` (`drawn` with `top_left_cell` and
+`layer_index`, `minimized`, or `no floating viewport`). `desired_size` writes
+each axis as `--cols` and `--rows` take it: `"60%"` or `"80"`.
 
 A session that started before you installed this Koshi cannot report its
 layout. `dump-layout` says so and names what to do: restart that session, or

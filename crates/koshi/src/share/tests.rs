@@ -413,49 +413,32 @@ fn build_sample_token_entries() -> Vec<TokenEntry> {
 fn a_listing_renders_one_table_row_per_grant_with_absent_times_as_a_dash() {
     assert_eq!(
         output::render_share_list(&build_sample_token_entries(), OutputFormat::Table),
-        "identity  scope                                         issued  expires  last_used  revoked\n\
-         alice     host                                          1000    87400    2000       -\n\
-         bob       session-0192f0c1-2345-7000-8000-000000000001  3000    -        -          4000\n"
+        "identity  scope                                         issued                expires               last_used             revoked\n\
+         alice     host                                          1970-01-01T00:16:40Z  1970-01-02T00:16:40Z  1970-01-01T00:33:20Z  -\n\
+         bob       session-0192f0c1-2345-7000-8000-000000000001  1970-01-01T00:50:00Z  -                     -                     1970-01-01T01:06:40Z\n"
     );
 }
 
 #[test]
-fn a_listing_renders_the_serde_form_of_every_grant_as_json() {
+fn a_listing_renders_every_grant_as_json_with_the_words_ids_and_times_the_table_prints() {
     assert_eq!(
         output::render_share_list(&build_sample_token_entries(), OutputFormat::Json),
         r#"[
   {
     "identity": "alice",
-    "scope": "HostWide",
-    "issued_at": {
-      "secs_since_epoch": 1000,
-      "nanos_since_epoch": 0
-    },
-    "expires_at": {
-      "secs_since_epoch": 87400,
-      "nanos_since_epoch": 0
-    },
-    "last_used_at": {
-      "secs_since_epoch": 2000,
-      "nanos_since_epoch": 0
-    },
+    "scope": "host",
+    "issued_at": "1970-01-01T00:16:40Z",
+    "expires_at": "1970-01-02T00:16:40Z",
+    "last_used_at": "1970-01-01T00:33:20Z",
     "revoked_at": null
   },
   {
     "identity": "bob",
-    "scope": {
-      "Session": "0192f0c1-2345-7000-8000-000000000001"
-    },
-    "issued_at": {
-      "secs_since_epoch": 3000,
-      "nanos_since_epoch": 0
-    },
+    "scope": "session-0192f0c1-2345-7000-8000-000000000001",
+    "issued_at": "1970-01-01T00:50:00Z",
     "expires_at": null,
     "last_used_at": null,
-    "revoked_at": {
-      "secs_since_epoch": 4000,
-      "nanos_since_epoch": 0
-    }
+    "revoked_at": "1970-01-01T01:06:40Z"
   }
 ]
 "#

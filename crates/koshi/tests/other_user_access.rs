@@ -213,10 +213,9 @@ fn build_koshi_command_as_user(
 #[cfg(unix)]
 fn render_single_server_version_answer(session_id: SessionId, build_version: &str) -> String {
     format!(
-        "[\n  {{\n    \"server_kind\": \"Router\",\n    \"session_id\": null,\n    \
-         \"state\": \"NotRunning\"\n  }},\n  {{\n    \"server_kind\": \"Session\",\n    \
-         \"session_id\": \"{}\",\n    \"state\": \"Running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n",
-        session_id.get_uuid()
+        "[\n  {{\n    \"server_kind\": \"router\",\n    \"session_id\": null,\n    \
+         \"state\": \"not running\"\n  }},\n  {{\n    \"server_kind\": \"session\",\n    \
+         \"session_id\": \"{session_id}\",\n    \"state\": \"running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n"
     )
 }
 

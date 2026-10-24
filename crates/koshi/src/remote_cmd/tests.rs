@@ -108,9 +108,35 @@ fn a_listing_renders_one_table_row_per_saved_server_with_an_absent_value_as_a_da
         output::render_remote_list(&build_two_saved_server_records(), OutputFormat::Table),
         format!(
             "name  address            fingerprint{}  last_used\n\
-             work  laptop.local:7654  {}  20\n\
+             work  laptop.local:7654  {}  1970-01-01T00:00:20Z\n\
              -     192.0.2.4:7654     {}  -\n",
             " ".repeat(64 - "fingerprint".len()),
+            "aa".repeat(32),
+            "bb".repeat(32)
+        )
+    );
+}
+
+#[test]
+fn a_listing_renders_every_saved_server_as_json_with_the_time_the_table_prints() {
+    assert_eq!(
+        output::render_remote_list(&build_two_saved_server_records(), OutputFormat::Json),
+        format!(
+            r#"[
+  {{
+    "server_name": "work",
+    "server_address": "laptop.local:7654",
+    "certificate_fingerprint": "{}",
+    "last_used_at": "1970-01-01T00:00:20Z"
+  }},
+  {{
+    "server_name": null,
+    "server_address": "192.0.2.4:7654",
+    "certificate_fingerprint": "{}",
+    "last_used_at": null
+  }}
+]
+"#,
             "aa".repeat(32),
             "bb".repeat(32)
         )
