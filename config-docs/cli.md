@@ -800,6 +800,12 @@ pane`.
 | `koshi focus-tab` | `--index` or `--tab <NAME_OR_ID>`, optional `--client` | Focus one tab |
 | `koshi move-tab` | `--index`, optional `--tab <NAME_OR_ID>` | Move one tab to a zero-based index |
 
+`--index` counts from 0. An index past the last tab is refused, and the command
+exits 1. The error names the session and the indexes it takes. Example: session
+`work` has 3 tabs. `koshi focus-tab --index 9` and `koshi move-tab --index 9`
+both print `no target matched`, then ``session `work` has 3 tabs; --index takes
+0 to 2``.
+
 `--client` on `new-tab` names the terminal that switches onto the new tab. With
 one terminal attached the flag is optional. If two or more terminals are
 attached and the command names no terminal, it fails with `several clients are

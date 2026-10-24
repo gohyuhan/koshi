@@ -11718,7 +11718,7 @@ fn move_tab_defaults_to_the_issuers_active_tab() {
 }
 
 #[test]
-fn move_tab_clamps_an_out_of_range_index() {
+fn move_tab_to_the_last_slot_moves_it_behind_every_other_tab() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
     let first_tab_id = TabId::new();
@@ -11738,12 +11738,12 @@ fn move_tab_clamps_an_out_of_range_index() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
-    // Index 99 clamps to the last slot (2).
+    // Index 2 is the last slot of three.
     let command_result = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::MoveTab(MoveTabArgs {
             tab_id: Some(first_tab_id),
-            target_tab_index: 99,
+            target_tab_index: 2,
         }),
     ));
     match command_result {
@@ -11756,6 +11756,60 @@ fn move_tab_clamps_an_out_of_range_index() {
     assert_eq!(session.tabs[&second_tab_id].get_tab_index(), 0);
     assert_eq!(session.tabs[&third_tab_id].get_tab_index(), 1);
     assert_eq!(session.tabs[&first_tab_id].get_tab_index(), 2);
+}
+
+#[test]
+fn move_tab_past_the_last_slot_is_refused_and_names_the_session_and_its_indexes() {
+    for (tab_count, target_tab_index, expected_help) in [
+        (3, 3, "session `s` has 3 tabs; --index takes 0 to 2"),
+        (3, 99, "session `s` has 3 tabs; --index takes 0 to 2"),
+        (
+            3,
+            usize::MAX,
+            "session `s` has 3 tabs; --index takes 0 to 2",
+        ),
+        (1, 1, "session `s` has 1 tab; --index takes 0"),
+    ] {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let mut session = build_bare_session(SessionId::new());
+        let tab_ids: Vec<TabId> = (0..tab_count).map(|_| TabId::new()).collect();
+        for &tab_id in &tab_ids {
+            let pane_id = PaneId::new();
+            register_pane_record(&mut session, pane_id);
+            register_session_tab(&mut session, tab_id, pane_id);
+        }
+        attach_client(&mut session, client_id, tab_ids[0], None);
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+        let _ = take_session_view_changes(&mut runtime, session_id);
+
+        let command_envelope = build_command_envelope(
+            CommandSource::from_key_binding(client_id),
+            Command::MoveTab(MoveTabArgs {
+                tab_id: Some(tab_ids[0]),
+                target_tab_index,
+            }),
+        );
+        let command_id = command_envelope.command_id;
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::TargetNotFound,
+                help: Some(expected_help.to_string()),
+            },
+            "{tab_count} tabs, index {target_tab_index}"
+        );
+        let session = &runtime.session_by_id[&session_id];
+        for (tab_index, tab_id) in tab_ids.iter().enumerate() {
+            assert_eq!(session.tabs[tab_id].get_tab_index(), tab_index);
+        }
+        assert_eq!(
+            take_session_view_changes(&mut runtime, session_id),
+            SessionViewChanges::default()
+        );
+    }
 }
 
 #[test]
@@ -11849,11 +11903,13 @@ fn move_tab_with_an_unknown_tab_is_rejected() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
+    // An unknown tab is refused before its index is read: index 99 is past
+    // the last slot too.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::MoveTab(MoveTabArgs {
             tab_id: Some(TabId::new()),
-            target_tab_index: 0,
+            target_tab_index: 99,
         }),
     );
     let command_id = command_envelope.command_id;
@@ -12035,7 +12091,7 @@ fn focus_tab_on_the_already_active_tab_is_ok_with_no_events() {
 }
 
 #[test]
-fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
+fn focus_tab_with_an_unknown_id_is_not_found() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
     let first_tab_id = TabId::new();
@@ -12047,11 +12103,63 @@ fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
-    for tab_target in [TabTarget::Id(TabId::new()), TabTarget::Index(9)] {
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::FocusTab(FocusTabArgs {
+            focus_target: TabTarget::Id(TabId::new()),
+            client_id: None,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: None,
+        }
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .unwrap()
+            .get_active_tab_id(),
+        first_tab_id
+    );
+}
+
+#[test]
+fn focus_tab_with_an_index_past_the_last_tab_names_the_session_and_its_indexes() {
+    for (tab_count, tab_index, expected_help) in [
+        (3, 3, "session `s` has 3 tabs; --index takes 0 to 2"),
+        (
+            3,
+            usize::MAX,
+            "session `s` has 3 tabs; --index takes 0 to 2",
+        ),
+        (1, 1, "session `s` has 1 tab; --index takes 0"),
+        (0, 0, "session `s` has no tab"),
+    ] {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let mut session = build_bare_session(SessionId::new());
+        let tab_ids: Vec<TabId> = (0..tab_count).map(|_| TabId::new()).collect();
+        for &tab_id in &tab_ids {
+            let pane_id = PaneId::new();
+            register_pane_record(&mut session, pane_id);
+            register_session_tab(&mut session, tab_id, pane_id);
+        }
+        // With no tab, the client views a tab the session does not hold.
+        let viewed_tab_id = tab_ids.first().copied().unwrap_or_else(TabId::new);
+        attach_client(&mut session, client_id, viewed_tab_id, None);
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+
         let command_envelope = build_command_envelope(
             CommandSource::from_key_binding(client_id),
             Command::FocusTab(FocusTabArgs {
-                focus_target: tab_target,
+                focus_target: TabTarget::Index(tab_index),
                 client_id: None,
             }),
         );
@@ -12061,18 +12169,19 @@ fn focus_tab_with_an_unknown_id_or_index_is_not_found() {
             CommandResult::Rejected {
                 command_id,
                 reason: RejectReason::TargetNotFound,
-                help: None,
-            }
+                help: Some(expected_help.to_string()),
+            },
+            "{tab_count} tabs, index {tab_index}"
+        );
+        assert_eq!(
+            runtime.session_by_id[&session_id]
+                .clients
+                .get_client_by_id(client_id)
+                .unwrap()
+                .get_active_tab_id(),
+            viewed_tab_id
         );
     }
-    assert_eq!(
-        runtime.session_by_id[&session_id]
-            .clients
-            .get_client_by_id(client_id)
-            .unwrap()
-            .get_active_tab_id(),
-        first_tab_id
-    );
 }
 
 #[test]
