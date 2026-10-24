@@ -31,7 +31,7 @@ use crate::error::{build_validation_error, ConfigError};
 use crate::layer::{PartialColorPalette, PartialThemeConfig};
 use crate::parser::{
     find_section_block, format_unknown_key, parse_kdl, parse_string_kdl_value, set_parsed_field,
-    validate_version_node,
+    validate_version_node, ParseWarnings,
 };
 use crate::types::RgbColor;
 
@@ -57,6 +57,9 @@ const COLOR_KEYS: &[&str] = &[
 /// Parses a theme file's `theme_source_text` into a [`PartialThemeConfig`]
 /// override layer and one warning per skipped color, unknown key, value
 /// written on the `colors` line, and repeated `colors` block, in file order.
+/// Each warning starts with the line and column of its node, such as
+/// ``line 3, column 5: ignored `colors.accent`: color must be 6 hex digits
+/// (#RRGGBB), got 3``.
 /// The returned layer leaves [`theme_name`](PartialThemeConfig::theme_name)
 /// unset, and the caller sets it from the file name.
 ///
@@ -72,7 +75,7 @@ pub fn parse_theme(
 ) -> Result<(PartialThemeConfig, Vec<String>), ConfigError> {
     let theme_document = parse_kdl(theme_path, theme_source_text)?;
     let mut partial_theme_config = PartialThemeConfig::default();
-    let mut parse_warnings = Vec::new();
+    let mut parse_warnings = ParseWarnings::default();
     let mut has_seen_version = false;
     let mut has_seen_colors = false;
     for config_node in theme_document.nodes() {
@@ -89,17 +92,21 @@ pub fn parse_theme(
             }
             "colors" => {
                 if has_seen_colors {
-                    parse_warnings.push("ignored duplicate `colors` section".to_string());
+                    parse_warnings
+                        .record_warning(config_node.span(), "ignored duplicate `colors` section");
                 } else {
                     has_seen_colors = true;
                     partial_theme_config.colors =
                         Some(parse_color_section(config_node, &mut parse_warnings));
                 }
             }
-            unknown_section_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(unknown_section_name, &["version", "colors"])
-            )),
+            unknown_section_name => parse_warnings.record_warning(
+                config_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(unknown_section_name, &["version", "colors"])
+                ),
+            ),
         }
     }
     if !has_seen_version {
@@ -108,16 +115,19 @@ pub fn parse_theme(
             "file must declare `version`",
         ));
     }
-    Ok((partial_theme_config, parse_warnings))
+    Ok((
+        partial_theme_config,
+        parse_warnings.format_in_file_order(theme_source_text),
+    ))
 }
 
 /// Reads the `colors { … }` block into per-role overrides. A role whose value
-/// is unreadable, and a name outside [`COLOR_KEYS`], are left unset and pushed
-/// onto `parse_warnings`. A `colors` node with no `{ … }` block sets no role, and a
+/// is unreadable, and a name outside [`COLOR_KEYS`], are left unset and
+/// recorded in `parse_warnings`. A `colors` node with no `{ … }` block sets no role, and a
 /// value written on the `colors` line itself is warned about and ignored.
 fn parse_color_section(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialColorPalette {
     let mut color_palette = PartialColorPalette::default();
     let Some(color_section_children) = find_section_block(config_node, parse_warnings) else {
@@ -140,10 +150,13 @@ fn parse_color_section(
             "letterbox" => &mut color_palette.letterbox,
             "bar-bg" => &mut color_palette.bar_bg,
             unknown_color_name => {
-                parse_warnings.push(format!(
-                    "ignored {}",
-                    format_unknown_key(&format!("colors.{unknown_color_name}"), COLOR_KEYS)
-                ));
+                parse_warnings.record_warning(
+                    color_node.span(),
+                    format!(
+                        "ignored {}",
+                        format_unknown_key(&format!("colors.{unknown_color_name}"), COLOR_KEYS)
+                    ),
+                );
                 continue;
             }
         };
@@ -151,7 +164,7 @@ fn parse_color_section(
             color_slot,
             parse_rgb_color(color_node),
             "colors",
-            color_field_name,
+            color_node,
             parse_warnings,
         );
     }

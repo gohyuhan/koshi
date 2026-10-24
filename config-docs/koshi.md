@@ -9,7 +9,9 @@ reach your sessions, and whether programs in panes may write your clipboard.
 on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `%APPDATA%\koshi\config\koshi.kdl` on Windows. See [README](README.md#where-the-files-go).
 
-**Bad fields:** startup skips them, keeps their defaults, and logs each one.
+**Bad fields:** startup skips them, keeps their defaults, and logs each one
+with its line and column, such as ``line 3, column 5: ignored `pane.gap`:
+expected an integer``.
 `koshi config check` rejects them. `koshi config migrate` keeps them in the
 migrated file. A bad value in `update` rejects the whole app file for that
 launch.

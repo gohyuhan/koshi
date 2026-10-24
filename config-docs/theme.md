@@ -30,7 +30,8 @@ Built-in `default` colors apply when:
 - the selected file is missing or invalid.
 
 Koshi logs theme load errors. A bad color keeps its default; other valid colors
-still apply.
+still apply. Each skipped color is logged with its line and column, such as
+``line 3, column 5: ignored `colors.accent`: expected a string``.
 
 The file is the theme itself — no wrapping block, just a required `version`
 and an optional `colors` block. Every color is a `#RRGGBB` hex string (the

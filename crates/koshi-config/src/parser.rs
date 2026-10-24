@@ -3,9 +3,9 @@
 //! [`parse_kdl`] wraps the `kdl` crate's document parser and attaches the
 //! config file path to any syntax error as a [`ConfigParseDiagnostic`]. The
 //! `parse_*_kdl_value` readers turn one field node into a typed field value,
-//! `set_parsed_field` stores one field value or records the skip as a warning,
-//! and [`format_unknown_key`] names the nearest allowed key for an unrecognized
-//! one.
+//! `set_parsed_field` stores one field value or records the skip in
+//! `ParseWarnings`, and [`format_unknown_key`] names the nearest allowed key
+//! for an unrecognized one.
 
 use std::path::Path;
 
@@ -13,7 +13,8 @@ use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
 use miette::SourceSpan;
 
 use crate::error::{
-    build_validation_error, validate_config_schema_version, ConfigError, ConfigParseDiagnostic,
+    build_validation_error, format_problems_at_line_and_column, validate_config_schema_version,
+    ConfigError, ConfigParseDiagnostic,
 };
 
 #[cfg(test)]
@@ -181,21 +182,57 @@ pub fn parse_kdl(
 // takes one field node (`key value`) and returns the typed field value, or a plain-words
 // reason it could not be read.
 
+/// The skipped settings of one field-partial file, `koshi.kdl` or a theme,
+/// each recorded at the node it skips.
+#[derive(Debug, Default)]
+pub(crate) struct ParseWarnings {
+    /// `(byte offset where the skipped node starts, message)` per skipped
+    /// setting, in the order recorded.
+    warning_messages_by_offset: Vec<(usize, String)>,
+}
+
+impl ParseWarnings {
+    /// Records `warning_message` at the start of `warning_span`.
+    pub(crate) fn record_warning(
+        &mut self,
+        warning_span: SourceSpan,
+        warning_message: impl Into<String>,
+    ) {
+        self.warning_messages_by_offset
+            .push((warning_span.offset(), warning_message.into()));
+    }
+
+    /// Every recorded warning as `line <L>, column <C>: <message>`, the line
+    /// and column of its node in `config_source_text`, in file order:
+    /// ascending node start, and the order recorded for one start.
+    ///
+    /// Example — `version 2\npane { gap "x" }` gives ``line 2, column 8:
+    /// ignored `pane.gap`: expected an integer``.
+    pub(crate) fn format_in_file_order(mut self, config_source_text: &str) -> Vec<String> {
+        self.warning_messages_by_offset
+            .sort_by_key(|(byte_offset, _)| *byte_offset);
+        format_problems_at_line_and_column(config_source_text, self.warning_messages_by_offset)
+    }
+}
+
 /// The `{ … }` block of a section node, warning about a value written on the
 /// section line, which no section reads.
 ///
 /// `scrollback 5000` gives `None` and the warning ``ignored `scrollback`
-/// value: a section takes a `{ … }` block``. `scrollback { max-lines 5000 }`
-/// gives the block and no warning.
+/// value: a section takes a `{ … }` block`` at the `scrollback` node.
+/// `scrollback { max-lines 5000 }` gives the block and no warning.
 pub(crate) fn find_section_block<'a>(
     section_node: &'a KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> Option<&'a KdlDocument> {
     if !section_node.entries().is_empty() {
-        parse_warnings.push(format!(
-            "ignored `{}` value: a section takes a `{{ … }}` block",
-            section_node.name().value()
-        ));
+        parse_warnings.record_warning(
+            section_node.span(),
+            format!(
+                "ignored `{}` value: a section takes a `{{ … }}` block",
+                section_node.name().value()
+            ),
+        );
     }
     section_node.children()
 }
@@ -345,23 +382,28 @@ pub(crate) fn validate_version_node(version_node: &KdlNode) -> Result<(), Config
 }
 
 /// Stores a parsed field value in `field_value_slot`. On `Err`, leaves the
-/// field value untouched and pushes one warning naming the field and reason.
+/// field value untouched and records one warning at `field_node`, naming the
+/// field and reason.
 ///
-/// `section_name` is the enclosing block (`pane`), `field_name` the field node's
-/// name (`min-cols`). A `field_parse_result` of `Err("expected an integer")` pushes
-/// ``ignored `pane.min-cols`: expected an integer``.
+/// `section_name` is the enclosing block (`pane`), and `field_node` the field
+/// node (`min-cols`). A `field_parse_result` of `Err("expected an integer")`
+/// records ``ignored `pane.min-cols`: expected an integer``.
 pub(crate) fn set_parsed_field<FieldValue>(
     field_value_slot: &mut Option<FieldValue>,
     field_parse_result: Result<FieldValue, String>,
     section_name: &str,
-    field_name: &str,
-    parse_warnings: &mut Vec<String>,
+    field_node: &KdlNode,
+    parse_warnings: &mut ParseWarnings,
 ) {
     match field_parse_result {
         Ok(parsed_field_value) => *field_value_slot = Some(parsed_field_value),
-        Err(parse_error_message) => parse_warnings.push(format!(
-            "ignored `{section_name}.{field_name}`: {parse_error_message}"
-        )),
+        Err(parse_error_message) => parse_warnings.record_warning(
+            field_node.span(),
+            format!(
+                "ignored `{section_name}.{}`: {parse_error_message}",
+                field_node.name().value()
+            ),
+        ),
     }
 }
 

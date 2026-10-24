@@ -56,7 +56,7 @@ use crate::layer::{
 use crate::parser::{
     find_section_block, format_unknown_key, parse_boolean_kdl_value, parse_integer_kdl_value,
     parse_kdl, parse_nonempty_string_kdl_value, parse_string_kdl_value, parse_u16_kdl_value,
-    parse_u32_kdl_value, set_parsed_field, validate_version_node,
+    parse_u32_kdl_value, set_parsed_field, validate_version_node, ParseWarnings,
 };
 use crate::types::WheelScroll;
 
@@ -101,7 +101,8 @@ pub struct AppConfigFile {
     /// file names no theme.
     pub theme_name: Option<String>,
     /// One warning per skipped field, skipped duplicate section, and unknown
-    /// key, in file order.
+    /// key, in file order. Each starts with the line and column of its node,
+    /// such as ``line 2, column 8: ignored `pane.gap`: expected an integer``.
     pub parse_warnings: Vec<String>,
 }
 
@@ -123,7 +124,7 @@ pub fn parse_app_config(
     let config_document = parse_kdl(config_path, config_source_text)?;
     let mut partial_koshi_config = PartialKoshiConfig::default();
     let mut theme_name = None;
-    let mut parse_warnings = Vec::new();
+    let mut parse_warnings = ParseWarnings::default();
     let mut seen_config_section_names: BTreeSet<&str> = BTreeSet::new();
     for config_node in config_document.nodes() {
         let config_section_name = config_node.name().value();
@@ -139,7 +140,10 @@ pub fn parse_app_config(
                     &format!("`{config_section_name}` is declared more than once"),
                 ));
             }
-            parse_warnings.push(format!("ignored duplicate `{config_section_name}` section"));
+            parse_warnings.record_warning(
+                config_node.span(),
+                format!("ignored duplicate `{config_section_name}` section"),
+            );
             continue;
         }
         match config_section_name {
@@ -149,7 +153,7 @@ pub fn parse_app_config(
             "theme" => set_top_level_field(
                 &mut theme_name,
                 parse_nonempty_string_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "update" => {
@@ -187,49 +191,49 @@ pub fn parse_app_config(
             "image-support" => set_top_level_field(
                 &mut partial_koshi_config.supports_image_protocols,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "reduced-motion" => set_top_level_field(
                 &mut partial_koshi_config.should_reduce_motion,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "stay-in-pane-placement-mode-after-placement" => set_top_level_field(
                 &mut partial_koshi_config.should_stay_in_pane_placement_mode_after_placement,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "remote-reconnect" => set_top_level_field(
                 &mut partial_koshi_config.should_reconnect_remote_session,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "remote-link-timeout-ms" => set_top_level_field(
                 &mut partial_koshi_config.remote_link_timeout_ms,
                 parse_remote_link_timeout_ms(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "max-frames-per-second" => set_top_level_field(
                 &mut partial_koshi_config.max_frames_per_second,
                 parse_max_frames_per_second(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "allow-beta-features" => set_top_level_field(
                 &mut partial_koshi_config.should_allow_beta_features,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "allow-other-users" => set_top_level_field(
                 &mut partial_koshi_config.should_allow_other_users,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             // `remote-listen` is `Option<Option<SocketAddr>>`: the outer
@@ -248,7 +252,7 @@ pub fn parse_app_config(
                             )
                         })
                 }),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             // `shared-sessions-dir` is `Option<Option<PathBuf>>`: the outer
@@ -257,13 +261,13 @@ pub fn parse_app_config(
                 &mut partial_koshi_config.shared_sessions_directory,
                 parse_nonempty_string_kdl_value(config_node)
                     .map(|directory_path| Some(PathBuf::from(directory_path))),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "auto-close-session" => set_top_level_field(
                 &mut partial_koshi_config.should_auto_close_session,
                 parse_boolean_kdl_value(config_node),
-                config_section_name,
+                config_node,
                 &mut parse_warnings,
             ),
             "pane-clipboard-writes" => {
@@ -271,10 +275,13 @@ pub fn parse_app_config(
                     parse_pane_clipboard_write_config(config_node, &mut parse_warnings),
                 );
             }
-            unknown_section_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(unknown_section_name, APP_CONFIG_SECTION_NAMES)
-            )),
+            unknown_section_name => parse_warnings.record_warning(
+                config_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(unknown_section_name, APP_CONFIG_SECTION_NAMES)
+                ),
+            ),
         }
     }
     if !seen_config_section_names.contains("version") {
@@ -286,28 +293,32 @@ pub fn parse_app_config(
     Ok(AppConfigFile {
         layer: partial_koshi_config,
         theme_name,
-        parse_warnings,
+        parse_warnings: parse_warnings.format_in_file_order(config_source_text),
     })
 }
 
 /// Stores a parsed top-level field in `field_value_slot`. On `Err`, leaves
-/// `field_value_slot` untouched and pushes one warning naming the field and
-/// the reason.
+/// `field_value_slot` untouched and records one warning at `field_node`,
+/// naming the field and the reason.
 ///
-/// `field_name` is the top-level node's name (`remote-listen`). A `field_parse_result` of
-/// `Err("must not be empty")` pushes ``ignored `remote-listen`: must not be
-/// empty``.
+/// `field_node` is the top-level node (`remote-listen`). A `field_parse_result`
+/// of `Err("must not be empty")` records ``ignored `remote-listen`: must not
+/// be empty``.
 fn set_top_level_field<FieldValue>(
     field_value_slot: &mut Option<FieldValue>,
     field_parse_result: Result<FieldValue, String>,
-    field_name: &str,
-    parse_warnings: &mut Vec<String>,
+    field_node: &KdlNode,
+    parse_warnings: &mut ParseWarnings,
 ) {
     match field_parse_result {
         Ok(parsed_field_value) => *field_value_slot = Some(parsed_field_value),
-        Err(parse_error_detail) => {
-            parse_warnings.push(format!("ignored `{field_name}`: {parse_error_detail}"));
-        }
+        Err(parse_error_detail) => parse_warnings.record_warning(
+            field_node.span(),
+            format!(
+                "ignored `{}`: {parse_error_detail}",
+                field_node.name().value()
+            ),
+        ),
     }
 }
 
@@ -315,7 +326,7 @@ fn set_top_level_field<FieldValue>(
 /// kind fails the whole parse; an unknown field is dropped with a warning.
 fn parse_update_config(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> Result<PartialUpdateConfig, ConfigError> {
     let mut partial_update_config = PartialUpdateConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -336,24 +347,30 @@ fn parse_update_config(
                 partial_update_config.should_allow_prerelease_updates =
                     Some(parse_required_boolean_field(field_node, field_name)?);
             }
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("update.{unknown_field_name}"),
-                    &[
-                        "update.auto-check",
-                        "update.check-interval-days",
-                        "update.allow-prerelease",
-                    ],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("update.{unknown_field_name}"),
+                        &[
+                            "update.auto-check",
+                            "update.check-interval-days",
+                            "update.allow-prerelease",
+                        ],
+                    )
+                ),
+            ),
         }
     }
     Ok(partial_update_config)
 }
 
 /// Reads the `pane { … }` block.
-fn parse_pane_config(config_node: &KdlNode, parse_warnings: &mut Vec<String>) -> PartialPaneConfig {
+fn parse_pane_config(
+    config_node: &KdlNode,
+    parse_warnings: &mut ParseWarnings,
+) -> PartialPaneConfig {
     let mut partial_pane_config = PartialPaneConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
         return partial_pane_config;
@@ -365,30 +382,33 @@ fn parse_pane_config(config_node: &KdlNode, parse_warnings: &mut Vec<String>) ->
                 &mut partial_pane_config.minimum_column_count,
                 parse_u16_kdl_value(field_node),
                 "pane",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "min-rows" => set_parsed_field(
                 &mut partial_pane_config.minimum_row_count,
                 parse_u16_kdl_value(field_node),
                 "pane",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "gap" => set_parsed_field(
                 &mut partial_pane_config.gap_cell_count,
                 parse_u16_kdl_value(field_node),
                 "pane",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("pane.{unknown_field_name}"),
-                    &["pane.min-cols", "pane.min-rows", "pane.gap"],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("pane.{unknown_field_name}"),
+                        &["pane.min-cols", "pane.min-rows", "pane.gap"],
+                    )
+                ),
+            ),
         }
     }
     partial_pane_config
@@ -397,7 +417,7 @@ fn parse_pane_config(config_node: &KdlNode, parse_warnings: &mut Vec<String>) ->
 /// Reads the `scrollback { … }` block.
 fn parse_scrollback_config(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialScrollbackConfig {
     let mut partial_scrollback_config = PartialScrollbackConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -410,34 +430,37 @@ fn parse_scrollback_config(
                 &mut partial_scrollback_config.maximum_line_count,
                 parse_scrollback_limit(field_node),
                 "scrollback",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "max-bytes" => set_parsed_field(
                 &mut partial_scrollback_config.maximum_byte_count,
                 parse_scrollback_limit(field_node),
                 "scrollback",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "scroll-on-input" => set_parsed_field(
                 &mut partial_scrollback_config.should_scroll_to_input,
                 parse_boolean_kdl_value(field_node),
                 "scrollback",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("scrollback.{unknown_field_name}"),
-                    &[
-                        "scrollback.max-lines",
-                        "scrollback.max-bytes",
-                        "scrollback.scroll-on-input",
-                    ],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("scrollback.{unknown_field_name}"),
+                        &[
+                            "scrollback.max-lines",
+                            "scrollback.max-bytes",
+                            "scrollback.scroll-on-input",
+                        ],
+                    )
+                ),
+            ),
         }
     }
     partial_scrollback_config
@@ -446,7 +469,7 @@ fn parse_scrollback_config(
 /// Reads the `layout { … }` block of default-layout settings.
 fn parse_layout_defaults(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialLayoutDefaults {
     let mut partial_layout_defaults = PartialLayoutDefaults::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -459,16 +482,19 @@ fn parse_layout_defaults(
                 &mut partial_layout_defaults.new_pane_direction,
                 parse_direction(field_node),
                 "layout",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("layout.{unknown_field_name}"),
-                    &["layout.new-pane-direction"],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("layout.{unknown_field_name}"),
+                        &["layout.new-pane-direction"],
+                    )
+                ),
+            ),
         }
     }
     partial_layout_defaults
@@ -477,7 +503,7 @@ fn parse_layout_defaults(
 /// Reads the `mouse { … }` block.
 fn parse_mouse_config(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialMouseConfig {
     let mut partial_mouse_config = PartialMouseConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -490,37 +516,43 @@ fn parse_mouse_config(
                 &mut partial_mouse_config.can_resize_pane_border,
                 parse_boolean_kdl_value(field_node),
                 "mouse",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "scroll-lines" => set_parsed_field(
                 &mut partial_mouse_config.scroll_line_count,
                 parse_u16_kdl_value(field_node),
                 "mouse",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "wheel" => set_parsed_field(
                 &mut partial_mouse_config.wheel_scroll,
                 parse_wheel_scroll(field_node),
                 "mouse",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("mouse.{unknown_field_name}"),
-                    &["mouse.border-resize", "mouse.scroll-lines", "mouse.wheel",],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("mouse.{unknown_field_name}"),
+                        &["mouse.border-resize", "mouse.scroll-lines", "mouse.wheel",],
+                    )
+                ),
+            ),
         }
     }
     partial_mouse_config
 }
 
 /// Reads the `copy { … }` block.
-fn parse_copy_config(config_node: &KdlNode, parse_warnings: &mut Vec<String>) -> PartialCopyConfig {
+fn parse_copy_config(
+    config_node: &KdlNode,
+    parse_warnings: &mut ParseWarnings,
+) -> PartialCopyConfig {
     let mut partial_copy_config = PartialCopyConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
         return partial_copy_config;
@@ -532,16 +564,19 @@ fn parse_copy_config(config_node: &KdlNode, parse_warnings: &mut Vec<String>) ->
                 &mut partial_copy_config.should_trim_trailing_whitespace,
                 parse_boolean_kdl_value(field_node),
                 "copy",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("copy.{unknown_field_name}"),
-                    &["copy.trim-trailing-whitespace"],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("copy.{unknown_field_name}"),
+                        &["copy.trim-trailing-whitespace"],
+                    )
+                ),
+            ),
         }
     }
     partial_copy_config
@@ -550,7 +585,7 @@ fn parse_copy_config(config_node: &KdlNode, parse_warnings: &mut Vec<String>) ->
 /// Reads the `terminal { … }` block.
 fn parse_terminal_config(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialTerminalConfig {
     let mut partial_terminal_config = PartialTerminalConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -565,14 +600,14 @@ fn parse_terminal_config(
                 &mut partial_terminal_config.term,
                 parse_nonempty_string_kdl_value(field_node),
                 "terminal",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "colorterm" => set_parsed_field(
                 &mut partial_terminal_config.colorterm,
                 parse_nonempty_string_kdl_value(field_node),
                 "terminal",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             // `default-shell` is `Option<Option<String>>`: the outer layer marks
@@ -582,7 +617,7 @@ fn parse_terminal_config(
                 &mut partial_terminal_config.default_shell,
                 parse_nonempty_string_kdl_value(field_node).map(Some),
                 "terminal",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             // `extended-keys` selects how a pane receives keys whose legacy
@@ -591,21 +626,24 @@ fn parse_terminal_config(
                 &mut partial_terminal_config.extended_keys_mode,
                 parse_extended_keys_mode(field_node),
                 "terminal",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("terminal.{unknown_field_name}"),
-                    &[
-                        "terminal.term",
-                        "terminal.colorterm",
-                        "terminal.default-shell",
-                        "terminal.extended-keys",
-                    ],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("terminal.{unknown_field_name}"),
+                        &[
+                            "terminal.term",
+                            "terminal.colorterm",
+                            "terminal.default-shell",
+                            "terminal.extended-keys",
+                        ],
+                    )
+                ),
+            ),
         }
     }
     partial_terminal_config
@@ -614,7 +652,7 @@ fn parse_terminal_config(
 /// Reads the `logging { … }` block.
 fn parse_logging_config(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialLoggingConfig {
     let mut partial_logging_config = PartialLoggingConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -627,30 +665,33 @@ fn parse_logging_config(
                 &mut partial_logging_config.is_enabled,
                 parse_boolean_kdl_value(field_node),
                 "logging",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "level" => set_parsed_field(
                 &mut partial_logging_config.log_level,
                 parse_log_level(field_node),
                 "logging",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "format" => set_parsed_field(
                 &mut partial_logging_config.log_format,
                 parse_log_format(field_node),
                 "logging",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("logging.{unknown_field_name}"),
-                    &["logging.enabled", "logging.level", "logging.format"],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("logging.{unknown_field_name}"),
+                        &["logging.enabled", "logging.level", "logging.format"],
+                    )
+                ),
+            ),
         }
     }
     partial_logging_config
@@ -659,7 +700,7 @@ fn parse_logging_config(
 /// Reads the `pane-clipboard-writes { … }` block.
 fn parse_pane_clipboard_write_config(
     config_node: &KdlNode,
-    parse_warnings: &mut Vec<String>,
+    parse_warnings: &mut ParseWarnings,
 ) -> PartialPaneClipboardWriteConfig {
     let mut partial_pane_clipboard_write_config = PartialPaneClipboardWriteConfig::default();
     let Some(section_children) = find_section_block(config_node, parse_warnings) else {
@@ -672,26 +713,29 @@ fn parse_pane_clipboard_write_config(
                 &mut partial_pane_clipboard_write_config.should_allow_writes,
                 parse_boolean_kdl_value(field_node),
                 "pane-clipboard-writes",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
             "max-copy-bytes" => set_parsed_field(
                 &mut partial_pane_clipboard_write_config.maximum_copy_byte_count,
                 parse_maximum_copy_byte_count(field_node),
                 "pane-clipboard-writes",
-                field_name,
+                field_node,
                 parse_warnings,
             ),
-            unknown_field_name => parse_warnings.push(format!(
-                "ignored {}",
-                format_unknown_key(
-                    &format!("pane-clipboard-writes.{unknown_field_name}"),
-                    &[
-                        "pane-clipboard-writes.allow",
-                        "pane-clipboard-writes.max-copy-bytes",
-                    ],
-                )
-            )),
+            unknown_field_name => parse_warnings.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("pane-clipboard-writes.{unknown_field_name}"),
+                        &[
+                            "pane-clipboard-writes.allow",
+                            "pane-clipboard-writes.max-copy-bytes",
+                        ],
+                    )
+                ),
+            ),
         }
     }
     partial_pane_clipboard_write_config

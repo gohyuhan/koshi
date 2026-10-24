@@ -267,7 +267,8 @@ fn field_partial_warning_is_a_validation_error() {
         MigrationError::Invalid {
             config_path: "koshi.kdl".to_string(),
             validation_error_detail:
-                "ignored unknown key `pane.min-col`; did you mean `pane.min-cols`?".to_string(),
+                "line 2, column 8: ignored unknown key `pane.min-col`; did you mean `pane.min-cols`?"
+                    .to_string(),
         }
     );
 }
@@ -670,7 +671,8 @@ fn a_theme_warning_is_a_validation_error() {
         migration_error,
         MigrationError::Invalid {
             config_path: "themes/plain.kdl".to_string(),
-            validation_error_detail: "ignored duplicate `colors` section".to_string(),
+            validation_error_detail: "line 3, column 1: ignored duplicate `colors` section"
+                .to_string(),
         }
     );
 }

@@ -124,7 +124,7 @@ fn a_bad_color_is_skipped_and_the_rest_apply() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.ramp-start`: color `nothex` contains a non-hex digit"]
+        ["line 3, column 5: ignored `colors.ramp-start`: color `nothex` contains a non-hex digit"]
     );
 }
 
@@ -134,7 +134,7 @@ fn an_unknown_color_role_warns() {
     assert_eq!(
         parse_warnings,
         vec![
-            "ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?".to_string()
+            "line 3, column 5: ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?".to_string()
         ]
     );
 }
@@ -206,7 +206,7 @@ fn a_color_given_as_an_integer_is_skipped_as_a_non_string() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.accent`: expected a string"]
+        ["line 3, column 5: ignored `colors.accent`: expected a string"]
     );
 }
 
@@ -223,7 +223,7 @@ fn a_name_node_warns_because_the_file_name_owns_the_theme_name() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored unknown key `name`; did you mean `colors`?"]
+        ["line 2, column 1: ignored unknown key `name`; did you mean `colors`?"]
     );
 }
 
@@ -296,7 +296,10 @@ fn a_repeated_colors_block_warns_and_the_first_one_stands() {
             ..PartialColorPalette::default()
         })
     );
-    assert_eq!(parse_warnings, ["ignored duplicate `colors` section"]);
+    assert_eq!(
+        parse_warnings,
+        ["line 5, column 1: ignored duplicate `colors` section"]
+    );
 }
 
 #[test]
@@ -360,7 +363,7 @@ fn a_color_carrying_a_child_block_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.accent`: takes no children"]
+        ["line 3, column 5: ignored `colors.accent`: takes no children"]
     );
 }
 
@@ -374,7 +377,7 @@ fn a_color_that_is_not_exactly_one_value_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.accent`: expected exactly one value".to_string()]
+        ["line 3, column 5: ignored `colors.accent`: expected exactly one value".to_string()]
     );
 
     let (parsed_theme, parse_warnings) =
@@ -385,7 +388,7 @@ fn a_color_that_is_not_exactly_one_value_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.accent`: expected exactly one value".to_string()]
+        ["line 3, column 5: ignored `colors.accent`: expected exactly one value".to_string()]
     );
 }
 
@@ -411,7 +414,7 @@ fn an_empty_color_string_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 0"]
+        ["line 3, column 5: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 0"]
     );
 }
 
@@ -424,7 +427,7 @@ fn a_seven_digit_color_is_skipped() {
     );
     assert_eq!(
         parse_warnings,
-        ["ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 7"]
+        ["line 3, column 5: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 7"]
     );
 }
 
@@ -441,7 +444,7 @@ fn a_six_character_color_of_multi_byte_characters_is_skipped() {
     assert_eq!(
         parse_warnings,
         [format!(
-            "ignored `colors.accent`: color `{}` contains a non-hex digit",
+            "line 3, column 5: ignored `colors.accent`: color `{}` contains a non-hex digit",
             "\u{ff}".repeat(6)
         )]
     );
@@ -459,9 +462,9 @@ fn warnings_come_out_in_file_order() {
     assert_eq!(
         parse_warnings,
         [
-            "ignored unknown key `name`; did you mean `colors`?",
-            "ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
-            "ignored duplicate `colors` section",
+            "line 2, column 1: ignored unknown key `name`; did you mean `colors`?",
+            "line 4, column 5: ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
+            "line 6, column 1: ignored duplicate `colors` section",
         ]
     );
 }
@@ -472,7 +475,7 @@ fn a_value_on_the_colors_line_is_warned_about_and_ignored() {
         parse_theme_text("colors \"oops\" {\n    accent \"#ff0000\"\n}");
     assert_eq!(
         parse_warnings,
-        ["ignored `colors` value: a section takes a `{ … }` block"]
+        ["line 2, column 1: ignored `colors` value: a section takes a `{ … }` block"]
     );
     assert_eq!(
         parsed_theme.colors,
