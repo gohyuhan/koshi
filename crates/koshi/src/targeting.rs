@@ -37,7 +37,7 @@ use std::path::Path;
 
 use koshi_core::command::CommandResult;
 use koshi_core::discovery::SessionOverview;
-use koshi_core::event::RejectReason;
+use koshi_core::event::{format_member_not_in_session_help, RejectReason, SessionMemberId};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, OwnedSessionId, PaneId, SessionId, TabId};
 use koshi_ipc::remote_servers::SavedServer;
@@ -576,9 +576,9 @@ fn select_target_session<'a>(
         {
             return Err(build_target_rejection(
                 RejectReason::TargetNotFound,
-                format!(
-                    "pane {pane_id} is not in session `{}`",
-                    selected_session_overview.session.session_name
+                format_member_not_in_session_help(
+                    SessionMemberId::Pane(pane_id),
+                    &selected_session_overview.session.session_name,
                 ),
             ));
         }
@@ -591,9 +591,9 @@ fn select_target_session<'a>(
         {
             return Err(build_target_rejection(
                 RejectReason::TargetNotFound,
-                format!(
-                    "client {client_id} is not attached to session `{}`",
-                    selected_session_overview.session.session_name
+                format_member_not_in_session_help(
+                    SessionMemberId::Client(client_id),
+                    &selected_session_overview.session.session_name,
                 ),
             ));
         }
@@ -696,9 +696,9 @@ fn resolve_target_tab(
             } else {
                 Err(build_target_rejection(
                     RejectReason::TargetNotFound,
-                    format!(
-                        "tab {tab_id} is not in session `{}`",
-                        session_overview.session.session_name
+                    format_member_not_in_session_help(
+                        SessionMemberId::Tab(*tab_id),
+                        &session_overview.session.session_name,
                     ),
                 ))
             }
