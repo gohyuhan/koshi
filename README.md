@@ -486,7 +486,8 @@ The global `--remote <SERVER>` flag runs one invocation against the machine
 Every other verb refuses it. A server this machine has not saved also needs
 the global `--certificate-fingerprint <FINGERPRINT>` flag, with the
 fingerprint `koshi share grant` prints on that machine. A saved server
-refuses that flag.
+takes that flag when it gives the fingerprint the server was saved with, and
+refuses any other fingerprint.
 
 | Command | Result |
 |---|---|

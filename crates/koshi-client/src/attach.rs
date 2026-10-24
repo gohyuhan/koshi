@@ -2273,10 +2273,12 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 ///
 /// `server` is either the name this machine saved that server under or the
 /// `host:port` it listens on. `certificate_fingerprint` is the fingerprint the
-/// certificate of a server reached for the first time must have; a server
-/// already saved refuses it. `save_as` is the name to save the server under:
-/// a server reached for the first time, or a saved server that holds no name,
-/// takes it; a saved server that holds a name refuses it.
+/// certificate of the server must have: a server reached for the first time
+/// needs it, and a saved server takes the one it holds and refuses any other.
+/// `save_as` is the name to save the server under: a server reached for the
+/// first time, or a saved server that holds no name, takes it; a saved server
+/// that holds that name already takes it too; a saved server that holds
+/// another name refuses it.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display name,
 /// and the server resolves it against the sessions this machine's secret
@@ -2289,8 +2291,9 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// nothing this secret reaches is running on it. [`CliError::IpcUnavailable`]
 /// when the certificate it presents is not the expected one.
 /// [`CliError::InvalidArgs`] when a server reached for the first time comes
-/// with no fingerprint or a malformed one, and when a saved server is given a
-/// fingerprint or holds none.
+/// with no fingerprint or a malformed one, when a saved server is given a
+/// fingerprint other than the one it holds, when it holds none, and when it
+/// holds a name other than `save_as`.
 pub fn attach_remote_session(
     server: &str,
     certificate_fingerprint: Option<&str>,

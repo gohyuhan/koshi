@@ -76,8 +76,9 @@ pub struct Cli {
 
     /// The fingerprint of the certificate the server `--remote` names must
     /// present: 64 lowercase hex characters, as `koshi share grant` prints it
-    /// on that machine. Needed for a server this machine has not saved, and
-    /// refused for a server it has saved.
+    /// on that machine. Needed for a server this machine has not saved. A
+    /// server it has saved takes the fingerprint it holds, and refuses any
+    /// other.
     #[arg(
         long = "certificate-fingerprint",
         global = true,
@@ -419,7 +420,7 @@ pub enum CliCommand {
         #[arg(value_name = "SESSION")]
         session_argument: Option<String>,
         /// Name to save the server under: `--remote NAME` then reaches it. A
-        /// saved server that has a name refuses this flag.
+        /// saved server that has another name refuses this flag.
         #[arg(long, requires = "remote_server_reference", value_name = "NAME")]
         save_as: Option<String>,
     },

@@ -119,23 +119,76 @@ fn a_saved_server_resolves_to_its_own_record_and_the_fingerprint_it_holds() {
 }
 
 #[test]
-fn a_fingerprint_given_for_a_saved_server_is_refused_rather_than_ignored() {
+fn a_fingerprint_given_for_a_saved_server_that_equals_the_one_it_holds_resolves_to_its_record() {
     let saved_server = build_saved_server();
 
-    let refusal = resolve_server_reference(
+    let resolved_server_reference = resolve_server_reference(
         SavedServerLookup::Saved(&saved_server),
         "work",
         Some(&"aa".repeat(32)),
     )
-    .expect_err("a fingerprint for a server that is already saved is refused");
+    .expect("a fingerprint equal to the saved one is taken");
 
-    let CliError::InvalidArgs { detail } = refusal else {
-        panic!("a fingerprint that cannot be used is a bad argument");
-    };
     assert_eq!(
-        detail,
-        "work is already saved, so --certificate-fingerprint would change nothing; run \
-         `koshi remote edit work` to change the fingerprint it expects"
+        resolved_server_reference,
+        ServerReference::Saved(saved_server)
+    );
+}
+
+#[test]
+fn a_fingerprint_given_for_a_saved_server_that_differs_from_the_one_it_holds_is_refused() {
+    let saved_server = build_saved_server();
+    let refused_fingerprint_cases = [
+        (
+            "bb".repeat(32),
+            format!(
+                "work expects the certificate fingerprint {}, and --certificate-fingerprint \
+                 gives {}; run `koshi remote edit work` to change the fingerprint it expects",
+                "aa".repeat(32),
+                "bb".repeat(32)
+            ),
+        ),
+        (
+            "AA".repeat(32),
+            "a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` \
+             prints it on the machine that serves"
+                .to_string(),
+        ),
+    ];
+
+    for (given_certificate_fingerprint, expected_detail) in refused_fingerprint_cases {
+        let refusal = resolve_server_reference(
+            SavedServerLookup::Saved(&saved_server),
+            "work",
+            Some(&given_certificate_fingerprint),
+        )
+        .expect_err("a fingerprint other than the saved one is refused");
+
+        let CliError::InvalidArgs { detail } = refusal else {
+            panic!("a fingerprint that cannot be used is a bad argument");
+        };
+        assert_eq!(detail, expected_detail, "{given_certificate_fingerprint}");
+    }
+}
+
+#[test]
+fn a_fingerprint_given_for_a_saved_server_holding_none_resolves_to_its_record() {
+    // The dial refuses a saved server that holds no fingerprint.
+    let saved_server = SavedServer {
+        certificate_fingerprint: None,
+        ..build_saved_server()
+    };
+
+    let resolved_server_reference = resolve_server_reference(
+        SavedServerLookup::Saved(&saved_server),
+        "work",
+        Some(&"aa".repeat(32)),
+    )
+    .expect("a saved server holding no fingerprint resolves");
+
+    assert_eq!(
+        resolved_server_reference,
+        ServerReference::Saved(saved_server)
     );
 }
 
@@ -267,20 +320,19 @@ fn a_selector_with_nothing_in_it_names_no_saved_server() {
 }
 
 #[test]
-fn naming_a_server_that_is_already_saved_is_refused_rather_than_ignored() {
-    // `--save-as` names a server this machine has not saved.
+fn naming_a_saved_server_that_holds_another_name_is_refused_before_any_dial() {
     let saved_server = build_saved_server();
 
     let refusal = connect_saved_server(&ServerReference::Saved(saved_server), Some("home"), None)
-        .expect_err("a name for a server that is already saved is refused");
+        .expect_err("another name for a saved server that holds one is refused");
 
     let DialError::Refused(CliError::InvalidArgs { detail }) = refusal else {
         panic!("a name that cannot be given is a bad argument, not a runtime failure");
     };
     assert_eq!(
         detail,
-        "work is already saved, so --save-as home would change nothing; \
-         run `koshi remote forget work` first to save it under another name"
+        "desk.local:7654 is already saved as work; run `koshi remote edit work` to rename it \
+         to home"
     );
 }
 

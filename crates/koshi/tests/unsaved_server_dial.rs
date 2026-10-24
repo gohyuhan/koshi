@@ -349,3 +349,85 @@ fn attach_save_as_refuses_a_name_a_saved_server_cannot_take_before_any_dial() {
         );
     }
 }
+
+#[test]
+fn the_connect_command_a_grant_prints_runs_twice_with_the_same_answer_and_one_saved_server() {
+    // The stand-in server lists no session: each attach finds none to join
+    // after the dial.
+    let (server_address, certificate_fingerprint) = spawn_stand_in_remote_server(vec![
+        RemoteServerFrame::Welcome {
+            remote_protocol_version: REMOTE_PROTOCOL_VERSION,
+        },
+        RemoteServerFrame::Sessions {
+            session_rows: Vec::new(),
+        },
+    ]);
+    let home_directory = build_short_test_directory();
+    let grant_output = koshi::output::render_remote_ready(
+        Some("alice"),
+        &koshi::output::RemoteReady::On {
+            remote_listen_address: server_address
+                .parse()
+                .expect("the stand-in address is a socket address"),
+            host_addresses: Vec::new(),
+            certificate_fingerprint: certificate_fingerprint.clone(),
+            config_mismatch: None,
+        },
+    );
+    let connect_command_line = grant_output
+        .lines()
+        .find(|grant_line| grant_line.trim_start().starts_with("koshi attach"))
+        .expect("the grant prints a connect command");
+    let connect_arguments: Vec<&str> = connect_command_line
+        .trim()
+        .strip_prefix("koshi ")
+        .and_then(|connect_command| connect_command.strip_suffix(" [SESSION]"))
+        .expect("the connect command starts with `koshi` and ends with `[SESSION]`")
+        .split(' ')
+        .collect();
+    assert_eq!(
+        connect_arguments,
+        vec![
+            "attach",
+            "--remote",
+            &server_address,
+            "--certificate-fingerprint",
+            &certificate_fingerprint,
+            "--save-as",
+            "alice"
+        ]
+    );
+
+    for attach_run_number in 1..=2 {
+        let attach_output = build_koshi_command_under_home(home_directory.path())
+            .args(&connect_arguments)
+            .env("KOSHI_REMOTE_SECRET", "test-secret")
+            .output()
+            .expect("the koshi binary runs");
+
+        assert_eq!(
+            String::from_utf8_lossy(&attach_output.stderr),
+            format!("koshi: no session is reachable on {server_address}\n"),
+            "run {attach_run_number}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&attach_output.stdout),
+            "",
+            "run {attach_run_number}"
+        );
+        assert_eq!(
+            attach_output.status.code(),
+            Some(CliExitCode::RuntimeAction.get_exit_code()),
+            "run {attach_run_number}"
+        );
+        assert_eq!(
+            list_saved_server_records(home_directory.path()),
+            vec![(
+                Some("alice".to_string()),
+                server_address.clone(),
+                Some(certificate_fingerprint.clone())
+            )],
+            "run {attach_run_number}"
+        );
+    }
+}

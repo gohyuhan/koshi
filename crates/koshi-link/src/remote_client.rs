@@ -434,7 +434,8 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 ///
 /// `certificate_fingerprint` is the value given with
 /// `--certificate-fingerprint`, or `None` when none was given. A server this
-/// machine has not saved needs it, and a saved one refuses it.
+/// machine has not saved needs it. A saved one takes it when it equals the
+/// fingerprint the record holds, and refuses any other.
 ///
 /// Example — `work` matches the record the user named `work`, and
 /// `laptop.local:7654` with no matching record and a fingerprint given is
@@ -446,8 +447,9 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector matches no record and is not an
 /// address, when it matches more than one, when it matches a saved server and
-/// a fingerprint is given, and when it is an address no record holds and the
-/// fingerprint is missing or is not 64 lowercase hex characters.
+/// a fingerprint other than the one that record holds is given, when a given
+/// fingerprint is not 64 lowercase hex characters, and when it is an address
+/// no record holds and the fingerprint is missing.
 pub fn resolve_server(
     server_selector_text: &str,
     certificate_fingerprint: Option<&str>,
@@ -463,17 +465,20 @@ pub fn resolve_server(
 /// Which server the selector names, given what the store said about it and
 /// the fingerprint given with `--certificate-fingerprint`.
 ///
-/// [`SavedServerLookup::Saved`] dials with the fingerprint that record holds
-/// and refuses `certificate_fingerprint`. [`SavedServerLookup::NotSaved`] with
-/// an address shape dials with `certificate_fingerprint`, and refuses to go on
-/// without one.
+/// [`SavedServerLookup::Saved`] dials with the fingerprint that record holds.
+/// It takes a `certificate_fingerprint` equal to that fingerprint, and refuses
+/// another one. A record holding no fingerprint takes any well-formed
+/// `certificate_fingerprint`, and the dial refuses that record.
+/// [`SavedServerLookup::NotSaved`] with an address shape dials with
+/// `certificate_fingerprint`, and refuses to go on without one.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector names nothing and is not an
 /// address, when it names more than one saved server, when it names a saved
-/// server and `certificate_fingerprint` is `Some`, and when it is an address
-/// nothing is saved under and `certificate_fingerprint` is `None` or fails
-/// [`validate_certificate_fingerprint`].
+/// server that holds a fingerprint other than `certificate_fingerprint`, when
+/// `certificate_fingerprint` is `Some` and fails
+/// [`validate_certificate_fingerprint`], and when it is an address nothing is
+/// saved under and `certificate_fingerprint` is `None`.
 fn resolve_server_reference(
     server_lookup: SavedServerLookup<'_>,
     server_selector_text: &str,
@@ -481,17 +486,28 @@ fn resolve_server_reference(
 ) -> Result<ServerReference, CliError> {
     match server_lookup {
         SavedServerLookup::Saved(saved_server) => {
-            if certificate_fingerprint.is_some() {
-                let saved_server_label = format_saved_server_label(saved_server);
-                return Err(CliError::InvalidArgs {
-                    detail: format!(
-                        "{saved_server_label} is already saved, so --certificate-fingerprint \
-                         would change nothing; run `koshi remote edit {saved_server_label}` to \
-                         change the fingerprint it expects"
-                    ),
-                });
+            let Some(certificate_fingerprint) = certificate_fingerprint else {
+                return Ok(ServerReference::Saved(saved_server.clone()));
+            };
+            validate_certificate_fingerprint(certificate_fingerprint)?;
+            match saved_server.certificate_fingerprint.as_deref() {
+                Some(saved_certificate_fingerprint)
+                    if saved_certificate_fingerprint != certificate_fingerprint =>
+                {
+                    let saved_server_label = format_saved_server_label(saved_server);
+                    Err(CliError::InvalidArgs {
+                        detail: format!(
+                            "{saved_server_label} expects the certificate fingerprint \
+                             {saved_certificate_fingerprint}, and --certificate-fingerprint gives \
+                             {certificate_fingerprint}; run `koshi remote edit \
+                             {saved_server_label}` to change the fingerprint it expects"
+                        ),
+                    })
+                }
+                // The fingerprint the record holds, or a record that holds none,
+                // which the dial refuses.
+                _ => Ok(ServerReference::Saved(saved_server.clone())),
             }
-            Ok(ServerReference::Saved(saved_server.clone()))
         }
         SavedServerLookup::Ambiguous => Err(CliError::InvalidArgs {
             detail: format!(
@@ -905,8 +921,9 @@ fn validate_remote_server_answer(
 /// `save_as` is the name the server is saved under. A saved server that holds
 /// no name takes it once it admits the connection, and the stamp of its
 /// last-used time goes into the same write. A store that will not take that
-/// name fails the call. A saved server that holds a name refuses `save_as`,
-/// and nothing is dialled.
+/// name fails the call. A saved server that holds `save_as` already is dialled
+/// as with no `save_as`. A saved server that holds another name refuses
+/// `save_as`, and nothing is dialled.
 ///
 /// `reply_timeout` is passed straight to [`connect_remote_server`].
 ///
@@ -914,8 +931,8 @@ fn validate_remote_server_answer(
 ///
 /// # Errors
 /// Whatever [`connect_remote_server`] reports. [`DialError::Refused`] carrying
-/// [`CliError::InvalidArgs`] when `save_as` names a saved server that holds a
-/// name, when a saved server holds no fingerprint, when the name cannot be
+/// [`CliError::InvalidArgs`] when `save_as` differs from the name a saved
+/// server holds, when a saved server holds no fingerprint, when the name cannot be
 /// given to that address, when the saved server changed while the connection
 /// opened, and when no secret was given; carrying
 /// [`CliError::IpcUnavailable`] when the record could not be saved.
@@ -926,22 +943,29 @@ pub fn connect_saved_server(
 ) -> Result<(RemoteLink, SavedServer), DialError> {
     match server_reference {
         ServerReference::Saved(saved_server_record) => {
-            if let Some(save_as_name) = save_as {
-                if let Some(saved_server_name) = &saved_server_record.server_name {
+            let server_name_to_give = match (save_as, saved_server_record.server_name.as_deref()) {
+                (Some(save_as_name), None) => {
+                    validate_save_as(save_as_name, &saved_server_record.server_address)
+                        .map_err(DialError::Refused)?;
+                    Some(save_as_name)
+                }
+                (Some(save_as_name), Some(saved_server_name))
+                    if save_as_name != saved_server_name =>
+                {
                     return Err(DialError::Refused(CliError::InvalidArgs {
                         detail: format!(
-                            "{saved_server_name} is already saved, so --save-as {save_as_name} \
-                             would change nothing; run `koshi remote forget {saved_server_name}` \
-                             first to save it under another name"
+                            "{} is already saved as {saved_server_name}; run `koshi remote \
+                                 edit {saved_server_name}` to rename it to {save_as_name}",
+                            saved_server_record.server_address
                         ),
                     }));
                 }
-                validate_save_as(save_as_name, &saved_server_record.server_address)
-                    .map_err(DialError::Refused)?;
-            }
+                // No `save_as`, or `save_as` names the name the record holds.
+                _ => None,
+            };
             let remote_link = dial_saved_server(saved_server_record, reply_timeout)?;
             let connection_opened_at = SystemTime::now();
-            if let Some(save_as_name) = save_as {
+            if let Some(save_as_name) = server_name_to_give {
                 let named_saved_server = update_saved_server_store(|saved_server_store| {
                     name_saved_server(
                         saved_server_store,
