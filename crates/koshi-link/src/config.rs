@@ -389,7 +389,7 @@ fn is_other_user_access_allowed(
     config_path: &Path,
     last_access_answer: &Mutex<Option<OtherUserAccessAnswer>>,
 ) -> bool {
-    let config_source_text = load_config_file(config_path, &mut Vec::new());
+    let config_source_text = read_config_file(config_path).unwrap_or(None);
     let mut last_access_answer = last_access_answer
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
@@ -511,16 +511,6 @@ pub fn resolve_client_config(app_config_layer: Option<PartialKoshiConfig>) -> Cl
         ClientConfig::default(),
         app_config_layer.into_iter().collect(),
     )
-}
-
-/// The file's text, or `None` when it is absent or unreadable. A read failure
-/// other than an absent file, such as a permission error, is recorded in
-/// `config_warnings`.
-fn load_config_file(config_path: &Path, config_warnings: &mut Vec<String>) -> Option<String> {
-    read_config_file(config_path).unwrap_or_else(|read_error| {
-        config_warnings.push(format_config_read_warning(config_path, &read_error));
-        None
-    })
 }
 
 /// The file's text, or `Ok(None)` when the file is absent.

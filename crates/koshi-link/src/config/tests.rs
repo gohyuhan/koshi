@@ -79,20 +79,20 @@ fn a_backslash_in_a_name_follows_the_platform_separator() {
     assert!(is_plain_file_name("a\\b"));
 }
 
-// --- load_config_file: absent, present, and unreadable files ---
+// --- read_config_file: absent, present, and unreadable files ---
+
+/// `read_config_file`'s answer with the read error as its text.
+fn read_config_file_as_text(config_path: &Path) -> Result<Option<String>, String> {
+    read_config_file(config_path).map_err(|read_error| read_error.to_string())
+}
 
 #[test]
-fn reading_an_absent_file_is_none_without_a_warning() {
+fn reading_an_absent_file_is_none() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(
-            &test_directory.path().join("missing.kdl"),
-            &mut config_warnings
-        ),
-        None
+        read_config_file_as_text(&test_directory.path().join("missing.kdl")),
+        Ok(None)
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
@@ -100,31 +100,21 @@ fn reading_a_present_file_returns_its_exact_text() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("present.kdl");
     fs::write(&config_file_path, "version 1\n").expect("write");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        Some("version 1\n".to_string())
+        read_config_file_as_text(&config_file_path),
+        Ok(Some("version 1\n".to_string()))
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
-fn reading_a_directory_as_a_file_warns_and_is_none() {
+fn reading_a_directory_as_a_file_is_its_read_error() {
     // Reading a directory as a string fails on every platform.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let read_error =
         fs::read_to_string(test_directory.path()).expect_err("a directory reads as no string");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(test_directory.path(), &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "could not read config file {}: {read_error}",
-            test_directory.path().display()
-        )]
+        read_config_file_as_text(test_directory.path()),
+        Err(read_error.to_string())
     );
 }
 
@@ -132,58 +122,40 @@ fn reading_a_directory_as_a_file_warns_and_is_none() {
 /// read fails with "not a directory", which is not an absent file.
 #[cfg(unix)]
 #[test]
-fn reading_a_path_below_a_regular_file_warns_and_is_none() {
+fn reading_a_path_below_a_regular_file_is_its_read_error() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let parent_file_path = test_directory.path().join("present.kdl");
     fs::write(&parent_file_path, "version 1\n").expect("write");
     let config_file_path = parent_file_path.join("keybinding.kdl");
     let read_error =
         fs::read_to_string(&config_file_path).expect_err("a regular file holds no entries");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "could not read config file {}: {read_error}",
-            config_file_path.display()
-        )]
+        read_config_file_as_text(&config_file_path),
+        Err(read_error.to_string())
     );
 }
 
 #[test]
-fn reading_an_empty_file_returns_an_empty_string_without_a_warning() {
+fn reading_an_empty_file_returns_an_empty_string() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("empty.kdl");
     fs::write(&config_file_path, "").expect("write");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        Some(String::new())
+        read_config_file_as_text(&config_file_path),
+        Ok(Some(String::new()))
     );
-    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
-fn reading_a_file_that_is_not_utf8_warns_and_is_none() {
+fn reading_a_file_that_is_not_utf8_is_its_read_error() {
     // `0x80` starts no UTF-8 sequence: the read fails on every platform.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("invalid.kdl");
     fs::write(&config_file_path, [0x76, 0x65, 0x80, 0x72]).expect("write");
     let read_error = fs::read_to_string(&config_file_path).expect_err("the bytes are not UTF-8");
-    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut config_warnings),
-        None
-    );
-    assert_eq!(
-        config_warnings,
-        vec![format!(
-            "could not read config file {}: {read_error}",
-            config_file_path.display()
-        )]
+        read_config_file_as_text(&config_file_path),
+        Err(read_error.to_string())
     );
 }
 
