@@ -2274,8 +2274,9 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 /// `server` is either the name this machine saved that server under or the
 /// `host:port` it listens on. `certificate_fingerprint` is the fingerprint the
 /// certificate of a server reached for the first time must have; a server
-/// already saved refuses it. `save_as` is the name to save a server reached
-/// for the first time under; a server already saved refuses it.
+/// already saved refuses it. `save_as` is the name to save the server under:
+/// a server reached for the first time, or a saved server that holds no name,
+/// takes it; a saved server that holds a name refuses it.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display name,
 /// and the server resolves it against the sessions this machine's secret

@@ -1,7 +1,7 @@
 //! Tests for the dialling side: which strings count as an address, which saved
 //! names and certificate fingerprints are refused, which of the three lookup
 //! answers leads to a dial and with which fingerprint, which saved server is
-//! refused before any dial,
+//! refused before any dial, how a saved server with no name takes a name,
 //! which answer to a Hello reads as a refusal a repeat dial cannot change, what
 //! an open link makes of each frame a server can answer a listing with, what
 //! one sweep of the saved servers reports, and how the lock that guards a
@@ -284,23 +284,128 @@ fn naming_a_server_that_is_already_saved_is_refused_rather_than_ignored() {
     );
 }
 
+/// A store holding the server `build_saved_server` builds, with no name, and
+/// after it a server named `home` at `laptop.local:7654`.
+fn build_store_with_unnamed_saved_server() -> ServerStore {
+    ServerStore {
+        saved_servers: vec![
+            SavedServer {
+                server_name: None,
+                ..build_saved_server()
+            },
+            SavedServer {
+                server_name: Some("home".to_string()),
+                server_address: "laptop.local:7654".to_string(),
+                ..build_saved_server()
+            },
+        ],
+        ..ServerStore::new()
+    }
+}
+
 #[test]
-fn a_saved_server_with_no_name_is_named_by_its_address_when_it_refuses() {
-    // A saved server with no name is labelled by its address.
-    let mut saved_server = build_saved_server();
-    saved_server.server_name = None;
+fn naming_a_saved_server_with_no_name_keeps_what_the_store_holds_and_moves_it_to_the_end() {
+    let mut server_store = build_store_with_unnamed_saved_server();
+    let stored_unnamed_server = server_store.saved_servers[0].clone();
+    let stored_home_server = server_store.saved_servers[1].clone();
+    let connection_opened_at = SystemTime::UNIX_EPOCH + Duration::from_secs(5000);
 
-    let refusal = connect_saved_server(&ServerReference::Saved(saved_server), Some("home"), None)
-        .expect_err("a name for a server that is already saved is refused");
+    let named_saved_server = name_saved_server(
+        &mut server_store,
+        "desk.local:7654",
+        "work",
+        connection_opened_at,
+    )
+    .expect("a saved server with no name takes a free name");
 
-    let DialError::Refused(CliError::InvalidArgs { detail }) = refusal else {
-        panic!("a name that cannot be given is a bad argument");
+    let expected_named_server = SavedServer {
+        server_name: Some("work".to_string()),
+        last_used_at: Some(connection_opened_at),
+        ..stored_unnamed_server
+    };
+    assert_eq!(named_saved_server, expected_named_server);
+    assert_eq!(
+        server_store.saved_servers,
+        vec![stored_home_server, expected_named_server]
+    );
+}
+
+#[test]
+fn naming_a_saved_server_that_already_holds_that_name_stamps_its_last_use() {
+    let mut server_store = build_store_with_unnamed_saved_server();
+    server_store.saved_servers[0].server_name = Some("work".to_string());
+    let stored_named_server = server_store.saved_servers[0].clone();
+    let connection_opened_at = SystemTime::UNIX_EPOCH + Duration::from_secs(5000);
+
+    let named_saved_server = name_saved_server(
+        &mut server_store,
+        "desk.local:7654",
+        "work",
+        connection_opened_at,
+    )
+    .expect("a saved server keeps the name it already holds");
+
+    assert_eq!(
+        named_saved_server,
+        SavedServer {
+            last_used_at: Some(connection_opened_at),
+            ..stored_named_server
+        }
+    );
+}
+
+#[test]
+fn naming_a_saved_server_another_koshi_renamed_or_forgot_meanwhile_is_refused() {
+    let mut renamed_server_store = build_store_with_unnamed_saved_server();
+    renamed_server_store.saved_servers[0].server_name = Some("office".to_string());
+    let mut forgotten_server_store = build_store_with_unnamed_saved_server();
+    forgotten_server_store.saved_servers.remove(0);
+
+    for mut changed_server_store in [renamed_server_store, forgotten_server_store] {
+        let server_store_before = changed_server_store.clone();
+
+        let refusal = name_saved_server(
+            &mut changed_server_store,
+            "desk.local:7654",
+            "work",
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect_err("a saved server that changed meanwhile is not named");
+
+        let CliError::InvalidArgs { detail } = refusal else {
+            panic!("a changed saved server is a bad argument, not a runtime failure");
+        };
+        assert_eq!(
+            detail,
+            "desk.local:7654 changed while this connection opened, so it was not named work; \
+             run the command again"
+        );
+        assert_eq!(changed_server_store, server_store_before);
+    }
+}
+
+#[test]
+fn naming_a_saved_server_with_a_name_another_saved_server_holds_is_refused() {
+    let mut server_store = build_store_with_unnamed_saved_server();
+    let server_store_before = server_store.clone();
+
+    let refusal = name_saved_server(
+        &mut server_store,
+        "desk.local:7654",
+        "home",
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect_err("a name another saved server holds is refused");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a taken name is a bad argument, not a runtime failure");
     };
     assert_eq!(
         detail,
-        "desk.local:7654 is already saved, so --save-as home would change nothing; \
-         run `koshi remote forget desk.local:7654` first to save it under another name"
+        "the name home already belongs to laptop.local:7654; run `koshi remote forget home` \
+         first, or pick another name"
     );
+    assert_eq!(server_store, server_store_before);
 }
 
 #[test]
