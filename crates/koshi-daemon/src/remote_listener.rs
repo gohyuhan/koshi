@@ -84,8 +84,9 @@ use koshi_ipc::remote_state::CertificateFile;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::remote_wire::{
     format_version_refusal, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
-    MIN_REMOTE_PROTOCOL_VERSION, REMOTE_HELLO_MAX_BYTE_COUNT, REMOTE_PROTOCOL_VERSION,
-    REMOTE_REFUSED, SESSION_NOT_ANSWERING_MESSAGE,
+    MAX_ADMISSION_COUNT, MAX_UNADMITTED_ATTEMPT_COUNT, MIN_REMOTE_PROTOCOL_VERSION,
+    RATE_WINDOW_DURATION, REMOTE_HELLO_MAX_BYTE_COUNT, REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
+    SESSION_NOT_ANSWERING_MESSAGE,
 };
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
@@ -106,26 +107,8 @@ use crate::router::{check_router_executable_file, RouterEvent};
 /// longer than this.
 const ADMISSION_WINDOW_DURATION: Duration = Duration::from_secs(10);
 
-/// How long one address's connection attempts are counted over.
-const RATE_WINDOW_DURATION: Duration = Duration::from_secs(60);
-
-/// How many connections from one address may be inside the admission window,
-/// or have left it without being admitted, inside [`RATE_WINDOW_DURATION`]
-/// before the rest are dropped. A connection whose secret is admitted stops
-/// counting at its admission.
-const MAX_UNADMITTED_ATTEMPT_COUNT: u32 = 10;
-
 /// How many peer addresses the attempt table counts at once.
 const MAX_RATE_TABLE_ENTRY_COUNT: usize = 1024;
-
-/// How many connections may be inside the admission window at once, across
-/// every address.
-///
-/// A connection is counted from the moment it is accepted until its secret is
-/// admitted or it goes away. One arriving over this count is closed without a
-/// handshake. An admitted connection is not counted here; it counts against
-/// [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT) instead.
-const MAX_ADMISSION_COUNT: usize = 64;
 
 /// How long the accept loop pauses after a failed accept before trying again.
 const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);

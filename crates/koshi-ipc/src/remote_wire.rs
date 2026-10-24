@@ -61,6 +61,24 @@ pub const MIN_REMOTE_PROTOCOL_VERSION: u32 = koshi_core::compat::REMOTE_PROTOCOL
 /// generated secret fits inside the cap at every value the versions can hold.
 pub const REMOTE_HELLO_MAX_BYTE_COUNT: u32 = 4096;
 
+/// How long the server counts one address's connection attempts over: 60 s.
+pub const RATE_WINDOW_DURATION: Duration = Duration::from_secs(60);
+
+/// How many connections from one address may be inside the admission window,
+/// or have left it without being admitted, inside [`RATE_WINDOW_DURATION`]
+/// before the server closes the rest before their TLS handshake: 10. A
+/// connection whose secret is admitted stops counting at its admission.
+pub const MAX_UNADMITTED_ATTEMPT_COUNT: u32 = 10;
+
+/// How many connections may be inside the server's admission window at once,
+/// across every address: 64.
+///
+/// A connection is counted from the moment the server accepts it until its
+/// secret is admitted or it goes away. One arriving over this count is closed
+/// without a handshake. An admitted connection is not counted here; the
+/// server's limit on live remote connections counts it instead.
+pub const MAX_ADMISSION_COUNT: usize = 64;
+
 /// The one sentence every refusal carries: a wrong secret, a revoked one, an
 /// expired one, a session that does not exist, and a session the secret holds
 /// no grant for all carry it.
@@ -211,7 +229,9 @@ pub enum RemoteServerFrame {
 /// # Errors
 /// [`IpcError::ConnectRefused`] when nothing accepts the TCP connection,
 /// [`IpcError::ConnectTimedOut`] when the connect deadline passes,
-/// [`IpcError::TlsHandshakeFailed`] when the handshake fails, and
+/// [`IpcError::TlsHandshakeClosed`] when the connection closes before the
+/// handshake finishes, [`IpcError::TlsHandshakeFailed`] when the handshake
+/// fails for another reason, and
 /// [`IpcError::CertificateMismatch`] when the presented certificate does not
 /// have `expected_certificate_fingerprint`. [`IpcError::Transport`] naming what failed
 /// for the lookup, the stream split, and a Hello or answer that ran out of

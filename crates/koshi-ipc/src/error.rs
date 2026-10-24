@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+use crate::remote_wire::{MAX_ADMISSION_COUNT, MAX_UNADMITTED_ATTEMPT_COUNT, RATE_WINDOW_DURATION};
 use crate::tls::format_certificate_fingerprint;
 
 /// A failure on the control channel.
@@ -11,6 +12,7 @@ use crate::tls::format_certificate_fingerprint;
 /// [`Disconnected`](IpcError::Disconnected)), a remote dial that fails
 /// ([`ConnectRefused`](IpcError::ConnectRefused),
 /// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
+/// [`TlsHandshakeClosed`](IpcError::TlsHandshakeClosed),
 /// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed),
 /// [`CertificateMismatch`](IpcError::CertificateMismatch)), a refused frame
 /// ([`FrameTooLarge`](IpcError::FrameTooLarge),
@@ -176,8 +178,31 @@ pub enum IpcError {
          allows it"
     )]
     ConnectTimedOut { server_address: String },
+    /// The TCP connection to `server_address` opened and closed before the TLS
+    /// handshake on it finished: a read or write on it met end of file, a
+    /// reset, an abort, a broken pipe or a socket no longer connected.
+    ///
+    /// The message names the three cases in which a koshi server closes a
+    /// connection that way, with [`MAX_ADMISSION_COUNT`] (64),
+    /// [`MAX_UNADMITTED_ATTEMPT_COUNT`] (10) and [`RATE_WINDOW_DURATION`] in
+    /// seconds (60), then the next steps: dial again once that time has passed,
+    /// and run `koshi doctor` on that machine if it keeps happening.
+    #[error(
+        "the connection to {server_address} closed during the TLS handshake. a koshi server \
+         closes a connection this way when it restarts or stops, when {} others wait to \
+         present a secret, and when the address it comes from opened {} that were not \
+         admitted in {} seconds. dial again in {} seconds. if it keeps happening, run `koshi \
+         doctor` on that machine to check that koshi serves that port",
+        MAX_ADMISSION_COUNT,
+        MAX_UNADMITTED_ATTEMPT_COUNT,
+        RATE_WINDOW_DURATION.as_secs(),
+        RATE_WINDOW_DURATION.as_secs()
+    )]
+    TlsHandshakeClosed { server_address: String },
     /// The TCP connection to `server_address` opened and the TLS handshake on
-    /// it did not finish, for the reason in `error_detail`.
+    /// it did not finish, for the reason in `error_detail`. A connection that
+    /// closed during the handshake is
+    /// [`TlsHandshakeClosed`](IpcError::TlsHandshakeClosed) instead.
     #[error("the TLS handshake with {server_address} failed: {error_detail}")]
     TlsHandshakeFailed {
         server_address: String,

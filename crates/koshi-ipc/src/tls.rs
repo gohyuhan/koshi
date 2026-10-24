@@ -39,7 +39,9 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureSch
 use sha2::{Digest, Sha256};
 
 use crate::error::IpcError;
-use crate::transport::{compute_remaining_duration_until, compute_step_deadline, is_io_timeout};
+use crate::transport::{
+    compute_remaining_duration_until, compute_step_deadline, is_io_timeout, is_peer_gone_error,
+};
 
 /// How many raw bytes [`TlsReader`] takes off the socket in one read.
 const TLS_READ_BUFFER_BYTE_COUNT: usize = 16 * 1024;
@@ -54,7 +56,11 @@ const TLS_READ_BUFFER_BYTE_COUNT: usize = 16 * 1024;
 ///
 /// # Errors
 /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time` when
-/// less than 1 ms is left; otherwise the failure of setting the timeout.
+/// less than 1 ms is left. [`io::ErrorKind::NotConnected`] with the text `the
+/// socket can neither read nor write any more` when setting the timeout fails
+/// with [`io::ErrorKind::InvalidInput`]: macOS refuses a timeout with `EINVAL`
+/// on a socket shut both ways, as a reset from the peer leaves it. Otherwise
+/// the failure of setting the timeout.
 fn set_socket_timeout_until(
     socket: &TcpStream,
     deadline: Option<Instant>,
@@ -63,7 +69,17 @@ fn set_socket_timeout_until(
     let Some(deadline) = deadline else {
         return Ok(());
     };
-    set_socket_timeout(socket, Some(compute_remaining_duration_until(deadline)?))
+    set_socket_timeout(socket, Some(compute_remaining_duration_until(deadline)?)).map_err(
+        |timeout_error| {
+            if timeout_error.kind() == io::ErrorKind::InvalidInput {
+                return io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "the socket can neither read nor write any more",
+                );
+            }
+            timeout_error
+        },
+    )
 }
 
 /// Decrypt the bytes `tls_connection` has taken and queue whatever it answers with.
@@ -217,7 +233,9 @@ impl Read for TlsReader {
     /// on this read and every read after it. A peer that drops the socket
     /// without closing the stream is [`io::ErrorKind::UnexpectedEof`], again
     /// on every read after it, and bytes that do not decrypt are
-    /// [`io::ErrorKind::InvalidData`].
+    /// [`io::ErrorKind::InvalidData`]. A socket that can neither read nor write
+    /// any more, as macOS leaves one after a reset, is
+    /// [`io::ErrorKind::NotConnected`].
     ///
     /// With a deadline or an idle timeout set, each socket read is given the
     /// time left until the instant [`compute_step_deadline`] gives when that
@@ -377,7 +395,9 @@ impl TlsWriter {
     ///
     /// # Errors
     /// [`io::ErrorKind::TimedOut`] when no time is left before a write,
-    /// [`io::ErrorKind::WriteZero`] when the socket takes no byte, and
+    /// [`io::ErrorKind::NotConnected`] when the socket can neither read nor
+    /// write any more, [`io::ErrorKind::WriteZero`] when the socket takes no
+    /// byte, and
     /// otherwise the socket write's own failure. The bytes not taken stay.
     fn send_unsent_encrypted_bytes(&mut self) -> io::Result<()> {
         while !self.unsent_encrypted_bytes.is_empty() {
@@ -464,8 +484,10 @@ impl Write for BoundedSocket<'_> {
 /// # Errors
 /// [`io::ErrorKind::TimedOut`] with the text `the TLS handshake did not
 /// finish in time` when the deadline passes; otherwise the handshake's own
-/// failure, which is [`io::ErrorKind::UnexpectedEof`] when the peer hangs up
-/// mid-handshake and [`io::ErrorKind::InvalidData`] when its bytes are not a
+/// failure, which is [`io::ErrorKind::UnexpectedEof`] when the peer closes the
+/// stream mid-handshake, [`io::ErrorKind::ConnectionReset`] or, once macOS has
+/// shut the socket both ways, [`io::ErrorKind::NotConnected`] when the peer
+/// resets it, and [`io::ErrorKind::InvalidData`] when its bytes are not a
 /// handshake this side accepts.
 pub fn run_tls_handshake(
     tls_connection: &mut rustls::Connection,
@@ -795,9 +817,11 @@ fn order_addresses_by_family(resolved_server_addresses: Vec<SocketAddr>) -> Vec<
 /// first address the lookup returns and no other address connects,
 /// [`IpcError::ConnectTimedOut`] when `connection_timeout` names an instant the
 /// clock cannot reach, when no time is left after the lookup, or when no
-/// address connects by the deadline, and [`IpcError::TlsHandshakeFailed`] when
-/// the handshake on an open connection does not finish, carrying
-/// [`run_tls_handshake`]'s own words. A certificate whose fingerprint is not
+/// address connects by the deadline, [`IpcError::TlsHandshakeClosed`] when
+/// the open connection closes before its handshake finishes, and
+/// [`IpcError::TlsHandshakeFailed`] when the handshake on an open connection
+/// does not finish for another reason, carrying [`run_tls_handshake`]'s own
+/// words. A certificate whose fingerprint is not
 /// `expected_certificate_fingerprint` is [`IpcError::CertificateMismatch`],
 /// naming no saved server.
 /// [`IpcError::Transport`] names the rest: a connect that failed for another
@@ -873,6 +897,9 @@ pub fn connect_tls_stream(
                         saved_server_label: None,
                     }
                 }
+                _ if is_peer_gone_error(&handshake_error) => IpcError::TlsHandshakeClosed {
+                    server_address: server_address.to_string(),
+                },
                 _ => IpcError::TlsHandshakeFailed {
                     server_address: server_address.to_string(),
                     error_detail: handshake_error.to_string(),

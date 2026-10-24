@@ -1153,7 +1153,9 @@ repeat it:
 
 ```text
 koshi: invalid arguments: a certificate fingerprint is sha256: followed by 64 lowercase hex characters, as `koshi share grant` prints it on the machine that serves. 64 hex characters alone is the shape of a secret, and a secret is never given here
-``` Both machines speak TLS 1.3 only, and a peer that offers
+```
+
+Both machines speak TLS 1.3 only, and a peer that offers
 TLS 1.2 alone is refused during the handshake.
 
 koshi 0.5.0 and older print no fingerprint, so a first connection from this
@@ -1199,6 +1201,18 @@ koshi: invalid arguments: work expects the certificate fingerprint sha256:3f6a0c
 `koshi remote edit <SERVER>` changes the fingerprint a saved server expects.
 If the serving machine's certificate changes on purpose, `koshi share open`
 there prints the new fingerprint, and `koshi remote edit` stores it.
+
+A serving machine closes a connection before its TLS handshake finishes when
+its koshi restarts or stops, when 64 other connections wait to present a
+secret, and when the address the connection comes from opened 10 connections
+in 60 seconds that were not admitted. A connection whose secret is
+admitted does not count toward the 10. The connecting side cannot tell these
+cases apart, nor tell them from another program on that port that closes the
+connection. The refusal names all of them:
+
+```text
+koshi: IPC unavailable: the connection to laptop.local:7654 closed during the TLS handshake. a koshi server closes a connection this way when it restarts or stops, when 64 others wait to present a secret, and when the address it comes from opened 10 that were not admitted in 60 seconds. dial again in 60 seconds. if it keeps happening, run `koshi doctor` on that machine to check that koshi serves that port
+```
 
 A first connection from any command that takes `--remote`, with
 `koshi list-sessions` included, saves the address, the secret and the
