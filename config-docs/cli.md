@@ -1117,10 +1117,17 @@ the connection is refused and nothing is dialled:
 koshi: invalid arguments: laptop.local:7654 is not saved, so the fingerprint of its certificate is needed: add `--certificate-fingerprint <FINGERPRINT>` with the fingerprint `koshi share grant` printed on that machine
 ```
 
-A saved server refuses `--certificate-fingerprint`, and
-`koshi remote edit <SERVER>` changes the fingerprint it expects. If the
-serving machine's certificate changes on purpose, `koshi share open` there
-prints the new fingerprint, and `koshi remote edit` stores it.
+A saved server takes `--certificate-fingerprint` when it gives the
+fingerprint the server was saved with, and the connection checks that
+fingerprint. Any other fingerprint is refused before a connection opens:
+
+```text
+koshi: invalid arguments: work expects the certificate fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0, and --certificate-fingerprint gives 0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c; run `koshi remote edit work` to change the fingerprint it expects
+```
+
+`koshi remote edit <SERVER>` changes the fingerprint a saved server expects.
+If the serving machine's certificate changes on purpose, `koshi share open`
+there prints the new fingerprint, and `koshi remote edit` stores it.
 
 A first connection from any command that takes `--remote`, with
 `koshi list-sessions` included, saves the address, the secret and the
@@ -1135,8 +1142,9 @@ koshi list-sessions --remote laptop.local:7654 --certificate-fingerprint 3f6a0c2
 koshi attach --remote laptop.local:7654 --save-as work
 ```
 
-A saved server that has a name refuses `--save-as`, and
-`koshi remote edit <SERVER>` changes its name.
+A saved server takes `--save-as` with the name it has, and refuses another
+name; `koshi remote edit <SERVER>` changes its name. The connect command that
+`koshi share grant` prints runs again with the same result.
 
 The store lives on the connecting machine and is readable only by its owner.
 `koshi remote list` prints the name, address, fingerprint and last-used time of

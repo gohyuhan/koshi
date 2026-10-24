@@ -6,7 +6,7 @@
 //! [`in_process_session`] runs one session server on a thread of the test
 //! process. [`session_connection`] speaks to a session server either way.
 //! [`RunningClient`] holds a `koshi` client the test started, and the waits
-//! below read what it did. [`spawn_stand_in_remote_server`] answers one remote
+//! below read what it did. [`spawn_stand_in_remote_server`] answers each remote
 //! connection with the frames a test gives it.
 //! [`write_saved_server_store`] writes the saved-server store under a test
 //! home, and [`list_saved_server_records`] reads it.
@@ -22,7 +22,7 @@ pub mod session_connection;
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -757,10 +757,12 @@ pub fn read_client_output_text(running_client: &mut RunningClient) -> String {
 }
 
 /// Start a TLS server on a loopback port that presents a certificate made for
-/// this call, and serve one connection on a thread of its own. For each frame
-/// of `answer_frames`, in order, the thread reads one client frame, then sends
-/// that answer frame. The thread ends after the last answer, or at the first
-/// handshake, read or write that fails.
+/// this call, and serve every connection it accepts, one after another, on a
+/// thread of its own. For each frame of `answer_frames`, in order, the thread
+/// reads one client frame, then sends that answer frame. A connection ends
+/// after the last answer, or at the first handshake, read or write that fails,
+/// and the thread then accepts the next one. The thread ends when an accept
+/// fails.
 ///
 /// Returns the server's address and the fingerprint of its certificate.
 pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (String, String) {
@@ -785,30 +787,42 @@ pub fn spawn_stand_in_remote_server(answer_frames: Vec<RemoteServerFrame>) -> (S
         .expect("the bound loopback address")
         .to_string();
 
+    let server_config = Arc::new(server_config);
     std::thread::spawn(move || {
-        let Ok((mut socket, _)) = server_listener.accept() else {
-            return;
-        };
-        let mut tls_connection = rustls::Connection::Server(
-            ServerConnection::new(Arc::new(server_config)).expect("the TLS server side starts"),
-        );
-        let handshake_deadline = Instant::now() + WAIT_DURATION;
-        if tls::run_tls_handshake(&mut tls_connection, &mut socket, handshake_deadline).is_err() {
-            return;
-        }
-        let (tls_reader, tls_writer) =
-            tls::split_tls_stream(tls_connection, socket).expect("the TLS stream splits");
-        let (mut frame_reader, mut frame_writer) =
-            build_frame_halves(Box::new(tls_reader), Box::new(tls_writer));
-        for answer_frame in answer_frames {
-            if frame_reader.recv::<RemoteClientFrame>().is_err()
-                || frame_writer.send(&answer_frame).is_err()
-            {
-                return;
-            }
+        while let Ok((socket, _)) = server_listener.accept() {
+            serve_stand_in_connection(socket, &server_config, &answer_frames);
         }
     });
     (server_address, certificate_fingerprint)
+}
+
+/// Run the TLS handshake on `socket` with `server_config`, then, for each frame
+/// of `answer_frames` in order, read one client frame and send that answer
+/// frame. Returns after the last answer, or at the first handshake, read or
+/// write that fails.
+fn serve_stand_in_connection(
+    mut socket: TcpStream,
+    server_config: &Arc<ServerConfig>,
+    answer_frames: &[RemoteServerFrame],
+) {
+    let mut tls_connection = rustls::Connection::Server(
+        ServerConnection::new(Arc::clone(server_config)).expect("the TLS server side starts"),
+    );
+    let handshake_deadline = Instant::now() + WAIT_DURATION;
+    if tls::run_tls_handshake(&mut tls_connection, &mut socket, handshake_deadline).is_err() {
+        return;
+    }
+    let (tls_reader, tls_writer) =
+        tls::split_tls_stream(tls_connection, socket).expect("the TLS stream splits");
+    let (mut frame_reader, mut frame_writer) =
+        build_frame_halves(Box::new(tls_reader), Box::new(tls_writer));
+    for answer_frame in answer_frames {
+        if frame_reader.recv::<RemoteClientFrame>().is_err()
+            || frame_writer.send(answer_frame).is_err()
+        {
+            return;
+        }
+    }
 }
 
 /// A saved server named `server_name` at `server_address`, holding

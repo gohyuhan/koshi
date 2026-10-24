@@ -1519,7 +1519,8 @@ fn resize_pane_help_renders_its_about_usage_and_flags() {
          --certificate-fingerprint <FINGERPRINT>\n          \
          The fingerprint of the certificate the server `--remote` names must present: 64 \
          lowercase hex characters, as `koshi share grant` prints it on that machine. Needed \
-         for a server this machine has not saved, and refused for a server it has saved\n\n  \
+         for a server this machine has not saved. A server it has saved takes the fingerprint \
+         it holds, and refuses any other\n\n  \
          -h, --help\n          Print help (see a summary with '-h')\n"
     );
 }
