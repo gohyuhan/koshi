@@ -1300,10 +1300,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
     match lock_mode {
         LockMode::Normal => None,
         LockMode::Locked => Some("LOCK"),
-        LockMode::Resize => Some("RESIZE"),
         LockMode::PanePlacement => Some("PLACE PANE"),
-        LockMode::TabMode => Some("TAB"),
-        LockMode::ScrollMode => Some("SCROLL"),
         LockMode::PaneMoveChoice => Some("MOVE"),
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
         LockMode::DockUndock => Some("DOCK"),

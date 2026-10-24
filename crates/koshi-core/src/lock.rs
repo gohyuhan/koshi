@@ -2,8 +2,8 @@
 //!
 //! [`LockMode`] is the interaction mode a single client is in — whether
 //! keystrokes drive the focused pane, are held verbatim for the pane, or are
-//! interpreted by one of Koshi's modal layers (resize, pane placement, the
-//! pane move chooser, floating pane move, dock/undock, tab, scroll).
+//! interpreted by one of Koshi's modal layers (pane placement, the pane move
+//! chooser, floating pane move, dock/undock).
 //! It is client-scoped: two clients attached to the same session hold
 //! independent modes. The command layer's `SetLockMode` carries a `bool` and
 //! moves a client only into or out of [`LockMode::Locked`].
@@ -20,9 +20,6 @@ pub enum LockMode {
     /// Keys the `locked` keymap binds fire; every other key passes verbatim to
     /// the focused pane.
     Locked,
-    /// Resize mode: directional keys resize the focused pane instead of
-    /// reaching it.
-    Resize,
     /// Pane placement mode, opened by `core:begin-pane-placement`.
     ///
     /// - The placement actions own the keyboard. The viewer overlays the mode
@@ -33,10 +30,6 @@ pub enum LockMode {
     ///   [`Command::PlacePane`](crate::command::Command::PlacePane), the only
     ///   command that changes the layout. Esc sends nothing.
     PanePlacement,
-    /// Tab mode: keys manage tabs — new, close, focus, and move.
-    TabMode,
-    /// Scroll mode: keys navigate the focused pane's scrollback.
-    ScrollMode,
     /// The pane move chooser, opened by `core:begin-pane-placement` while the
     /// viewer draws at least one floating pane that it did not pin.
     ///
@@ -78,22 +71,18 @@ pub enum LockMode {
 impl LockMode {
     /// Whether input that binds nothing reaches the pane in this mode.
     /// `Normal` and `Locked` pass what they do not bind; the modal layers
-    /// (`Resize`, `PanePlacement`, `TabMode`, `ScrollMode`, `PaneMoveChoice`,
-    /// `FloatingPaneMove`, `DockUndock`) own the keyboard while they are held
-    /// and discard it.
+    /// (`PanePlacement`, `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock`)
+    /// own the keyboard while they are held and discard it.
     #[must_use]
     pub fn should_pass_unbound_input_to_pane(self) -> bool {
         matches!(self, LockMode::Normal | LockMode::Locked)
     }
 
     /// Every built-in mode, in declaration order.
-    pub const ALL: [LockMode; 9] = [
+    pub const ALL: [LockMode; 6] = [
         LockMode::Normal,
         LockMode::Locked,
-        LockMode::Resize,
         LockMode::PanePlacement,
-        LockMode::TabMode,
-        LockMode::ScrollMode,
         LockMode::PaneMoveChoice,
         LockMode::FloatingPaneMove,
         LockMode::DockUndock,
@@ -106,10 +95,7 @@ impl LockMode {
         match self {
             LockMode::Normal => "normal",
             LockMode::Locked => "locked",
-            LockMode::Resize => "resize",
             LockMode::PanePlacement => "pane-placement",
-            LockMode::TabMode => "tab",
-            LockMode::ScrollMode => "scroll",
             LockMode::PaneMoveChoice => "pane-move-choice",
             LockMode::FloatingPaneMove => "floating-pane-move",
             LockMode::DockUndock => "dock-undock",

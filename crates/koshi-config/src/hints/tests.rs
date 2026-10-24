@@ -3,8 +3,7 @@
 //! filter (a refused action, a locked-mode sequence holding the unlock chord,
 //! and a mode the build does not register each yield no hint), the
 //! chord-depth cap at 0 and 1, the pinned locked-mode unlock, prefix labels
-//! under either leader shape, sequence matching, empty modes, the label each
-//! frame shows for the move chooser's Enter and for mouse-select, and the
+//! under either leader shape, sequence matching, the label each frame shows for the move chooser's Enter and for mouse-select, and the
 //! per-frame `Arc` sharing.
 
 use koshi_core::key::{BindingModifierFlags, Key, NamedKey};
@@ -105,19 +104,6 @@ fn locked_mode_pins_the_reserved_unlock() {
         .expect("locked mode binds the reserved unlock");
     assert_eq!(hint_binding.action_display_name, "Unlock");
     assert!(hint_binding.is_pinned);
-}
-
-#[test]
-fn modes_without_defaults_are_empty() {
-    let hint_catalog = build_default_hint_catalog();
-    for lock_mode in [LockMode::Resize, LockMode::TabMode, LockMode::ScrollMode] {
-        let hints = hint_catalog.build_frame_hints(lock_mode, false, false);
-        assert!(
-            hints.hint_bindings.is_empty(),
-            "{lock_mode:?} ships no bindings"
-        );
-        assert!(hints.removed_key_sequences.is_empty());
-    }
 }
 
 #[test]
@@ -245,10 +231,15 @@ fn an_unbound_sequence_matches_nothing() {
         ),
         KeyMatch::default()
     );
-    // A mode nothing binds in holds no map at all.
+    // A catalog built from no layers holds no map for any mode.
+    let empty_hint_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
+        &[],
+        &KeybindingsConfig::default(),
+        &ActionRegistry::new(),
+    );
     assert_eq!(
-        hint_catalog.match_sequence(
-            LockMode::Resize,
+        empty_hint_catalog.match_sequence(
+            LockMode::Normal,
             &build_single_chord_sequence(BindingModifierFlags::CTRL, 'q')
         ),
         KeyMatch::default()

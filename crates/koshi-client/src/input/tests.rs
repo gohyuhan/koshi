@@ -1006,7 +1006,15 @@ fn a_user_bound_locked_opener_opens_placement_and_keeps_the_client_locked() {
 #[test]
 fn a_modal_mode_owns_the_keyboard_and_discards_what_it_does_not_bind() {
     let mut client = build_test_client();
-    client.set_lock_mode(LockMode::Resize);
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: Some(TabId::new()),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command_id: None,
+    });
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'a'),
