@@ -427,6 +427,10 @@ Koshi writes its log files in `logs/` below the state directory:
 - `koshi-log-router.log`, one file for the router. It holds the lines of the
   router, such as a restart into a new koshi that failed.
 
+A failure that ends the router, a session server, or the process that holds a
+session's panes is written to that process's log file at `error` level, such
+as `the router ends, runtime_error: File exists (os error 17)`.
+
 The router reads this section when it starts, and again each time it restarts.
 Disabled logging creates no log file.
 

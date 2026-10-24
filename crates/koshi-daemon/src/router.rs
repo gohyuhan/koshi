@@ -1560,7 +1560,6 @@ fn run_dispatch_loop(
             if let Err(child_reap_error) =
                 reap_unwaited_children(&mut router_sessions.unwaited_child_process_ids)
             {
-                tracing::error!(%child_reap_error, "the router ends");
                 return RouterExit::ChildReaperFailed(child_reap_error);
             }
             start_unwatched_session_probes(

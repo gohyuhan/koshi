@@ -10,6 +10,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use koshi_core::command::CliExitCode;
 use koshi_core::ids::SessionId;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile, ServerProgramFile};
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
@@ -1032,6 +1033,61 @@ fn a_restarted_router_takes_its_log_settings_from_koshi_kdl_again() {
             },
             "target": "koshi_daemon::router"
         })
+    );
+}
+
+/// A regular file where the router's runtime directory must go: the router
+/// installs its log, cannot make that directory, and ends. Its log holds the
+/// failure at error level, and standard error holds `koshi: <failure>`.
+#[test]
+fn a_router_that_cannot_make_its_runtime_directory_writes_the_failure_to_its_log() {
+    let test_home_directory = build_short_test_directory();
+    write_test_config(
+        test_home_directory.path(),
+        "version 2\nlogging {\n    enabled #true\n    level \"warning\"\n}\n",
+    );
+    let blocking_file_path = test_home_directory.path().join("blocked-run");
+    std::fs::write(&blocking_file_path, b"not a directory")
+        .expect("the file where the runtime directory must go is written");
+    let runtime_directory_error = std::fs::create_dir_all(&blocking_file_path)
+        .expect_err("a regular file cannot be made a directory");
+
+    let mut router_process = start_router_process(test_home_directory.path(), &blocking_file_path);
+    let exit_deadline = Instant::now() + WAIT_DURATION;
+    let router_exit_status = loop {
+        if let Some(router_exit_status) = router_process.find_router_exit_status() {
+            break router_exit_status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "the router did not end within {WAIT_DURATION:?}"
+        );
+        std::thread::sleep(POLL_INTERVAL_DURATION);
+    };
+    router_process.wait_for_error_stream_end(exit_deadline);
+
+    assert_eq!(
+        router_exit_status.code(),
+        Some(CliExitCode::RuntimeAction.get_exit_code())
+    );
+    assert_eq!(
+        router_process.format_error_tail(),
+        format!("koshi: {runtime_directory_error}")
+    );
+    let router_log_path =
+        resolve_log_directory_under_home(test_home_directory.path()).join("koshi-log-router.log");
+    let router_log_text = std::fs::read_to_string(&router_log_path)
+        .unwrap_or_else(|read_error| panic!("read {}: {read_error}", router_log_path.display()));
+    let error_line = router_log_text
+        .lines()
+        .find(|router_log_line| router_log_line.contains("the router ends"))
+        .unwrap_or_else(|| panic!("the router log holds no end line:\n{router_log_text}"));
+    let (_log_timestamp, logged_error) = error_line
+        .split_once("Z ")
+        .unwrap_or_else(|| panic!("the error line starts with a timestamp: {error_line}"));
+    assert_eq!(
+        logged_error,
+        format!("ERROR koshi: the router ends, runtime_error: {runtime_directory_error}")
     );
 }
 

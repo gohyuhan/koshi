@@ -60,7 +60,9 @@ fn main() -> ExitCode {
     let cli = parse_cli_arguments();
 
     // A failure prints `koshi: <error>` on standard error before the process
-    // exits with that error's code.
+    // exits with that error's code. The router, a session server, and the
+    // process holding a session's panes first write their failure to their
+    // own log at error level.
     let cli_exit_code = match run_cli_invocation(&cli) {
         Ok(()) => CliExitCode::Success,
         Err(cli_error) => {
@@ -246,8 +248,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             *should_wait_for_lock,
             config_migration_error.as_ref(),
         )
-        .map_err(|runtime_error| CliError::Runtime {
-            detail: runtime_error.to_string(),
+        .map_err(|runtime_error| {
+            tracing::error!(%runtime_error, "the router ends");
+            CliError::Runtime {
+                detail: runtime_error.to_string(),
+            }
         });
     }
 
@@ -282,8 +287,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             *supervisor_pid,
             config_migration_error.as_ref(),
         )
-        .map_err(|runtime_error| CliError::Runtime {
-            detail: runtime_error.to_string(),
+        .map_err(|runtime_error| {
+            tracing::error!(%runtime_error, "the session server ends");
+            CliError::Runtime {
+                detail: runtime_error.to_string(),
+            }
         });
     }
 
@@ -325,8 +333,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             *session_id,
             supervisor_token.clone(),
         )
-        .map_err(|runtime_error| CliError::Runtime {
-            detail: runtime_error.to_string(),
+        .map_err(|runtime_error| {
+            tracing::error!(%runtime_error, "the process holding the panes ends");
+            CliError::Runtime {
+                detail: runtime_error.to_string(),
+            }
         });
     }
 

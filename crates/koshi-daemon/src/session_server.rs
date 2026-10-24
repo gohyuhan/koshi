@@ -497,7 +497,6 @@ pub fn run_session_server(
                 // failure.
                 Err(swap_error) => {
                     tracing::error!(
-                        %swap_error,
                         "the session could neither swap nor be put back; every pane is ended"
                     );
                     remove_session_clipboard_tools(runtime_directory, session_id);
