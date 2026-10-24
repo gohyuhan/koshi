@@ -7,6 +7,12 @@
 //! ribbon that holds a longer name puts `|` between every two (`ENTER|f`).
 //! A modifier-less key (bare `Tab`) is its own opener and wears the header
 //! style itself.
+//! Groups read `Ctrl`, `Alt`, no modifier, `Ctrl+Shift`, `Shift`, `Super`,
+//! then every other set; a group holding a pinned hint reads first. Inside a
+//! group, keys read pinned first, then by hint tier (`Essential`,
+//! `Navigation`, `Other`), then arrows `←↓↑→`, then by key name. A prefix
+//! key takes the first tier among the bindings under it: `<C-p>` reads
+//! `Essential` because `<C-p> n` fires `core:new-pane`.
 //! Pending view paints the pressed prefix as an accent breadcrumb, then shows
 //! only its next chords. Internal config spellings such as `C-` and `A-` never
 //! leak into user-facing text. The row is filled with the theme's bar
@@ -17,6 +23,7 @@
 
 use std::collections::BTreeMap;
 
+use koshi_core::action::HintTier;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
@@ -226,6 +233,7 @@ struct HintEntry {
     chord: KeyChord,
     action_label: String,
     is_pinned: bool,
+    hint_tier: HintTier,
 }
 
 #[derive(Default)]
@@ -233,6 +241,9 @@ struct ChordSummary {
     leaf_action: Option<LeafAction>,
     deeper_binding_count: usize,
     has_user_binding: bool,
+    /// The first tier, in [`HintTier`] order, among every binding this chord
+    /// fires or starts.
+    hint_tier: HintTier,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -267,18 +278,20 @@ fn list_hint_entries(keymap_hints: &KeymapHints, pending_chords: &[KeyChord]) ->
         let chord_summary = summary_by_chord.entry(next_chord).or_default();
         if binding_chords.len() == pending_chords.len() + 1 {
             chord_summary.leaf_action = Some(LeafAction {
-                action_label: hint_binding.action_display_name.clone(),
+                action_label: hint_binding.action_label.clone(),
                 is_pinned: hint_binding.is_pinned,
             });
         } else {
             chord_summary.deeper_binding_count += 1;
         }
         chord_summary.has_user_binding |= hint_binding.is_user_authored;
+        chord_summary.hint_tier = chord_summary.hint_tier.min(hint_binding.hint_tier);
     }
 
     let mut hint_entries: Vec<HintEntry> = summary_by_chord
         .into_iter()
         .map(|(chord, chord_summary)| {
+            let hint_tier = chord_summary.hint_tier;
             let (action_label, is_pinned) = match (
                 chord_summary.leaf_action,
                 chord_summary.deeper_binding_count,
@@ -303,14 +316,16 @@ fn list_hint_entries(keymap_hints: &KeymapHints, pending_chords: &[KeyChord]) ->
                 chord,
                 action_label,
                 is_pinned,
+                hint_tier,
             }
         })
         .collect();
-    // Pinned hints first, then by modifier group, then by key.
+    // Pinned hints first, then by hint tier, then by key. `group_hint_entries`
+    // orders the groups.
     hint_entries.sort_by_cached_key(|hint_entry| {
         (
             !hint_entry.is_pinned,
-            compute_modifier_sort_rank(hint_entry.chord.modifier_flags),
+            hint_entry.hint_tier,
             compute_key_sort_rank(hint_entry.chord.key),
         )
     });
@@ -353,8 +368,17 @@ fn group_hint_entries(hint_entries: Vec<HintEntry>) -> Vec<ModifierGroup> {
             });
         }
     }
-    modifier_groups
-        .sort_by_key(|modifier_group| compute_modifier_sort_rank(modifier_group.modifier_flags));
+    // A group holding a pinned hint first, then by modifier set.
+    modifier_groups.sort_by_key(|modifier_group| {
+        let has_pinned_ribbon = modifier_group
+            .action_ribbons
+            .iter()
+            .any(|action_ribbon| action_ribbon.is_pinned);
+        (
+            !has_pinned_ribbon,
+            compute_modifier_sort_rank(modifier_group.modifier_flags),
+        )
+    });
     modifier_groups
 }
 
@@ -504,18 +528,19 @@ fn format_key_name(key: Key) -> String {
     }
 }
 
-/// Orders modifier groups: `Ctrl`, `Alt`, `Ctrl+Shift`, `Shift`, `Super`,
-/// then every other set by its bit pattern.
+/// Orders modifier groups: `Ctrl`, `Alt`, no modifier, `Ctrl+Shift`,
+/// `Shift`, `Super`, then every other set by its bit pattern.
 fn compute_modifier_sort_rank(modifier_flags: BindingModifierFlags) -> u16 {
     const CTRL_SHIFT: BindingModifierFlags =
         BindingModifierFlags::CTRL.union(BindingModifierFlags::SHIFT);
     match modifier_flags {
         BindingModifierFlags::CTRL => 0,
         BindingModifierFlags::ALT => 1,
-        CTRL_SHIFT => 2,
-        BindingModifierFlags::SHIFT => 3,
-        BindingModifierFlags::SUPER => 4,
-        _ => 5 + u16::from(modifier_flags.get_bits()),
+        BindingModifierFlags::NONE => 2,
+        CTRL_SHIFT => 3,
+        BindingModifierFlags::SHIFT => 4,
+        BindingModifierFlags::SUPER => 5,
+        _ => 6 + u16::from(modifier_flags.get_bits()),
     }
 }
 

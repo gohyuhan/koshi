@@ -335,6 +335,21 @@ pub enum ClientActionKind {
     TogglePanePlacementStack,
 }
 
+/// Where an action's key sorts among the keys of its modifier group in the
+/// hint bar: `Essential` keys first, then `Navigation`, then `Other`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HintTier {
+    /// Confirms or cancels a mode, creates or closes a pane or tab, or locks
+    /// or unlocks the client.
+    Essential,
+    /// Moves, selects, resizes or splits in one direction, or steps to the
+    /// next or previous tab or floating pane.
+    Navigation,
+    /// Every other action.
+    #[default]
+    Other,
+}
+
 /// Everything the registry knows about one action: how to show it, what it can
 /// target, and how to dispatch it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,9 +369,17 @@ pub struct ActionMetadata {
     /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
     /// per action here, never in a binding.
     pub is_continuous: bool,
+    /// The hint bar's label for the action in place of `display_name`, or
+    /// `None` to show `display_name`. The four actions of one direction family
+    /// share one label: `focus-pane-left`, `-down`, `-up` and `-right` all read
+    /// `Focus Pane`, and their keys fold into one ribbon (`←↓↑→ Focus Pane`).
+    pub hint_label: Option<&'static str>,
+    /// Where the action's key sorts in its modifier group of the hint bar.
+    pub hint_tier: HintTier,
 }
 
-/// Build one `core:` seed entry with `is_continuous` `false`.
+/// Build one `core:` seed entry with `is_continuous` `false`, no hint label
+/// and the [`HintTier::Other`] hint tier.
 ///
 /// # Panics
 /// Panics if `action_name` violates the action-name grammar.
@@ -377,6 +400,8 @@ fn build_core_action_seed(
         target_kinds,
         handler,
         is_continuous: false,
+        hint_label: None,
+        hint_tier: HintTier::Other,
     };
     (action_reference, action_metadata)
 }
@@ -424,6 +449,20 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// The `resize-pane*`, `focus-pane*`, `focus-next-floating-pane`,
 /// `focus-previous-floating-pane`, and `scroll-pane-up`/`scroll-pane-down`
 /// actions are `is_continuous`; every other action is not.
+///
+/// Each direction family carries one hint label: `new-pane-*` reads
+/// `Split Pane`, `resize-pane-*` `Resize Pane`, `select-pane-target-*`
+/// `Select Pane Target`, `select-pane-insertion-*` `Select Pane Insertion`,
+/// `move-floating-pane-*` `Move Floating Pane`, `focus-pane-*` `Focus Pane`,
+/// and `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`. Every other action
+/// has none.
+///
+/// Every `confirm-*` and `cancel-*` action, `new-pane`, `close-pane`,
+/// `close-pane-tree`, `new-tab`, `close-tab`, `lock` and `unlock` are
+/// [`HintTier::Essential`]. The direction families, `next-tab`,
+/// `previous-tab`, and the next and previous floating pane and placement tab
+/// actions are [`HintTier::Navigation`]. Every other action is
+/// [`HintTier::Other`].
 #[must_use]
 pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
     use ActionHandlerReference::{CoreClient, CoreCommand};
@@ -1087,6 +1126,53 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         ) {
             action_metadata.is_continuous = true;
         }
+    }
+
+    for (action_reference, action_metadata) in &mut action_seeds {
+        let action_name = action_reference.action_name.get_name();
+        action_metadata.hint_label = match action_name {
+            "new-pane-left" | "new-pane-down" | "new-pane-up" | "new-pane-right" => {
+                Some("Split Pane")
+            }
+            "resize-pane-left" | "resize-pane-down" | "resize-pane-up" | "resize-pane-right" => {
+                Some("Resize Pane")
+            }
+            "select-pane-target-left"
+            | "select-pane-target-down"
+            | "select-pane-target-up"
+            | "select-pane-target-right" => Some("Select Pane Target"),
+            "select-pane-insertion-left"
+            | "select-pane-insertion-down"
+            | "select-pane-insertion-up"
+            | "select-pane-insertion-right" => Some("Select Pane Insertion"),
+            "move-floating-pane-left"
+            | "move-floating-pane-down"
+            | "move-floating-pane-up"
+            | "move-floating-pane-right" => Some("Move Floating Pane"),
+            "focus-pane-left" | "focus-pane-down" | "focus-pane-up" | "focus-pane-right" => {
+                Some("Focus Pane")
+            }
+            "scroll-pane-up" | "scroll-pane-down" => Some("Scroll Pane"),
+            _ => None,
+        };
+        let is_direction_family_member = action_metadata.hint_label.is_some();
+        action_metadata.hint_tier = match action_name {
+            "new-pane" | "close-pane" | "close-pane-tree" | "new-tab" | "close-tab" | "lock"
+            | "unlock" => HintTier::Essential,
+            _ if action_name.starts_with("confirm-") || action_name.starts_with("cancel-") => {
+                HintTier::Essential
+            }
+            "next-tab"
+            | "previous-tab"
+            | "focus-next-floating-pane"
+            | "focus-previous-floating-pane"
+            | "select-next-floating-pane"
+            | "select-previous-floating-pane"
+            | "select-next-placement-tab"
+            | "select-previous-placement-tab" => HintTier::Navigation,
+            _ if is_direction_family_member => HintTier::Navigation,
+            _ => HintTier::Other,
+        };
     }
 
     action_seeds

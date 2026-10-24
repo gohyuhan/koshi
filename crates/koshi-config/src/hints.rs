@@ -4,8 +4,9 @@
 //! [`KeymapHintCatalog::from_keymap_layers_config_and_registry`] builds the
 //! catalog at startup from the keybinding layers and the action table: it
 //! folds the layers with [`merge_keymaps`], joins every surviving binding to
-//! its action's display name from the [`ActionRegistry`], and files the
-//! result per mode behind [`Arc`]s, in each label form a frame shows.
+//! its action's hint-bar label and hint tier from the [`ActionRegistry`], and
+//! files the result per mode behind [`Arc`]s, in each label form a frame
+//! shows.
 //! [`KeymapHintCatalog::build_frame_hints`] then hands one frame's data out as
 //! `Arc` clones, and
 //! [`KeymapHintCatalog::match_sequence`] answers one pending key sequence from
@@ -24,7 +25,7 @@ use crate::key::Leader;
 use crate::keymap_merge::{merge_keymaps, MergedKeymap, MergedModeKeymap};
 use crate::types::{build_default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
 use koshi_core::action::{
-    ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT,
+    ActionReference, HintTier, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT, MOVE_FLOATING_PANE_HINT,
     MOVE_FOCUSED_PANE_HINT, MOVE_TILED_PANE_HINT,
 };
 use koshi_core::key::{KeyChord, KeySequence};
@@ -35,9 +36,9 @@ use koshi_core::registry::ActionRegistry;
 /// current input mode.
 ///
 /// Everything is plain data: the merged keymap's bindings for the mode, each
-/// already joined to its action's display name. The per-mode collections
-/// travel behind [`Arc`]s — [`KeymapHintCatalog`] computes them once per
-/// keymap change, and every frame shares them by reference.
+/// already joined to its action's hint-bar label and hint tier. The per-mode
+/// collections travel behind [`Arc`]s — [`KeymapHintCatalog`] computes them
+/// once per keymap change, and every frame shares them by reference.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeymapHints {
     /// Every binding in the client's current mode, sorted by key sequence.
@@ -51,23 +52,29 @@ pub struct KeymapHints {
     pub removed_key_sequences: Arc<BTreeSet<KeySequence>>,
 }
 
-/// One binding the hint bar can show: a key sequence, the display name of the
-/// action it fires, and the flags the bar's grouping and ordering read.
+/// One binding the hint bar can show: a key sequence, the label of the action
+/// it fires, and the fields the bar's grouping and ordering read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HintBinding {
     /// The chords pressed to fire the binding.
     pub key_sequence: KeySequence,
-    /// The bound action's human-facing name, from its registry metadata.
-    pub action_display_name: String,
+    /// The label the hint bar shows for the bound action: the action's
+    /// registry `hint_label` when it has one, else its `display_name`.
+    /// `<C-p> <Left>` reads `Focus Pane`; `<C-p> n` reads `New Pane`.
+    pub action_label: String,
+    /// Where the binding sorts in its modifier group, from the bound action's
+    /// registry `hint_tier`.
+    pub hint_tier: HintTier,
     /// Whether a user surface authored the winning entry (a default shows
     /// `false`). Any `true` entry under a prefix voids the prefix's label.
     pub is_user_authored: bool,
     /// Whether the hint sorts ahead of the unpinned hints in its own modifier
-    /// group — set on every locked-mode entry firing `core:unlock`.
+    /// group, and its group ahead of every group with no pinned hint — set on
+    /// every locked-mode entry firing `core:unlock`.
     pub is_pinned: bool,
 }
 
-/// Per-mode hint-bar data: every mode's bindings joined to display names,
+/// Per-mode hint-bar data: every mode's bindings joined to hint-bar labels,
 /// shared by reference with each frame's snapshot.
 ///
 /// A clone copies the two per-mode maps. The merged keymap, each binding
@@ -324,7 +331,7 @@ fn relabel_hint_bindings(
 ) -> Arc<Vec<HintBinding>> {
     let has_current_label = hint_bindings
         .iter()
-        .any(|hint_binding| hint_binding.action_display_name == current_label);
+        .any(|hint_binding| hint_binding.action_label == current_label);
     if !has_current_label {
         return Arc::clone(hint_bindings);
     }
@@ -332,8 +339,8 @@ fn relabel_hint_bindings(
         .iter()
         .map(|hint_binding| {
             let mut hint_binding = hint_binding.clone();
-            if hint_binding.action_display_name == current_label {
-                replacement_label.clone_into(&mut hint_binding.action_display_name);
+            if hint_binding.action_label == current_label {
+                replacement_label.clone_into(&mut hint_binding.action_label);
             }
             hint_binding
         })
@@ -370,11 +377,13 @@ fn has_longer_key_sequence_starting_with<Binding>(
         })
 }
 
-/// One mode's merged bindings joined to display names, sorted by sequence.
+/// One mode's merged bindings joined to hint-bar labels and hint tiers, sorted
+/// by sequence.
 ///
 /// Walks the mode's user-authored entries and surviving defaults — the merge
-/// leaves no key in both — reads each action's display name from the
-/// registry, and flags every locked-mode binding firing `unlock` pinned.
+/// leaves no key in both — reads each action's `hint_label`, else its
+/// `display_name`, and its `hint_tier` from the registry, and flags every
+/// locked-mode binding firing `unlock` pinned.
 fn build_mode_hint_bindings(
     merged_mode_keymap: &MergedModeKeymap,
     registry: &ActionRegistry,
@@ -393,16 +402,19 @@ fn build_mode_hint_bindings(
     let mut hint_bindings: Vec<HintBinding> = user_bindings
         .chain(default_bindings)
         .map(|(key_sequence, bound_action, is_user_authored)| {
-            let action_display_name = registry
+            let action_metadata = registry
                 .find_action_metadata(&bound_action.action_reference)
                 // `merge_keymaps` admits only bindings whose action resolves
                 // in this same registry.
-                .expect("a merged binding's action is registered")
-                .display_name
-                .clone();
+                .expect("a merged binding's action is registered");
+            let action_label = match action_metadata.hint_label {
+                Some(hint_label) => hint_label.to_owned(),
+                None => action_metadata.display_name.clone(),
+            };
             HintBinding {
                 key_sequence: key_sequence.clone(),
-                action_display_name,
+                action_label,
+                hint_tier: action_metadata.hint_tier,
                 is_user_authored,
                 is_pinned: lock_mode == LockMode::Locked
                     && bound_action.action_reference == *unlock_action_reference,

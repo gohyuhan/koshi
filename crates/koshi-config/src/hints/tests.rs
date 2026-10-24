@@ -1,11 +1,14 @@
 //! Tests for the keymap hint catalog: the defaults-only merge joined to
-//! display names, user bindings and removals over the defaults, the firing
-//! filter (a refused action, a locked-mode sequence holding the unlock chord,
-//! and a mode the build does not register each yield no hint), the
-//! chord-depth cap at 0 and 1, the pinned locked-mode unlock, prefix labels
-//! under either leader shape, sequence matching, the label each frame shows for the move chooser's Enter and for mouse-select, and the
-//! per-frame `Arc` sharing.
+//! hint-bar labels and hint tiers, the relabelled entries matching the same
+//! actions by hint label as by display name, user bindings and removals over
+//! the defaults, the firing filter (a refused action, a locked-mode sequence
+//! holding the unlock chord, and a mode the build does not register each
+//! yield no hint), the chord-depth cap at 0 and 1, the pinned locked-mode
+//! unlock, prefix labels under either leader shape, sequence matching, the
+//! label each frame shows for the move chooser's Enter and for mouse-select,
+//! and the per-frame `Arc` sharing.
 
+use koshi_core::action::build_core_action_seeds;
 use koshi_core::key::{BindingModifierFlags, Key, NamedKey};
 
 use super::*;
@@ -54,24 +57,85 @@ fn build_hint_catalog_with_config(keybindings_config: &KeybindingsConfig) -> Key
 }
 
 #[test]
-fn normal_mode_joins_defaults_to_display_names() {
+fn normal_mode_joins_defaults_to_hint_labels_and_tiers() {
     let hints = build_default_hint_catalog().build_frame_hints(LockMode::Normal, false, false);
 
     // All 27 shipped normal-mode bindings fire in this build.
     assert_eq!(hints.hint_bindings.len(), 27);
 
-    let new_pane_key_sequence = build_two_chord_sequence(
-        build_character_chord(BindingModifierFlags::CTRL, 'p'),
-        build_character_chord(BindingModifierFlags::NONE, 'n'),
-    );
-    let hint_binding = hints
-        .hint_bindings
-        .iter()
-        .find(|hint_binding| hint_binding.key_sequence == new_pane_key_sequence)
-        .expect("the default <C-p> n binding yields a hint");
-    assert_eq!(hint_binding.action_display_name, "New Pane");
-    assert!(!hint_binding.is_user_authored);
-    assert!(!hint_binding.is_pinned);
+    let pane_prefix_chord = build_character_chord(BindingModifierFlags::CTRL, 'p');
+    // Each case: the key, then the label and the tier its hint carries.
+    // `core:new-pane` has no hint label and shows its display name;
+    // `core:focus-pane-left` shows its family's hint label.
+    for (key_sequence, action_label, hint_tier) in [
+        (
+            build_two_chord_sequence(
+                pane_prefix_chord,
+                build_character_chord(BindingModifierFlags::NONE, 'n'),
+            ),
+            "New Pane",
+            HintTier::Essential,
+        ),
+        (
+            build_two_chord_sequence(
+                pane_prefix_chord,
+                KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left)),
+            ),
+            "Focus Pane",
+            HintTier::Navigation,
+        ),
+        (
+            build_single_chord_sequence(BindingModifierFlags::CTRL, 'g'),
+            MOUSE_SELECT_HINT,
+            HintTier::Other,
+        ),
+    ] {
+        let hint_binding = hints
+            .hint_bindings
+            .iter()
+            .find(|hint_binding| hint_binding.key_sequence == key_sequence)
+            .unwrap_or_else(|| panic!("the default {key_sequence} binding yields a hint"));
+        assert_eq!(
+            *hint_binding,
+            HintBinding {
+                key_sequence,
+                action_label: action_label.to_string(),
+                hint_tier,
+                is_user_authored: false,
+                is_pinned: false,
+            }
+        );
+    }
+}
+
+#[test]
+fn relabelling_matches_the_same_actions_by_hint_label_as_by_display_name() {
+    // `relabel_hint_bindings` matches entries by label. Each current label
+    // names the same single action whether the catalog reads hint labels or
+    // display names, so the entries it relabels are unchanged.
+    let core_action_seeds = build_core_action_seeds();
+    for (current_label, expected_action_names) in [
+        (MOUSE_SELECT_HINT, ["core:mouse-select"]),
+        (MOVE_FOCUSED_PANE_HINT, ["core:confirm-pane-move-choice"]),
+    ] {
+        let action_names_by_display_name: Vec<String> = core_action_seeds
+            .iter()
+            .filter(|(_, action_metadata)| action_metadata.display_name == current_label)
+            .map(|(action_reference, _)| action_reference.to_string())
+            .collect();
+        let action_names_by_hint_label: Vec<String> = core_action_seeds
+            .iter()
+            .filter(|(_, action_metadata)| {
+                action_metadata
+                    .hint_label
+                    .unwrap_or(action_metadata.display_name.as_str())
+                    == current_label
+            })
+            .map(|(action_reference, _)| action_reference.to_string())
+            .collect();
+        assert_eq!(action_names_by_display_name, expected_action_names);
+        assert_eq!(action_names_by_hint_label, expected_action_names);
+    }
 }
 
 #[test]
@@ -85,7 +149,7 @@ fn quit_binding_surfaces_in_both_modes() {
             .iter()
             .find(|hint_binding| hint_binding.key_sequence == quit_key_sequence)
             .unwrap_or_else(|| panic!("{lock_mode:?} binds the quit chord"));
-        assert_eq!(hint_binding.action_display_name, "Quit");
+        assert_eq!(hint_binding.action_label, "Quit");
     }
 }
 
@@ -102,7 +166,7 @@ fn locked_mode_pins_the_reserved_unlock() {
             hint_binding.key_sequence == KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)
         })
         .expect("locked mode binds the reserved unlock");
-    assert_eq!(hint_binding.action_display_name, "Unlock");
+    assert_eq!(hint_binding.action_label, "Unlock");
     assert!(hint_binding.is_pinned);
 }
 
@@ -110,76 +174,101 @@ fn locked_mode_pins_the_reserved_unlock() {
 fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
     let hints =
         build_default_hint_catalog().build_frame_hints(LockMode::PanePlacement, false, false);
+    let build_named_chord =
+        |modifier_flags, named_key| KeyChord::from_parts(modifier_flags, Key::Named(named_key));
+    let no_modifier_flags = BindingModifierFlags::NONE;
+    let shift_modifier_flags = BindingModifierFlags::SHIFT;
     let expected_hint_bindings = [
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left)),
-            "Select Pane Target Left",
+            build_named_chord(no_modifier_flags, NamedKey::Left),
+            "Select Pane Target",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Down)),
-            "Select Pane Target Down",
+            build_named_chord(no_modifier_flags, NamedKey::Down),
+            "Select Pane Target",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Up)),
-            "Select Pane Target Up",
+            build_named_chord(no_modifier_flags, NamedKey::Up),
+            "Select Pane Target",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Right)),
-            "Select Pane Target Right",
+            build_named_chord(no_modifier_flags, NamedKey::Right),
+            "Select Pane Target",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Left)),
-            "Select Pane Insertion Left",
+            build_named_chord(shift_modifier_flags, NamedKey::Left),
+            "Select Pane Insertion",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Down)),
-            "Select Pane Insertion Down",
+            build_named_chord(shift_modifier_flags, NamedKey::Down),
+            "Select Pane Insertion",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Up)),
-            "Select Pane Insertion Up",
+            build_named_chord(shift_modifier_flags, NamedKey::Up),
+            "Select Pane Insertion",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Right)),
-            "Select Pane Insertion Right",
+            build_named_chord(shift_modifier_flags, NamedKey::Right),
+            "Select Pane Insertion",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)),
+            build_named_chord(no_modifier_flags, NamedKey::Space),
             "Cycle Pane Placement Span",
+            HintTier::Other,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('s')),
+            KeyChord::from_parts(no_modifier_flags, Key::Char('s')),
             "Toggle Pane Placement Stack",
+            HintTier::Other,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
+            build_named_chord(no_modifier_flags, NamedKey::Tab),
             "Select Next Placement Tab",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)),
+            build_named_chord(shift_modifier_flags, NamedKey::Tab),
             "Select Previous Placement Tab",
+            HintTier::Navigation,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Enter)),
+            build_named_chord(no_modifier_flags, NamedKey::Enter),
             "Confirm Pane Placement",
+            HintTier::Essential,
         ),
         (
-            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
+            build_named_chord(no_modifier_flags, NamedKey::Esc),
             "Cancel Pane Placement",
+            HintTier::Essential,
         ),
     ];
 
     assert_eq!(hints.hint_bindings.len(), 14);
-    for (key_chord, action_display_name) in expected_hint_bindings {
+    for (key_chord, action_label, hint_tier) in expected_hint_bindings {
         let key_sequence = KeySequence::from(key_chord);
         let hint_binding = hints
             .hint_bindings
             .iter()
             .find(|hint_binding| hint_binding.key_sequence == key_sequence)
             .unwrap_or_else(|| panic!("pane placement mode binds {key_sequence}"));
-        assert_eq!(hint_binding.action_display_name, action_display_name);
-        assert!(!hint_binding.is_user_authored);
-        assert!(!hint_binding.is_pinned);
+        assert_eq!(
+            *hint_binding,
+            HintBinding {
+                key_sequence,
+                action_label: action_label.to_string(),
+                hint_tier,
+                is_user_authored: false,
+                is_pinned: false,
+            }
+        );
     }
 }
 
@@ -361,15 +450,12 @@ fn frames_share_each_label_form_by_reference() {
     }
 }
 
-/// How many hint bindings in `keymap_hints` carry `action_display_name`.
-fn count_hint_bindings_with_action_display_name(
-    keymap_hints: &KeymapHints,
-    action_display_name: &str,
-) -> usize {
+/// How many hint bindings in `keymap_hints` carry `action_label`.
+fn count_hint_bindings_with_action_label(keymap_hints: &KeymapHints, action_label: &str) -> usize {
     keymap_hints
         .hint_bindings
         .iter()
-        .filter(|hint_binding| hint_binding.action_display_name == action_display_name)
+        .filter(|hint_binding| hint_binding.action_label == action_label)
         .count()
 }
 
@@ -388,21 +474,15 @@ fn frame_hints_label_the_move_choosers_enter_by_the_focused_panes_kind() {
         );
 
         assert_eq!(
-            count_hint_bindings_with_action_display_name(
-                &move_choice_hints,
-                MOVE_FOCUSED_PANE_HINT
-            ),
+            count_hint_bindings_with_action_label(&move_choice_hints, MOVE_FOCUSED_PANE_HINT),
             0
         );
         assert_eq!(
-            count_hint_bindings_with_action_display_name(&move_choice_hints, MOVE_TILED_PANE_HINT),
+            count_hint_bindings_with_action_label(&move_choice_hints, MOVE_TILED_PANE_HINT),
             tiled_hint_count
         );
         assert_eq!(
-            count_hint_bindings_with_action_display_name(
-                &move_choice_hints,
-                MOVE_FLOATING_PANE_HINT
-            ),
+            count_hint_bindings_with_action_label(&move_choice_hints, MOVE_FLOATING_PANE_HINT),
             floating_hint_count
         );
     }
@@ -433,14 +513,11 @@ fn frame_hints_flip_the_mouse_select_label_only_while_it_is_on() {
     else {
         panic!("exactly one hint changes, got {changed_hint_bindings:?}");
     };
-    assert_eq!(
-        mouse_select_hint_binding.action_display_name,
-        MOUSE_SELECT_HINT
-    );
+    assert_eq!(mouse_select_hint_binding.action_label, MOUSE_SELECT_HINT);
     assert_eq!(
         **mouse_unselect_hint_binding,
         HintBinding {
-            action_display_name: MOUSE_UNSELECT_HINT.to_string(),
+            action_label: MOUSE_UNSELECT_HINT.to_string(),
             ..(*mouse_select_hint_binding).clone()
         }
     );
@@ -467,7 +544,7 @@ fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
         .iter()
         .find(|hint_binding| hint_binding.key_sequence == fullscreen_key_sequence)
         .expect("the user binding yields a hint");
-    assert_eq!(hint_binding.action_display_name, "Quit");
+    assert_eq!(hint_binding.action_label, "Quit");
     assert!(hint_binding.is_user_authored);
     assert!(!hint_binding.is_pinned);
     assert_eq!(
