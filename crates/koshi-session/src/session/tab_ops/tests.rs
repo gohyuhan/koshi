@@ -1495,23 +1495,18 @@ fn move_tab_backward_shifts_the_span_forward() {
 }
 
 #[test]
-fn move_tab_clamps_an_out_of_bounds_index() {
+fn move_tab_past_the_last_slot_is_a_noop() {
+    // Four tabs fill 0..=3; index 4 is the first slot that does not exist.
     let (mut session, tab_ids) = build_four_tab_session();
 
-    let emitted_events = move_tab(&mut session, tab_ids[0], usize::MAX); // clamps to len-1 = 3
+    for new_tab_index in [4, usize::MAX] {
+        let emitted_events = move_tab(&mut session, tab_ids[0], new_tab_index);
 
-    assert_eq!(session.tabs[&tab_ids[1]].get_tab_index(), 0);
-    assert_eq!(session.tabs[&tab_ids[2]].get_tab_index(), 1);
-    assert_eq!(session.tabs[&tab_ids[3]].get_tab_index(), 2);
-    assert_eq!(session.tabs[&tab_ids[0]].get_tab_index(), 3);
-    assert_eq!(
-        emitted_events,
-        vec![Event::TabMoved(TabMoved {
-            tab_id: tab_ids[0],
-            previous_tab_index: 0,
-            new_tab_index: 3,
-        })]
-    );
+        assert_eq!(emitted_events, Vec::new(), "index {new_tab_index}");
+        for (tab_index, tab_id) in tab_ids.iter().enumerate() {
+            assert_eq!(session.tabs[tab_id].get_tab_index(), tab_index);
+        }
+    }
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
@@ -1542,8 +1537,8 @@ fn moving_an_unknown_tab_is_a_noop() {
 
 #[test]
 fn move_tab_in_a_single_tab_session_is_a_noop() {
-    // The clamp reads `len - 1`; with one tab that is 0, and every requested
-    // index lands back on the slot the tab already holds.
+    // Index 0 is the slot the tab already holds, and index 7 is past the only
+    // slot.
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     let mut session = build_session_with(

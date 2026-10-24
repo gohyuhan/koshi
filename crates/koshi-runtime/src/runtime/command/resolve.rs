@@ -388,9 +388,13 @@ impl Server {
             Command::CloseTab(command_args) => self
                 .resolve_tab_or_active(command_args.tab_id, command_source, session)
                 .map(drop),
-            Command::MoveTab(command_args) => self
-                .resolve_tab_or_active(command_args.tab_id, command_source, session)
-                .map(drop),
+            Command::MoveTab(command_args) => {
+                self.resolve_tab_or_active(command_args.tab_id, command_source, session)?;
+                Self::require_tab_index(
+                    Self::require_session(session)?,
+                    command_args.target_tab_index,
+                )
+            }
             Command::FocusTab(command_args) => {
                 Self::resolve_focus_tab_target(command_args, command_source, session).map(drop)
             }
@@ -1865,9 +1869,10 @@ impl Server {
 
     /// Resolve the [`Command::FocusTab`] target: the client whose view
     /// switches ([`Self::resolve_view_client`]) and the concrete tab the
-    /// target names — an id or index must match an existing tab, and
-    /// `Next`/`Previous` step from the *target* client's active tab, wrapping at
-    /// the ends. Validation and [`Self::handle_focus_tab`] both call it.
+    /// target names — an id must match an existing tab, an index past the last
+    /// tab is [`Self::require_tab_index`]'s refusal, and `Next`/`Previous` step
+    /// from the *target* client's active tab, wrapping at the ends. Validation
+    /// and [`Self::handle_focus_tab`] both call it.
     pub(super) fn resolve_focus_tab_target(
         command_args: &FocusTabArgs,
         command_source: &CommandSource,
@@ -1878,7 +1883,10 @@ impl Server {
         let client = Self::require_client(session, client_id)?;
         let tab_target = match command_args.focus_target {
             TabTarget::Id(tab_id) => tab_ops::TabTarget::Id(tab_id),
-            TabTarget::Index(tab_index) => tab_ops::TabTarget::Index(tab_index),
+            TabTarget::Index(tab_index) => {
+                Self::require_tab_index(session, tab_index)?;
+                tab_ops::TabTarget::Index(tab_index)
+            }
             TabTarget::Next => tab_ops::TabTarget::Next,
             TabTarget::Previous => tab_ops::TabTarget::Previous,
         };
@@ -1946,6 +1954,34 @@ impl Server {
         } else {
             Err(Rejection::from_reason(RejectReason::TargetNotFound))
         }
+    }
+
+    /// Confirm a tab sits at display position `tab_index` in `session`, whose
+    /// tabs hold the positions `0` to `session.tabs.len() - 1`.
+    ///
+    /// [`RejectReason::TargetNotFound`] when `tab_index` is past the last tab,
+    /// with a help naming the session's tab count and the `--index` values it
+    /// takes. Session `work` with 3 tabs gives ``session `work` has 3 tabs;
+    /// --index takes 0 to 2``, with 1 tab ``session `work` has 1 tab; --index
+    /// takes 0``, and with no tab ``session `work` has no tab``.
+    pub(super) fn require_tab_index(session: &Session, tab_index: usize) -> Result<(), Rejection> {
+        let tab_count = session.tabs.len();
+        if tab_index < tab_count {
+            return Ok(());
+        }
+        let session_name = &session.session_name;
+        let tab_index_help = match tab_count {
+            0 => format!("session `{session_name}` has no tab"),
+            1 => format!("session `{session_name}` has 1 tab; --index takes 0"),
+            _ => format!(
+                "session `{session_name}` has {tab_count} tabs; --index takes 0 to {}",
+                tab_count - 1
+            ),
+        };
+        Err(Rejection::from_reason_and_help(
+            RejectReason::TargetNotFound,
+            &tab_index_help,
+        ))
     }
 
     /// Whether `session` is shutting down (`Stopping`/`Stopped`) and so accepts

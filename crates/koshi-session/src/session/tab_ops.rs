@@ -385,11 +385,11 @@ fn find_tab_at_index(session: &Session, tab_index: usize) -> Option<TabId> {
 
 /// Move `tab_id` to display position `new_tab_index`, keeping the index dense.
 ///
-/// `new_tab_index` is clamped to `[0, len-1]`. The other tabs close ranks around the
-/// moved one so the final order is still `0..len` with the target at
-/// `new_tab_index`. A no-op when the tab is unknown or already at that position.
-/// Returns a single [`Event::TabMoved`]; the tabs that shift to make room do not
-/// emit events of their own.
+/// The other tabs close ranks around the moved one so the final order is still
+/// `0..len` with the target at `new_tab_index`. A no-op when the tab is unknown,
+/// when `new_tab_index` is `len` or more, and when the tab already sits at
+/// `new_tab_index`. Returns a single [`Event::TabMoved`]; the tabs that shift to
+/// make room do not emit events of their own.
 #[must_use]
 pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usize) -> Vec<Event> {
     let Some(previous_tab_index) = session
@@ -400,10 +400,7 @@ pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usiz
         return Vec::new();
     };
 
-    // The target exists, so `len` is at least 1.
-    let new_tab_index = new_tab_index.min(session.tabs.len() - 1);
-
-    if new_tab_index == previous_tab_index {
+    if new_tab_index >= session.tabs.len() || new_tab_index == previous_tab_index {
         return Vec::new();
     }
 
