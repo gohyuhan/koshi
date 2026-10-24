@@ -24,7 +24,7 @@ pub mod session_connection;
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -591,6 +591,68 @@ pub fn send_router_request(
         connection.recv().expect("the router answers the request");
     assert_eq!(router_response.request_id, Some(2));
     router_response.answer_result
+}
+
+/// How many loopback ports [`start_router_with_remote_access`] tries before it
+/// gives up switching remote access on.
+const MAX_ADDRESS_ATTEMPT_COUNT: usize = 8;
+
+/// Write the `koshi.kdl` of `home_directory`, start a router under it serving
+/// `runtime_directory`, and switch its remote access on. Hands back the
+/// router, a connection to it, the address its remote listener serves, and
+/// the fingerprint of the certificate that listener presents.
+///
+/// `koshi.kdl` holds `version 2`, a free loopback port as `remote-listen`, and
+/// then `remote_config_text`, such as `remote-reconnect #false` and a line
+/// break. The port is found by binding port `0` and releasing it, and another
+/// program can take it before the router binds it. A router that answers the
+/// switch with anything else than `RemoteEnabled` is ended, and the next try
+/// writes a new port.
+///
+/// # Panics
+/// When no try out of [`MAX_ADDRESS_ATTEMPT_COUNT`] switches remote access on.
+/// The message holds the last answer.
+pub fn start_router_with_remote_access(
+    home_directory: &Path,
+    runtime_directory: &Path,
+    remote_config_text: &str,
+) -> (RunningRouter, Connection, SocketAddr, String) {
+    let mut last_router_result = None;
+    for _ in 0..MAX_ADDRESS_ATTEMPT_COUNT {
+        let remote_listen_port = TcpListener::bind("127.0.0.1:0")
+            .expect("a free loopback port")
+            .local_addr()
+            .expect("the free port's address can be read")
+            .port();
+        write_test_config(
+            home_directory,
+            &format!(
+                "version 2\n\
+                 remote-listen \"127.0.0.1:{remote_listen_port}\"\n\
+                 {remote_config_text}"
+            ),
+        );
+        let router = start_router_process(home_directory, runtime_directory);
+        let mut router_connection = connect_to_router(runtime_directory);
+        match send_router_request(&mut router_connection, RouterRequestKind::EnableRemote) {
+            RouterResult::RemoteEnabled {
+                remote_listen_address,
+                certificate_fingerprint,
+            } => {
+                return (
+                    router,
+                    router_connection,
+                    remote_listen_address,
+                    certificate_fingerprint,
+                )
+            }
+            router_result => last_router_result = Some(router_result),
+        }
+    }
+    panic!(
+        "remote access was not switched on in {MAX_ADDRESS_ATTEMPT_COUNT} tries; \
+         the last answer was {last_router_result:?}"
+    );
 }
 
 /// Ask the router for a new session and hand back where it listens.

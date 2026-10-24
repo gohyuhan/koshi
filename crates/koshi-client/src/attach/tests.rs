@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
@@ -65,7 +65,6 @@ use koshi_ipc::frame::{
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult, ProcessImageId,
 };
-use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::remote_wire::RemoteClientFrame;
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterRequest, RouterResponse,
@@ -688,17 +687,11 @@ fn build_local_home() -> Home {
     }
 }
 
-/// A session on another machine, reached through a saved server named `work`.
+/// A session on another machine, reached through the saved server at
+/// `laptop.local:7654`.
 fn build_remote_home() -> Home {
     Home::Remote {
-        server: ServerReference::Saved(SavedServer {
-            server_name: Some("work".to_string()),
-            server_address: "laptop.local:7654".to_string(),
-            connection_token: ConnectionToken::generate(),
-            certificate_fingerprint: Some("00".repeat(32)),
-            added_at: SystemTime::UNIX_EPOCH,
-            last_used_at: None,
-        }),
+        server_address: "laptop.local:7654".to_string(),
     }
 }
 
@@ -718,82 +711,6 @@ fn a_death_reports_the_cause_and_how_to_reattach() {
             "the session ended unexpectedly\n  \
              run `koshi list-sessions`; if session {session_id} is still listed, \
              reattach with `koshi attach {session_id}`"
-        )
-    );
-    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
-}
-
-#[test]
-fn a_death_on_another_machine_reports_the_way_back_to_that_machine() {
-    // The way back names the saved server `work`, not this machine.
-    let session_id = SessionId::new();
-    let ending_error = report_attachment_ending(
-        &build_remote_home(),
-        AttachmentEnding::ConnectionDied,
-        session_id,
-        None,
-    )
-    .expect_err("a death is an error");
-    assert_eq!(
-        ending_error.to_string(),
-        format!(
-            "the session ended unexpectedly\n  \
-             run `koshi attach --remote work` to see that server's sessions; \
-             if session {session_id} is among them, reattach with \
-             `koshi attach --remote work {session_id}`"
-        )
-    );
-    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
-}
-
-#[test]
-fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
-    let session_id = SessionId::new();
-    let remote_home = Home::Remote {
-        server: ServerReference::New {
-            server_address: "laptop.local:7654".to_string(),
-            certificate_fingerprint: "ab".repeat(32),
-        },
-    };
-    let ending_error = report_attachment_ending(
-        &remote_home,
-        AttachmentEnding::ConnectionDied,
-        session_id,
-        None,
-    )
-    .expect_err("a death is an error");
-    assert_eq!(
-        ending_error.to_string(),
-        format!(
-            "the session ended unexpectedly\n  \
-             run `koshi attach --remote laptop.local:7654` to see that server's sessions; \
-             if session {session_id} is among them, reattach with \
-             `koshi attach --remote laptop.local:7654 {session_id}`"
-        )
-    );
-}
-
-#[test]
-fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_back() {
-    let session_id = SessionId::new();
-    let cause = CliError::Runtime {
-        detail: "the token saved for the server host:7654 does not reach session 7".to_string(),
-    };
-    let ending_error = report_attachment_ending(
-        &build_remote_home(),
-        AttachmentEnding::LinkLost(Box::new(cause)),
-        session_id,
-        None,
-    )
-    .expect_err("a lost link is an error");
-    assert_eq!(
-        ending_error.to_string(),
-        format!(
-            "the token saved for the server host:7654 does not reach session 7\n  \
-             the session continues without you\n  \
-             run `koshi attach --remote work` to see that server's sessions; \
-             if session {session_id} is among them, reattach with \
-             `koshi attach --remote work {session_id}`"
         )
     );
     assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
@@ -10513,7 +10430,7 @@ fn a_released_image_leaves_the_encode_cache_and_gives_its_bytes_back() {
 #[test]
 fn leaving_while_reconnecting_exits_zero_and_names_no_next_session() {
     let report_result = report_attachment_ending(
-        &build_remote_home(),
+        &build_local_home(),
         AttachmentEnding::LeftWhileReconnecting,
         SessionId::new(),
         None,

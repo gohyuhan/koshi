@@ -74,7 +74,13 @@
 //! is not the expected one, a secret it does not admit, a session that secret does
 //! not reach, or a protocol version this build does not accept — is not dialed
 //! again, and the viewer stops there.
-//! Each dial presents the secret the last attach
+//! Each dial first reads the saved server at the address the viewer joined
+//! through from the saved-server store, dials with the secret and the
+//! certificate fingerprint it holds then, and names it by its saved name then:
+//! a server renamed with `koshi remote edit` while the viewer was attached is
+//! named by its new name. A store that holds no single saved server at that
+//! address, or cannot be read, is a refusal, and the viewer stops there too.
+//! Each dial also presents the secret the last attach
 //! minted, and the session hands that attach's view back for it: the same
 //! active tab, the same focused and zoomed pane of each tab, and the same
 //! scroll offset of each pane. A session that no longer holds that view mints a
@@ -224,7 +230,8 @@ use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
 use koshi_link::remote_client::{
-    self, DialError, ServerReference, REMOTE_RESTART_POLL_INTERVAL_DURATION,
+    self, DialError, SavedServerAtAddressError, ServerReference,
+    REMOTE_RESTART_POLL_INTERVAL_DURATION,
 };
 use koshi_link::router_client::{self, submit_router_request};
 use koshi_link::talk;
@@ -2144,9 +2151,11 @@ enum Home {
     },
     /// A session on another machine, joined through the server serving it.
     Remote {
-        /// The saved record every dial presents: the address, the secret, and
-        /// the fingerprint the server's certificate must have.
-        server: ServerReference,
+        /// Where the saved server this viewer joined through listens, as
+        /// `host:port`. Every dial, and every way back an ending prints, reads
+        /// the saved server at this address from the saved-server store at
+        /// that moment: its name, its secret and its certificate fingerprint.
+        server_address: String,
     },
 }
 
@@ -2343,7 +2352,7 @@ pub fn attach_remote_session(
     drop(server_connection);
     attach_home(
         Home::Remote {
-            server: ServerReference::Saved(saved_server),
+            server_address: saved_server.server_address,
         },
         session_selector,
         koshi_paths::resolve_config_directory().as_deref(),
@@ -2408,10 +2417,12 @@ fn attach_selected_session_from_listing(
             &reachable_session_rows[remote_session_index]
         }
     };
+    let server_address = match remote_client::resolve_listed_server(server_label)? {
+        ServerReference::Saved(saved_server) => saved_server.server_address,
+        ServerReference::New { server_address, .. } => server_address,
+    };
     attach_home(
-        Home::Remote {
-            server: remote_client::resolve_listed_server(server_label)?,
-        },
+        Home::Remote { server_address },
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
         loaded_app_config,
@@ -3182,17 +3193,17 @@ fn run_attachment<B: Backend, W: Write>(
                 }
                 // The link to a session on a server broke, and
                 // `remote-reconnect` is on: the viewer dials that server again.
-                (AttachmentEnding::ConnectionDied, Home::Remote { server })
+                (AttachmentEnding::ConnectionDied, Home::Remote { server_address })
                     if client.get_client_config().should_reconnect_remote_session =>
                 {
-                    let redial_server = server.clone();
+                    let redial_server_address = server_address.clone();
                     let redial_resume_token = resume_token.clone();
                     let cell_size = cell_size_query.get_current_cell_size();
                     (
                         LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
                         Arc::new(move || {
                             build_redial_answer(dial_remote(
-                                &redial_server,
+                                &redial_server_address,
                                 &SessionSelector::SessionId(session_id),
                                 None,
                                 redial_resume_token.as_ref(),
@@ -3410,8 +3421,9 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// again over the endpoint its new image advertises, as
 /// [`run_session_exchange_across_restart`](ipc_client::run_session_exchange_across_restart)
 /// states. On a server the whole admission runs — TLS with the check of the
-/// certificate against the fingerprint the saved record holds, the secret, and
-/// the scope check on the session asked for — and the server resolves the name
+/// certificate against the fingerprint the saved server at the home's address
+/// holds in the saved-server store now, the secret it holds, and the scope
+/// check on the session asked for — and the server resolves the name
 /// against the sessions that secret reaches. A server whose router answers
 /// that it is restarting, or whose session refuses the join while it replaces
 /// its process image, is dialed again, as
@@ -3470,10 +3482,10 @@ fn dial_session(
                 },
             )
         }
-        Home::Remote { server } => {
+        Home::Remote { server_address } => {
             remote_client::dial_through_router_restart(RESTART_WINDOW_DURATION, || {
                 dial_remote(
-                    server,
+                    server_address,
                     session_selector,
                     None,
                     None,
@@ -3488,14 +3500,25 @@ fn dial_session(
     }
 }
 
-/// Dial `server`, ask it for the session `session_selector` names, and join that session
-/// as a client: open the connection, then [`join_remote_session`] over it. The
-/// join runs under a deadline of [`remote_client::JOIN_TIMEOUT_DURATION`] after
+/// Dial the saved server at `server_address`, ask it for the session `session_selector`
+/// names, and join that session as a client: read the saved server at that
+/// address from the saved-server store, open the connection with the secret
+/// and the certificate fingerprint it holds, then [`join_remote_session`] over
+/// it. The join runs under a deadline of [`remote_client::JOIN_TIMEOUT_DURATION`] after
 /// the connection opens until the session answers `Prepared`. The `Commit` and
 /// its answer then run under a deadline of the same length after the `Commit`
 /// starts to be written.
 ///
+/// Example — a server saved as `work` at `laptop.local:7654`, renamed `lab`
+/// and given a new secret with `koshi remote edit` after the viewer joined, is
+/// dialled with the new secret, and a refusal names `lab`.
+///
 /// # Errors
+/// [`DialError::Refused`] carrying [`CliError::Runtime`] with the text of the
+/// [`SavedServerAtAddressError`](remote_client::SavedServerAtAddressError)
+/// that [`find_saved_server_at_address`](remote_client::find_saved_server_at_address)
+/// gives when the store holds no single saved server at `server_address` or
+/// cannot be read, and nothing is dialled.
 /// [`DialError::Unreachable`] when the connection could not be opened.
 /// [`DialError::Refused`] when the saved record holds no certificate
 /// fingerprint, the certificate the server presents is not the expected one,
@@ -3503,7 +3526,7 @@ fn dial_session(
 /// overlap. Every error that [`join_remote_session`] returns.
 #[allow(clippy::too_many_arguments)]
 fn dial_remote(
-    server: &ServerReference,
+    server_address: &str,
     session_selector: &SessionSelector,
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
@@ -3512,8 +3535,14 @@ fn dial_remote(
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
+    let stored_saved_server =
+        remote_client::find_saved_server_at_address(server_address).map_err(|lookup_error| {
+            DialError::Refused(CliError::Runtime {
+                detail: lookup_error.to_string(),
+            })
+        })?;
     let (remote_link, saved_server) = remote_client::connect_saved_server(
-        server,
+        &ServerReference::Saved(stored_saved_server),
         None,
         Some(remote_client::JOIN_TIMEOUT_DURATION),
     )?;
@@ -3825,10 +3854,10 @@ fn reconnect_after_restart(
             }
             rejoin_result
         }
-        Home::Remote { server } => redial_restarted_remote_session_with(
+        Home::Remote { server_address } => redial_restarted_remote_session_with(
             || {
                 dial_remote(
-                    server,
+                    server_address,
                     &SessionSelector::SessionId(session_id),
                     Some(client_id),
                     resume_token,
@@ -6545,6 +6574,25 @@ fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> i
 /// attach command names the user id of a home that holds one, such as
 /// `koshi attach 1001/session-<uuid>`. One on a server names that server in
 /// both commands: `koshi attach --remote my-box` shows that server's sessions.
+/// The server is named as the saved-server store names the saved server at
+/// the home's address now: its saved name, else its address. Example — a
+/// server saved as `work` and renamed `lab` while the viewer was attached
+/// reads `koshi attach --remote lab`.
+///
+/// With no single saved server at that address, the way back names the next
+/// step for each [`SavedServerAtAddressError`](remote_client::SavedServerAtAddressError):
+///
+/// - `NotSaved`: ``run `koshi remote list` to find the name that server is
+///   saved under now, then reattach with `koshi attach --remote <server>
+///   <session id>`; if it is not saved, run `koshi share grant` on that
+///   machine, then reattach with the command it prints, giving <session id>
+///   as the session``.
+/// - `SavedMoreThanOnce`: ``run `koshi remote list` to see the saved servers
+///   at <address>, keep one of them, then reattach with `koshi attach --remote
+///   <address> <session id>` ``.
+/// - `StoreUnreadable`: ``once the saved servers can be read, run `koshi
+///   attach --remote <address>` to see that server's sessions; …``, the two
+///   commands a saved server gets, naming the address.
 fn build_reattach_instructions(home: &Home, session_id: SessionId) -> String {
     match home {
         Home::Local { owner_user_id, .. } => format!(
@@ -6552,13 +6600,43 @@ fn build_reattach_instructions(home: &Home, session_id: SessionId) -> String {
              reattach with `koshi attach {}`",
             format_session_target(session_id, *owner_user_id)
         ),
-        Home::Remote { server } => {
-            let server_label = server.format_server_label();
-            format!(
-                "run `koshi attach --remote {server_label}` to see that server's sessions; \
-                 if session {session_id} is among them, reattach with \
-                 `koshi attach --remote {server_label} {session_id}`"
-            )
+        Home::Remote { server_address } => {
+            match remote_client::find_saved_server_at_address(server_address) {
+                Ok(saved_server) => format_remote_reattach_commands(
+                    &remote_client::format_saved_server_label(&saved_server),
+                    session_id,
+                ),
+                Err(SavedServerAtAddressError::NotSaved { .. }) => format!(
+                    "run `koshi remote list` to find the name that server is saved under now, \
+                     then reattach with `koshi attach --remote <server> {session_id}`; if it is \
+                     not saved, run `koshi share grant` on that machine, then reattach with the \
+                     command it prints, giving {session_id} as the session"
+                ),
+                Err(SavedServerAtAddressError::SavedMoreThanOnce { .. }) => format!(
+                    "run `koshi remote list` to see the saved servers at {server_address}, keep \
+                     one of them, then reattach with `koshi attach --remote {server_address} \
+                     {session_id}`"
+                ),
+                Err(SavedServerAtAddressError::StoreUnreadable { .. }) => format!(
+                    "once the saved servers can be read, {}",
+                    format_remote_reattach_commands(server_address, session_id)
+                ),
+            }
         }
     }
+}
+
+/// The two commands that reach `session_id` on the server `server_label`
+/// names: the one that shows that server's sessions, and the one that joins
+/// the session.
+///
+/// Example — `lab` gives ``run `koshi attach --remote lab` to see that
+/// server's sessions; if session <session id> is among them, reattach with
+/// `koshi attach --remote lab <session id>` ``.
+fn format_remote_reattach_commands(server_label: &str, session_id: SessionId) -> String {
+    format!(
+        "run `koshi attach --remote {server_label}` to see that server's sessions; \
+         if session {session_id} is among them, reattach with \
+         `koshi attach --remote {server_label} {session_id}`"
+    )
 }

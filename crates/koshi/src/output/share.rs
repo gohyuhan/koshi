@@ -57,6 +57,16 @@ pub enum RemoteReady {
         /// gives. `[::ffff:0.0.0.0]` gives the IPv4 addresses. Empty for every
         /// other address.
         host_addresses: Vec<HostAddress>,
+        /// The name this machine goes by, as
+        /// [`get_local_hostname`](koshi_pty::working_directory::get_local_hostname)
+        /// gives it, or `None` when the OS cannot say. Each connect command
+        /// offers it as `--save-as` when it starts with an ASCII letter or
+        /// digit, holds only ASCII letters, digits, `.`, `-` and `_`, has no
+        /// dot-separated part that reads `localhost` in any case, and passes
+        /// [`validate_saved_server_name`](koshi_link::remote_client::validate_saved_server_name).
+        /// Example — `desk` gives `--save-as desk`; `localhost.localdomain`,
+        /// `-desk`, `my desk` and `desk$(id)` give no `--save-as`.
+        host_name: Option<String>,
         /// The fingerprint of the certificate the remote listener presents,
         /// as 64 lowercase hex characters. The connect commands print it as
         /// `sha256:` followed by those characters.
@@ -207,6 +217,7 @@ pub fn render_remote_ready(token_identity: Option<&str>, remote_ready: &RemoteRe
         RemoteReady::On {
             remote_listen_address,
             host_addresses,
+            host_name,
             certificate_fingerprint,
             config_mismatch,
         } => {
@@ -214,6 +225,7 @@ pub fn render_remote_ready(token_identity: Option<&str>, remote_ready: &RemoteRe
                 token_identity,
                 *remote_listen_address,
                 host_addresses,
+                host_name.as_deref(),
                 certificate_fingerprint,
             );
             if let Some(config_mismatch) = config_mismatch {
@@ -365,10 +377,11 @@ const GRANTED_SECRET_LINE: &str =
 /// Render the commands that connect to this machine's remote listener at
 /// `remote_listen_address`. Each command carries
 /// `--certificate-fingerprint sha256:{certificate_fingerprint}`, and
-/// `--save-as {token_identity}` when `token_identity` is one word without the
-/// `host:port` shape. A `token_identity` of `None`, for `koshi share open`,
-/// gives no `--save-as`, and the secret line names the secret `koshi share
-/// grant` printed in place of the secret above. An IPv4-mapped IPv6 address,
+/// `--save-as {host_name}` when [`RemoteReady::On`] states that it offers
+/// `host_name`.
+/// A `token_identity` of `None`, for `koshi share open`, makes the secret line
+/// name the secret `koshi share grant` printed in place of the secret above.
+/// An IPv4-mapped IPv6 address,
 /// such as `[::ffff:192.0.2.20]`, is read as its IPv4 form, `192.0.2.20`, and
 /// a command names that form.
 ///
@@ -383,23 +396,26 @@ const GRANTED_SECRET_LINE: &str =
 /// - Any other address, such as `192.0.2.20:7654`: one command with it, and
 ///   a line saying this machine accepts connections on that address only.
 ///
-/// Example: `0.0.0.0:7654`, `ada`, `192.0.2.20` on `en0`, and the fingerprint
-/// `9c1e` give one line: two spaces, this command, three spaces, and `# en0`:
+/// Example: `0.0.0.0:7654`, `192.0.2.20` on `en0`, the host name `desk`, and
+/// the fingerprint `9c1e` give one line: two spaces, this command, three
+/// spaces, and `# en0`:
 ///
-/// `koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:9c1e --save-as ada [SESSION]`
+/// `koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:9c1e --save-as desk [SESSION]`
 fn render_connect_commands(
     token_identity: Option<&str>,
     remote_listen_address: SocketAddr,
     host_addresses: &[HostAddress],
+    host_name: Option<&str>,
     certificate_fingerprint: &str,
 ) -> String {
-    let (save_as_option, secret_line) = match token_identity {
-        Some(token_identity) => (build_save_as_option(token_identity), REMOTE_SECRET_LINE),
-        None => (String::new(), GRANTED_SECRET_LINE),
+    let secret_line = match token_identity {
+        Some(_) => REMOTE_SECRET_LINE,
+        None => GRANTED_SECRET_LINE,
     };
     let connect_options = format!(
-        " --certificate-fingerprint {}{save_as_option}",
-        format_certificate_fingerprint(certificate_fingerprint)
+        " --certificate-fingerprint {}{}",
+        format_certificate_fingerprint(certificate_fingerprint),
+        build_save_as_option(host_name)
     );
     let listen_ip_address = remote_listen_address.ip().to_canonical();
     let listen_port = remote_listen_address.port();
@@ -447,19 +463,30 @@ fn render_connect_commands(
     rendered_output
 }
 
-/// The ` --save-as <token_identity>` the connect command carries, or an empty string
-/// when `token_identity` has the `host:port` shape or is not a single word.
-///
-/// Example — `alice` gives `" --save-as alice"`; `desk:22` and `ada lovelace`
-/// each give `""`.
-fn build_save_as_option(token_identity: &str) -> String {
-    if koshi_link::remote_client::validate_saved_server_name(token_identity).is_err() {
+/// The ` --save-as <host_name>` the connect command carries, or an empty
+/// string when `host_name` is `None` or is not offered, as
+/// [`RemoteReady::On`] states for its `host_name`.
+fn build_save_as_option(host_name: Option<&str>) -> String {
+    let Some(host_name) = host_name else {
+        return String::new();
+    };
+    let starts_with_letter_or_digit =
+        host_name.starts_with(|first_character: char| first_character.is_ascii_alphanumeric());
+    let has_only_host_name_characters = host_name.chars().all(|host_name_character| {
+        host_name_character.is_ascii_alphanumeric()
+            || matches!(host_name_character, '.' | '-' | '_')
+    });
+    let names_loopback_host = host_name
+        .split('.')
+        .any(|host_name_part| host_name_part.eq_ignore_ascii_case("localhost"));
+    if !starts_with_letter_or_digit
+        || !has_only_host_name_characters
+        || names_loopback_host
+        || koshi_link::remote_client::validate_saved_server_name(host_name).is_err()
+    {
         return String::new();
     }
-    if token_identity.split_whitespace().count() != 1 {
-        return String::new();
-    }
-    format!(" --save-as {token_identity}")
+    format!(" --save-as {host_name}")
 }
 
 /// Render a `share revoke` answer: one line per grant that stopped working,

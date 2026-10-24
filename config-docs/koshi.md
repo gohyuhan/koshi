@@ -535,17 +535,42 @@ that joins it again. It exits with status zero. With the link up, the quit
 keybinding sends the quit to the session and leaves without waiting for the
 session's answer.
 
+Each dial reads the saved server at the address the terminal joined through,
+as `koshi remote list` shows it at that moment, and dials with the secret and
+the fingerprint it holds then. A `koshi remote edit` or `koshi remote
+set-secret` made while the terminal is attached takes effect at the next dial,
+and a message that names the saved server names it as it is saved at that
+moment: a server saved as `work` and renamed `lab` reads `lab`.
+
 A refusal no dial can change stops the dialing at once, without waiting the 120
 seconds out: the certificate the server presents is not the expected one, the
 server does not admit the token, the token does not reach the session, or the
-two builds share no protocol version. Every identical dial gets that same
-answer, so no dial follows it.
+two builds share no protocol version. The dialing also stops when no saved
+server is at that address any more, as after `koshi remote forget` or a
+`koshi remote edit` that gives the server another address, and when the saved
+servers cannot be read. Every identical dial gets that same answer, so no dial
+follows it.
 
 When the dialing stops, koshi puts your terminal back the way it found it.
 Then it prints the cause it stopped on, then `the session continues without
 you`, then the command that lists the session on that server and the command
-that joins it again — `koshi attach --remote <server> <session>`. It exits with
-a non-zero status.
+that joins it again — `koshi attach --remote <server> <session>`. `<server>` is
+the saved name of the server at that address at that moment, else the
+address. It exits with a non-zero status.
+
+A dialing that stops because no saved server is at that address any more
+prints that cause, then names `koshi remote list` to find the name the server
+is saved under now, and `koshi share grant` on that machine to save it again:
+
+```text
+koshi: no saved server is at laptop.local:7654 any more: it was forgotten, or saved under another address
+  the session continues without you
+  run `koshi remote list` to find the name that server is saved under now, then reattach with `koshi attach --remote <server> session-<uuid>`; if it is not saved, run `koshi share grant` on that machine, then reattach with the command it prints, giving session-<uuid> as the session
+```
+
+Saved servers that cannot be read print `the saved servers could not be
+read:` and the reason, then the two commands, after `once the saved servers
+can be read,`.
 
 Off, a dropped link ends the terminal, printing how to attach again by hand.
 

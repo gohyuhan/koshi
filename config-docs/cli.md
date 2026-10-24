@@ -1045,8 +1045,13 @@ connects as soon as the port opens.
 With the port open, the grant prints the command that connects to this
 machine. Each command carries `--certificate-fingerprint` with the fingerprint
 of the certificate this machine's listener presents: the sha256 of it, as
-`sha256:` followed by 64 lowercase hex characters. The address in that command
-depends on `remote-listen`:
+`sha256:` followed by 64 lowercase hex characters. It also carries `--save-as`
+with this machine's host name, the name the other machine saves this one
+under. A host name that does not start with a letter or digit, holds a
+character other than ASCII letters, digits, `.`, `-` and `_`, has a
+dot-separated part `localhost`, or is 64 hex characters gives no `--save-as`,
+and the other machine saves this one with no name. The address in that
+command depends on `remote-listen`:
 
 - `0.0.0.0:7654` gives one command for each IPv4 address of this machine, and
   `[::]:7654` gives one for each IPv6 address. Koshi lists the addresses of each
@@ -1068,10 +1073,12 @@ address now, a last line names both, and `koshi restart-servers`.
 An IPv4-mapped IPv6 address counts as its IPv4 form: `[::ffff:192.0.2.20]:7654`
 gives the same command as `192.0.2.20:7654`.
 
+Example, on a machine with the host name `desk` that listens on `0.0.0.0:7654`:
+
 ```text
 connect from another machine, at the address of this one it can reach:
-  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # en0
-  koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as alice [SESSION]   # utun3
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as desk [SESSION]   # en0
+  koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as desk [SESSION]   # utun3
 set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.
 ```
 
@@ -1080,8 +1087,8 @@ laptop on the same Wi-Fi uses the `en0` address, and a laptop on a VPN uses the
 `utun3` address.
 
 `koshi share open` opens the port without a question and mints no token. It
-prints the same connect commands as a grant, with the same fingerprint and no
-`--save-as`. Its secret line names the secret `koshi share grant` printed in
+prints the same connect commands as a grant, with the same fingerprint and the
+same `--save-as`. Its secret line names the secret `koshi share grant` printed in
 place of the secret above. On a port that is already open it
 opens nothing and prints the commands again, so it is also how to read the
 fingerprint again. A port that does not open prints the reason on standard
@@ -1091,7 +1098,7 @@ error, as the grant does, and the command exits 1. Example, after a grant whose
 ```text
 koshi share open
 connect from another machine:
-  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 [SESSION]
+  koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint sha256:3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0 --save-as desk [SESSION]
 set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when asked.
 this machine accepts connections on 192.0.2.20 only; the other machine must connect to that address.
 ```

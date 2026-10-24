@@ -54,6 +54,7 @@ use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::router_client::RemoteAccessStatus;
 use koshi_link::{ipc_client, router_client};
+use koshi_pty::working_directory::get_local_hostname;
 
 #[cfg(test)]
 mod tests;
@@ -178,6 +179,7 @@ pub fn run_share_command(
                             resolve_remote_ready_or_unknown(resolve_remote_access_ready(
                                 config_file_path.as_deref(),
                                 configured_address,
+                                get_local_hostname(),
                                 prompt::read_yes_answer,
                                 |router_request_kind| {
                                     router_client::submit_router_request(
@@ -200,6 +202,7 @@ pub fn run_share_command(
             let remote_ready = resolve_remote_access_ready(
                 config_file_path.as_deref(),
                 configured_address,
+                get_local_hostname(),
                 |_| true,
                 |router_request_kind| {
                     router_client::submit_router_request(&runtime_directory, router_request_kind)
@@ -453,8 +456,10 @@ fn resolve_remote_ready_or_unknown(
 ///   listening on <address>.` then `try to open <address> now? [y/N]`.
 ///
 /// A yes that opens the port is [`RemoteReady::On`] carrying the fingerprint
-/// the enable answer names. A no is [`RemoteReady::Off`] when remote access
-/// was off, and [`RemoteReady::Blocked`] with no refusal when it was on. A
+/// the enable answer names. Every [`RemoteReady::On`] carries `host_name`, the
+/// name this machine goes by, or `None` when the OS cannot say. A no is
+/// [`RemoteReady::Off`] when remote access was off, and
+/// [`RemoteReady::Blocked`] with no refusal when it was on. A
 /// refused enable is [`RemoteReady::Blocked`] carrying the router's sentence
 /// and whether remote access was on before the request. A refused enable
 /// writes no record and leaves that answer as it was.
@@ -474,6 +479,7 @@ fn resolve_remote_ready_or_unknown(
 fn resolve_remote_access_ready(
     config_file_path: Option<&Path>,
     configured_address: Option<SocketAddr>,
+    host_name: Option<String>,
     confirm_enable: impl FnOnce(&str) -> bool,
     mut request_router: impl FnMut(RouterRequestKind) -> Result<RouterResult, CliError>,
 ) -> Result<RemoteReady, CliError> {
@@ -516,6 +522,7 @@ fn resolve_remote_access_ready(
                 remote_listen_address,
                 host_addresses::list_host_addresses,
             ),
+            host_name,
             remote_listen_address,
             certificate_fingerprint,
             config_mismatch,
@@ -555,6 +562,7 @@ fn resolve_remote_access_ready(
                 remote_listen_address,
                 host_addresses::list_host_addresses,
             ),
+            host_name,
             remote_listen_address,
             certificate_fingerprint,
             config_mismatch: None,

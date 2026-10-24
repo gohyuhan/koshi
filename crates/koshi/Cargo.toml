@@ -17,6 +17,7 @@ koshi-layout.workspace = true
 koshi-link.workspace = true
 koshi-observability.workspace = true
 koshi-paths.workspace = true
+koshi-pty.workspace = true
 koshi-runtime.workspace = true
 koshi-storage.workspace = true
 semver.workspace = true
@@ -36,7 +37,6 @@ libc.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [dev-dependencies]
-koshi-pty.workspace = true
 koshi-test-support.workspace = true
 rcgen.workspace = true
 rustls.workspace = true

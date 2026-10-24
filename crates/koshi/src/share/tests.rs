@@ -325,6 +325,7 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
                 &RemoteReady::On {
                     remote_listen_address: parse_listen_address("192.0.2.20:7654"),
                     host_addresses: Vec::new(),
+                    host_name: Some("desk".to_string()),
                     certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
                     config_mismatch: None,
                 },
@@ -337,7 +338,7 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
              f00d\n\
              connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must \
              connect to that address.\n"
@@ -473,55 +474,97 @@ fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
     assert_eq!(secret_block.matches("f00d").count(), 1);
 }
 
-#[test]
-fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
-    // `desk:22` has the `host:port` shape: the command carries no `--save-as`.
-    let rendered_output = output::render_remote_ready(
-        Some("desk:22"),
+/// What a grant to `alice` closes with when the remote listener serves on
+/// `192.0.2.20:7654` and this machine goes by `host_name`.
+fn render_one_address_remote_ready_for_host_name(host_name: Option<&str>) -> String {
+    output::render_remote_ready(
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
+            host_name: host_name.map(str::to_string),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
-    );
+    )
+}
 
+/// The block [`render_one_address_remote_ready_for_host_name`] gives when its
+/// connect command carries `save_as_option`, such as ` --save-as desk` or the
+/// empty string.
+fn build_one_address_remote_ready_text(save_as_option: &str) -> String {
+    format!(
+        "connect from another machine:\n\
+         \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
+         sha256:{TEST_CERTIFICATE_FINGERPRINT}{save_as_option} [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.0.2.20 only; the other machine must \
+         connect to that address.\n"
+    )
+}
+
+#[test]
+fn a_machine_with_no_host_name_offers_no_saved_name_and_never_the_grant_identity() {
     assert_eq!(
-        rendered_output,
-        format!(
-            "connect from another machine:\n\
-             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
-             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.0.2.20 only; the other machine must \
-             connect to that address.\n"
-        )
+        render_one_address_remote_ready_for_host_name(None),
+        build_one_address_remote_ready_text("")
     );
 }
 
 #[test]
-fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
-    // `ada lovelace` is two words: the command carries no `--save-as`.
-    let rendered_output = output::render_remote_ready(
-        Some("ada lovelace"),
-        &RemoteReady::On {
-            remote_listen_address: parse_listen_address("192.0.2.20:7654"),
-            host_addresses: Vec::new(),
-            certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
-            config_mismatch: None,
-        },
-    );
+fn a_host_name_with_capitals_digits_dots_hyphens_and_underscores_is_offered_as_it_reads() {
+    for offered_host_name in ["Desk-01.lan", "build_box", "mylocalhost.example", "7desk"] {
+        assert_eq!(
+            render_one_address_remote_ready_for_host_name(Some(offered_host_name)),
+            build_one_address_remote_ready_text(&format!(" --save-as {offered_host_name}")),
+            "{offered_host_name}"
+        );
+    }
+}
 
+#[test]
+fn a_host_name_a_shell_reads_as_more_than_one_plain_word_is_not_offered_as_a_saved_name() {
+    for refused_host_name in [
+        "",
+        "my desk",
+        "desk$(id)",
+        "desk;id",
+        "'desk'",
+        "-desk",
+        ".desk",
+        "d\u{e9}sk",
+        "desk:22",
+    ] {
+        assert_eq!(
+            render_one_address_remote_ready_for_host_name(Some(refused_host_name)),
+            build_one_address_remote_ready_text(""),
+            "{refused_host_name:?}"
+        );
+    }
+}
+
+#[test]
+fn a_host_name_that_names_the_loopback_host_is_not_offered_as_a_saved_name() {
+    for refused_host_name in [
+        "localhost",
+        "LocalHost",
+        "localhost.localdomain",
+        "box.localhost",
+    ] {
+        assert_eq!(
+            render_one_address_remote_ready_for_host_name(Some(refused_host_name)),
+            build_one_address_remote_ready_text(""),
+            "{refused_host_name}"
+        );
+    }
+}
+
+#[test]
+fn a_host_name_shaped_like_a_secret_is_not_offered_as_a_saved_name() {
+    let secret_shaped_host_name = "f00d".repeat(16);
     assert_eq!(
-        rendered_output,
-        format!(
-            "connect from another machine:\n\
-             \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
-             set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
-             this machine accepts connections on 192.0.2.20 only; the other machine must \
-             connect to that address.\n"
-        )
+        render_one_address_remote_ready_for_host_name(Some(&secret_shaped_host_name)),
+        build_one_address_remote_ready_text("")
     );
 }
 
@@ -537,6 +580,7 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
     let answered_remote_ready = resolve_remote_ready_or_unknown(Ok(RemoteReady::On {
         remote_listen_address: parse_listen_address("192.0.2.20:7654"),
         host_addresses: Vec::new(),
+        host_name: Some("desk".to_string()),
         certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
         config_mismatch: None,
     }));
@@ -545,6 +589,7 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
         RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -593,8 +638,8 @@ fn build_remote_status(
 
 /// What `resolve_remote_access_ready` gives for a router that answers the
 /// status request with `remote_status` and asks nothing more, with this koshi
-/// having read `configured_address` from `config_file_path`. A question or an
-/// enable request fails the test.
+/// having read `configured_address` from `config_file_path`, on a machine that
+/// goes by `desk`. A question or an enable request fails the test.
 fn resolve_without_asking(
     config_file_path: Option<&Path>,
     configured_address: Option<SocketAddr>,
@@ -603,6 +648,7 @@ fn resolve_without_asking(
     resolve_remote_access_ready(
         config_file_path,
         configured_address,
+        Some("desk".to_string()),
         |prompt_text| panic!("nothing is asked, got {prompt_text:?}"),
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(remote_status.clone()),
@@ -634,6 +680,7 @@ fn a_serving_router_gives_the_fingerprint_it_names_and_nothing_is_asked() {
         RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         }
@@ -655,6 +702,7 @@ fn a_serving_router_that_names_no_fingerprint_gives_no_connect_command() {
     let remote_ready_error = resolve_remote_access_ready(
         Some(&config_file_path),
         Some(parse_listen_address("192.0.2.20:7654")),
+        Some("desk".to_string()),
         |_| panic!("a serving router is not asked to open anything"),
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(remote_status.clone()),
@@ -680,6 +728,7 @@ fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
         Some(parse_listen_address("192.0.2.20:7654")),
+        Some("desk".to_string()),
         |prompt_text| {
             asked_prompt_texts.push(prompt_text.to_string());
             true
@@ -710,6 +759,7 @@ fn an_enable_the_user_confirms_gives_the_fingerprint_the_router_answers_with() {
         RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         }
@@ -725,6 +775,7 @@ fn an_enable_the_router_refuses_carries_its_sentence_and_leaves_remote_access_of
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
         Some(parse_listen_address("192.0.2.20:7654")),
+        Some("desk".to_string()),
         |_| true,
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(
@@ -779,6 +830,7 @@ fn a_no_to_trying_the_port_again_leaves_remote_access_on_and_the_port_shut() {
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
         Some(parse_listen_address("192.0.2.20:7654")),
+        Some("desk".to_string()),
         |prompt_text| {
             asked_prompt_texts.push(prompt_text.to_string());
             false
@@ -827,6 +879,7 @@ fn a_no_to_switching_remote_access_on_names_share_open() {
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
         Some(parse_listen_address("192.0.2.20:7654")),
+        Some("desk".to_string()),
         |_| false,
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(
@@ -852,13 +905,15 @@ fn a_no_to_switching_remote_access_on_names_share_open() {
 #[test]
 fn share_open_switches_remote_access_on_without_a_question() {
     // `share open` answers the offer itself: the enable is sent, and the block
-    // names the secret `koshi share grant` printed and no saved name.
+    // names the secret `koshi share grant` printed and offers the host name as
+    // the saved name.
     let config_directory = TempDir::new().expect("a config directory");
     let config_file_path = config_directory.path().join("koshi.kdl");
     let mut is_enable_sent = false;
     let remote_ready = resolve_remote_access_ready(
         Some(&config_file_path),
         Some(parse_listen_address("192.0.2.20:7654")),
+        Some("desk".to_string()),
         |_| true,
         |router_request_kind| match router_request_kind {
             RouterRequestKind::RemoteStatus => Ok(build_remote_status(
@@ -886,7 +941,7 @@ fn share_open_switches_remote_access_on_without_a_question() {
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
              asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must connect \
@@ -917,7 +972,7 @@ fn share_open_on_a_serving_router_sends_no_enable_and_prints_the_fingerprint() {
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
              asked.\n\
              the router listens on 127.0.0.1:7654, a loopback address, so no other machine can \
@@ -1035,6 +1090,7 @@ fn a_serving_router_whose_file_now_names_another_address_keeps_serving_and_names
         RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: Some(ConfigMismatch::FileChanged {
                 config_file_path: config_file_path.clone(),
@@ -1047,7 +1103,7 @@ fn a_serving_router_whose_file_now_names_another_address_keeps_serving_and_names
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must connect \
              to that address.\n\
@@ -1938,6 +1994,7 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
                 build_host_address("192.0.2.20", "en0"),
                 build_host_address("198.51.100.2", "utun3"),
             ],
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -1948,9 +2005,9 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]   # en0\n\
              \x20 koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # utun3\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]   # utun3\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -1959,10 +2016,11 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
 #[test]
 fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
     let rendered_output = output::render_remote_ready(
-        Some("desk:22"),
+        Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("[::]:7654"),
             host_addresses: vec![build_host_address("2001:db8::20", "Wi-Fi")],
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -1973,7 +2031,7 @@ fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
              \x20 koshi attach --remote [2001:db8::20]:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]   # Wi-Fi\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]   # Wi-Fi\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -1986,6 +2044,7 @@ fn an_interface_name_is_printed_without_its_control_characters() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: vec![build_host_address("192.0.2.20", "en0\u{1b}]0;x\u{7}")],
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -1996,7 +2055,7 @@ fn an_interface_name_is_printed_without_its_control_characters() {
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0]0;x\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]   # en0]0;x\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -2009,6 +2068,7 @@ fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("0.0.0.0:7654"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -2019,20 +2079,20 @@ fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
         format!(
             "this machine has no network address right now. Connect from another machine with:\n\
              \x20 koshi attach --remote <this machine's address>:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
 }
 
 #[test]
-fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identity_as_the_saved_name(
-) {
+fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_the_host_name_as_the_saved_name() {
     let rendered_output = output::render_remote_ready(
         Some("alice"),
         &RemoteReady::On {
             remote_listen_address: parse_listen_address("192.0.2.20:7654"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -2043,7 +2103,7 @@ fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identit
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must \
              connect to that address.\n"
@@ -2052,7 +2112,8 @@ fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identit
 }
 
 /// What a grant to `alice` closes with when the remote listener serves on
-/// `remote_listen_address_text` and this machine has `host_addresses`.
+/// `remote_listen_address_text`, and this machine goes by `desk` and has
+/// `host_addresses`.
 fn render_serving_remote_ready_for_alice(
     remote_listen_address_text: &str,
     host_addresses: Vec<HostAddress>,
@@ -2062,6 +2123,7 @@ fn render_serving_remote_ready_for_alice(
         &RemoteReady::On {
             remote_listen_address: parse_listen_address(remote_listen_address_text),
             host_addresses,
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: TEST_CERTIFICATE_FINGERPRINT.to_string(),
             config_mismatch: None,
         },
@@ -2075,7 +2137,7 @@ fn a_listener_on_ipv4_loopback_names_the_command_for_this_machine_with_its_finge
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on 127.0.0.1:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2091,7 +2153,7 @@ fn a_listener_on_another_ipv4_loopback_address_names_the_command_for_this_machin
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.2:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on 127.0.0.2:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2107,7 +2169,7 @@ fn a_listener_on_ipv6_loopback_names_the_command_for_this_machine_in_brackets() 
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote [::1]:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on [::1]:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2123,7 +2185,7 @@ fn a_listener_on_ipv4_mapped_loopback_names_the_ipv4_command_for_this_machine() 
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
-             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on [::ffff:127.0.0.1]:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2137,7 +2199,7 @@ fn a_listener_on_one_ipv4_mapped_address_renders_as_its_ipv4_form() {
     let expected_output = format!(
         "connect from another machine:\n\
          \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-         sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+         sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
          this machine accepts connections on 192.0.2.20 only; the other machine must \
          connect to that address.\n"
@@ -2158,7 +2220,7 @@ fn a_listener_on_ipv4_mapped_every_address_names_each_ipv4_address_of_this_machi
     let expected_output = format!(
         "connect from another machine, at the address of this one it can reach:\n\
          \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-         sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
+         sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]   # en0\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
     );
 
