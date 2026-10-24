@@ -246,6 +246,11 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
 /// admit carries `remote_protocol_version`, the version settled from that
 /// Hello. A `v0.5.0` dialer ignores the field, and a `v0.5.0` listener leaves
 /// it out, which reads as `None`.
+///
+/// An Attach to a session the secret reaches that cannot be opened is refused
+/// with `the session did not answer`. A `v0.5.0` listener refuses it with
+/// `this server did not admit the connection`, and a `v0.5.0` dialer reads
+/// both sentences the same way.
 pub const REMOTE_PROTOCOL: Surface = Surface {
     surface_name: "remote protocol",
     minimum_version: 2,

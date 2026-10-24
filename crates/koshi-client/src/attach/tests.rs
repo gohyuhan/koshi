@@ -777,7 +777,7 @@ fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
 fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_back() {
     let session_id = SessionId::new();
     let cause = CliError::Runtime {
-        detail: "the token this server saved does not reach session 7".to_string(),
+        detail: "the token saved for the server host:7654 does not reach session 7".to_string(),
     };
     let ending_error = report_attachment_ending(
         &build_remote_home(),
@@ -789,7 +789,7 @@ fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_b
     assert_eq!(
         ending_error.to_string(),
         format!(
-            "the token this server saved does not reach session 7\n  \
+            "the token saved for the server host:7654 does not reach session 7\n  \
              the session continues without you\n  \
              run `koshi attach --remote work` to see that server's sessions; \
              if session {session_id} is among them, reattach with \
@@ -1503,6 +1503,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
             frame_reader,
             frame_writer,
         },
+        "host:7654",
         connection_token.clone(),
         &SessionSelector::SessionId(session_id),
         None,
@@ -1575,6 +1576,7 @@ fn a_remote_join_names_its_placement_target_and_pings_every_third_of_the_link_ti
                 frame_reader: client_frame_reader,
                 frame_writer: client_frame_writer,
             },
+            "host:7654",
             ConnectionToken::generate(),
             &SessionSelector::SessionId(session_id),
             None,

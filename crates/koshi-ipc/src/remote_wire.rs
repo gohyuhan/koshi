@@ -24,10 +24,13 @@
 //! Attach waits for the larger of that and 20 seconds.
 //!
 //! Every refusal carries the same sentence,
-//! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED), but two: a remote
-//! protocol range that does not overlap, and an attach that arrives while the
+//! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED), but three: a remote
+//! protocol range that does not overlap; an attach that arrives while the
 //! router is about to restart into a new build, which carries
-//! [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE).
+//! [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE);
+//! and an attach to a session the secret reaches that does not answer, which
+//! carries
+//! [`SESSION_NOT_ANSWERING_MESSAGE`](crate::remote_wire::SESSION_NOT_ANSWERING_MESSAGE).
 
 use std::time::{Duration, Instant};
 
@@ -68,15 +71,24 @@ pub const REMOTE_HELLO_MAX_BYTE_COUNT: u32 = 4096;
 /// same for every secret the server does not admit.
 ///
 /// A remote protocol range that does not overlap carries
-/// [`format_version_refusal`] instead, and an attach that arrives while the
+/// [`format_version_refusal`] instead, an attach that arrives while the
 /// router is about to restart carries
-/// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE).
+/// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE),
+/// and an attach to a session that does not answer carries
+/// [`SESSION_NOT_ANSWERING_MESSAGE`].
 pub const REMOTE_REFUSED: &str = "this server did not admit the connection";
 
+/// The sentence an admitted caller gets when the session its Attach names,
+/// which its secret reaches, cannot be opened: the session's endpoint file
+/// cannot be read, its socket cannot be reached, another OS user serves it,
+/// or the Hello sent on the caller's behalf cannot be written.
+pub const SESSION_NOT_ANSWERING_MESSAGE: &str = "the session did not answer";
+
 /// The refusal a caller gets when no remote protocol version suits both ends,
-/// naming both ranges and which end is which. One of the two refusals that
-/// are not [`REMOTE_REFUSED`]; the other is
-/// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE).
+/// naming both ranges and which end is which. One of the three refusals that
+/// are not [`REMOTE_REFUSED`]; the others are
+/// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE) and
+/// [`SESSION_NOT_ANSWERING_MESSAGE`].
 ///
 /// Example — a caller speaking 2 to 3 against a build speaking 1 to 1 reads
 /// `"the caller speaks remote protocol versions 2 to 3, this koshi speaks 1 to
@@ -157,9 +169,11 @@ pub enum RemoteServerFrame {
     /// The stream is not open, or the frame is not served.
     Refused {
         /// [`REMOTE_REFUSED`]; the sentence [`format_version_refusal`] builds
-        /// when no remote protocol version suits both ends; or
+        /// when no remote protocol version suits both ends;
         /// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE)
-        /// for an attach that arrives while the router is about to restart.
+        /// for an attach that arrives while the router is about to restart; or
+        /// [`SESSION_NOT_ANSWERING_MESSAGE`] for an attach to a session that
+        /// does not answer.
         message: String,
         /// The remote protocol version the server settled from the Hello
         /// before it refused the secret, or `None` on every other refusal.

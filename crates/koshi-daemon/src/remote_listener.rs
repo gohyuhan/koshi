@@ -36,10 +36,13 @@
 //! Every refusal closes the connection. An admitted caller whose attach
 //! arrives while the router is about to restart into a new build is refused
 //! with [`ROUTER_RESTARTING_MESSAGE`](koshi_ipc::router::ROUTER_RESTARTING_MESSAGE),
-//! whatever its selector names. A caller that opens with the Hello of koshi
-//! 0.3.0 or 0.4.0 gets the refusal naming both version ranges, and no secret
-//! is read from it. Every other refusal but the one naming both version ranges
-//! is [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED). The refusal
+//! whatever its selector names. An admitted caller whose attach names a
+//! session its secret reaches, and that session cannot be opened, is refused
+//! with [`SESSION_NOT_ANSWERING_MESSAGE`](koshi_ipc::remote_wire::SESSION_NOT_ANSWERING_MESSAGE).
+//! A caller that opens with the Hello of koshi 0.3.0 or 0.4.0 gets the
+//! refusal naming both version ranges, and no secret is read from it. Every
+//! other refusal but the one naming both version ranges is
+//! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED). The refusal
 //! of a secret also carries the remote protocol version settled from the
 //! Hello. A wrong secret, a revoked secret, and an expired secret produce the
 //! same bytes and the same work. A session that does not exist, a session the
@@ -82,7 +85,7 @@ use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::remote_wire::{
     format_version_refusal, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
     MIN_REMOTE_PROTOCOL_VERSION, REMOTE_HELLO_MAX_BYTE_COUNT, REMOTE_PROTOCOL_VERSION,
-    REMOTE_REFUSED,
+    REMOTE_REFUSED, SESSION_NOT_ANSWERING_MESSAGE,
 };
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
@@ -997,8 +1000,9 @@ fn open_local_session_bridge_across_restart(
 /// The router sends the session-plane Hello carrying the session's endpoint
 /// token and the client's version range. The session server's answer to that
 /// Hello, and everything after it, travels back through the bridge unread. A
-/// session that cannot be opened is refused, and the connection is reported
-/// ended with nothing bridged.
+/// session that cannot be opened is refused with
+/// [`SESSION_NOT_ANSWERING_MESSAGE`], and the connection is reported ended
+/// with nothing bridged.
 ///
 /// `link_timeout` is the Attach's `link_timeout_ms`. Each socket write to the
 /// client waits at most `link_timeout` for the client to take a byte. Each
@@ -1034,7 +1038,12 @@ fn bridge_remote_connection_to_session(
     let Some((mut session_reader, mut session_writer, session_read_closer)) =
         open_local_session_bridge_across_restart(located_session, session_protocol_versions)
     else {
-        send_refusal(&mut writer);
+        send_refusal_message(
+            &mut writer,
+            SESSION_NOT_ANSWERING_MESSAGE,
+            None,
+            Instant::now() + REFUSAL_WINDOW_DURATION,
+        );
         report_remote_connection_ended(dispatcher_events_sender, remote_connection_id);
         return;
     };

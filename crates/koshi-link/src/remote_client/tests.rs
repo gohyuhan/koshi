@@ -1694,6 +1694,7 @@ fn a_forwarded_answer_carrying_the_restarting_sentence_reads_as_restarting() {
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     );
 
@@ -1702,6 +1703,29 @@ fn a_forwarded_answer_carrying_the_restarting_sentence_reads_as_restarting() {
         panic!("expected a restarting answer, got {forwarded_answer_result:?}");
     };
     assert_eq!(detail, ROUTER_RESTARTING_MESSAGE);
+}
+
+#[test]
+fn a_forwarded_refusal_carrying_the_not_answering_sentence_names_that_session() {
+    let mut frame_reader =
+        build_frame_reader(serialize_server_frame(&RemoteServerFrame::Refused {
+            message: remote_wire::SESSION_NOT_ANSWERING_MESSAGE.to_string(),
+            remote_protocol_version: None,
+        }));
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        "desk.local:7654",
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Refused(CliError::Runtime { detail })) = forwarded_answer_result else {
+        panic!("expected a refusal, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(
+        detail,
+        "session quiet-lake did not answer on the server desk.local:7654"
+    );
 }
 
 #[test]
@@ -1714,6 +1738,7 @@ fn any_other_forwarded_refusal_reads_as_the_token_not_reaching_the_session() {
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     );
 
@@ -1722,7 +1747,7 @@ fn any_other_forwarded_refusal_reads_as_the_token_not_reaching_the_session() {
     };
     assert_eq!(
         detail,
-        "the token this server saved does not reach session quiet-lake"
+        "the token saved for the server desk.local:7654 does not reach session quiet-lake"
     );
 }
 
@@ -1739,6 +1764,7 @@ fn a_forwarded_session_answer_parses_as_the_session_response() {
 
     let incoming_response = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     )
     .expect("a session answer is handed back");
@@ -1765,6 +1791,7 @@ fn a_forwarded_answer_that_parses_as_neither_is_refused_naming_the_parse_error()
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     );
 
@@ -1787,6 +1814,7 @@ fn a_forwarded_answer_quoting_escape_bytes_is_refused_with_them_filtered_out() {
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     );
 
@@ -1810,6 +1838,7 @@ fn a_forwarded_answer_from_a_session_of_koshi_0_4_0_names_the_step_on_the_servin
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     );
 
@@ -1830,6 +1859,7 @@ fn a_link_that_ends_before_the_forwarded_answer_is_unreachable() {
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
+        "desk.local:7654",
         &SessionSelector::SessionName(String::from("quiet-lake")),
     );
 
