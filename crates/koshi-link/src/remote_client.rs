@@ -19,7 +19,7 @@
 //! `Welcome`. [`connect_saved_server`] wraps
 //! that with the store: a server reached for the first time is saved with the
 //! fingerprint it was dialled with, and a saved one has its last-used time
-//! stamped.
+//! stamped. A saved one that holds no name takes the name `--save-as` gives.
 //!
 //! From an open link a caller lists the sessions the secret reaches, attaches
 //! to one, submits one command to one, or asks one to describe itself.
@@ -902,8 +902,11 @@ fn validate_remote_server_answer(
 /// with that fingerprint under `save_as` once it admits the connection. A store
 /// that will not take that record fails the call.
 ///
-/// `save_as` names a server this machine has not saved. Given for a server
-/// that is already saved, it is refused.
+/// `save_as` is the name the server is saved under. A saved server that holds
+/// no name takes it once it admits the connection, and the stamp of its
+/// last-used time goes into the same write. A store that will not take that
+/// name fails the call. A saved server that holds a name refuses `save_as`,
+/// and nothing is dialled.
 ///
 /// `reply_timeout` is passed straight to [`connect_remote_server`].
 ///
@@ -911,11 +914,11 @@ fn validate_remote_server_answer(
 ///
 /// # Errors
 /// Whatever [`connect_remote_server`] reports. [`DialError::Refused`] carrying
-/// [`CliError::InvalidArgs`] when `save_as` names a server that is already
-/// saved, when a saved server holds no fingerprint, when the name cannot be
-/// given to that address, and when no secret was given; carrying
-/// [`CliError::IpcUnavailable`] when a server reached for the first time could
-/// not be saved.
+/// [`CliError::InvalidArgs`] when `save_as` names a saved server that holds a
+/// name, when a saved server holds no fingerprint, when the name cannot be
+/// given to that address, when the saved server changed while the connection
+/// opened, and when no secret was given; carrying
+/// [`CliError::IpcUnavailable`] when the record could not be saved.
 pub fn connect_saved_server(
     server_reference: &ServerReference,
     save_as: Option<&str>,
@@ -924,17 +927,32 @@ pub fn connect_saved_server(
     match server_reference {
         ServerReference::Saved(saved_server_record) => {
             if let Some(save_as_name) = save_as {
-                return Err(DialError::Refused(CliError::InvalidArgs {
-                    detail: format!(
-                        "{} is already saved, so --save-as {save_as_name} would change nothing; \
-                         run `koshi remote forget {}` first to save it under another name",
-                        format_saved_server_label(saved_server_record),
-                        format_saved_server_label(saved_server_record)
-                    ),
-                }));
+                if let Some(saved_server_name) = &saved_server_record.server_name {
+                    return Err(DialError::Refused(CliError::InvalidArgs {
+                        detail: format!(
+                            "{saved_server_name} is already saved, so --save-as {save_as_name} \
+                             would change nothing; run `koshi remote forget {saved_server_name}` \
+                             first to save it under another name"
+                        ),
+                    }));
+                }
+                validate_save_as(save_as_name, &saved_server_record.server_address)
+                    .map_err(DialError::Refused)?;
             }
             let remote_link = dial_saved_server(saved_server_record, reply_timeout)?;
             let connection_opened_at = SystemTime::now();
+            if let Some(save_as_name) = save_as {
+                let named_saved_server = update_saved_server_store(|saved_server_store| {
+                    name_saved_server(
+                        saved_server_store,
+                        &saved_server_record.server_address,
+                        save_as_name,
+                        connection_opened_at,
+                    )
+                })
+                .map_err(DialError::Refused)?;
+                return Ok((remote_link, named_saved_server));
+            }
             let store_update_result = update_saved_server_store(|saved_server_store| {
                 saved_server_store
                     .mark_server_used(&saved_server_record.server_address, connection_opened_at);
@@ -983,6 +1001,58 @@ pub fn connect_saved_server(
             Ok((remote_link, new_saved_server))
         }
     }
+}
+
+/// Give the saved server at `server_address` the name `server_name` and the
+/// last-used time `last_used_at`, and return that server as `server_store`
+/// now holds it.
+///
+/// The server must hold no name, or `server_name` already. Its secret, its
+/// fingerprint and its added time stay as `server_store` holds them. It moves
+/// to the end of `saved_servers`, as [`ServerStore::save_server`] places every
+/// server it saves. A refusal leaves `server_store` as it was.
+///
+/// The store is not written; the caller does that.
+///
+/// # Errors
+/// [`CliError::InvalidArgs`] when no single saved server is at `server_address`,
+/// when that server holds another name, and when another saved server answers
+/// to `server_name`.
+fn name_saved_server(
+    server_store: &mut ServerStore,
+    server_address: &str,
+    server_name: &str,
+    last_used_at: SystemTime,
+) -> Result<SavedServer, CliError> {
+    let changed_server_error = CliError::InvalidArgs {
+        detail: format!(
+            "{server_address} changed while this connection opened, so it was not named \
+             {server_name}; run the command again"
+        ),
+    };
+    let SavedServerLookup::Saved(stored_saved_server) =
+        server_store.find_saved_server(server_address)
+    else {
+        return Err(changed_server_error);
+    };
+    if stored_saved_server
+        .server_name
+        .as_deref()
+        .is_some_and(|stored_server_name| stored_server_name != server_name)
+    {
+        return Err(changed_server_error);
+    }
+    let named_saved_server = SavedServer {
+        server_name: Some(server_name.to_string()),
+        last_used_at: Some(last_used_at),
+        ..stored_saved_server.clone()
+    };
+    server_store
+        .save_server(named_saved_server.clone())
+        .map_err(|name_taken_error| CliError::InvalidArgs {
+            detail: name_taken_error.to_string(),
+        })?;
+    Ok(named_saved_server)
 }
 
 /// Open a connection to the saved server `saved_server_record` names,

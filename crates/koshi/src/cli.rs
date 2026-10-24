@@ -418,8 +418,8 @@ pub enum CliCommand {
         /// sessions running for this user and on the saved servers.
         #[arg(value_name = "SESSION")]
         session_argument: Option<String>,
-        /// Name to save a server reached for the first time under: `--remote
-        /// NAME` then reaches it. A server already saved refuses this flag.
+        /// Name to save the server under: `--remote NAME` then reaches it. A
+        /// saved server that has a name refuses this flag.
         #[arg(long, requires = "remote_server_reference", value_name = "NAME")]
         save_as: Option<String>,
     },

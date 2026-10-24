@@ -1122,12 +1122,27 @@ A saved server refuses `--certificate-fingerprint`, and
 serving machine's certificate changes on purpose, `koshi share open` there
 prints the new fingerprint, and `koshi remote edit` stores it.
 
-A first connection saves the address, the secret, the fingerprint, and the
-name given by `--save-as`. The store lives on the connecting machine and is
-readable only by its owner. `koshi remote list` prints the name, address,
-fingerprint and last-used time of each saved server, and never a secret. Once
-the serving machine grants a fresh secret, `koshi remote set-secret <SERVER>`
-replaces the saved one; it reads the new secret the same way a connection does.
+A first connection from any command that takes `--remote`, with
+`koshi list-sessions` included, saves the address, the secret and the
+fingerprint. `koshi attach` also saves the name that `--save-as` gives. A
+first connection with no `--save-as` saves the server with no name, and
+`koshi remote list` prints `-` for that name. Then
+`koshi attach --remote <address> --save-as <NAME>` gives that server the name
+once the server admits the connection:
+
+```text
+koshi list-sessions --remote laptop.local:7654 --certificate-fingerprint 3f6a0c2e9b8d4f17a5c3e1d0b9f8a7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0
+koshi attach --remote laptop.local:7654 --save-as work
+```
+
+A saved server that has a name refuses `--save-as`, and
+`koshi remote edit <SERVER>` changes its name.
+
+The store lives on the connecting machine and is readable only by its owner.
+`koshi remote list` prints the name, address, fingerprint and last-used time of
+each saved server, and never a secret. Once the serving machine grants a fresh
+secret, `koshi remote set-secret <SERVER>` replaces the saved one; it reads the
+new secret the same way a connection does.
 
 `koshi remote new` saves a server without attaching to one of its sessions. It
 asks four questions in turn — the name, the address, the fingerprint of the
