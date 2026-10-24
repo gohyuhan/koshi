@@ -389,7 +389,7 @@ impl SessionCensusPlan {
 /// itself, and every session `shared_sessions_base_directory` advertises for
 /// the other local users of this machine. `shared_sessions_base_directory` is
 /// the directory
-/// [`resolve_shared_sessions_base_directory`](ipc_client::resolve_shared_sessions_base_directory)
+/// [`resolve_shared_sessions_base_directory_for_layer`](crate::config::resolve_shared_sessions_base_directory_for_layer)
 /// names; `None` asks only this user's sessions.
 ///
 /// Up to [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE)

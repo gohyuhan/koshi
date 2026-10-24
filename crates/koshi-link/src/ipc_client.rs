@@ -125,19 +125,6 @@ pub fn resolve_runtime_directory() -> Result<PathBuf, CliError> {
     })
 }
 
-/// The shared directory holding the sessions other local users started, as
-/// this user's `koshi.kdl` names it now:
-/// [`find_shared_sessions_base_directory`](crate::config::find_shared_sessions_base_directory)
-/// over the config directory `koshi_paths::resolve_config_directory` gives.
-/// `None` while `allow-other-users` is off, and on a machine with no config
-/// directory.
-#[must_use]
-pub fn resolve_shared_sessions_base_directory() -> Option<PathBuf> {
-    crate::config::find_shared_sessions_base_directory(
-        koshi_paths::resolve_config_directory().as_deref(),
-    )
-}
-
 /// Submit `command` to the session this CLI runs inside and hand back the
 /// dispatcher's result.
 ///
@@ -178,8 +165,11 @@ pub fn submit_in_session_command(
 /// Naming one changes nothing about the exchange: the Hello and the `Prepare`
 /// go out back to back, then the `Commit`, and it costs two round trips
 /// either way. `owner_user_id` names the user whose session it is, as
-/// [`load_session_endpoint`] reads it.
+/// [`load_session_endpoint`] reads it in `shared_sessions_base_directory`, the
+/// shared directory the `koshi.kdl` layer the caller read at this process's
+/// start names. `None` looks the session up in the runtime directory alone.
 pub fn submit_external_command(
+    shared_sessions_base_directory: Option<&Path>,
     session_id: SessionId,
     owner_user_id: Option<u32>,
     client_id: Option<ClientId>,
@@ -187,7 +177,7 @@ pub fn submit_external_command(
 ) -> Result<CommandResult, CliError> {
     submit_external_command_via_runtime_directory(
         &resolve_runtime_directory()?,
-        resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         session_id,
         owner_user_id,
         client_id,

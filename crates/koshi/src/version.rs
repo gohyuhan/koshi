@@ -201,12 +201,18 @@ pub fn build_unreachable_server_error(
 /// A server that could not be asked earns a row saying so, and the other rows
 /// still come back; [`build_unreachable_server_error`] turns those rows into the failure
 /// the caller ends with.
+///
+/// `shared_sessions_base_directory` is the shared directory the `koshi.kdl`
+/// layer the caller read at this process's start names, as
+/// [`resolve_shared_sessions_base_directory_for_layer`](koshi_link::config::resolve_shared_sessions_base_directory_for_layer)
+/// gives it. `None` looks up only this user's sessions.
 pub fn list_server_version_rows(
     session_reference: Option<&SessionReference>,
+    shared_sessions_base_directory: Option<&Path>,
 ) -> Result<ServerVersionReport, CliError> {
     list_server_version_rows_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         session_reference,
     )
 }
