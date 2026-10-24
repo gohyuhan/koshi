@@ -204,7 +204,7 @@ fn resolve_command_route_in_runtime_directory(
 /// dispatcher's result.
 ///
 /// `server_reference` is the name this machine saved that server under, or the
-/// `host:port` it listens on. `certificate_fingerprint` is the
+/// `host:port` it listens on. `certificate_fingerprint_text` is the
 /// `--certificate-fingerprint` value, which a server this machine has not saved
 /// needs, as [`remote_client::resolve_server`] states.
 ///
@@ -223,11 +223,12 @@ fn resolve_command_route_in_runtime_directory(
 /// put on a pane-opening verb that was given no `--direction`.
 pub fn submit_remote(
     server_reference: &str,
-    certificate_fingerprint: Option<&str>,
+    certificate_fingerprint_text: Option<&str>,
     command: &CliCommand,
     new_pane_direction: Direction,
 ) -> Result<CommandResult, CliError> {
-    let saved_server = remote_client::resolve_server(server_reference, certificate_fingerprint)?;
+    let saved_server =
+        remote_client::resolve_server(server_reference, certificate_fingerprint_text)?;
     // This connection saves the record the dials below present.
     let (mut remote_link, saved_server_record) = remote_client::connect_saved_server(
         &saved_server,

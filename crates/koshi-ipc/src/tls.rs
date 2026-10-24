@@ -10,7 +10,10 @@
 //! Both sides speak TLS 1.3 only. The dialling side does not use a
 //! certificate authority. Every dial names the fingerprint of the certificate
 //! the server must present — its sha256, 64 lowercase hex characters — and a
-//! server that presents another certificate ends the handshake.
+//! server that presents another certificate ends the handshake. A user reads
+//! and types a fingerprint as `sha256:` followed by those characters,
+//! [`format_certificate_fingerprint`](crate::tls::format_certificate_fingerprint)'s
+//! form.
 //! [`FingerprintVerifier`](crate::tls::FingerprintVerifier) holds that rule
 //! and still checks the server's handshake signature: the proof that the
 //! server holds the private key of the certificate it presented.
@@ -496,6 +499,19 @@ pub fn compute_certificate_fingerprint(certificate_der_bytes: &[u8]) -> String {
     crate::bytes::format_hex(&Sha256::digest(certificate_der_bytes))
 }
 
+/// The text in front of a certificate fingerprint wherever a user reads or
+/// types one.
+pub const CERTIFICATE_FINGERPRINT_PREFIX: &str = "sha256:";
+
+/// `certificate_fingerprint`, 64 lowercase hex characters, as a user reads and
+/// types it: [`CERTIFICATE_FINGERPRINT_PREFIX`] followed by those characters.
+///
+/// Example — `ba7816bf…f20015ad` gives `sha256:ba7816bf…f20015ad`.
+#[must_use]
+pub fn format_certificate_fingerprint(certificate_fingerprint: &str) -> String {
+    format!("{CERTIFICATE_FINGERPRINT_PREFIX}{certificate_fingerprint}")
+}
+
 /// The aws-lc-rs cryptography provider, built fresh on each call.
 ///
 /// With rustls's `prefer-post-quantum` feature on, the key exchange groups it
@@ -558,8 +574,8 @@ impl ServerCertVerifier for FingerprintVerifier {
     /// Records the fingerprint of `end_entity_certificate` as
     /// [`get_presented_certificate_fingerprint`](Self::get_presented_certificate_fingerprint), then
     /// accepts it when it equals the expected fingerprint byte for byte, and
-    /// refuses it otherwise with `the expected certificate is <expected>, the
-    /// server presented <presented>`.
+    /// refuses it otherwise with `the expected certificate is sha256:<expected>,
+    /// the server presented sha256:<presented>`.
     fn verify_server_cert(
         &self,
         end_entity_certificate: &CertificateDer<'_>,
@@ -579,8 +595,9 @@ impl ServerCertVerifier for FingerprintVerifier {
             return Ok(ServerCertVerified::assertion());
         }
         Err(rustls::Error::General(format!(
-            "the expected certificate is {}, the server presented {presented_certificate_fingerprint}",
-            self.expected_certificate_fingerprint
+            "the expected certificate is {}, the server presented {}",
+            format_certificate_fingerprint(&self.expected_certificate_fingerprint),
+            format_certificate_fingerprint(&presented_certificate_fingerprint)
         )))
     }
 

@@ -1789,7 +1789,7 @@ fn the_hidden_subcommand_is_the_one_the_supervisor_is_started_under() {
         cli.command,
         Some(koshi::cli::CliCommand::ServePtySupervisor {
             session_id,
-            supervisor_token: "k7QxSecret".to_string(),
+            supervisor_token: ConnectionToken::from_secret("k7QxSecret"),
             runtime_directory: Some(std::path::PathBuf::from("/run/user/1000/koshi")),
         })
     );

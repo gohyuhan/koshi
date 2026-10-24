@@ -72,6 +72,24 @@ fn a_saved_name_shaped_like_an_address_is_refused() {
 }
 
 #[test]
+fn a_saved_name_of_sixty_four_lowercase_hex_characters_is_refused_without_repeating_it() {
+    let secret_shaped_name = ConnectionToken::generate().expose_secret().to_string();
+
+    let refusal = validate_saved_server_name(&secret_shaped_name)
+        .expect_err("a name with the shape of a secret is refused");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a name that cannot be saved is a bad argument, not a runtime failure");
+    };
+    assert_eq!(
+        detail,
+        "a saved name must not be 64 hex characters, the shape of a secret. Pick a plain name."
+    );
+    validate_saved_server_name(&"A".repeat(64)).expect("uppercase hex is not a secret's shape");
+    validate_saved_server_name(&"a".repeat(63)).expect("63 characters is not a secret's shape");
+}
+
+#[test]
 fn an_empty_saved_name_is_refused() {
     let refusal = validate_saved_server_name("").expect_err("an empty name is refused");
 
@@ -94,6 +112,20 @@ fn the_dial_timeout_is_ten_seconds_and_the_reply_timeout_twenty() {
     assert_eq!(DIAL_TIMEOUT_DURATION, Duration::from_secs(10));
     assert_eq!(REPLY_TIMEOUT_DURATION, Duration::from_secs(20));
 }
+
+/// The refusal of a certificate fingerprint that is not `sha256:` followed by
+/// 64 lowercase hex characters.
+const FINGERPRINT_SHAPE_DETAIL: &str = "a certificate fingerprint is sha256: followed by 64 \
+                                        lowercase hex characters, as `koshi share grant` prints \
+                                        it on the machine that serves";
+
+/// The refusal of 64 lowercase hex characters given as a certificate
+/// fingerprint with no `sha256:` in front.
+const SECRET_SHAPED_FINGERPRINT_DETAIL: &str = "a certificate fingerprint is sha256: followed by \
+                                                64 lowercase hex characters, as `koshi share \
+                                                grant` prints it on the machine that serves. 64 \
+                                                hex characters alone is the shape of a secret, \
+                                                and a secret is never given here";
 
 /// Build a saved server named `work` at `desk.local:7654`.
 fn build_saved_server() -> SavedServer {
@@ -126,7 +158,7 @@ fn a_fingerprint_given_for_a_saved_server_that_equals_the_one_it_holds_resolves_
     let resolved_server_reference = resolve_server_reference(
         SavedServerLookup::Saved(&saved_server),
         "work",
-        Some(&"aa".repeat(32)),
+        Some(&format!("sha256:{}", "aa".repeat(32))),
     )
     .expect("a fingerprint equal to the saved one is taken");
 
@@ -141,19 +173,22 @@ fn a_fingerprint_given_for_a_saved_server_that_differs_from_the_one_it_holds_is_
     let saved_server = build_saved_server();
     let refused_fingerprint_cases = [
         (
-            "bb".repeat(32),
+            format!("sha256:{}", "bb".repeat(32)),
             format!(
-                "work expects the certificate fingerprint {}, and --certificate-fingerprint \
-                 gives {}; run `koshi remote edit work` to change the fingerprint it expects",
+                "work expects the certificate fingerprint sha256:{}, and \
+                 --certificate-fingerprint gives sha256:{}; run `koshi remote edit work` to \
+                 change the fingerprint it expects",
                 "aa".repeat(32),
                 "bb".repeat(32)
             ),
         ),
         (
-            "AA".repeat(32),
-            "a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` \
-             prints it on the machine that serves"
-                .to_string(),
+            format!("sha256:{}", "AA".repeat(32)),
+            FINGERPRINT_SHAPE_DETAIL.to_string(),
+        ),
+        (
+            "aa".repeat(32),
+            SECRET_SHAPED_FINGERPRINT_DETAIL.to_string(),
         ),
     ];
 
@@ -183,7 +218,7 @@ fn a_fingerprint_given_for_a_saved_server_holding_none_resolves_to_its_record() 
     let resolved_server_reference = resolve_server_reference(
         SavedServerLookup::Saved(&saved_server),
         "work",
-        Some(&"aa".repeat(32)),
+        Some(&format!("sha256:{}", "aa".repeat(32))),
     )
     .expect("a saved server holding no fingerprint resolves");
 
@@ -323,7 +358,7 @@ fn an_ambiguous_selector_is_refused_and_never_dialled_as_a_new_server() {
     let refusal = resolve_server_reference(
         SavedServerLookup::Ambiguous,
         "laptop.local:7654",
-        Some(&"ab".repeat(32)),
+        Some(&format!("sha256:{}", "ab".repeat(32))),
     )
     .expect_err("an ambiguous selector is refused");
     let CliError::InvalidArgs { detail } = refusal else {
@@ -341,7 +376,7 @@ fn an_address_nothing_is_saved_under_is_the_one_new_server_case() {
     let resolved_server_reference = resolve_server_reference(
         SavedServerLookup::NotSaved,
         "laptop.local:7654",
-        Some(&"ab".repeat(32)),
+        Some(&format!("sha256:{}", "ab".repeat(32))),
     )
     .expect("an address with nothing saved is a new server");
     assert_eq!(
@@ -370,51 +405,85 @@ fn an_address_nothing_is_saved_under_and_no_fingerprint_is_refused_before_any_di
 }
 
 #[test]
-fn an_address_nothing_is_saved_under_and_a_malformed_fingerprint_is_refused() {
-    let refusal = resolve_server_reference(
-        SavedServerLookup::NotSaved,
-        "laptop.local:7654",
-        Some(&"AB".repeat(32)),
-    )
-    .expect_err("an uppercase fingerprint is refused");
+fn an_address_nothing_is_saved_under_and_a_malformed_fingerprint_is_refused_without_repeating_it() {
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
+    let refused_fingerprint_cases = [
+        (
+            format!("sha256:{}", "AB".repeat(32)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (secret_text, SECRET_SHAPED_FINGERPRINT_DETAIL),
+    ];
 
-    let CliError::InvalidArgs { detail } = refusal else {
-        panic!("a malformed fingerprint is a bad argument, not a runtime failure");
-    };
-    assert_eq!(
-        detail,
-        "a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` \
-         prints it on the machine that serves"
-    );
+    for (given_certificate_fingerprint, expected_detail) in refused_fingerprint_cases {
+        let refusal = resolve_server_reference(
+            SavedServerLookup::NotSaved,
+            "laptop.local:7654",
+            Some(&given_certificate_fingerprint),
+        )
+        .expect_err("a malformed fingerprint is refused");
+
+        let CliError::InvalidArgs { detail } = refusal else {
+            panic!("a malformed fingerprint is a bad argument, not a runtime failure");
+        };
+        assert_eq!(detail, expected_detail);
+    }
 }
 
 #[test]
-fn a_fingerprint_is_sixty_four_lowercase_hex_characters_and_nothing_else() {
+fn a_fingerprint_is_sha256_followed_by_sixty_four_lowercase_hex_characters_and_nothing_else() {
     for accepted_fingerprint in ["0123456789abcdef".repeat(4), "f".repeat(64)] {
-        assert!(
-            validate_certificate_fingerprint(&accepted_fingerprint).is_ok(),
-            "{accepted_fingerprint} is a fingerprint"
+        assert_eq!(
+            parse_certificate_fingerprint(&format!("sha256:{accepted_fingerprint}"))
+                .expect("sha256: and 64 lowercase hex characters is a fingerprint"),
+            accepted_fingerprint
         );
     }
-    for refused_fingerprint in [
-        String::new(),
-        "a".repeat(63),
-        "a".repeat(65),
-        "A".repeat(64),
-        "g".repeat(64),
-        format!("{} ", "a".repeat(63)),
-        format!("sha256:{}", "a".repeat(64)),
-    ] {
+    let refused_fingerprint_cases = [
+        (String::new(), FINGERPRINT_SHAPE_DETAIL),
+        ("sha256:".to_string(), FINGERPRINT_SHAPE_DETAIL),
+        (
+            format!("sha256:{}", "a".repeat(63)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (
+            format!("sha256:{}", "a".repeat(65)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (
+            format!("sha256:{}", "A".repeat(64)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (
+            format!("sha256:{}", "g".repeat(64)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (
+            format!("sha256:{} ", "a".repeat(63)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (
+            format!("SHA256:{}", "a".repeat(64)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        (
+            format!("sha256: {}", "a".repeat(64)),
+            FINGERPRINT_SHAPE_DETAIL,
+        ),
+        ("A".repeat(64), FINGERPRINT_SHAPE_DETAIL),
+        ("a".repeat(64), SECRET_SHAPED_FINGERPRINT_DETAIL),
+        (
+            "0123456789abcdef".repeat(4),
+            SECRET_SHAPED_FINGERPRINT_DETAIL,
+        ),
+    ];
+    for (refused_fingerprint, expected_detail) in refused_fingerprint_cases {
         let Err(CliError::InvalidArgs { detail }) =
-            validate_certificate_fingerprint(&refused_fingerprint)
+            parse_certificate_fingerprint(&refused_fingerprint)
         else {
             panic!("{refused_fingerprint:?} is not a fingerprint");
         };
-        assert_eq!(
-            detail,
-            "a certificate fingerprint is 64 lowercase hex characters, as `koshi share grant` \
-             prints it on the machine that serves"
-        );
+        assert_eq!(detail, expected_detail, "{refused_fingerprint:?}");
     }
 }
 
@@ -810,8 +879,8 @@ fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a
     assert_eq!(
         detail,
         format!(
-            "the certificate desk.local:7654 presented is not the expected one: expected {}, \
-             presented {}. the secret was not sent. if that machine's certificate changed on \
+            "the certificate desk.local:7654 presented is not the expected one: expected \
+             sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with \
              --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
             "aa".repeat(32),
@@ -842,8 +911,8 @@ fn a_certificate_that_is_not_the_expected_one_on_a_saved_server_names_the_edit_o
     assert_eq!(
         detail,
         format!(
-            "the certificate desk.local:7654 presented is not the expected one: expected {}, \
-             presented {}. the secret was not sent. if that machine's certificate changed on \
+            "the certificate desk.local:7654 presented is not the expected one: expected \
+             sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with `koshi \
              remote edit work`.",
             "aa".repeat(32),

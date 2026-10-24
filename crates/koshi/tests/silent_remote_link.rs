@@ -239,7 +239,7 @@ fn start_router_with_remote_access(
 }
 
 /// Start `koshi attach --remote <relay_address> --certificate-fingerprint
-/// <certificate_fingerprint> <session_id>` under `home_directory`, with
+/// sha256:<certificate_fingerprint> <session_id>` under `home_directory`, with
 /// `remote_secret` in `KOSHI_REMOTE_SECRET`. A thread reads the client's
 /// standard output to its end and drops it.
 fn start_remote_client(
@@ -254,7 +254,7 @@ fn start_remote_client(
         .arg("--remote")
         .arg(relay_address.to_string())
         .arg("--certificate-fingerprint")
-        .arg(certificate_fingerprint)
+        .arg(format!("sha256:{certificate_fingerprint}"))
         .arg(session_id.to_string())
         .env("KOSHI_REMOTE_SECRET", remote_secret)
         .spawn()

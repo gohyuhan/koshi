@@ -1242,7 +1242,7 @@ fn remote_listener_names_the_served_address_and_its_fingerprint() {
         DoctorOutcome {
             verdict: Verdict::Ok,
             reason: format!(
-                "the router serves 127.0.0.1:7654 with the certificate fingerprint {}",
+                "the router serves 127.0.0.1:7654 with the certificate fingerprint sha256:{}",
                 "a".repeat(64)
             ),
             help: None,
@@ -1298,9 +1298,9 @@ fn remote_listener_keeps_the_fingerprint_beside_a_change_the_serving_router_has_
         DoctorOutcome {
             verdict: Verdict::Warn,
             reason: format!(
-                "the router serves 127.0.0.1:7654 with the certificate fingerprint {}; {} names \
-                 the remote listen address 0.0.0.0:7654, and the running router read the remote \
-                 listen address 127.0.0.1:7654 from it when it started",
+                "the router serves 127.0.0.1:7654 with the certificate fingerprint sha256:{}; {} \
+                 names the remote listen address 0.0.0.0:7654, and the running router read the \
+                 remote listen address 127.0.0.1:7654 from it when it started",
                 "a".repeat(64),
                 build_router_config_file_path().display()
             ),

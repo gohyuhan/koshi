@@ -13,11 +13,12 @@ use std::process::Output;
 
 use common::{
     build_koshi_command_under_home, build_saved_server, build_short_test_directory,
-    spawn_stand_in_remote_server, write_saved_server_store,
+    list_saved_server_records, resolve_data_directory_under_home, spawn_stand_in_remote_server,
+    write_saved_server_store,
 };
 use koshi_core::command::CliExitCode;
 use koshi_core::ids::SessionId;
-use koshi_ipc::remote_servers::SavedServer;
+use koshi_ipc::remote_servers::{resolve_server_store_path, SavedServer};
 use koshi_ipc::remote_wire::{
     RemoteServerFrame, RemoteSessionRow, REMOTE_PROTOCOL_VERSION, REMOTE_REFUSED,
 };
@@ -81,8 +82,8 @@ fn list_sessions_names_each_saved_server_it_cannot_list_on_standard_error() {
              store the new secret with `koshi remote set-secret gate`\n\
              koshi: lab did not answer; its sessions are not listed\n\
              koshi: mill: the certificate {reinstalled_server_address} presented is not the \
-             expected one: expected {saved_certificate_fingerprint}, presented \
-             {reinstalled_server_certificate_fingerprint}. the secret was not sent. if that \
+             expected one: expected sha256:{saved_certificate_fingerprint}, presented \
+             sha256:{reinstalled_server_certificate_fingerprint}. the secret was not sent. if that \
              machine's certificate changed on purpose, `koshi share open` there prints the new \
              fingerprint: give it with `koshi remote edit mill`. its sessions are not listed\n"
         )
@@ -181,5 +182,80 @@ fn list_sessions_asks_the_first_16_saved_servers_and_names_how_many_are_saved() 
     assert_eq!(
         listing_output.status.code(),
         Some(CliExitCode::Success.get_exit_code())
+    );
+}
+
+#[test]
+fn a_saved_server_file_the_previous_build_wrote_loads_lists_sha256_and_dials_unchanged() {
+    let remote_session_row = RemoteSessionRow {
+        session_id: SessionId::new(),
+        session_name: "quiet-lake".to_string(),
+    };
+    let (answering_server_address, answering_server_certificate_fingerprint) =
+        spawn_stand_in_remote_server(vec![
+            RemoteServerFrame::Welcome {
+                remote_protocol_version: REMOTE_PROTOCOL_VERSION,
+            },
+            RemoteServerFrame::Sessions {
+                session_rows: vec![remote_session_row.clone()],
+            },
+        ]);
+    let home_directory = build_short_test_directory();
+    write_saved_server_store(home_directory.path(), Vec::new());
+    std::fs::write(
+        resolve_server_store_path(&resolve_data_directory_under_home(home_directory.path())),
+        format!(
+            r#"{{"store_format":2,"saved_servers":[{{"server_name":"work","server_address":"{answering_server_address}","connection_token":"test-secret","certificate_fingerprint":"{answering_server_certificate_fingerprint}","added_at":{{"secs_since_epoch":0,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
+        ),
+    )
+    .expect("the saved-server file of the previous build is written");
+
+    let remote_list_output = build_koshi_command_under_home(home_directory.path())
+        .args(["remote", "list", "--format", "json"])
+        .output()
+        .expect("the koshi binary runs");
+    assert_eq!(String::from_utf8_lossy(&remote_list_output.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&remote_list_output.stdout),
+        format!(
+            r#"[
+  {{
+    "server_name": "work",
+    "server_address": "{answering_server_address}",
+    "certificate_fingerprint": "sha256:{answering_server_certificate_fingerprint}",
+    "last_used_at": null
+  }}
+]
+"#
+        )
+    );
+
+    let listing_output = build_koshi_command_under_home(home_directory.path())
+        .arg("list-sessions")
+        .output()
+        .expect("the koshi binary runs");
+    assert_eq!(String::from_utf8_lossy(&listing_output.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&listing_output.stdout),
+        koshi::output::render_sessions(
+            &[SessionRow::from_session(
+                remote_session_row.session_id,
+                &remote_session_row.session_name,
+                Some("work".to_string()),
+            )],
+            koshi::cli::OutputFormat::Table
+        )
+    );
+    assert_eq!(
+        listing_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        list_saved_server_records(home_directory.path()),
+        vec![(
+            Some("work".to_string()),
+            answering_server_address,
+            Some(answering_server_certificate_fingerprint)
+        )]
     );
 }

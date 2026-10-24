@@ -337,7 +337,7 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
              f00d\n\
              connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must \
              connect to that address.\n"
@@ -491,7 +491,7 @@ fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must \
              connect to that address.\n"
@@ -517,7 +517,7 @@ fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must \
              connect to that address.\n"
@@ -886,7 +886,7 @@ fn share_open_switches_remote_access_on_without_a_question() {
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
              asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must connect \
@@ -917,7 +917,7 @@ fn share_open_on_a_serving_router_sends_no_enable_and_prints_the_fingerprint() {
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
              asked.\n\
              the router listens on 127.0.0.1:7654, a loopback address, so no other machine can \
@@ -1047,7 +1047,7 @@ fn a_serving_router_whose_file_now_names_another_address_keeps_serving_and_names
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must connect \
              to that address.\n\
@@ -1948,9 +1948,9 @@ fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
              \x20 koshi attach --remote 198.51.100.2:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # utun3\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # utun3\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -1973,7 +1973,7 @@ fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
              \x20 koshi attach --remote [2001:db8::20]:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} [SESSION]   # Wi-Fi\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} [SESSION]   # Wi-Fi\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -1996,7 +1996,7 @@ fn an_interface_name_is_printed_without_its_control_characters() {
         format!(
             "connect from another machine, at the address of this one it can reach:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0]0;x\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0]0;x\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -2019,7 +2019,7 @@ fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
         format!(
             "this machine has no network address right now. Connect from another machine with:\n\
              \x20 koshi attach --remote <this machine's address>:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
         )
     );
@@ -2043,7 +2043,7 @@ fn a_listener_on_one_address_names_it_as_the_only_one_and_offers_a_plain_identit
         format!(
             "connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              this machine accepts connections on 192.0.2.20 only; the other machine must \
              connect to that address.\n"
@@ -2075,7 +2075,7 @@ fn a_listener_on_ipv4_loopback_names_the_command_for_this_machine_with_its_finge
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on 127.0.0.1:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2091,7 +2091,7 @@ fn a_listener_on_another_ipv4_loopback_address_names_the_command_for_this_machin
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.2:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on 127.0.0.2:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2107,7 +2107,7 @@ fn a_listener_on_ipv6_loopback_names_the_command_for_this_machine_in_brackets() 
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote [::1]:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on [::1]:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2123,7 +2123,7 @@ fn a_listener_on_ipv4_mapped_loopback_names_the_ipv4_command_for_this_machine() 
         format!(
             "connect from this machine:\n\
              \x20 koshi attach --remote 127.0.0.1:7654 --certificate-fingerprint \
-             {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+             sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
              set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
              the router listens on [::ffff:127.0.0.1]:7654, a loopback address, so no other machine can \
              connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
@@ -2137,7 +2137,7 @@ fn a_listener_on_one_ipv4_mapped_address_renders_as_its_ipv4_form() {
     let expected_output = format!(
         "connect from another machine:\n\
          \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-         {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
+         sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
          this machine accepts connections on 192.0.2.20 only; the other machine must \
          connect to that address.\n"
@@ -2158,7 +2158,7 @@ fn a_listener_on_ipv4_mapped_every_address_names_each_ipv4_address_of_this_machi
     let expected_output = format!(
         "connect from another machine, at the address of this one it can reach:\n\
          \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
-         {TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
+         sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as alice [SESSION]   # en0\n\
          set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
     );
 

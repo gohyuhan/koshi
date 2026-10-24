@@ -61,6 +61,7 @@ use koshi_ipc::remote_wire::{
     REMOTE_PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
+use koshi_ipc::tls::{format_certificate_fingerprint, CERTIFICATE_FINGERPRINT_PREFIX};
 use koshi_ipc::transport::{parse_answer, FrameReader, FrameWriter};
 use koshi_ipc::wire::WireName;
 use serde_json::value::RawValue;
@@ -436,10 +437,11 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 /// selector, or a server this machine has not saved when the selector is an
 /// address.
 ///
-/// `certificate_fingerprint` is the value given with
-/// `--certificate-fingerprint`, or `None` when none was given. A server this
-/// machine has not saved needs it. A saved one takes it when it equals the
-/// fingerprint the record holds, and refuses any other.
+/// `certificate_fingerprint_text` is the value given with
+/// `--certificate-fingerprint`, such as `sha256:` followed by 64 lowercase hex
+/// characters, or `None` when none was given. A server this machine has not
+/// saved needs it. A saved one takes it when it names the fingerprint the
+/// record holds, and refuses any other.
 ///
 /// A saved one is refused when `KOSHI_REMOTE_SECRET`, with its surrounding
 /// whitespace trimmed, holds a secret that no saved server holds, or bytes that
@@ -458,18 +460,19 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 /// address, when it matches more than one, when it matches a saved server and
 /// a fingerprint other than the one that record holds is given, when it
 /// matches a saved server and `KOSHI_REMOTE_SECRET` holds a secret no saved
-/// server holds, when a given fingerprint is not 64 lowercase hex characters,
-/// and when it is an address no record holds and the fingerprint is missing.
+/// server holds, when a given fingerprint fails
+/// [`parse_certificate_fingerprint`], and when it is an address no record holds
+/// and the fingerprint is missing.
 /// [`CliError::IpcUnavailable`] when the saved-server store cannot be read.
 pub fn resolve_server(
     server_selector_text: &str,
-    certificate_fingerprint: Option<&str>,
+    certificate_fingerprint_text: Option<&str>,
 ) -> Result<ServerReference, CliError> {
     let (_, saved_server_store) = load_saved_server_store()?;
     let server_reference = resolve_server_reference(
         saved_server_store.find_saved_server(server_selector_text),
         server_selector_text,
-        certificate_fingerprint,
+        certificate_fingerprint_text,
     )?;
     if let ServerReference::Saved(saved_server) = &server_reference {
         validate_environment_secret(
@@ -547,33 +550,36 @@ fn validate_environment_secret(
 }
 
 /// Which server the selector names, given what the store said about it and
-/// the fingerprint given with `--certificate-fingerprint`.
+/// the text given with `--certificate-fingerprint`.
 ///
 /// [`SavedServerLookup::Saved`] dials with the fingerprint that record holds.
-/// It takes a `certificate_fingerprint` equal to that fingerprint, and refuses
-/// another one. A record holding no fingerprint takes any well-formed
-/// `certificate_fingerprint`, and the dial refuses that record.
-/// [`SavedServerLookup::NotSaved`] with an address shape dials with
-/// `certificate_fingerprint`, and refuses to go on without one.
+/// It takes a `certificate_fingerprint_text` naming that fingerprint, and
+/// refuses another one. A record holding no fingerprint takes any well-formed
+/// `certificate_fingerprint_text`, and the dial refuses that record.
+/// [`SavedServerLookup::NotSaved`] with an address shape dials with the
+/// fingerprint `certificate_fingerprint_text` names, and refuses to go on
+/// without one.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector names nothing and is not an
 /// address, when it names more than one saved server, when it names a saved
-/// server that holds a fingerprint other than `certificate_fingerprint`, when
-/// `certificate_fingerprint` is `Some` and fails
-/// [`validate_certificate_fingerprint`], and when it is an address nothing is
-/// saved under and `certificate_fingerprint` is `None`.
+/// server that holds a fingerprint other than the one
+/// `certificate_fingerprint_text` names, when `certificate_fingerprint_text`
+/// is `Some` and fails [`parse_certificate_fingerprint`], and when it is an
+/// address nothing is saved under and `certificate_fingerprint_text` is
+/// `None`.
 fn resolve_server_reference(
     server_lookup: SavedServerLookup<'_>,
     server_selector_text: &str,
-    certificate_fingerprint: Option<&str>,
+    certificate_fingerprint_text: Option<&str>,
 ) -> Result<ServerReference, CliError> {
     match server_lookup {
         SavedServerLookup::Saved(saved_server) => {
-            let Some(certificate_fingerprint) = certificate_fingerprint else {
+            let Some(certificate_fingerprint_text) = certificate_fingerprint_text else {
                 return Ok(ServerReference::Saved(saved_server.clone()));
             };
-            validate_certificate_fingerprint(certificate_fingerprint)?;
+            let certificate_fingerprint =
+                parse_certificate_fingerprint(certificate_fingerprint_text)?;
             match saved_server.certificate_fingerprint.as_deref() {
                 Some(saved_certificate_fingerprint)
                     if saved_certificate_fingerprint != certificate_fingerprint =>
@@ -581,10 +587,11 @@ fn resolve_server_reference(
                     let saved_server_label = format_saved_server_label(saved_server);
                     Err(CliError::InvalidArgs {
                         detail: format!(
-                            "{saved_server_label} expects the certificate fingerprint \
-                             {saved_certificate_fingerprint}, and --certificate-fingerprint gives \
-                             {certificate_fingerprint}; run `koshi remote edit \
-                             {saved_server_label}` to change the fingerprint it expects"
+                            "{saved_server_label} expects the certificate fingerprint {}, and \
+                             --certificate-fingerprint gives {}; run `koshi remote edit \
+                             {saved_server_label}` to change the fingerprint it expects",
+                            format_certificate_fingerprint(saved_certificate_fingerprint),
+                            format_certificate_fingerprint(&certificate_fingerprint)
                         ),
                     })
                 }
@@ -600,7 +607,7 @@ fn resolve_server_reference(
             ),
         }),
         SavedServerLookup::NotSaved if is_server_address(server_selector_text) => {
-            let Some(certificate_fingerprint) = certificate_fingerprint else {
+            let Some(certificate_fingerprint_text) = certificate_fingerprint_text else {
                 return Err(CliError::InvalidArgs {
                     detail: format!(
                         "{server_selector_text} is not saved, so the fingerprint of its \
@@ -609,10 +616,11 @@ fn resolve_server_reference(
                     ),
                 });
             };
-            validate_certificate_fingerprint(certificate_fingerprint)?;
             Ok(ServerReference::New {
                 server_address: server_selector_text.to_string(),
-                certificate_fingerprint: certificate_fingerprint.to_string(),
+                certificate_fingerprint: parse_certificate_fingerprint(
+                    certificate_fingerprint_text,
+                )?,
             })
         }
         SavedServerLookup::NotSaved => Err(CliError::InvalidArgs {
@@ -649,7 +657,11 @@ pub fn is_server_address(server_selector_text: &str) -> bool {
         && port_text.parse::<u16>().is_ok()
 }
 
-/// Refuse a saved name that is empty or has the `host:port` shape.
+/// Refuse a saved name that is empty, that is 64 lowercase hex characters,
+/// or that has the `host:port` shape.
+///
+/// A name of 64 lowercase hex characters has the shape of a secret, and its
+/// refusal does not repeat it.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] naming the shape, and for an empty name.
@@ -657,6 +669,13 @@ pub fn validate_saved_server_name(saved_server_name: &str) -> Result<(), CliErro
     if saved_server_name.is_empty() {
         return Err(CliError::InvalidArgs {
             detail: "a saved name must not be empty. Pick a plain name.".to_string(),
+        });
+    }
+    if is_32_byte_lowercase_hex(saved_server_name) {
+        return Err(CliError::InvalidArgs {
+            detail: "a saved name must not be 64 hex characters, the shape of a secret. Pick a \
+                     plain name."
+                .to_string(),
         });
     }
     if is_server_address(saved_server_name) {
@@ -670,38 +689,68 @@ pub fn validate_saved_server_name(saved_server_name: &str) -> Result<(), CliErro
     Ok(())
 }
 
-/// Refuse a certificate fingerprint that is not 64 lowercase hex characters,
+/// The 64 lowercase hex characters of the certificate fingerprint
+/// `certificate_fingerprint_text` names, typed as `sha256:` followed by them,
 /// the shape `koshi share grant` prints.
 ///
-/// Example — 64 `a` characters are taken. 64 `A` characters, 63 `a`
-/// characters, and 64 `g` characters are refused.
+/// A refusal never repeats `certificate_fingerprint_text`. The refusal of 64
+/// lowercase hex characters with no `sha256:` in front says that this is the
+/// shape of a secret.
+///
+/// Example — `sha256:` followed by 64 `a` characters gives the 64 `a`
+/// characters. 64 `a` characters alone, `SHA256:` followed by 64 `a`
+/// characters, and `sha256:` followed by 63 `a` characters are refused.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] naming the shape.
-pub fn validate_certificate_fingerprint(certificate_fingerprint: &str) -> Result<(), CliError> {
-    let is_fingerprint_shape = certificate_fingerprint.len() == 64
-        && certificate_fingerprint
-            .bytes()
-            .all(|fingerprint_byte| matches!(fingerprint_byte, b'0'..=b'9' | b'a'..=b'f'));
-    if is_fingerprint_shape {
-        return Ok(());
+pub fn parse_certificate_fingerprint(
+    certificate_fingerprint_text: &str,
+) -> Result<String, CliError> {
+    if let Some(certificate_fingerprint) =
+        certificate_fingerprint_text.strip_prefix(CERTIFICATE_FINGERPRINT_PREFIX)
+    {
+        if is_32_byte_lowercase_hex(certificate_fingerprint) {
+            return Ok(certificate_fingerprint.to_string());
+        }
     }
+    let shape_sentence = "a certificate fingerprint is sha256: followed by 64 lowercase hex \
+                          characters, as `koshi share grant` prints it on the machine that serves";
+    let refusal_detail = if is_32_byte_lowercase_hex(certificate_fingerprint_text) {
+        format!(
+            "{shape_sentence}. 64 hex characters alone is the shape of a secret, and a secret is \
+             never given here"
+        )
+    } else {
+        shape_sentence.to_string()
+    };
     Err(CliError::InvalidArgs {
-        detail: "a certificate fingerprint is 64 lowercase hex characters, as `koshi share \
-                 grant` prints it on the machine that serves"
-            .to_string(),
+        detail: refusal_detail,
     })
+}
+
+/// Whether `hex_text` is 64 lowercase hex characters: 32 bytes written as
+/// [`format_hex`](koshi_ipc::bytes::format_hex) writes them, the shape of a
+/// secret and of a certificate fingerprint.
+///
+/// Example — 64 `a` characters are; 64 `A` characters, 63 `a` characters,
+/// and 64 `g` characters are not.
+fn is_32_byte_lowercase_hex(hex_text: &str) -> bool {
+    hex_text.len() == 64
+        && hex_text
+            .bytes()
+            .all(|hex_byte| matches!(hex_byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Refuse a saved name that cannot be given to the server at `server_address`.
 ///
-/// Two names are refused: one with the `host:port` shape
-/// ([`validate_saved_server_name`]), and one another record already answers to
-/// ([`ServerStore::is_server_name_free`]). Reads the store.
+/// Two names are refused: one [`validate_saved_server_name`] refuses, such as
+/// one with the `host:port` shape or the shape of a secret, and one another
+/// record already answers to ([`ServerStore::is_server_name_free`]). Reads the
+/// store.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when the saved name has the `host:port` shape, and when
-/// another address already holds it.
+/// [`CliError::InvalidArgs`] when [`validate_saved_server_name`] refuses the
+/// saved name, and when another address already holds it.
 fn validate_save_as(saved_server_name: &str, server_address: &str) -> Result<(), CliError> {
     validate_saved_server_name(saved_server_name)?;
     let (_, saved_server_store) = load_saved_server_store()?;

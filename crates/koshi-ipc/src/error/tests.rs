@@ -243,8 +243,8 @@ fn a_certificate_mismatch_names_both_fingerprints_and_where_the_new_one_comes_fr
     assert_eq!(
         ipc_error.to_string(),
         format!(
-            "the certificate laptop.local:7654 presented is not the expected one: expected {}, \
-             presented {}. the secret was not sent. if that machine's certificate changed on \
+            "the certificate laptop.local:7654 presented is not the expected one: expected \
+             sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with \
              --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
             "aa".repeat(32),
@@ -264,8 +264,8 @@ fn a_certificate_mismatch_of_a_saved_server_names_the_edit_of_that_server() {
     assert_eq!(
         ipc_error.to_string(),
         format!(
-            "the certificate laptop.local:7654 presented is not the expected one: expected {}, \
-             presented {}. the secret was not sent. if that machine's certificate changed on \
+            "the certificate laptop.local:7654 presented is not the expected one: expected \
+             sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with `koshi \
              remote edit work`.",
             "aa".repeat(32),

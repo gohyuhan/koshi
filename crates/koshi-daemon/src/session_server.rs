@@ -70,6 +70,7 @@ use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 use koshi_host::clipboard_tool::refresh_clipboard_tool_directory;
 use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_file_path};
 use koshi_ipc::error::IpcError;
+use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
 use koshi_observability::logging::initialize_tracing;
 use koshi_pty::backend::state::{PtyBackend, PtySink};
@@ -102,8 +103,6 @@ use koshi_pty::kill::PtyChildKillControl;
 #[cfg(unix)]
 use koshi_pty::portable::{find_terminal_master_name, set_terminal_cloexec, PortablePtyBackend};
 
-#[cfg(windows)]
-use koshi_ipc::protocol::ConnectionToken;
 #[cfg(windows)]
 use koshi_ipc::supervisor::compute_supervisor_socket_address;
 #[cfg(windows)]
@@ -257,7 +256,7 @@ struct SessionStart {
     config_directory: Option<PathBuf>,
     /// The secret the link to the process holding the panes presents at Hello.
     /// `None` on Unix, where the panes are this process's own children.
-    supervisor_token: Option<String>,
+    supervisor_token: Option<ConnectionToken>,
     /// The process id of that same process, which its link address is derived
     /// from. `None` on Unix, and set together with `supervisor_token` on
     /// Windows.
@@ -351,7 +350,7 @@ pub fn run_session_server(
     profile_name: Option<&str>,
     should_allow_other_users_override: Option<bool>,
     resume_file_path: Option<&Path>,
-    supervisor_token: Option<&str>,
+    supervisor_token: Option<&ConnectionToken>,
     supervisor_process_id: Option<u32>,
     config_migration_error: Option<&CliError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -416,7 +415,7 @@ pub fn run_session_server(
             env!("CARGO_PKG_VERSION"),
         )),
         config_directory: config_directory.map(Path::to_path_buf),
-        supervisor_token: supervisor_token.map(str::to_string),
+        supervisor_token: supervisor_token.cloned(),
         supervisor_process_id,
     };
     // The stand-in clipboard tools are in place before the first pane starts.
@@ -696,7 +695,7 @@ fn resume_from_file(
             release_panes_without_header(
                 &session_start.runtime_directory,
                 session_start.session_id,
-                session_start.supervisor_token.as_deref(),
+                session_start.supervisor_token.as_ref(),
                 session_start.supervisor_process_id,
                 Arc::clone(&pty_sink),
             );
@@ -871,7 +870,7 @@ fn open_session_panes(
             pty_sink,
             &[],
         )?;
-        session_start.supervisor_token = Some(supervisor_token.expose_secret().to_string());
+        session_start.supervisor_token = Some(supervisor_token);
         session_start.supervisor_process_id = Some(supervisor_process_id);
         Ok(linked_pty_owner)
     }
@@ -1201,7 +1200,7 @@ fn take_panes_back(
     pty_sink: Arc<dyn PtySink>,
     session_start: &SessionStart,
 ) -> Result<TakenBackPtyState, Box<dyn std::error::Error>> {
-    let supervisor_token = session_start.supervisor_token.as_deref().ok_or(
+    let supervisor_token = session_start.supervisor_token.as_ref().ok_or(
         "the secret of the link to the process holding the panes was not passed on, \
          so those panes cannot be reached",
     )?;
@@ -1225,7 +1224,7 @@ fn take_panes_back(
         session_start.session_id,
         supervisor_process_id,
         &session_start.runtime_directory,
-        &ConnectionToken::from_secret(supervisor_token),
+        supervisor_token,
         Arc::clone(&pty_sink),
         &claimed_pane_ids,
     ) {
@@ -1272,7 +1271,7 @@ fn take_panes_back(
 fn release_panes_without_header(
     _runtime_directory: &Path,
     _session_id: SessionId,
-    _supervisor_token: Option<&str>,
+    _supervisor_token: Option<&ConnectionToken>,
     _supervisor_process_id: Option<u32>,
     _pty_sink: Arc<dyn PtySink>,
 ) {
@@ -1415,7 +1414,7 @@ fn end_carried_child(process_id: u32) -> Option<libc::pid_t> {
 fn release_panes_without_header(
     runtime_directory: &Path,
     session_id: SessionId,
-    supervisor_token: Option<&str>,
+    supervisor_token: Option<&ConnectionToken>,
     supervisor_process_id: Option<u32>,
     pty_sink: Arc<dyn PtySink>,
 ) {
@@ -1429,7 +1428,7 @@ fn release_panes_without_header(
         session_id,
         supervisor_process_id,
         runtime_directory,
-        &ConnectionToken::from_secret(supervisor_token),
+        supervisor_token,
         pty_sink,
         &[],
     ) else {
@@ -2306,7 +2305,7 @@ fn build_resume_command(
     if let Some(supervisor_token) = &session_start.supervisor_token {
         process_command
             .arg(SUPERVISOR_TOKEN_FLAG)
-            .arg(supervisor_token);
+            .arg(supervisor_token.expose_secret());
     }
     if let Some(supervisor_process_id) = session_start.supervisor_process_id {
         process_command

@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::tls::format_certificate_fingerprint;
+
 /// A failure on the control channel.
 ///
 /// Client-fatal — the affected connection or caller stops and the session
@@ -183,6 +185,8 @@ pub enum IpcError {
     },
     /// The server at `server_address` presented a certificate whose
     /// fingerprint is not the one the dial expected. The secret was not sent.
+    /// The message writes both fingerprints as [`format_certificate_fingerprint`]
+    /// does: `sha256:` followed by 64 lowercase hex characters.
     ///
     /// `saved_server_label` is the name, else the address, of the saved
     /// server the dial presented the saved secret of, or `None` for a dial of
@@ -191,10 +195,11 @@ pub enum IpcError {
     /// ``give it with --certificate-fingerprint, or with `koshi remote edit`
     /// for a saved server.``
     #[error(
-        "the certificate {server_address} presented is not the expected one: expected \
-         {expected_certificate_fingerprint}, presented {presented_certificate_fingerprint}. the \
-         secret was not sent. if that machine's certificate changed on purpose, `koshi share \
-         open` there prints the new fingerprint: {}.",
+        "the certificate {server_address} presented is not the expected one: expected {}, \
+         presented {}. the secret was not sent. if that machine's certificate changed on \
+         purpose, `koshi share open` there prints the new fingerprint: {}.",
+        format_certificate_fingerprint(expected_certificate_fingerprint),
+        format_certificate_fingerprint(presented_certificate_fingerprint),
         format_new_fingerprint_step(saved_server_label.as_deref())
     )]
     CertificateMismatch {

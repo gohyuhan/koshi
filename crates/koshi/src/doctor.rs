@@ -23,6 +23,7 @@ use std::time::{Instant, SystemTime};
 use koshi_core::process::SpawnSpec;
 use koshi_core::text::format_counted_noun;
 use koshi_ipc::remote_tokens::TokenStore;
+use koshi_ipc::tls::format_certificate_fingerprint;
 
 use crate::cli::OutputFormat;
 use crate::output::{self, ConfigMismatch};
@@ -626,7 +627,7 @@ fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
 ///
 /// A router that serves `0.0.0.0:7654` with the fingerprint `3f6a…` gives the
 /// reason `"the router serves 0.0.0.0:7654 with the certificate fingerprint
-/// 3f6a…"`. A [`DoctorContext::remote_config_mismatch`] makes the row `warn`:
+/// sha256:3f6a…"`. A [`DoctorContext::remote_config_mismatch`] makes the row `warn`:
 /// its facts follow the fingerprint, or stand alone while nothing listens, and
 /// the help names the step that makes the router read the file again.
 fn check_remote_listener(doctor_context: &DoctorContext) -> DoctorOutcome {
@@ -651,8 +652,8 @@ fn check_remote_listener(doctor_context: &DoctorContext) -> DoctorOutcome {
         &remote_access_status.certificate_fingerprint,
     ) {
         (Some(remote_listen_address), true, Some(certificate_fingerprint)) => Some(format!(
-            "the router serves {remote_listen_address} with the certificate fingerprint \
-             {certificate_fingerprint}"
+            "the router serves {remote_listen_address} with the certificate fingerprint {}",
+            format_certificate_fingerprint(certificate_fingerprint)
         )),
         _ => None,
     };
