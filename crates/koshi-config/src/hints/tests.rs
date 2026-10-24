@@ -278,6 +278,10 @@ fn the_unlock_chord_is_the_reserved_one_when_the_config_names_no_alternative() {
         build_default_hint_catalog().get_chord_timeout(),
         Duration::from_millis(500)
     );
+    assert_eq!(
+        build_default_hint_catalog().get_which_key_delay(),
+        Duration::from_millis(300)
+    );
 }
 
 #[test]
@@ -649,6 +653,27 @@ fn the_chord_timeout_carries_the_configured_milliseconds_at_both_bounds() {
     });
     assert_eq!(
         maximum_timeout_hint_catalog.get_chord_timeout(),
+        Duration::from_millis(4_294_967_295)
+    );
+}
+
+#[test]
+fn the_which_key_delay_carries_the_configured_milliseconds_at_both_bounds() {
+    let minimum_delay_hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
+        which_key_delay_ms: 0,
+        ..KeybindingsConfig::default()
+    });
+    assert_eq!(
+        minimum_delay_hint_catalog.get_which_key_delay(),
+        Duration::ZERO
+    );
+
+    let maximum_delay_hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
+        which_key_delay_ms: u32::MAX,
+        ..KeybindingsConfig::default()
+    });
+    assert_eq!(
+        maximum_delay_hint_catalog.get_which_key_delay(),
         Duration::from_millis(4_294_967_295)
     );
 }

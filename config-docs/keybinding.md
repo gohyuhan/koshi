@@ -21,7 +21,7 @@ once beside the `mode` blocks.
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `chord-timeout-ms` | integer — ms a shortcut waits for its next key when it is a complete binding and also the start of a longer one. When the time passes, the complete binding fires. A shortcut that only starts longer ones has no time limit (see [Key sequences](#key-sequences)) | `500` | ≥ 0.1.0 |
-| `which-key-delay-ms` | integer — ms before the hint bar shows the keys that continue a shortcut | `300` | ≥ 0.1.0 |
+| `which-key-delay-ms` | integer — ms from a shortcut's first key until the hint bar shows the keys that continue it. A shortcut that ends sooner leaves the hint bar as it was. `0` shows them with the first key | `300` | ≥ 0.1.0 |
 | `max-chord-depth` | integer 0–255 — most keys a single shortcut may chain. A shortcut longer than this can never fire, and `koshi keys conflicts` reports it | `4` | ≥ 0.1.0 |
 | `leader` | string — the key `<leader>` stands for in bindings; a modifier run like `"C-"` or a single chord like `"<Space>"` | `"C-"` (the Ctrl modifier run) | ≥ 0.1.0 |
 | `unlock-alternative` | string — the chord that leaves locked mode, in place of `<C-l>`. Setting it frees `<C-l>` to rebind, and the whole file is rejected unless the `locked` block also binds this chord to `core:unlock`. A chord plain typing produces is rejected | (none) | ≥ 0.1.0 |

@@ -1,6 +1,6 @@
 //! Tests for viewer-side key resolution: what a chord means in each mode,
-//! how an open sequence captures the keyboard, the ambiguity deadline, and the
-//! input read times that deadline is judged against. Tests for the
+//! how an open sequence captures the keyboard, the ambiguity deadline and the
+//! hint deadline, and the input read times those deadlines are judged against. Tests for the
 //! viewer-local modes: pane placement mode, the move chooser, floating pane
 //! move mode, and dock/undock mode, with the commands each one sends.
 
@@ -46,17 +46,20 @@ fn build_key_chord(modifier_flags: BindingModifierFlags, key_character: char) ->
 }
 
 /// A resolved keymap holding exactly `key_bindings` in `mode_name`, each
-/// sequence paired with the core action of that name. Nothing else is bound.
+/// sequence paired with the core action of that name, with the built-in chord
+/// timeout and which-key delay. Nothing else is bound.
 fn build_keymap_for_mode(
     mode_name: &str,
     key_bindings: &[(KeySequence, &str)],
 ) -> KeymapHintCatalog {
-    build_keymap_for_modes(&[(mode_name, key_bindings)])
+    build_keymap_for_modes(&[(mode_name, key_bindings)], &KeybindingsConfig::default())
 }
 
-/// A resolved keymap holding exactly the supplied bindings in each named mode.
+/// A resolved keymap holding exactly the supplied bindings in each named mode,
+/// with the chord timeout and which-key delay of `keybindings_config`.
 fn build_keymap_for_modes(
     mode_binding_sets: &[(&str, &[(KeySequence, &str)])],
+    keybindings_config: &KeybindingsConfig,
 ) -> KeymapHintCatalog {
     let mut mode_bindings_by_name = BTreeMap::new();
     for (mode_name, key_bindings) in mode_binding_sets {
@@ -79,9 +82,22 @@ fn build_keymap_for_modes(
             origin: LayerOrigin::Defaults,
             mode_bindings_by_name,
         }],
-        &KeybindingsConfig::default(),
+        keybindings_config,
         &ActionRegistry::new(),
     )
+}
+
+/// The built-in keybinding settings with a chord timeout of `chord_timeout_ms`
+/// and a which-key delay of `which_key_delay_ms`.
+fn build_keybindings_config_with_timing(
+    chord_timeout_ms: u32,
+    which_key_delay_ms: u32,
+) -> KeybindingsConfig {
+    KeybindingsConfig {
+        chord_timeout_ms,
+        which_key_delay_ms,
+        ..KeybindingsConfig::default()
+    }
 }
 
 #[test]
@@ -1046,9 +1062,89 @@ fn changing_mode_drops_an_open_sequence() {
 }
 
 #[test]
-fn a_prefix_only_sequence_never_wakes_the_loop() {
-    // Only exact-plus-longer ambiguity arms a deadline; a prefix that binds
-    // nothing on its own waits for its next chord indefinitely.
+fn a_prefix_only_sequence_wakes_the_loop_once_to_show_its_hint() {
+    // `<C-p>` binds nothing on its own, so it arms no ambiguity deadline. Its
+    // hint deadline, one which-key delay after it, is the one wakeup it asks
+    // for. Past it the hint shows, the sequence stays open, and the loop waits
+    // for the next chord with no deadline.
+    let mut client = build_test_client();
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
+    let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    let current_time = Instant::now();
+    assert_eq!(
+        client.resolve_key(prefix_chord, current_time),
+        KeyOutcome::Pending
+    );
+    assert!(client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.compute_next_key_wakeup(current_time),
+        Some(which_key_delay)
+    );
+
+    let before_hint_deadline = current_time + which_key_delay - Duration::from_millis(1);
+    assert_eq!(client.expire_key_sequence(before_hint_deadline), None);
+    assert!(
+        client.is_continuation_hint_hidden(),
+        "one millisecond before its deadline the hint stays hidden"
+    );
+    assert_eq!(
+        client.compute_next_key_wakeup(before_hint_deadline),
+        Some(Duration::from_millis(1))
+    );
+
+    let hint_deadline = current_time + which_key_delay;
+    assert_eq!(client.expire_key_sequence(hint_deadline), None);
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from(prefix_chord))
+    );
+    assert_eq!(client.compute_next_key_wakeup(hint_deadline), None);
+
+    assert_eq!(
+        client.expire_key_sequence(hint_deadline + Duration::from_secs(3600)),
+        None
+    );
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from(prefix_chord)),
+        "the prefix waits for its next chord with no time limit"
+    );
+}
+
+#[test]
+fn a_shortcut_completed_before_the_which_key_delay_ends_leaves_no_hint_deadline() {
+    // `<C-p> n` typed 299 ms apart fires `core:new-pane` while the hint is
+    // still hidden. Nothing is left to wake the loop, and the next `<C-p>`
+    // waits the whole delay again.
+    let mut client = build_test_client();
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
+    let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    let current_time = Instant::now();
+    client.resolve_key(prefix_chord, current_time);
+
+    let completed_at = current_time + which_key_delay - Duration::from_millis(1);
+    assert_eq!(
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::NONE, 'n'),
+            completed_at
+        ),
+        KeyOutcome::Fire(build_core_bound_action("new-pane"))
+    );
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(client.compute_next_key_wakeup(completed_at), None);
+
+    let reopened_at = current_time + Duration::from_secs(1);
+    client.resolve_key(prefix_chord, reopened_at);
+    assert!(client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.compute_next_key_wakeup(reopened_at),
+        Some(which_key_delay)
+    );
+}
+
+#[test]
+fn escape_during_the_which_key_delay_drops_the_sequence_and_its_hint_deadline() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.resolve_key(
@@ -1056,8 +1152,324 @@ fn a_prefix_only_sequence_never_wakes_the_loop() {
         current_time,
     );
 
+    let escaped_at = current_time + Duration::from_millis(100);
+    assert_eq!(
+        client.resolve_key(ESCAPE_KEY_CHORD, escaped_at),
+        KeyOutcome::Pending
+    );
+
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(client.compute_next_key_wakeup(escaped_at), None);
+}
+
+#[test]
+fn a_mode_change_during_the_which_key_delay_drops_the_hint_deadline() {
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    client.resolve_key(
+        build_key_chord(BindingModifierFlags::CTRL, 'p'),
+        current_time,
+    );
+
+    client.set_lock_mode(LockMode::Locked);
+
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert!(!client.is_continuation_hint_hidden());
     assert_eq!(client.compute_next_key_wakeup(current_time), None);
-    assert_eq!(client.expire_key_sequence(current_time), None);
+}
+
+#[test]
+fn a_chord_typed_during_the_which_key_delay_keeps_the_first_chords_hint_deadline() {
+    // `<C-y> a b` binds `core:new-tab`. `z` continues nothing at 100 ms and
+    // `a` continues the sequence at 200 ms: the hint deadline stays at 300 ms,
+    // one which-key delay after `<C-y>`.
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let a_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    client.keymap_catalog = build_keymap_for_mode(
+        "normal",
+        &[(
+            KeySequence::from_first_and_rest(
+                ctrl_y_chord,
+                vec![a_chord, build_key_chord(BindingModifierFlags::NONE, 'b')],
+            ),
+            "new-tab",
+        )],
+    );
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
+    let current_time = Instant::now();
+    client.resolve_key(ctrl_y_chord, current_time);
+
+    let z_typed_at = current_time + Duration::from_millis(100);
+    assert_eq!(
+        client.resolve_key(build_key_chord(BindingModifierFlags::NONE, 'z'), z_typed_at),
+        KeyOutcome::Pending
+    );
+    assert_eq!(
+        client.compute_next_key_wakeup(z_typed_at),
+        Some(which_key_delay - Duration::from_millis(100))
+    );
+
+    let a_typed_at = current_time + Duration::from_millis(200);
+    assert_eq!(client.resolve_key(a_chord, a_typed_at), KeyOutcome::Pending);
+    assert!(client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.compute_next_key_wakeup(a_typed_at),
+        Some(which_key_delay - Duration::from_millis(200))
+    );
+
+    assert_eq!(
+        client.expire_key_sequence(current_time + which_key_delay),
+        None
+    );
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from_first_and_rest(
+            ctrl_y_chord,
+            vec![a_chord]
+        ))
+    );
+}
+
+#[test]
+fn a_chord_typed_after_the_hint_shows_keeps_it_shown_with_no_new_delay() {
+    // The hint of `<C-y>` shows at 300 ms. `a` at 400 ms continues the same
+    // sequence, and the hint bar shows `<C-y> a` at once.
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let a_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    client.keymap_catalog = build_keymap_for_mode(
+        "normal",
+        &[(
+            KeySequence::from_first_and_rest(
+                ctrl_y_chord,
+                vec![a_chord, build_key_chord(BindingModifierFlags::NONE, 'b')],
+            ),
+            "new-tab",
+        )],
+    );
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
+    let current_time = Instant::now();
+    client.resolve_key(ctrl_y_chord, current_time);
+    client.expire_key_sequence(current_time + which_key_delay);
+    assert!(!client.is_continuation_hint_hidden());
+
+    let a_typed_at = current_time + Duration::from_millis(400);
+    assert_eq!(client.resolve_key(a_chord, a_typed_at), KeyOutcome::Pending);
+
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from_first_and_rest(
+            ctrl_y_chord,
+            vec![a_chord]
+        ))
+    );
+    assert_eq!(client.compute_next_key_wakeup(a_typed_at), None);
+}
+
+#[test]
+fn a_which_key_delay_of_zero_shows_the_hint_with_the_first_chord() {
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    client.keymap_catalog = build_keymap_for_modes(
+        &[(
+            "normal",
+            &[(
+                KeySequence::from_first_and_rest(
+                    ctrl_y_chord,
+                    vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
+                ),
+                "new-tab",
+            )],
+        )],
+        &build_keybindings_config_with_timing(500, 0),
+    );
+    let current_time = Instant::now();
+
+    assert_eq!(
+        client.resolve_key(ctrl_y_chord, current_time),
+        KeyOutcome::Pending
+    );
+
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(client.compute_next_key_wakeup(current_time), None);
+}
+
+#[test]
+fn an_ambiguity_deadline_before_the_which_key_delay_fires_with_no_hint_shown() {
+    // `<C-y>` binds `core:quit` and opens `<C-y> a`. The chord timeout is
+    // 500 ms and the which-key delay 800 ms: the binding fires at 500 ms, and
+    // nothing is left for the hint deadline to show.
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    client.keymap_catalog = build_keymap_for_modes(
+        &[(
+            "normal",
+            &[
+                (KeySequence::from(ctrl_y_chord), "quit"),
+                (
+                    KeySequence::from_first_and_rest(
+                        ctrl_y_chord,
+                        vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
+                    ),
+                    "new-tab",
+                ),
+            ],
+        )],
+        &build_keybindings_config_with_timing(500, 800),
+    );
+    let current_time = Instant::now();
+    client.resolve_key(ctrl_y_chord, current_time);
+    assert_eq!(
+        client.compute_next_key_wakeup(current_time),
+        Some(Duration::from_millis(500))
+    );
+
+    let ambiguity_deadline = current_time + Duration::from_millis(500);
+    assert_eq!(
+        client.expire_key_sequence(ambiguity_deadline),
+        Some(build_core_bound_action("quit"))
+    );
+
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(client.compute_next_key_wakeup(ambiguity_deadline), None);
+}
+
+#[test]
+fn a_prefix_re_opened_by_an_ambiguity_deadline_keeps_the_first_chords_hint_deadline() {
+    // `<C-y> a` binds the continuous `core:focus-pane-left` and opens
+    // `<C-y> a b`. The chord timeout is 500 ms and the which-key delay
+    // 800 ms. `a` at 100 ms arms the ambiguity deadline at 600 ms; it fires
+    // and re-opens `<C-y>`, whose hint still shows at 800 ms.
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let a_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    client.keymap_catalog = build_keymap_for_modes(
+        &[(
+            "normal",
+            &[
+                (
+                    KeySequence::from_first_and_rest(ctrl_y_chord, vec![a_chord]),
+                    "focus-pane-left",
+                ),
+                (
+                    KeySequence::from_first_and_rest(
+                        ctrl_y_chord,
+                        vec![a_chord, build_key_chord(BindingModifierFlags::NONE, 'b')],
+                    ),
+                    "new-tab",
+                ),
+            ],
+        )],
+        &build_keybindings_config_with_timing(500, 800),
+    );
+    let current_time = Instant::now();
+    client.resolve_key(ctrl_y_chord, current_time);
+    let a_typed_at = current_time + Duration::from_millis(100);
+    assert_eq!(client.resolve_key(a_chord, a_typed_at), KeyOutcome::Pending);
+    assert_eq!(
+        client.compute_next_key_wakeup(a_typed_at),
+        Some(Duration::from_millis(500))
+    );
+
+    let ambiguity_deadline = current_time + Duration::from_millis(600);
+    assert_eq!(
+        client.expire_key_sequence(ambiguity_deadline),
+        Some(build_core_bound_action("focus-pane-left"))
+    );
+    assert_eq!(
+        client.get_pending_key_sequence(),
+        Some(&KeySequence::from(ctrl_y_chord))
+    );
+    assert!(client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.compute_next_key_wakeup(ambiguity_deadline),
+        Some(Duration::from_millis(200))
+    );
+
+    assert_eq!(
+        client.expire_key_sequence(current_time + Duration::from_millis(800)),
+        None
+    );
+    assert!(!client.is_continuation_hint_hidden());
+}
+
+#[test]
+fn a_locked_mode_prefix_waits_the_which_key_delay_and_the_unlock_chord_drops_it() {
+    // The leader `<Space>` makes `<leader>q` the two-chord `<Space> q` in
+    // locked mode. `<Space>` opens it like any prefix, and the unlock chord
+    // takes the sequence and its hint deadline with it.
+    let mut client = build_test_client();
+    let space_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space));
+    client.keymap_catalog = build_keymap_for_mode(
+        "locked",
+        &[(
+            KeySequence::from_first_and_rest(
+                space_chord,
+                vec![build_key_chord(BindingModifierFlags::NONE, 'q')],
+            ),
+            "quit",
+        )],
+    );
+    client.set_lock_mode(LockMode::Locked);
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
+    let current_time = Instant::now();
+
+    assert_eq!(
+        client.resolve_key(space_chord, current_time),
+        KeyOutcome::Pending
+    );
+    assert!(client.is_continuation_hint_hidden());
+    assert_eq!(
+        client.compute_next_key_wakeup(current_time),
+        Some(which_key_delay)
+    );
+
+    let unlocked_at = current_time + Duration::from_millis(100);
+    let key_outcome = client.resolve_key(client.keymap_catalog.get_unlock_chord(), unlocked_at);
+
+    assert_eq!(key_outcome, KeyOutcome::Fire(build_unlock_bound_action()));
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert!(!client.is_continuation_hint_hidden());
+    assert_eq!(client.compute_next_key_wakeup(unlocked_at), None);
+}
+
+#[test]
+fn two_viewers_judge_the_which_key_delay_each_on_their_own_keymap() {
+    // Each viewer holds its own keymap and its own open sequence. The same
+    // `<C-y>` at the same instant shows at once on a viewer whose delay is
+    // `0`, and waits 300 ms on a viewer with the built-in delay.
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let key_bindings = [(
+        KeySequence::from_first_and_rest(
+            ctrl_y_chord,
+            vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
+        ),
+        "new-tab",
+    )];
+    let mut delayed_client = build_test_client();
+    delayed_client.keymap_catalog = build_keymap_for_mode("normal", &key_bindings);
+    let mut immediate_client = build_test_client();
+    immediate_client.keymap_catalog = build_keymap_for_modes(
+        &[("normal", &key_bindings)],
+        &build_keybindings_config_with_timing(500, 0),
+    );
+    let current_time = Instant::now();
+
+    delayed_client.resolve_key(ctrl_y_chord, current_time);
+    immediate_client.resolve_key(ctrl_y_chord, current_time);
+
+    assert!(delayed_client.is_continuation_hint_hidden());
+    assert_eq!(
+        delayed_client.compute_next_key_wakeup(current_time),
+        Some(Duration::from_millis(300))
+    );
+    assert!(!immediate_client.is_continuation_hint_hidden());
+    assert_eq!(immediate_client.compute_next_key_wakeup(current_time), None);
 }
 
 #[test]
@@ -1099,8 +1511,8 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
     );
     assert_eq!(
         client.compute_next_key_wakeup(current_time),
-        None,
-        "the re-opened prefix waits for its next chord with no deadline"
+        Some(client.keymap_catalog.get_which_key_delay()),
+        "the re-opened prefix arms no ambiguity deadline and keeps the hint deadline of `<C-p>`"
     );
 
     let key_outcome = client.resolve_key(left_chord, current_time);
@@ -1151,19 +1563,22 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
         "the active pane keymap is checked instead of the normal keymap"
     );
 
-    client.keymap_catalog = build_keymap_for_modes(&[
-        (
-            "normal",
-            &[(
-                KeySequence::from_first_and_rest(leader_chord, vec![right_chord]),
-                "quit",
-            )],
-        ),
-        (
-            "pane-placement",
-            &[(KeySequence::from(right_chord), "cancel-pane-placement")],
-        ),
-    ]);
+    client.keymap_catalog = build_keymap_for_modes(
+        &[
+            (
+                "normal",
+                &[(
+                    KeySequence::from_first_and_rest(leader_chord, vec![right_chord]),
+                    "quit",
+                )],
+            ),
+            (
+                "pane-placement",
+                &[(KeySequence::from(right_chord), "cancel-pane-placement")],
+            ),
+        ],
+        &KeybindingsConfig::default(),
+    );
     assert_eq!(
         client.resolve_key(right_chord, Instant::now()),
         KeyOutcome::Fire(build_core_bound_action("cancel-pane-placement"))
@@ -1264,7 +1679,7 @@ fn an_open_deadline_asks_for_no_wakeup_while_an_input_event_is_on_its_way() {
             ),
         ],
     );
-    let chord_timeout = client.keymap_catalog.get_chord_timeout();
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let current_time = Instant::now();
     assert_eq!(
         client.resolve_key(ctrl_y_chord, current_time),
@@ -1281,7 +1696,8 @@ fn an_open_deadline_asks_for_no_wakeup_while_an_input_event_is_on_its_way() {
 
     assert_eq!(
         client.compute_next_key_wakeup(current_time),
-        Some(chord_timeout)
+        Some(which_key_delay),
+        "the 300 ms hint deadline comes before the 500 ms ambiguity deadline"
     );
 }
 
@@ -1305,6 +1721,7 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
         ],
     );
     let chord_timeout = client.keymap_catalog.get_chord_timeout();
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let current_time = Instant::now();
 
     assert_eq!(
@@ -1313,13 +1730,25 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
     );
     assert_eq!(
         client.compute_next_key_wakeup(current_time),
-        Some(chord_timeout),
-        "the ambiguity arms a deadline one chord timeout out"
+        Some(which_key_delay),
+        "the 300 ms hint deadline wakes the loop before the 500 ms ambiguity deadline"
     );
     assert_eq!(
         client.expire_key_sequence(current_time),
         None,
         "nothing fires before the deadline"
+    );
+
+    let hint_deadline = current_time + which_key_delay;
+    assert_eq!(client.expire_key_sequence(hint_deadline), None);
+    assert!(
+        !client.is_continuation_hint_hidden(),
+        "the hint deadline shows `<C-y>` and fires nothing"
+    );
+    assert_eq!(
+        client.compute_next_key_wakeup(hint_deadline),
+        Some(chord_timeout - which_key_delay),
+        "the ambiguity arms a deadline one chord timeout after `<C-y>`"
     );
 
     let key_sequence_deadline = current_time + chord_timeout;
@@ -1554,7 +1983,11 @@ fn a_continuous_three_chord_binding_re_opens_its_two_chord_prefix() {
         )),
         "the two-chord prefix is held again, not the whole sequence"
     );
-    assert_eq!(client.compute_next_key_wakeup(current_time), None);
+    assert_eq!(
+        client.compute_next_key_wakeup(current_time),
+        Some(client.keymap_catalog.get_which_key_delay()),
+        "the re-opened prefix arms no ambiguity deadline and keeps the hint deadline of `<C-y>`"
+    );
 
     let key_outcome = client.resolve_key(second_following_chord, current_time);
 
@@ -1661,6 +2094,7 @@ fn begin_pane_placement_opens_the_move_chooser_while_an_unpinned_floating_pane_i
     client.pending_key_sequence = Some(PendingKeySequence {
         sequence: KeySequence::from(build_key_chord(BindingModifierFlags::CTRL, 'p')),
         ambiguity_deadline: None,
+        continuation_hint_hidden_until: None,
     });
 
     assert_eq!(

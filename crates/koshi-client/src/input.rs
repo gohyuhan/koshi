@@ -20,6 +20,14 @@
 //! a complete binding and a longer one's prefix closes on its ambiguity
 //! deadline, firing the complete binding.
 //!
+//! **The hint bar shows an open sequence after `which-key-delay-ms`.** The
+//! delay runs from the sequence's first chord. Until it ends, the hint bar
+//! keeps the face it had before that chord, so a sequence that closes sooner
+//! never changes the bar. Once the bar shows the sequence, each further chord
+//! of it changes the bar at once. Example: with a delay of 300 ms, `<C-p> n`
+//! typed within 300 ms draws nothing, and `<C-p>` left open for 300 ms draws
+//! the `<C-p>` breadcrumb and the chords that continue it.
+//!
 //! **Viewer-local modes run here too.** Pane placement mode, the move
 //! chooser, floating pane move mode, and dock/undock mode each own the
 //! keyboard while they are on and the viewer is linked.
@@ -127,9 +135,9 @@ impl InputReadClock {
     }
 
     /// The instant to judge the input timers at, an open sequence's ambiguity
-    /// deadline, a placement tab hover and a selection drag's edge scroll: the
-    /// clock read under the lock, or `None` while an input event the input
-    /// thread read has not reached the loop.
+    /// deadline and its hint deadline, a placement tab hover and a selection
+    /// drag's edge scroll: the clock read under the lock, or `None` while an
+    /// input event the input thread read has not reached the loop.
     pub(crate) fn find_input_judge_time(&self) -> Option<Instant> {
         let input_read_times = self.lock_input_read_times();
         if input_read_times.has_untaken_input() {
@@ -161,7 +169,8 @@ pub enum KeyOutcome {
     Fire(BoundAction),
     /// The chord opened or continued a multi-chord sequence, a held sequence
     /// swallowed a key that continues nothing, or an `Esc` closed one. The hint
-    /// bar changes; nothing else does.
+    /// bar changes only when it shows the sequence before or after the chord
+    /// ([`Client::is_continuation_hint_hidden`]); nothing else changes.
     Pending,
     /// Nothing bound the chord and the mode passes what it does not bind. The
     /// session encodes it for the focused pane with that pane's cursor-key mode
@@ -359,12 +368,29 @@ impl Client {
         self.pending_lock_command_id = pending_lock_command_id;
     }
 
-    /// The chords of an open sequence, for the hint bar's breadcrumb.
+    /// The chords of an open sequence. The hint bar draws them as a
+    /// breadcrumb while [`is_continuation_hint_hidden`](Self::is_continuation_hint_hidden)
+    /// is `false`.
     #[must_use]
     pub fn get_pending_key_sequence(&self) -> Option<&KeySequence> {
         self.pending_key_sequence
             .as_ref()
             .map(|pending_key_sequence| &pending_key_sequence.sequence)
+    }
+
+    /// Whether an open sequence waits for its hint deadline, `which-key-delay-ms`
+    /// after its first chord, before the hint bar shows it. `false` when no
+    /// sequence is open. [`expire_key_sequence`](Self::expire_key_sequence)
+    /// at or past the deadline makes it `false`.
+    #[must_use]
+    pub fn is_continuation_hint_hidden(&self) -> bool {
+        self.pending_key_sequence
+            .as_ref()
+            .is_some_and(|pending_key_sequence| {
+                pending_key_sequence
+                    .continuation_hint_hidden_until
+                    .is_some()
+            })
     }
 
     /// Apply one viewer-local action selected by the active keymap, against
@@ -1261,6 +1287,11 @@ impl Client {
     /// `Pending`; a plain `a` with nothing bound yields `PassThrough('a')`.
     /// Escape while a floating pane's grab handle is held drops that move and
     /// any open key sequence, and yields `Discard`.
+    ///
+    /// A sequence `chord` opens hides its hint until `current_time` plus the
+    /// keymap's which-key delay, or not at all when the delay is zero. A
+    /// sequence `chord` continues keeps the hint deadline of its first chord,
+    /// or keeps showing its hint.
     pub fn resolve_key(&mut self, chord: KeyChord, current_time: Instant) -> KeyOutcome {
         if chord == ESCAPE_KEY_CHORD && self.cancel_floating_pane_move_drag() {
             self.pending_key_sequence = None;
@@ -1276,6 +1307,16 @@ impl Client {
         {
             return KeyOutcome::Fire(build_unlock_bound_action());
         }
+
+        // The hint deadline of the open sequence, or of a sequence this chord
+        // opens.
+        let continuation_hint_hidden_until = match open_key_sequence.as_ref() {
+            Some(open_key_sequence) => open_key_sequence.continuation_hint_hidden_until,
+            None => {
+                let which_key_delay = self.keymap_catalog.get_which_key_delay();
+                (!which_key_delay.is_zero()).then(|| current_time + which_key_delay)
+            }
+        };
 
         // The open sequence's chords with this one after them, or this one on
         // its own.
@@ -1298,7 +1339,11 @@ impl Client {
             sequence_match.has_longer_key_sequence,
         ) {
             (Some(bound_action), false) => {
-                self.rearm_continuous_sequence_prefix(&bound_action, &key_sequence);
+                self.rearm_continuous_sequence_prefix(
+                    &bound_action,
+                    &key_sequence,
+                    continuation_hint_hidden_until,
+                );
                 KeyOutcome::Fire(bound_action)
             }
             (exact_bound_action, true) => {
@@ -1311,6 +1356,7 @@ impl Client {
                 self.pending_key_sequence = Some(PendingKeySequence {
                     sequence: key_sequence,
                     ambiguity_deadline,
+                    continuation_hint_hidden_until,
                 });
                 KeyOutcome::Pending
             }
@@ -1319,7 +1365,7 @@ impl Client {
                 // and the Escape itself is consumed rather than typed.
                 Some(_) if chord == ESCAPE_KEY_CHORD => KeyOutcome::Pending,
                 // A key that continues nothing is discarded, and the sequence
-                // stands unchanged, deadline included.
+                // stands unchanged, both deadlines included.
                 Some(held_key_sequence) => {
                     self.pending_key_sequence = Some(held_key_sequence);
                     KeyOutcome::Pending
@@ -1333,44 +1379,73 @@ impl Client {
         }
     }
 
-    /// How long until an open sequence's ambiguity deadline. A prefix-only
-    /// sequence carries no deadline and returns `None`. While an input event
-    /// this terminal's input thread read has not reached the loop
+    /// How long until an open sequence's earlier deadline: its ambiguity
+    /// deadline or its hint deadline. A sequence with neither, a prefix-only
+    /// sequence whose hint shows, returns `None`. While an input event this
+    /// terminal's input thread read has not reached the loop
     /// (`InputReadClock::has_untaken_input`), the answer is `None` too: that
-    /// event's arrival wakes the loop.
+    /// event's arrival wakes the loop. Example: `<C-p>` pressed at `t` with a
+    /// which-key delay of 300 ms returns `Some(300 ms)` at `t`, and `None` once
+    /// [`expire_key_sequence`](Self::expire_key_sequence) ran at `t + 300 ms`.
     #[must_use]
     pub fn compute_next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
         if self.input_read_clock.has_untaken_input() {
             return None;
         }
-        self.pending_key_sequence
-            .as_ref()
-            .and_then(|pending_key_sequence| pending_key_sequence.ambiguity_deadline)
-            .map(|ambiguity_deadline| ambiguity_deadline.saturating_duration_since(current_time))
+        let pending_key_sequence = self.pending_key_sequence.as_ref()?;
+        [
+            pending_key_sequence.ambiguity_deadline,
+            pending_key_sequence.continuation_hint_hidden_until,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|next_deadline| next_deadline.saturating_duration_since(current_time))
     }
 
-    /// Fire the open sequence's complete binding if its ambiguity deadline has
-    /// passed.
+    /// Run the open sequence's deadlines that `current_time` reached, in this
+    /// order:
+    ///
+    /// 1. A passed ambiguity deadline fires the sequence's complete binding,
+    ///    which the call returns. The sequence closes, unless the binding's
+    ///    action is continuous and its prefix opens again.
+    /// 2. A passed hint deadline of the sequence still open makes the hint bar
+    ///    show it ([`is_continuation_hint_hidden`](Self::is_continuation_hint_hidden)
+    ///    turns `false`).
     ///
     /// A sequence whose binding a keymap change retired while it waited
     /// resolves to nothing: the held chords are dropped, never typed at the
-    /// pane, and the call returns `None`.
+    /// pane, and the call returns `None`. Example: `<C-y>` binds `core:quit`
+    /// and opens `<C-y> a`, the chord timeout is 500 ms and the which-key delay
+    /// is 800 ms: at `t + 500 ms` the call returns `core:quit`, and the hint
+    /// bar never shows `<C-y>`.
     pub fn expire_key_sequence(&mut self, current_time: Instant) -> Option<BoundAction> {
-        let is_ambiguity_deadline_due = self
-            .pending_key_sequence
-            .as_ref()
-            .and_then(|pending_key_sequence| pending_key_sequence.ambiguity_deadline)
-            .is_some_and(|ambiguity_deadline| ambiguity_deadline <= current_time);
-        if !is_ambiguity_deadline_due {
-            return None;
+        let due_key_sequence = self.pending_key_sequence.take_if(|pending_key_sequence| {
+            pending_key_sequence
+                .ambiguity_deadline
+                .is_some_and(|ambiguity_deadline| ambiguity_deadline <= current_time)
+        });
+        let fired_bound_action = due_key_sequence.and_then(|due_key_sequence| {
+            let bound_action = self
+                .keymap_catalog
+                .match_sequence(self.get_active_input_mode(), &due_key_sequence.sequence)
+                .exact_bound_action?;
+            self.rearm_continuous_sequence_prefix(
+                &bound_action,
+                &due_key_sequence.sequence,
+                due_key_sequence.continuation_hint_hidden_until,
+            );
+            Some(bound_action)
+        });
+        if let Some(pending_key_sequence) = self.pending_key_sequence.as_mut() {
+            if pending_key_sequence
+                .continuation_hint_hidden_until
+                .is_some_and(|hidden_until| hidden_until <= current_time)
+            {
+                pending_key_sequence.continuation_hint_hidden_until = None;
+            }
         }
-        let pending_key_sequence = self.pending_key_sequence.take()?;
-        let bound_action = self
-            .keymap_catalog
-            .match_sequence(self.get_active_input_mode(), &pending_key_sequence.sequence)
-            .exact_bound_action?;
-        self.rearm_continuous_sequence_prefix(&bound_action, &pending_key_sequence.sequence);
-        Some(bound_action)
+        fired_bound_action
     }
 
     /// The read times of this terminal's input events, shared with its input
@@ -1386,11 +1461,13 @@ impl Client {
     /// Only multi-chord sequences have a prefix to hold. The re-armed prefix
     /// captures the keyboard like any other open sequence, so a key that
     /// resizes nothing is discarded and the prefix stands until `Esc` leaves
-    /// it.
+    /// it. It carries `continuation_hint_hidden_until`, the hint deadline of
+    /// the sequence that fired, and no ambiguity deadline.
     fn rearm_continuous_sequence_prefix(
         &mut self,
         bound_action: &BoundAction,
         key_sequence: &KeySequence,
+        continuation_hint_hidden_until: Option<Instant>,
     ) {
         let is_continuous = self
             .registry
@@ -1406,6 +1483,7 @@ impl Client {
                 sequence_chords[1..sequence_chords.len() - 1].to_vec(),
             ),
             ambiguity_deadline: None,
+            continuation_hint_hidden_until,
         });
     }
 }

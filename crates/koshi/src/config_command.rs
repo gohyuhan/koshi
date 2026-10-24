@@ -293,13 +293,13 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "keybinding.chord-timeout-ms",
         "keybinding.kdl",
         "500",
-        "Wait for the next key in a sequence.",
+        "Wait for the next key of a shortcut that is complete and also starts a longer one.",
     ),
     build_config_field_help(
         "keybinding.which-key-delay-ms",
         "keybinding.kdl",
         "300",
-        "Wait before showing key hints.",
+        "Wait after a shortcut's first key before showing the keys that continue it.",
     ),
     build_config_field_help(
         "keybinding.max-chord-depth",

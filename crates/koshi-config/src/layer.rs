@@ -411,9 +411,12 @@ impl PartialScrollbackConfig {
 /// Keybinding config overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialKeybindingsConfig {
-    /// Milliseconds to wait for the next chord in a multi-key sequence.
+    /// Milliseconds a sequence that is a complete binding and also a longer
+    /// binding's prefix waits for its next chord before the complete binding
+    /// fires.
     pub chord_timeout_ms: Option<u32>,
-    /// Milliseconds before the which-key continuation hint appears.
+    /// Milliseconds from a sequence's first chord until the hint bar shows the
+    /// chords that continue it.
     pub which_key_delay_ms: Option<u32>,
     /// Maximum number of chords in one key sequence.
     pub maximum_chord_depth: Option<u8>,
