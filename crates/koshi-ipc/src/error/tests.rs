@@ -1,6 +1,9 @@
 //! Tests for the `Display` wording of every [`IpcError`] variant, including
 //! which remote access file a failure names and the changed-certificate
-//! refusal.
+//! refusal, and for the part of each message
+//! [`IpcError::render_sanitized_message`] cuts.
+
+use koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
 
 use super::*;
 
@@ -261,7 +264,7 @@ fn a_certificate_mismatch_names_both_fingerprints_and_where_the_new_one_comes_fr
             "the certificate laptop.local:7654 presented is not the expected one: expected \
              sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with \
-             --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
+             --certificate-fingerprint, or with `koshi remote edit` for a saved server",
             "aa".repeat(32),
             "bb".repeat(32)
         )
@@ -282,9 +285,101 @@ fn a_certificate_mismatch_of_a_saved_server_names_the_edit_of_that_server() {
             "the certificate laptop.local:7654 presented is not the expected one: expected \
              sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with `koshi \
-             remote edit work`.",
+             remote edit work`",
             "aa".repeat(32),
             "bb".repeat(32)
         )
+    );
+}
+
+#[test]
+fn only_the_text_a_message_ends_with_that_koshi_did_not_write_is_cut() {
+    let reported_text = "x".repeat(600);
+    let cut_reported_text = "x".repeat(MAX_REPORTED_TEXT_BYTE_COUNT);
+    let free_text_errors = vec![
+        IpcError::Transport {
+            error_detail: reported_text.clone(),
+        },
+        IpcError::MalformedFrame {
+            error_detail: reported_text.clone(),
+        },
+        IpcError::UntrustedSocket {
+            socket_address: "/home/user/.koshi/router.sock".to_string(),
+            trust_failure_reason: reported_text.clone(),
+        },
+        IpcError::EndpointFileUnreadable {
+            endpoint_file_path: "/home/user/.koshi/session.json".to_string(),
+            error_detail: reported_text.clone(),
+        },
+        IpcError::EndpointFileWrite {
+            endpoint_file_path: "/home/user/.koshi/session.json".to_string(),
+            error_detail: reported_text.clone(),
+        },
+        IpcError::ProgramFileUnreadable {
+            program_file_path: "/home/user/.koshi/program.json".to_string(),
+            error_detail: reported_text.clone(),
+        },
+        IpcError::ProgramFileWrite {
+            program_file_path: "/home/user/.koshi/program.json".to_string(),
+            error_detail: reported_text.clone(),
+        },
+        IpcError::RemoteFileUnreadable {
+            remote_file: RemoteFile::SavedServers,
+            remote_file_path: "/home/user/.koshi/remote/servers".to_string(),
+            error_detail: reported_text.clone(),
+        },
+        IpcError::RemoteFileWrite {
+            remote_file: RemoteFile::TokenStore,
+            remote_file_path: "/home/user/.koshi/remote/tokens".to_string(),
+            error_detail: reported_text.clone(),
+        },
+        IpcError::TlsHandshakeFailed {
+            server_address: "desk.local:7654".to_string(),
+            error_detail: reported_text.clone(),
+        },
+    ];
+
+    for ipc_error in free_text_errors {
+        let message = ipc_error.to_string();
+        let koshi_words = message
+            .strip_suffix(reported_text.as_str())
+            .unwrap_or_else(|| panic!("{message:?} ends with the text koshi did not write"));
+        assert_eq!(
+            ipc_error.render_sanitized_message(),
+            format!("{koshi_words}{cut_reported_text}")
+        );
+    }
+}
+
+#[test]
+fn a_message_koshi_wrote_is_filtered_and_never_cut() {
+    let longest_host_name = format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    );
+    assert_eq!(longest_host_name.len(), 253);
+    let certificate_mismatch_error = IpcError::CertificateMismatch {
+        server_address: format!("{longest_host_name}:7654"),
+        expected_certificate_fingerprint: "aa".repeat(32),
+        presented_certificate_fingerprint: "bb".repeat(32),
+        saved_server_label: Some("work".to_string()),
+    };
+    let refused_error = IpcError::ConnectRefused {
+        server_address: "desk\u{1b}[2J.local:7654".to_string(),
+    };
+
+    assert!(certificate_mismatch_error.to_string().len() > MAX_REPORTED_TEXT_BYTE_COUNT);
+    assert_eq!(
+        certificate_mismatch_error.render_sanitized_message(),
+        certificate_mismatch_error.to_string()
+    );
+    assert_eq!(
+        refused_error.render_sanitized_message(),
+        "desk[2J.local:7654 refused the connection: nothing is listening on that port. if \
+         remote access is not enabled on that machine, run `koshi share open` there to open \
+         the port"
     );
 }

@@ -132,15 +132,15 @@ impl PeerWords {
 }
 
 /// A failure to talk to a peer, in the words the fault itself used:
-/// [`CliError::IpcUnavailable`] carrying `error.to_string()` filtered by
-/// [`sanitize_reported_text`]. [`IpcError::PreviousReleaseAnswer`] is
-/// [`CliError::PreviousReleaseServer`] carrying that same sentence.
+/// [`CliError::IpcUnavailable`] carrying
+/// [`IpcError::render_sanitized_message`]. [`IpcError::PreviousReleaseAnswer`]
+/// is [`CliError::PreviousReleaseServer`] carrying that same sentence.
 ///
 /// The same sentence for either peer — it names the fault, not who was on the
 /// other end. [`IpcError::MalformedFrame`] carries the decoder's own message,
 /// which quotes the field or variant name the peer sent.
 pub fn build_ipc_unavailable_error(ipc_error: IpcError) -> CliError {
-    let detail = sanitize_reported_text(&ipc_error.to_string());
+    let detail = ipc_error.render_sanitized_message();
     match ipc_error {
         IpcError::PreviousReleaseAnswer => CliError::PreviousReleaseServer { detail },
         _ => CliError::IpcUnavailable { detail },
@@ -148,11 +148,11 @@ pub fn build_ipc_unavailable_error(ipc_error: IpcError) -> CliError {
 }
 
 /// The [`CliError::CommittedRequestUnanswered`] for `ipc_error`, the failure
-/// of the write of a `Commit` or of the read of its answer, carrying its text
-/// filtered by [`sanitize_reported_text`].
+/// of the write of a `Commit` or of the read of its answer, carrying
+/// [`IpcError::render_sanitized_message`].
 pub fn build_committed_request_unanswered_error(ipc_error: IpcError) -> CliError {
     CliError::CommittedRequestUnanswered {
-        detail: sanitize_reported_text(&ipc_error.to_string()),
+        detail: ipc_error.render_sanitized_message(),
     }
 }
 

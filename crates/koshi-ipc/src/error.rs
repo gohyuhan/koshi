@@ -1,5 +1,6 @@
 //! IPC domain error.
 
+use koshi_core::text::{remove_refused_characters, sanitize_reported_text};
 use thiserror::Error;
 
 use crate::remote_wire::{MAX_ADMISSION_COUNT, MAX_UNADMITTED_ATTEMPT_COUNT, RATE_WINDOW_DURATION};
@@ -216,13 +217,13 @@ pub enum IpcError {
     /// `saved_server_label` is the name, else the address, of the saved
     /// server the dial presented the saved secret of, or `None` for a dial of
     /// a server that is not saved. With `Some("work")` the message ends in
-    /// ``give it with `koshi remote edit work`.``; with `None` it ends in
+    /// ``give it with `koshi remote edit work` ``; with `None` it ends in
     /// ``give it with --certificate-fingerprint, or with `koshi remote edit`
-    /// for a saved server.``
+    /// for a saved server``.
     #[error(
         "the certificate {server_address} presented is not the expected one: expected {}, \
          presented {}. the secret was not sent. if that machine's certificate changed on \
-         purpose, `koshi share open` there prints the new fingerprint: {}.",
+         purpose, `koshi share open` there prints the new fingerprint: {}",
         format_certificate_fingerprint(expected_certificate_fingerprint),
         format_certificate_fingerprint(presented_certificate_fingerprint),
         format_new_fingerprint_step(saved_server_label.as_deref())
@@ -233,6 +234,68 @@ pub enum IpcError {
         presented_certificate_fingerprint: String,
         saved_server_label: Option<String>,
     },
+}
+
+impl IpcError {
+    /// This error's message for a user to read.
+    ///
+    /// Every character [`sanitize_reported_text`] removes is removed from the
+    /// whole message. The text that ends the message and that koshi did not
+    /// write is also cut to
+    /// [`MAX_REPORTED_TEXT_BYTE_COUNT`](koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT):
+    /// `error_detail` and `trust_failure_reason`, which hold the words of a
+    /// decoder, of the operating system, or of the bytes a peer sent. Every
+    /// other variant holds only words koshi wrote, addresses and paths the
+    /// user gave or the machine holds, and fingerprints of 64 hex
+    /// characters, and none of it is cut. A message that does not end with its
+    /// `error_detail` or `trust_failure_reason` is cut as a whole.
+    ///
+    /// Example — `MalformedFrame` with an `error_detail` of 5000 `x` gives
+    /// `ipc frame is not a readable message: ` followed by 512 `x`.
+    /// `TlsHandshakeClosed` names a 253-character host whole, with every step
+    /// after it.
+    #[must_use]
+    pub fn render_sanitized_message(&self) -> String {
+        let message = self.to_string();
+        let reported_text = match self {
+            IpcError::Transport { error_detail }
+            | IpcError::MalformedFrame { error_detail }
+            | IpcError::EndpointFileUnreadable { error_detail, .. }
+            | IpcError::EndpointFileWrite { error_detail, .. }
+            | IpcError::ProgramFileUnreadable { error_detail, .. }
+            | IpcError::ProgramFileWrite { error_detail, .. }
+            | IpcError::RemoteFileUnreadable { error_detail, .. }
+            | IpcError::RemoteFileWrite { error_detail, .. }
+            | IpcError::TlsHandshakeFailed { error_detail, .. } => error_detail,
+            IpcError::UntrustedSocket {
+                trust_failure_reason,
+                ..
+            } => trust_failure_reason,
+            IpcError::Disconnected
+            | IpcError::FrameTooLarge { .. }
+            | IpcError::UnexpectedBinaryFrame
+            | IpcError::PreviousReleaseAnswer
+            | IpcError::NoListener { .. }
+            | IpcError::PeerIsOtherUser { .. }
+            | IpcError::SocketBusy { .. }
+            | IpcError::EndpointFileMissing { .. }
+            | IpcError::Koshi010WindowEndpointFile { .. }
+            | IpcError::ConnectRefused { .. }
+            | IpcError::ConnectTimedOut { .. }
+            | IpcError::TlsHandshakeClosed { .. }
+            | IpcError::CertificateMismatch { .. } => {
+                return remove_refused_characters(&message);
+            }
+        };
+        match message.strip_suffix(reported_text.as_str()) {
+            Some(koshi_words) => format!(
+                "{}{}",
+                remove_refused_characters(koshi_words),
+                sanitize_reported_text(reported_text)
+            ),
+            None => sanitize_reported_text(&message),
+        }
+    }
 }
 
 /// The step that gives a dial the new fingerprint of a server's certificate.

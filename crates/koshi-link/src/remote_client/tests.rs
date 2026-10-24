@@ -9,6 +9,7 @@
 //! change to the saved-server store behaves.
 
 use std::io::Write;
+use std::net::TcpListener;
 use std::time::SystemTime;
 
 use koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
@@ -913,9 +914,8 @@ fn any_other_refusal_keeps_the_servers_own_sentence_and_names_the_server() {
 
 #[test]
 fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a_runtime_one() {
-    // `probe_saved_server` reads a refused dial carrying `CliError::IpcUnavailable` as the
-    // certificate check and answers `Reach::CertificateMismatch`; every
-    // refusal `validate_remote_server_answer` builds carries `CliError::Runtime` instead.
+    // A certificate failure exits with `CliExitCode::IpcUnavailable`; every
+    // refusal `validate_remote_server_answer` builds carries `CliError::Runtime`.
     let certificate_mismatch_error = classify_dial_failure(
         IpcError::CertificateMismatch {
             server_address: "desk.local:7654".to_string(),
@@ -927,9 +927,7 @@ fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a
     );
 
     let DialError::Refused(CliError::IpcUnavailable { detail }) = certificate_mismatch_error else {
-        panic!(
-            "a certificate that is not the expected one is the shape `probe_saved_server` reads"
-        );
+        panic!("a certificate that is not the expected one is an IPC failure the dial refuses");
     };
     assert_eq!(
         detail,
@@ -937,7 +935,7 @@ fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a
             "the certificate desk.local:7654 presented is not the expected one: expected \
              sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with \
-             --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
+             --certificate-fingerprint, or with `koshi remote edit` for a saved server",
             "aa".repeat(32),
             "bb".repeat(32)
         )
@@ -959,9 +957,7 @@ fn a_certificate_that_is_not_the_expected_one_on_a_saved_server_names_the_edit_o
     );
 
     let DialError::Refused(CliError::IpcUnavailable { detail }) = certificate_mismatch_error else {
-        panic!(
-            "a certificate that is not the expected one is the shape `probe_saved_server` reads"
-        );
+        panic!("a certificate that is not the expected one is an IPC failure the dial refuses");
     };
     assert_eq!(
         detail,
@@ -969,7 +965,7 @@ fn a_certificate_that_is_not_the_expected_one_on_a_saved_server_names_the_edit_o
             "the certificate desk.local:7654 presented is not the expected one: expected \
              sha256:{}, presented sha256:{}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with `koshi \
-             remote edit work`.",
+             remote edit work`",
             "aa".repeat(32),
             "bb".repeat(32)
         )
@@ -1000,10 +996,9 @@ fn a_connection_closed_during_the_handshake_is_unreachable_so_a_redial_dials_aga
 #[test]
 fn a_sweep_answer_names_its_server_whatever_it_says() {
     assert_eq!(
-        get_reach_server_label(&Reach::CertificateMismatch {
+        get_reach_server_label(&Reach::Failed {
             server_label: "desk".to_string(),
-            certificate_error_detail: "the certificate desk.local:7654 presented is not the \
-                                       expected one"
+            failure_message: "the certificate desk.local:7654 presented is not the expected one"
                 .to_string(),
         }),
         "desk"
@@ -1084,7 +1079,7 @@ fn read_hidden_terminal_line_reports_an_entry_that_ended_before_anything_was_typ
 // The sweep completion: every asked server comes back as exactly one entry,
 // sorted by server name.
 #[test]
-fn a_server_not_heard_from_comes_back_unreachable() {
+fn a_server_not_heard_from_comes_back_unanswered() {
     let received_reaches = vec![Reach::Reached {
         server_label: "desk".to_string(),
         session_rows: Vec::new(),
@@ -1098,7 +1093,7 @@ fn a_server_not_heard_from_comes_back_unreachable() {
                 server_label: "desk".to_string(),
                 session_rows: Vec::new(),
             },
-            Reach::Unreachable {
+            Reach::Unanswered {
                 server_label: "work".to_string(),
             },
         ]
@@ -1108,9 +1103,9 @@ fn a_server_not_heard_from_comes_back_unreachable() {
 #[test]
 fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
     let received_reaches = vec![
-        Reach::Refused {
+        Reach::Failed {
             server_label: "work".to_string(),
-            refusal_detail: "this server did not admit the connection".to_string(),
+            failure_message: "this server did not admit the connection".to_string(),
         },
         Reach::Reached {
             server_label: "desk".to_string(),
@@ -1126,9 +1121,9 @@ fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
                 server_label: "desk".to_string(),
                 session_rows: Vec::new(),
             },
-            Reach::Refused {
+            Reach::Failed {
                 server_label: "work".to_string(),
-                refusal_detail: "this server did not admit the connection".to_string(),
+                failure_message: "this server did not admit the connection".to_string(),
             },
         ]
     );
@@ -1141,10 +1136,10 @@ fn a_sweep_that_heard_nothing_reports_every_asked_server() {
     assert_eq!(
         complete_reach_results(Vec::new(), requested_server_labels),
         vec![
-            Reach::Unreachable {
+            Reach::Unanswered {
                 server_label: "desk".to_string(),
             },
-            Reach::Unreachable {
+            Reach::Unanswered {
                 server_label: "work".to_string(),
             },
         ]
@@ -1394,18 +1389,95 @@ fn a_record_with_no_certificate_fingerprint_is_unchecked_and_is_not_dialled() {
     );
 }
 
-// A dial that reaches nothing is unreachable, not refused: a refusal is a
-// sentence the server sent.
+/// The time a sweep test gives a dial that fails before it: 10 seconds.
+const PROBE_DEADLINE_DURATION: Duration = Duration::from_secs(10);
+
+/// A loopback address that nothing listens on.
+fn build_closed_loopback_address() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    listener
+        .local_addr()
+        .expect("read the bound address")
+        .to_string()
+}
+
 #[test]
-fn a_saved_server_nothing_answers_for_is_unreachable() {
+fn a_saved_server_that_refuses_the_connection_fails_with_the_dials_own_message() {
     let mut saved_server = build_saved_server();
-    // Port 1 of the loopback address: a connect there is refused, and a
-    // machine that drops it instead runs out of the deadline below.
-    saved_server.server_address = "127.0.0.1:1".to_string();
+    saved_server.server_address = build_closed_loopback_address();
+
+    assert_eq!(
+        probe_saved_server(&saved_server, Instant::now() + PROBE_DEADLINE_DURATION),
+        Reach::Failed {
+            server_label: "work".to_string(),
+            failure_message: format!(
+                "IPC unavailable: {} refused the connection: nothing is listening on that \
+                 port. if remote access is not enabled on that machine, run `koshi share open` \
+                 there to open the port",
+                saved_server.server_address
+            ),
+        }
+    );
+}
+
+#[test]
+fn a_saved_server_whose_address_cannot_be_looked_up_fails_with_the_dials_own_message() {
+    let mut saved_server = build_saved_server();
+    saved_server.server_address = "127.0.0.1:seven".to_string();
+
+    assert_eq!(
+        probe_saved_server(&saved_server, Instant::now() + PROBE_DEADLINE_DURATION),
+        Reach::Failed {
+            server_label: "work".to_string(),
+            failure_message: "IPC unavailable: ipc transport error: 127.0.0.1:seven could not \
+                              be looked up: invalid port value"
+                .to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_saved_server_that_closes_during_the_handshake_fails_with_the_dials_own_message() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let mut saved_server = build_saved_server();
+    saved_server.server_address = listener
+        .local_addr()
+        .expect("read the bound address")
+        .to_string();
+    let closing_thread = std::thread::spawn(move || {
+        // Accepted, and closed before a byte is answered.
+        let _ = listener.accept();
+    });
+
+    assert_eq!(
+        probe_saved_server(&saved_server, Instant::now() + PROBE_DEADLINE_DURATION),
+        Reach::Failed {
+            server_label: "work".to_string(),
+            failure_message: format!(
+                "IPC unavailable: {}",
+                IpcError::TlsHandshakeClosed {
+                    server_address: saved_server.server_address.clone(),
+                }
+            ),
+        }
+    );
+    let _ = closing_thread.join();
+}
+
+#[test]
+fn a_saved_server_that_answers_nothing_by_the_deadline_is_unanswered() {
+    // Bound and never accepted: the operating system's backlog completes the
+    // TCP connection, so the dial waits in the handshake until the deadline.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let mut saved_server = build_saved_server();
+    saved_server.server_address = listener
+        .local_addr()
+        .expect("read the bound address")
+        .to_string();
 
     assert_eq!(
         probe_saved_server(&saved_server, Instant::now() + Duration::from_millis(200)),
-        Reach::Unreachable {
+        Reach::Unanswered {
             server_label: "work".to_string(),
         }
     );
