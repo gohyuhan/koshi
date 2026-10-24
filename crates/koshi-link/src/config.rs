@@ -41,9 +41,8 @@ use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
 use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME_NAME};
 use koshi_core::geometry::Direction;
-use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
-use koshi_observability::logging::LoggingParameters;
+use koshi_observability::logging::{LogFileOwner, LoggingParameters};
 #[cfg(unix)]
 use koshi_runtime::ipc_server::{OtherUsers, OtherUsersSetting};
 
@@ -272,14 +271,15 @@ pub fn load_app_layer(config_directory: Option<&Path>) -> Option<PartialKoshiCon
     load_app_config_at(&config_directory.join("koshi.kdl")).into_app_config_layer()
 }
 
-/// The tracing subscriber's settings for `session_id`: `app_config_layer`'s
-/// `logging` section over the built-in defaults. The session server and every
-/// client attached to it build their parameters here; one session's lines all
-/// land in one file.
+/// The tracing subscriber's settings for the process `log_file_owner` names:
+/// `app_config_layer`'s `logging` section over the built-in defaults. The
+/// router, the session server, every client attached to a session, and on
+/// Windows the process holding a session's panes build their parameters here.
+/// One session's lines all land in one file, and the router's in another.
 #[must_use]
 pub fn build_logging_parameters(
     app_config_layer: Option<&PartialKoshiConfig>,
-    session_id: SessionId,
+    log_file_owner: LogFileOwner,
 ) -> LoggingParameters {
     let logging_config = app_config_layer
         .map(PartialKoshiConfig::get_logging_config)
@@ -288,7 +288,7 @@ pub fn build_logging_parameters(
         is_enabled: logging_config.is_enabled,
         log_level: logging_config.log_level,
         log_format: logging_config.log_format,
-        session_id,
+        log_file_owner,
     }
 }
 

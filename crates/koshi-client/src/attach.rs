@@ -2714,7 +2714,7 @@ fn attach_once(
     let _ = koshi_observability::logging::initialize_tracing(
         koshi_link::config::build_logging_parameters(
             loaded_config.app_config_layer.as_ref(),
-            session_id,
+            koshi_observability::logging::LogFileOwner::Session { session_id },
         ),
     );
     for warning in &config_warnings {

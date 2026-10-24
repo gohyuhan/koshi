@@ -5,7 +5,7 @@ use std::path::Path;
 
 use koshi_link::config::LoadedAppConfig;
 use koshi_link::error::CliError;
-use koshi_observability::logging::initialize_tracing;
+use koshi_observability::logging::{initialize_tracing, LogFileOwner};
 
 /// Bare `koshi`: start or reuse the router, have it create a new session
 /// server in this terminal's directory, and attach this terminal to it.
@@ -28,7 +28,7 @@ pub fn run_default_client(
         koshi_link::router_client::request_new_session(&runtime_directory, profile, None)?;
     let _ = initialize_tracing(koshi_link::config::build_logging_parameters(
         loaded_app_config.find_app_config_layer(),
-        session_id,
+        LogFileOwner::Session { session_id },
     ));
     // Runs after the subscriber is installed, so its lines reach the log.
     // Creating the directory adds no `koshi.kdl`, so `loaded_app_config`

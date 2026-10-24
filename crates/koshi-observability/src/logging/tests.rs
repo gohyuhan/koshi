@@ -1,8 +1,8 @@
 //! Tests for the tracing subscriber bootstrap and the writers it uses.
 //!
-//! Coverage: the session log path, per-session lazy file creation, the level
-//! cutoff, single global install, the disabled no-op, the per-session file
-//! writer, and the capture writer.
+//! Coverage: the session and router log paths, lazy file creation, the level
+//! cutoff, single global install, the disabled no-op, the log file writer, and
+//! the capture writer.
 
 use super::*;
 
@@ -59,7 +59,7 @@ fn a_line_carries_every_correlation_id_field_it_was_given() {
 #[test]
 fn session_log_path_is_the_named_file_in_the_logs_folder() {
     let session_id = SessionId::new();
-    let log_file_path = resolve_session_log_path(session_id);
+    let log_file_path = resolve_log_file_path(LogFileOwner::Session { session_id });
     let log_file_name = format!("koshi-log-{}.log", session_id.get_uuid());
 
     // Pins the `logs/<file>` tail on every OS, then the full path when the
@@ -78,9 +78,32 @@ fn session_log_path_is_the_named_file_in_the_logs_folder() {
 }
 
 #[test]
+fn router_log_path_is_koshi_log_router_in_the_logs_folder() {
+    let log_file_path = resolve_log_file_path(LogFileOwner::Router);
+
+    assert!(
+        log_file_path.ends_with("logs/koshi-log-router.log"),
+        "unexpected log path: {}",
+        log_file_path.display()
+    );
+    if let Some(state_directory_path) = koshi_paths::resolve_state_directory() {
+        assert_eq!(
+            log_file_path,
+            state_directory_path
+                .join("logs")
+                .join("koshi-log-router.log")
+        );
+    }
+}
+
+#[test]
 fn two_sessions_get_two_distinct_log_files() {
-    let first_log_file_path = resolve_session_log_path(SessionId::new());
-    let second_log_file_path = resolve_session_log_path(SessionId::new());
+    let first_log_file_path = resolve_log_file_path(LogFileOwner::Session {
+        session_id: SessionId::new(),
+    });
+    let second_log_file_path = resolve_log_file_path(LogFileOwner::Session {
+        session_id: SessionId::new(),
+    });
     assert_ne!(
         first_log_file_path, second_log_file_path,
         "each session must name its own log file"
@@ -102,7 +125,7 @@ fn initialize_tracing_at_path_creates_file_lazily_and_installs_once() {
         is_enabled: false,
         log_level: LogLevel::Error,
         log_format: LogFormat::Json,
-        session_id: SessionId::new(),
+        log_file_owner: LogFileOwner::Router,
     };
     initialize_tracing(disabled_logging_parameters.clone())
         .expect("disabled logging installs nothing");
@@ -213,11 +236,11 @@ fn a_line_at_info_level_is_written_when_the_cutoff_is_info() {
     );
 }
 
-// The per-session file writer, exercised directly (without a subscriber): its
+// The log file writer, exercised directly (without a subscriber): its
 // first write creates the `logs/` parent and the file, a second write appends,
 // and flush is a no-op that reports success.
 #[test]
-fn session_log_writer_creates_parent_then_appends_each_write() {
+fn log_file_writer_creates_parent_then_appends_each_write() {
     use std::io::Write as _;
 
     let test_directory_path =
@@ -227,7 +250,7 @@ fn session_log_writer_creates_parent_then_appends_each_write() {
         .join("logs")
         .join("koshi-log-writer.log");
 
-    let mut log_writer = SessionLogWriter {
+    let mut log_writer = LogFileWriter {
         log_file_path: log_file_path.clone(),
     };
     let first_write_byte_count = log_writer
@@ -254,7 +277,7 @@ fn session_log_writer_creates_parent_then_appends_each_write() {
 // A `logs/` directory removed between writes comes back on the next line: the
 // failed open triggers one recreate-and-retry.
 #[test]
-fn session_log_writer_recreates_a_logs_directory_removed_mid_session() {
+fn log_file_writer_recreates_a_logs_directory_removed_while_koshi_runs() {
     use std::io::Write as _;
 
     let test_directory_path =
@@ -264,7 +287,7 @@ fn session_log_writer_recreates_a_logs_directory_removed_mid_session() {
         .join("logs")
         .join("koshi-log-writer.log");
 
-    let mut log_writer = SessionLogWriter {
+    let mut log_writer = LogFileWriter {
         log_file_path: log_file_path.clone(),
     };
     let first_write_byte_count = log_writer
@@ -288,7 +311,7 @@ fn session_log_writer_recreates_a_logs_directory_removed_mid_session() {
 // A log file removed between writes comes back on the next line, holding only
 // the lines written after the removal.
 #[test]
-fn session_log_writer_recreates_a_log_file_removed_mid_session() {
+fn log_file_writer_recreates_a_log_file_removed_while_koshi_runs() {
     use std::io::Write as _;
 
     let test_directory_path =
@@ -298,7 +321,7 @@ fn session_log_writer_recreates_a_log_file_removed_mid_session() {
         .join("logs")
         .join("koshi-log-writer.log");
 
-    let mut log_writer = SessionLogWriter {
+    let mut log_writer = LogFileWriter {
         log_file_path: log_file_path.clone(),
     };
     let first_write_byte_count = log_writer
@@ -319,11 +342,48 @@ fn session_log_writer_recreates_a_log_file_removed_mid_session() {
     let _ = std::fs::remove_dir_all(&test_directory_path);
 }
 
+// Two writers on one path, as two processes writing one file: each write
+// appends after the other's, and no write truncates or overwrites a line.
+#[test]
+fn two_log_file_writers_on_one_path_append_whole_lines_in_write_order() {
+    use std::io::Write as _;
+
+    let test_directory_path =
+        std::env::temp_dir().join(format!("koshi-writer-shared-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&test_directory_path);
+    let log_file_path = test_directory_path
+        .join("logs")
+        .join("koshi-log-router.log");
+
+    let mut first_log_writer = LogFileWriter {
+        log_file_path: log_file_path.clone(),
+    };
+    let mut second_log_writer = LogFileWriter {
+        log_file_path: log_file_path.clone(),
+    };
+    first_log_writer
+        .write_all(b"first router line\n")
+        .expect("the first write creates the file");
+    second_log_writer
+        .write_all(b"second router line\n")
+        .expect("the second write appends");
+    first_log_writer
+        .write_all(b"third router line\n")
+        .expect("the third write appends");
+
+    assert_eq!(
+        std::fs::read(&log_file_path).unwrap(),
+        b"first router line\nsecond router line\nthird router line\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&test_directory_path);
+}
+
 // A regular file where the `logs/` directory must go: the open fails, the
 // recreate fails with `AlreadyExists`, and the write reports that error and
 // creates nothing. With the file gone, the next write succeeds.
 #[test]
-fn session_log_writer_reports_the_error_when_its_parent_is_a_regular_file() {
+fn log_file_writer_reports_the_error_when_its_parent_is_a_regular_file() {
     use std::io::Write as _;
 
     let test_directory_path =
@@ -335,7 +395,7 @@ fn session_log_writer_reports_the_error_when_its_parent_is_a_regular_file() {
         .expect("create the file that blocks the logs directory");
     let log_file_path = logs_directory_blocking_file_path.join("koshi-log-writer.log");
 
-    let mut log_writer = SessionLogWriter {
+    let mut log_writer = LogFileWriter {
         log_file_path: log_file_path.clone(),
     };
     let write_error = log_writer
@@ -373,7 +433,7 @@ fn a_created_log_file_is_0600_in_a_0700_directory() {
     let log_directory_path = test_directory_path.join("logs");
     let log_file_path = log_directory_path.join("koshi-log-writer.log");
 
-    let mut log_writer = SessionLogWriter {
+    let mut log_writer = LogFileWriter {
         log_file_path: log_file_path.clone(),
     };
     log_writer

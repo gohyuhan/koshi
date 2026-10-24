@@ -10,6 +10,7 @@ use koshi_beta::beta_feature;
 use koshi_config::layer::PartialLoggingConfig;
 use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
 use koshi_core::action::ActionReference;
+use koshi_core::ids::SessionId;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::log::{LogFormat, LogLevel};
 
@@ -759,13 +760,12 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
 
 #[test]
 fn build_logging_parameters_with_no_config_file_are_the_defaults() {
-    let session_id = SessionId::new();
-    let logging_parameters = build_logging_parameters(None, session_id);
+    let logging_parameters = build_logging_parameters(None, LogFileOwner::Router);
 
     assert!(!logging_parameters.is_enabled);
     assert_eq!(logging_parameters.log_level, LogLevel::Warning);
     assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
-    assert_eq!(logging_parameters.session_id, session_id);
+    assert_eq!(logging_parameters.log_file_owner, LogFileOwner::Router);
 }
 
 #[test]
@@ -780,12 +780,16 @@ fn build_logging_parameters_take_the_level_and_format_the_config_names() {
         ..Default::default()
     };
 
-    let logging_parameters = build_logging_parameters(Some(&app_config), session_id);
+    let logging_parameters =
+        build_logging_parameters(Some(&app_config), LogFileOwner::Session { session_id });
 
     assert!(logging_parameters.is_enabled);
     assert_eq!(logging_parameters.log_level, LogLevel::Info);
     assert_eq!(logging_parameters.log_format, LogFormat::Json);
-    assert_eq!(logging_parameters.session_id, session_id);
+    assert_eq!(
+        logging_parameters.log_file_owner,
+        LogFileOwner::Session { session_id }
+    );
 }
 
 #[test]
@@ -800,12 +804,16 @@ fn build_logging_parameters_keep_the_defaults_for_every_field_the_config_leaves_
         ..Default::default()
     };
 
-    let logging_parameters = build_logging_parameters(Some(&app_config), session_id);
+    let logging_parameters =
+        build_logging_parameters(Some(&app_config), LogFileOwner::Session { session_id });
 
     assert!(logging_parameters.is_enabled);
     assert_eq!(logging_parameters.log_level, LogLevel::Warning);
     assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
-    assert_eq!(logging_parameters.session_id, session_id);
+    assert_eq!(
+        logging_parameters.log_file_owner,
+        LogFileOwner::Session { session_id }
+    );
 }
 
 // --- The direction a pane-opening verb uses with no `--direction` ---

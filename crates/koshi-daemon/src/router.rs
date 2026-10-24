@@ -79,12 +79,17 @@
 //! restarts. On Unix it removes its program file and replaces its own running
 //! image, and keeps the same process id. On Windows it starts the new koshi,
 //! which waits for the router lock, and then runs its own shutdown and exits.
-//! A restart that fails logs the exec or spawn error at warn level and resumes
-//! serving under the same endpoint file and token, still ignoring the SIGPIPE
-//! signal on Unix, and the first check 30 seconds or more after the failure
-//! reads the program file again. Every serving thread blocks SIGPIPE on its
-//! own mask; a write to a peer that hung up returns an error in every
-//! disposition state.
+//! A restart that fails writes the exec or spawn error to the router log at
+//! warn level and resumes serving under the same endpoint file and token,
+//! still ignoring the SIGPIPE signal on Unix, and the first check 30 seconds
+//! or more after the failure reads the program file again. Every serving
+//! thread blocks SIGPIPE on its own mask; a write to a peer that hung up
+//! returns an error in every disposition state.
+//!
+//! The router log is `koshi-log-router.log` in the log directory. The router
+//! writes it only while the `logging` section of `koshi.kdl` turns logging on,
+//! at the level and format that section names. The image that a restart starts
+//! reads `koshi.kdl` again and takes its log settings from that read.
 //!
 //! With no session left, the dispatcher waits one idle window for a request.
 //! A window that passes with no connection open ends the router, and a
@@ -151,6 +156,7 @@ use koshi_link::error::CliError;
 use koshi_link::ipc_client::{self, DuplicatedForeignSession, ForeignSessionListing, UnreadPath};
 use koshi_link::remote_client::{acquire_store_lock, STORE_LOCK_TIMEOUT_DURATION};
 use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIRECTORY_FLAG, WAIT_FOR_LOCK_FLAG};
+use koshi_observability::logging::{initialize_tracing, LogFileOwner};
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_runtime::executable_watch::ExecutableWatch;
 use koshi_runtime::server::is_binary_runnable;
@@ -854,17 +860,29 @@ impl std::error::Error for ChildReapError {}
 /// process that cannot be reaped closes the gate at once.
 ///
 /// `app_config_layer` is the `koshi.kdl` layer the caller read at this
-/// process's start: the router takes `remote-listen` and the shared directory
-/// it starts with from it. `None` starts on the built-in defaults.
-/// `config_directory` holds the `koshi.kdl` the router reads again on every
-/// attach lookup for the shared directory. Every remote status answer names
-/// that file. A `config_directory` of `None` reads no file.
+/// process's start: the router takes its log settings, `remote-listen` and the
+/// shared directory it starts with from it. `None` starts on the built-in
+/// defaults. Before anything else, the router installs its tracing subscriber
+/// from that layer's `logging` section: with logging on, every line it writes
+/// goes to `koshi-log-router.log` in the log directory. `config_directory`
+/// holds the `koshi.kdl` the router reads again on every attach lookup for the
+/// shared directory. Every remote status answer names that file. A
+/// `config_directory` of `None` reads no file.
+///
+/// `config_migration_error` is the failure of the config migration that ran
+/// before this call, or `None` when it did not fail. Once this router holds the
+/// router lock, the failure is written to the router log at warn level.
 pub fn run_router(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
     app_config_layer: Option<PartialKoshiConfig>,
     should_wait_for_lock: bool,
+    config_migration_error: Option<&CliError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = initialize_tracing(koshi_link::config::build_logging_parameters(
+        app_config_layer.as_ref(),
+        LogFileOwner::Router,
+    ));
     koshi_paths::ensure_private_directory(runtime_directory)?;
 
     // The path of the program this router runs, as
@@ -891,6 +909,12 @@ pub fn run_router(
         .open(resolve_router_lock_path(runtime_directory))?;
     if !take_router_lock(&lock_file, should_wait_for_lock)? {
         return Ok(());
+    }
+    if let Some(config_migration_error) = config_migration_error {
+        tracing::warn!(
+            %config_migration_error,
+            "the config files could not be migrated; the router starts with them as they are"
+        );
     }
     #[cfg(unix)]
     let inherited_child_process_ids = if should_wait_for_lock {

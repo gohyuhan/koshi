@@ -72,7 +72,7 @@ use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
-use koshi_observability::logging::initialize_tracing;
+use koshi_observability::logging::{initialize_tracing, LogFileOwner};
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_runtime::executable_watch::{read_first_output_line, ExecutableWatch, OutputLineError};
 use koshi_runtime::ipc_server::{ImageReplacement, IpcServer};
@@ -354,8 +354,10 @@ pub fn run_session_server(
     supervisor_process_id: Option<u32>,
     config_migration_error: Option<&CliError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let logging_parameters =
-        koshi_link::config::build_logging_parameters(app_config_layer.as_ref(), session_id);
+    let logging_parameters = koshi_link::config::build_logging_parameters(
+        app_config_layer.as_ref(),
+        LogFileOwner::Session { session_id },
+    );
     let (log_level, log_format) = (logging_parameters.log_level, logging_parameters.log_format);
     let _ = initialize_tracing(logging_parameters);
     // The first line written: it names the level and format the session runs

@@ -19,8 +19,8 @@ use tempfile::TempDir;
 mod common;
 
 use common::{
-    build_koshi_command_under_home, resolve_config_directory_under_home, SESSION_SERVER_NAME,
-    WAIT_DURATION,
+    build_koshi_command_under_home, resolve_config_directory_under_home,
+    resolve_log_directory_under_home, SESSION_SERVER_NAME, WAIT_DURATION,
 };
 
 const STARTUP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
@@ -426,26 +426,6 @@ fn a_router_whose_config_migration_fails_warns_and_serves() {
     );
 }
 
-#[cfg(target_os = "macos")]
-fn resolve_test_log_directory(home_directory: &Path) -> PathBuf {
-    home_directory.join("Library/Application Support/koshi/logs")
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_test_log_directory(home_directory: &Path) -> PathBuf {
-    home_directory.join(".local/state/koshi/logs")
-}
-
-#[cfg(windows)]
-fn resolve_test_log_directory(home_directory: &Path) -> PathBuf {
-    home_directory
-        .join("AppData")
-        .join("Local")
-        .join("koshi")
-        .join("data")
-        .join("logs")
-}
-
 /// `koshi.kdl` turns logging on, and `keybinding.kdl` holds KDL that does not
 /// parse: migration fails on `keybinding.kdl`, and the session server writes
 /// that failure to its log file at warn level.
@@ -461,7 +441,7 @@ fn a_session_server_whose_config_migration_fails_writes_the_failure_to_its_log()
     fs::write(&keybinding_config_path, "version 1\nnormal {").expect("write keybinding config");
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let session_log_path = resolve_test_log_directory(test_directory.path())
+    let session_log_path = resolve_log_directory_under_home(test_directory.path())
         .join(format!("koshi-log-{}.log", session_id.get_uuid()));
 
     let mut session_server_process = build_koshi_command_under_home(test_directory.path())
@@ -501,6 +481,60 @@ fn a_session_server_whose_config_migration_fails_writes_the_failure_to_its_log()
         format!(
             "WARN koshi_daemon::session_server: the config files could not be migrated; the \
              session starts with them as they are, config_migration_error: {expected_warning}"
+        )
+    );
+}
+
+/// `koshi.kdl` turns logging on, and `keybinding.kdl` holds KDL that does not
+/// parse: migration fails on `keybinding.kdl`, and the router writes that
+/// failure to `koshi-log-router.log` at warn level.
+#[test]
+fn a_router_whose_config_migration_fails_writes_the_failure_to_its_log() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let config_directory = resolve_config_directory_under_home(test_directory.path());
+    write_app_config(
+        &config_directory,
+        "version 2\nlogging {\n    enabled #true\n    level \"warning\"\n}\n",
+    );
+    let keybinding_config_path = config_directory.join("keybinding.kdl");
+    fs::write(&keybinding_config_path, "version 1\nnormal {").expect("write keybinding config");
+    let runtime_directory = build_test_runtime_directory();
+    let router_log_path =
+        resolve_log_directory_under_home(test_directory.path()).join("koshi-log-router.log");
+
+    let mut router_process = build_koshi_command_under_home(test_directory.path())
+        .arg("serve-router")
+        .arg("--runtime-dir")
+        .arg(runtime_directory.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the router");
+    let expected_warning = format!(
+        "config failed: config parse error in {}: line 2, column 8: No closing '}}' for child block",
+        keybinding_config_path.display()
+    );
+    let startup_deadline = Instant::now() + WAIT_DURATION;
+    let mut router_log_text = String::new();
+    while !router_log_text.contains(&expected_warning) && Instant::now() < startup_deadline {
+        std::thread::sleep(STARTUP_POLL_INTERVAL_DURATION);
+        router_log_text = fs::read_to_string(&router_log_path).unwrap_or_default();
+    }
+    let _ = router_process.kill();
+    let _ = router_process.wait();
+
+    let warning_line = router_log_text
+        .lines()
+        .find(|router_log_line| router_log_line.contains(&expected_warning))
+        .unwrap_or_else(|| panic!("the router log holds no migration warning:\n{router_log_text}"));
+    let (_log_timestamp, logged_warning) = warning_line
+        .split_once("Z  ")
+        .unwrap_or_else(|| panic!("the warning line starts with a timestamp: {warning_line}"));
+    assert_eq!(
+        logged_warning,
+        format!(
+            "WARN koshi_daemon::router: the config files could not be migrated; the router \
+             starts with them as they are, config_migration_error: {expected_warning}"
         )
     );
 }

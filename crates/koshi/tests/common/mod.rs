@@ -459,6 +459,35 @@ pub fn resolve_data_directory_under_home(home_directory: &Path) -> PathBuf {
         .join("data")
 }
 
+/// The log directory a `koshi` started by [`build_koshi_command_at`] with
+/// `home_directory` writes its log files in: `logs` in the state directory,
+/// which macOS derives from the home directory alone.
+#[cfg(target_os = "macos")]
+pub fn resolve_log_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join("Library/Application Support/koshi/logs")
+}
+
+/// The log directory a `koshi` started by [`build_koshi_command_at`] with
+/// `home_directory` writes its log files in: `.local/state/koshi/logs` inside
+/// the home directory, under the `XDG_STATE_HOME` that command sets.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn resolve_log_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join(".local/state/koshi/logs")
+}
+
+/// The log directory a `koshi` started by [`build_koshi_command_at`] with
+/// `home_directory` writes its log files in: `AppData\Local\koshi\data\logs`
+/// inside the home directory, under the `LOCALAPPDATA` that command sets.
+#[cfg(windows)]
+pub fn resolve_log_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory
+        .join("AppData")
+        .join("Local")
+        .join("koshi")
+        .join("data")
+        .join("logs")
+}
+
 /// Write `config_text` as the `koshi.kdl` a process started under
 /// `home_directory` reads.
 pub fn write_test_config(home_directory: &Path, config_text: &str) {

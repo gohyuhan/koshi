@@ -419,9 +419,16 @@ To type non-ASCII text in such a pane, do one of these:
 
 Neither side owns these: every koshi process reads them for its own log file.
 
-Koshi writes `logs/koshi-log-<uuid>.log` below the state directory, one file
-per session, named by the session's bare UUID. Disabled logging creates no log
-file.
+Koshi writes its log files in `logs/` below the state directory:
+
+- `koshi-log-<uuid>.log`, one file per session, named by the session's bare
+  UUID. It holds the lines of the session server, of each client attached to
+  the session, and on Windows of the process that holds the session's panes.
+- `koshi-log-router.log`, one file for the router. It holds the lines of the
+  router, such as a restart into a new koshi that failed.
+
+The router reads this section when it starts, and again each time it restarts.
+Disabled logging creates no log file.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

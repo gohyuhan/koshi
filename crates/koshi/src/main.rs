@@ -112,9 +112,9 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // `koshi.kdl` is read here once for every command. A service command
     // migrates the config files first, and its `koshi.kdl` comes from the text
     // that migration read or wrote. A service command whose config migration
-    // fails prints the failure on stderr and starts anyway. A session server
-    // also writes it to its log. The next service start runs the migration
-    // again.
+    // fails prints the failure on stderr and starts anyway. A router and a
+    // session server also write it to their logs. The next service start runs
+    // the migration again.
     let config_directory = koshi_paths::resolve_config_directory();
     let (loaded_app_config, config_migration_error) = config_command::load_app_config_for_command(
         cli.command.as_ref(),
@@ -244,6 +244,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             config_directory.as_deref(),
             loaded_app_config.into_app_config_layer(),
             *should_wait_for_lock,
+            config_migration_error.as_ref(),
         )
         .map_err(|runtime_error| CliError::Runtime {
             detail: runtime_error.to_string(),
@@ -320,6 +321,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         };
         return pty_supervisor::run_pty_supervisor(
             &runtime_directory,
+            loaded_app_config.find_app_config_layer(),
             *session_id,
             supervisor_token.clone(),
         )
