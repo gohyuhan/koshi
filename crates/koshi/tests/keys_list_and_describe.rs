@@ -136,6 +136,30 @@ continuous: false
     );
 }
 
+#[test]
+fn keys_describe_marks_a_binding_whose_action_repeats_from_its_prefix_as_continuous() {
+    let home_directory = TempDir::new().expect("create test home");
+    assert_eq!(
+        run_koshi_under_home(home_directory.path(), &["keys", "describe", "<C-p> <Left>"]),
+        KoshiRunOutput {
+            standard_output: "\
+key: <C-p> <Left>
+mode: normal
+action: core:focus-pane-left
+display_name: Focus Pane Left
+description: Move the issuing client's focus to the pane on the left
+scope: client
+source: defaults
+displaced_by: -
+continuous: true
+"
+            .to_string(),
+            standard_error: String::new(),
+            exit_code: Some(0),
+        }
+    );
+}
+
 /// The `core:mouse-select` block `koshi keys describe "<C-g>"` prints for
 /// `mode_name`, with its `source` and `displaced_by` values.
 fn build_mouse_select_detail_block(

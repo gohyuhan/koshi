@@ -1523,6 +1523,79 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
 }
 
 #[test]
+fn a_re_opened_prefix_stays_open_through_continuous_keys_and_closes_on_one_that_is_not() {
+    // `<C-p>` at 0 ms, then `<Left>`, `<Left>` and `<Down>` at 50, 100 and
+    // 150 ms: each fires its continuous action and `<C-p>` stays open with
+    // the hint deadline of `<C-p>`, 300 ms. At 1000 ms, past the 500 ms chord
+    // timeout, `<C-p>` is still open. `n` fires `core:new-pane`, which is not
+    // continuous, and closes `<C-p>`: the next `a` goes to the pane.
+    let mut client = build_test_client();
+    let ctrl_p_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    let left_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left));
+    let down_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Down));
+    let n_chord = build_key_chord(BindingModifierFlags::NONE, 'n');
+    let a_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    client.keymap_catalog = build_keymap_for_modes(
+        &[(
+            "normal",
+            &[
+                (
+                    KeySequence::from_first_and_rest(ctrl_p_chord, vec![left_chord]),
+                    "focus-pane-left",
+                ),
+                (
+                    KeySequence::from_first_and_rest(ctrl_p_chord, vec![down_chord]),
+                    "focus-pane-down",
+                ),
+                (
+                    KeySequence::from_first_and_rest(ctrl_p_chord, vec![n_chord]),
+                    "new-pane",
+                ),
+            ],
+        )],
+        &build_keybindings_config_with_timing(500, 300),
+    );
+    let ctrl_p_sequence = KeySequence::from(ctrl_p_chord);
+    let current_time = Instant::now();
+    assert_eq!(
+        client.resolve_key(ctrl_p_chord, current_time),
+        KeyOutcome::Pending
+    );
+
+    for (chord, action_name, typed_after_ms) in [
+        (left_chord, "focus-pane-left", 50),
+        (left_chord, "focus-pane-left", 100),
+        (down_chord, "focus-pane-down", 150),
+    ] {
+        let typed_at = current_time + Duration::from_millis(typed_after_ms);
+        assert_eq!(
+            client.resolve_key(chord, typed_at),
+            KeyOutcome::Fire(build_core_bound_action(action_name))
+        );
+        assert_eq!(client.get_pending_key_sequence(), Some(&ctrl_p_sequence));
+        assert_eq!(
+            client.compute_next_key_wakeup(typed_at),
+            Some(Duration::from_millis(300 - typed_after_ms))
+        );
+    }
+
+    let past_every_deadline = current_time + Duration::from_millis(1000);
+    assert_eq!(client.expire_key_sequence(past_every_deadline), None);
+    assert_eq!(client.get_pending_key_sequence(), Some(&ctrl_p_sequence));
+    assert!(!client.is_continuation_hint_hidden());
+
+    assert_eq!(
+        client.resolve_key(n_chord, past_every_deadline),
+        KeyOutcome::Fire(build_core_bound_action("new-pane"))
+    );
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert_eq!(
+        client.resolve_key(a_chord, past_every_deadline),
+        KeyOutcome::PassThrough(a_chord)
+    );
+}
+
+#[test]
 fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
     let mut client = build_test_client();
     let leader_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');

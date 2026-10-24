@@ -875,6 +875,13 @@ removes, with the source `defaults (unbound)`.
 each longer key that starts with it. For example, `koshi keys describe "<C-t>"`
 explains `<C-t> n` (`core:new-tab`) and `<C-t> x` (`core:close-tab`).
 
+The `continuous` field (`is_continuous` in JSON) is `true` when the action
+repeats from its prefix: after the shortcut fires, its prefix stays open, and
+the last key alone fires the action again (`keybinding.md`, *Repeating keys*).
+For example, `koshi keys describe "<C-p> <Left>"` explains
+`core:focus-pane-left` with `continuous: true`, and `<C-p> <Left> <Left>`
+focuses left twice.
+
 If your `keybinding.kdl` rebinds or removes a built-in shortcut, `keys
 describe` also explains that built-in shortcut, with the source
 `defaults (unbound)`. Its `displaced_by` field names what replaced it:

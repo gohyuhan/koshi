@@ -43,9 +43,49 @@ A key that starts a longer shortcut opens a sequence. While the sequence is
 open, no key reaches the program. A sequence that is not also a complete
 binding waits for its next key with no time limit. A key that continues
 nothing is discarded, and the sequence stays open. The sequence ends when a key
-completes a binding, when you press `<Esc>`, or, in locked mode, when you press
-the unlock chord. For example, in normal mode `<C-p>` then `z` discards `z` and
-leaves `<C-p>` open, and a following `n` opens a new pane.
+completes a binding whose action does not repeat (see
+[Repeating keys](#repeating-keys)), when you press `<Esc>`, when the input
+mode changes, or, in locked mode, when you press the unlock chord. For example,
+in normal mode `<C-p>` then `z` discards `z` and leaves `<C-p>` open, and a
+following `n` opens a new pane.
+
+### Repeating keys
+
+Some actions repeat from their prefix. If a shortcut of two or more keys fires
+one of them, the shortcut without its last key opens again. The last key alone
+then fires the action again. For example, `<C-p> <Left> <Left> <Down>` focuses
+the pane on the left, then the next pane on the left, then the pane below.
+`<C-p>` stays open after each key.
+
+These actions repeat:
+
+- `core:focus-pane-left`, `core:focus-pane-down`, `core:focus-pane-up`,
+  `core:focus-pane-right`
+- `core:resize-pane-left`, `core:resize-pane-down`, `core:resize-pane-up`,
+  `core:resize-pane-right`
+- `core:focus-next-floating-pane`, `core:focus-previous-floating-pane`
+- `core:scroll-pane-up`, `core:scroll-pane-down`
+
+`koshi keys describe` prints `continuous: true` for a shortcut that fires one
+of them. Every other action, a plugin action included, does not repeat.
+
+The prefix that opens again is an open sequence like any other:
+
+- A key bound under it fires its action. If that action repeats, the prefix
+  stays open. If it does not, the prefix ends. For example, `<C-p> <Left> n`
+  focuses the pane on the left, opens a new pane, and ends `<C-p>`.
+- A key bound to nothing under it is discarded, and the prefix stays open. For
+  example, `<C-p> <Left> a` focuses the pane on the left and discards `a`.
+- `<Esc>` ends it, and the program receives no key.
+- `chord-timeout-ms` does not end it. It waits for its next key with no time
+  limit.
+- The hint bar keeps the timing of the first key. With the default
+  `which-key-delay-ms 300`, the hint bar shows the keys that continue `<C-p>`
+  300 ms after `<C-p>`. A repeated `<Left>` does not restart that wait.
+
+A one-key shortcut opens no prefix. With `bind "<A-h>" "core:focus-pane-left"`,
+each `<A-h>` focuses the pane on the left once, and the next key goes where it
+went before.
 
 ## `mode` blocks
 
@@ -96,14 +136,14 @@ mode "normal" {
     bind "<leader>p s" "core:new-pane-stacked"  // <C-p> s: a new pane in the focused pane's stack
     bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>p u" "core:begin-dock-undock"
-    bind "<leader>p <Tab>" "core:focus-next-floating-pane"       // the prefix stays open
+    bind "<leader>p <Tab>" "core:focus-next-floating-pane"       // repeats: the prefix stays open
     bind "<leader>p <S-Tab>" "core:focus-previous-floating-pane"
     bind "<leader>p x" "core:close-pane-tree"
-    bind "<leader>p <Left>" "core:focus-pane-left"
+    bind "<leader>p <Left>" "core:focus-pane-left"              // repeats: the prefix stays open
     bind "<leader>p <Down>" "core:focus-pane-down"
     bind "<leader>p <Up>" "core:focus-pane-up"
     bind "<leader>p <Right>" "core:focus-pane-right"
-    bind "<leader>s <Left>" "core:resize-pane-left"
+    bind "<leader>s <Left>" "core:resize-pane-left"             // repeats: the prefix stays open
     bind "<leader>s <Down>" "core:resize-pane-down"
     bind "<leader>s <Up>" "core:resize-pane-up"
     bind "<leader>s <Right>" "core:resize-pane-right"
@@ -408,8 +448,8 @@ session, in the order the panes became floating, and wrap at the ends:
 - The panes a step passes stay shown.
 - From a tiled or stacked pane, `<Tab>` lands on the first floating pane and
   `<S-Tab>` on the last.
-- The prefix stays open, so each further `<Tab>` or `<S-Tab>` takes one more
-  step.
+- Both actions repeat (see [Repeating keys](#repeating-keys)). The prefix
+  stays open, so each further `<Tab>` or `<S-Tab>` takes one more step.
 
 Example: `htop` and then `logs` became floating, this client minimized both,
 and its input is on the tiled pane `A`. `<C-p> <Tab>` shows and focuses
