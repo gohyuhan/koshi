@@ -15,6 +15,7 @@ use std::process::Output;
 
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::router::{resolve_router_endpoint_path, RouterRequestKind, RouterResult};
+use koshi_pty::working_directory::get_local_hostname;
 
 use common::{
     build_koshi_command_under_home, build_short_test_directory, connect_to_router,
@@ -88,21 +89,24 @@ fn end_advertised_router(runtime_directory: &Path) {
 
 /// What `koshi share open` prints on standard output once the router serves
 /// `remote_listen_address`, a loopback address, with the certificate
-/// `certificate_fingerprint`.
+/// `certificate_fingerprint`: the block
+/// [`render_remote_ready`](koshi::output::render_remote_ready) renders after
+/// no grant, for no other address of this machine and the host name
+/// [`get_local_hostname`] reads. The text of that block is pinned in
+/// `crates/koshi/src/share/tests.rs`.
 fn build_expected_loopback_block(
     remote_listen_address: SocketAddr,
     certificate_fingerprint: &str,
 ) -> String {
-    format!(
-        "connect from this machine:\n\
-         \x20 koshi attach --remote {remote_listen_address} --certificate-fingerprint \
-         sha256:{certificate_fingerprint} [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret `koshi share grant` printed, or paste it when \
-         asked.\n\
-         the router listens on {remote_listen_address}, a loopback address, so no other machine \
-         can connect to it. To let another machine connect, set remote-listen in koshi.kdl to an \
-         address of this machine, such as 0.0.0.0:{}, then run `koshi restart-servers`.\n",
-        remote_listen_address.port()
+    koshi::output::render_remote_ready(
+        None,
+        &koshi::output::RemoteReady::On {
+            remote_listen_address,
+            host_addresses: Vec::new(),
+            host_name: get_local_hostname(),
+            certificate_fingerprint: certificate_fingerprint.to_string(),
+            config_mismatch: None,
+        },
     )
 }
 

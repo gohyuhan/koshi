@@ -469,6 +469,7 @@ fn the_connect_command_a_grant_prints_runs_twice_with_the_same_answer_and_one_sa
                 .parse()
                 .expect("the stand-in address is a socket address"),
             host_addresses: Vec::new(),
+            host_name: Some("desk".to_string()),
             certificate_fingerprint: certificate_fingerprint.clone(),
             config_mismatch: None,
         },
@@ -494,7 +495,7 @@ fn the_connect_command_a_grant_prints_runs_twice_with_the_same_answer_and_one_sa
             "--certificate-fingerprint",
             &certificate_fingerprint_text,
             "--save-as",
-            "alice"
+            "desk"
         ]
     );
 
@@ -523,7 +524,7 @@ fn the_connect_command_a_grant_prints_runs_twice_with_the_same_answer_and_one_sa
         assert_eq!(
             list_saved_server_records(home_directory.path()),
             vec![(
-                Some("alice".to_string()),
+                Some("desk".to_string()),
                 server_address.clone(),
                 Some(certificate_fingerprint.clone())
             )],

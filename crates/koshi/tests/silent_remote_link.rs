@@ -27,21 +27,16 @@ use koshi_core::command::CliExitCode;
 use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
-use koshi_ipc::transport::Connection;
 
 use common::{
-    build_koshi_command_under_home, build_short_test_directory, connect_to_router, create_session,
+    build_koshi_command_under_home, build_short_test_directory, create_session,
     list_saved_server_records, resolve_runtime_directory_under_home, send_router_request,
-    start_router_process, wait_for_attached_client_count, wait_for_client_exit, write_test_config,
-    RunningClient, RunningRouter, RunningSessions,
+    start_router_with_remote_access, wait_for_attached_client_count, wait_for_client_exit,
+    RunningClient, RunningSessions,
 };
 
 /// The most bytes one read of a relay pump takes: 16 KiB.
 const RELAY_READ_BYTE_COUNT: usize = 16 * 1024;
-
-/// How many loopback ports the test tries before it gives up switching remote
-/// access on.
-const MAX_ADDRESS_ATTEMPT_COUNT: usize = 8;
 
 /// A relay between `koshi attach --remote` and the router's remote listener.
 ///
@@ -181,63 +176,6 @@ fn pump_relayed_bytes(
     }
 }
 
-/// Write the `koshi.kdl` of `home_directory`, start a router under it serving
-/// `runtime_directory`, and switch its remote access on. Hands back the
-/// router, a connection to it, the address its remote listener serves, and
-/// the fingerprint of the certificate that listener presents.
-///
-/// `koshi.kdl` sets `remote-link-timeout-ms 1000`, `remote-reconnect #false`,
-/// and a free loopback port as `remote-listen`. The port is found by binding
-/// port `0` and releasing it, and another program can take it before the
-/// router binds it. A router that answers the switch with anything else than
-/// `RemoteEnabled` is ended, and the next try writes a new port.
-///
-/// # Panics
-/// When no try out of [`MAX_ADDRESS_ATTEMPT_COUNT`] switches remote access on.
-/// The message holds the last answer.
-fn start_router_with_remote_access(
-    home_directory: &Path,
-    runtime_directory: &Path,
-) -> (RunningRouter, Connection, SocketAddr, String) {
-    let mut last_router_result = None;
-    for _ in 0..MAX_ADDRESS_ATTEMPT_COUNT {
-        let remote_listen_port = TcpListener::bind("127.0.0.1:0")
-            .expect("a free loopback port")
-            .local_addr()
-            .expect("the free port's address can be read")
-            .port();
-        write_test_config(
-            home_directory,
-            &format!(
-                "version 2\n\
-                 remote-listen \"127.0.0.1:{remote_listen_port}\"\n\
-                 remote-link-timeout-ms 1000\n\
-                 remote-reconnect #false\n"
-            ),
-        );
-        let router = start_router_process(home_directory, runtime_directory);
-        let mut router_connection = connect_to_router(runtime_directory);
-        match send_router_request(&mut router_connection, RouterRequestKind::EnableRemote) {
-            RouterResult::RemoteEnabled {
-                remote_listen_address,
-                certificate_fingerprint,
-            } => {
-                return (
-                    router,
-                    router_connection,
-                    remote_listen_address,
-                    certificate_fingerprint,
-                )
-            }
-            router_result => last_router_result = Some(router_result),
-        }
-    }
-    panic!(
-        "remote access was not switched on in {MAX_ADDRESS_ATTEMPT_COUNT} tries; \
-         the last answer was {last_router_result:?}"
-    );
-}
-
 /// Start `koshi attach --remote <relay_address> --certificate-fingerprint
 /// sha256:<certificate_fingerprint> <session_id>` under `home_directory`, with
 /// `remote_secret` in `KOSHI_REMOTE_SECRET`. A thread reads the client's
@@ -274,7 +212,11 @@ fn a_silent_link_ends_the_remote_viewer_and_its_session_removes_it() {
     let home_directory = build_short_test_directory();
     let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     let (_router, mut router_connection, listener_address, certificate_fingerprint) =
-        start_router_with_remote_access(home_directory.path(), &runtime_directory);
+        start_router_with_remote_access(
+            home_directory.path(),
+            &runtime_directory,
+            "remote-link-timeout-ms 1000\nremote-reconnect #false\n",
+        );
     let created_session = create_session(&mut router_connection);
     let _session_processes = RunningSessions {
         runtime_directory: runtime_directory.clone(),

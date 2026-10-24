@@ -167,7 +167,8 @@ fn format_missing_fingerprint_refusal(saved_server_label: &str) -> String {
 /// How one saved server is named in a message: the name the user chose when
 /// they chose one, else the address it listens on. Either way it is a word
 /// `koshi remote` takes.
-fn format_saved_server_label(saved_server: &SavedServer) -> String {
+#[must_use]
+pub fn format_saved_server_label(saved_server: &SavedServer) -> String {
     saved_server
         .server_name
         .clone()
@@ -494,6 +495,75 @@ pub fn resolve_listed_server(server_label: &str) -> Result<ServerReference, CliE
         server_label,
         None,
     )
+}
+
+/// Why [`find_saved_server_at_address`] found no single saved server at an
+/// address. The text names what happened.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SavedServerAtAddressError {
+    /// The saved-server store holds no server at `server_address`: it was
+    /// forgotten, or saved under another address.
+    #[error(
+        "no saved server is at {server_address} any more: it was forgotten, or saved under \
+         another address"
+    )]
+    NotSaved {
+        /// The address looked up, as `host:port`.
+        server_address: String,
+    },
+    /// More than one server in the saved-server store answers to
+    /// `server_address`.
+    #[error("more than one saved server is at {server_address}")]
+    SavedMoreThanOnce {
+        /// The address looked up, as `host:port`.
+        server_address: String,
+    },
+    /// The saved-server store could not be read.
+    #[error("the saved servers could not be read: {store_error_detail}")]
+    StoreUnreadable {
+        /// What reading the store reported, such as `another koshi is
+        /// changing the saved servers; try again`.
+        store_error_detail: String,
+    },
+}
+
+/// The server the saved-server store holds at `server_address` now, read
+/// with its lock held. `KOSHI_REMOTE_SECRET` is not read.
+///
+/// Example — a server saved as `work` at `laptop.local:7654` and renamed
+/// `lab` gives the server named `lab`; once forgotten, it gives
+/// [`SavedServerAtAddressError::NotSaved`].
+///
+/// # Errors
+/// [`SavedServerAtAddressError::NotSaved`] when no saved server answers to
+/// `server_address`, [`SavedServerAtAddressError::SavedMoreThanOnce`] when
+/// more than one does, and [`SavedServerAtAddressError::StoreUnreadable`]
+/// carrying the reason when the store cannot be read.
+pub fn find_saved_server_at_address(
+    server_address: &str,
+) -> Result<SavedServer, SavedServerAtAddressError> {
+    let saved_server_store = match load_saved_server_store() {
+        Ok((_, saved_server_store)) => saved_server_store,
+        Err(CliError::IpcUnavailable { detail }) => {
+            return Err(SavedServerAtAddressError::StoreUnreadable {
+                store_error_detail: detail,
+            })
+        }
+        Err(store_error) => {
+            return Err(SavedServerAtAddressError::StoreUnreadable {
+                store_error_detail: store_error.to_string(),
+            })
+        }
+    };
+    match saved_server_store.find_saved_server(server_address) {
+        SavedServerLookup::Saved(saved_server) => Ok(saved_server.clone()),
+        SavedServerLookup::NotSaved => Err(SavedServerAtAddressError::NotSaved {
+            server_address: server_address.to_string(),
+        }),
+        SavedServerLookup::Ambiguous => Err(SavedServerAtAddressError::SavedMoreThanOnce {
+            server_address: server_address.to_string(),
+        }),
+    }
 }
 
 /// Refuse a dial to `saved_server` when `environment_secret`, the value of
