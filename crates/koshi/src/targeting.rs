@@ -84,13 +84,19 @@ pub enum Route {
 /// pane this CLI runs in, [`ResolvedTargets::pane_id`] names that pane:
 /// `koshi pin-pane --client <client>` typed in floating pane `F` pins `F` on
 /// that client's screen.
+///
+/// `shared_sessions_base_directory` is the shared directory the `koshi.kdl`
+/// layer the caller read at this process's start names, as
+/// [`resolve_shared_sessions_base_directory_for_layer`](koshi_link::config::resolve_shared_sessions_base_directory_for_layer)
+/// gives it. `None` looks up only this user's sessions.
 pub fn resolve_command_route(
     command: &CliCommand,
     in_session_context: Option<&InSessionContext>,
+    shared_sessions_base_directory: Option<&Path>,
 ) -> Result<Route, CliError> {
     resolve_command_route_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        shared_sessions_base_directory,
         command,
         in_session_context,
     )
