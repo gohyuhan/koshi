@@ -1,6 +1,8 @@
 //! Tests for the statusline: idle grouping (leaf hints, labeled default prefix
 //! groups, `+N` counts once a user binding or a removal touches a group), the
-//! open-sequence view (breadcrumb plus continuations, nested groups),
+//! key names of a folded ribbon (`←↓`, `hj`, `ENTER|f`, and the shipped pane
+//! move chooser row), the open-sequence view (breadcrumb plus continuations,
+//! nested groups),
 //! pinned-first ordering, whole-item truncation, the blanked row for a mode
 //! with nothing to hint, and the cells outside the given area that the bar
 //! leaves untouched.
@@ -10,7 +12,10 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use koshi_config::hints::KeymapHintCatalog;
 use koshi_core::key::{BindingModifierFlags, Key, KeySequence, NamedKey};
+use koshi_core::lock::LockMode;
+use koshi_core::registry::ActionRegistry;
 use ratatui::buffer::Cell;
 
 use crate::snapshot::HintBinding;
@@ -432,6 +437,123 @@ fn named_keys_read_as_their_own_names() {
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " BACKSPACE  Undo  ENTER  Accept  ESC  Cancel  SPACE  Pick"
+    );
+}
+
+#[test]
+fn the_pane_move_choosers_80_column_row_separates_enter_from_the_key_it_folds_with() {
+    let hint_catalog = KeymapHintCatalog::from_registry(&ActionRegistry::new());
+    // Each case: whether the focused pane is floating, then the row the
+    // shipped `pane-move-choice` bindings paint.
+    for (is_focused_pane_floating, expected_row) in [
+        (
+            true,
+            " ENTER|f  Move Floating Pane  ESC  Cancel Move  t  Move Tiled Pane",
+        ),
+        (
+            false,
+            " ENTER|t  Move Tiled Pane  ESC  Cancel Move  f  Move Floating Pane",
+        ),
+    ] {
+        let keymap_hints = hint_catalog.build_frame_hints(
+            LockMode::PaneMoveChoice,
+            false,
+            is_focused_pane_floating,
+        );
+        assert_eq!(
+            format_rendered_row(&render_statusline(&keymap_hints, 80)),
+            expected_row,
+            "focused pane floating: {is_focused_pane_floating}"
+        );
+    }
+}
+
+#[test]
+fn modified_keys_folded_with_a_longer_key_name_are_separated_by_a_bar() {
+    let build_ctrl_hint_binding = |key, action_label: &str| {
+        build_hint_binding(
+            build_key_sequence(&[KeyChord::from_parts(BindingModifierFlags::CTRL, key)]),
+            action_label,
+            false,
+            false,
+        )
+    };
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_ctrl_hint_binding(Key::Named(NamedKey::Tab), "Next Tab"),
+            build_ctrl_hint_binding(Key::Char('n'), "Next Tab"),
+            build_ctrl_hint_binding(Key::Named(NamedKey::F(1)), "Help"),
+            build_ctrl_hint_binding(Key::Named(NamedKey::F(2)), "Help"),
+        ],
+        &[],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Ctrl +  F1|F2  Help  Tab|n  Next Tab"
+    );
+}
+
+#[test]
+fn a_bar_key_folded_with_a_longer_key_name_follows_its_separator() {
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_hint_binding(
+                build_key_sequence(&[build_plain_chord('|')]),
+                "Split",
+                false,
+                false,
+            ),
+            build_hint_binding(
+                build_key_sequence(&[KeyChord::from_parts(
+                    BindingModifierFlags::NONE,
+                    Key::Named(NamedKey::Tab),
+                )]),
+                "Split",
+                false,
+                false,
+            ),
+        ],
+        &[],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
+        " Tab||  Split"
+    );
+}
+
+#[test]
+fn pending_continuations_folded_with_a_longer_key_name_are_separated_by_a_bar() {
+    let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
+    let keymap_hints = build_keymap_hints(
+        vec![
+            build_hint_binding(
+                build_key_sequence(&[
+                    build_ctrl_chord('p'),
+                    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
+                ]),
+                "Next Floating Pane",
+                false,
+                false,
+            ),
+            build_hint_binding(
+                build_key_sequence(&[build_ctrl_chord('p'), build_plain_chord('n')]),
+                "Next Floating Pane",
+                false,
+                false,
+            ),
+        ],
+        &[(build_ctrl_chord('p'), "PANE")],
+        Vec::new(),
+    );
+    assert_eq!(
+        format_rendered_row(&render_pending_statusline(
+            &keymap_hints,
+            &pending_key_sequence,
+            80,
+        )),
+        " Ctrl +  p  PANE  ▶  Tab|n  Next Floating Pane"
     );
 }
 
