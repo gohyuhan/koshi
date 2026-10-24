@@ -115,7 +115,7 @@ fn explain_reports_file_default_and_meaning_for_each_config_file_kind() {
         (
             "keybinding.chord-timeout-ms",
             "keybinding.chord-timeout-ms\nfile: keybinding.kdl\ndefault: 500\n\
-             Wait for the next key in a sequence.\n",
+             Wait for the next key of a shortcut that is complete and also starts a longer one.\n",
         ),
         (
             "profile.version",

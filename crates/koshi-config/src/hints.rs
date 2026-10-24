@@ -76,8 +76,12 @@ pub struct HintBinding {
 pub struct KeymapHintCatalog {
     /// Liveness-filtered lookup table shared by hints and keyboard resolution.
     merged_keymap: Arc<MergedKeymap>,
-    /// Multi-chord wait before an incomplete prefix falls through.
+    /// How long an ambiguous sequence waits for its next chord, from
+    /// `chord_timeout_ms`.
     chord_timeout_duration: Duration,
+    /// How long the hint bar waits after a sequence's first chord before it
+    /// shows the chords that continue it, from `which_key_delay_ms`.
+    which_key_delay_duration: Duration,
     /// The chord that unlocks a locked client, ahead of every other lookup.
     unlock_chord: KeyChord,
     /// One sorted binding list per built-in mode in each label form; a mode
@@ -102,9 +106,9 @@ impl KeymapHintCatalog {
 
     /// Resolve the hint catalog from `keymap_layers` and the effective
     /// keybinding configuration. Reads `chord_timeout_ms`,
-    /// `unlock_alternative`, `maximum_chord_depth` and `leader`;
-    /// `mode_bindings_by_name` and `which_key_delay_ms` are not read, and
-    /// `keymap_layers` carries the bindings.
+    /// `which_key_delay_ms`, `unlock_alternative`, `maximum_chord_depth` and
+    /// `leader`; `mode_bindings_by_name` is not read, and `keymap_layers`
+    /// carries the bindings.
     ///
     /// Folds the layers with [`merge_keymaps`]: a binding that does not fire
     /// yields no hint — its action unregistered, its arguments unresolvable, a
@@ -119,6 +123,8 @@ impl KeymapHintCatalog {
     ) -> Self {
         let chord_timeout_duration =
             Duration::from_millis(u64::from(keybindings_config.chord_timeout_ms));
+        let which_key_delay_duration =
+            Duration::from_millis(u64::from(keybindings_config.which_key_delay_ms));
         let unlock_chord =
             KeybindingsConfig::resolve_unlock_chord(keybindings_config.unlock_alternative);
         let merged_keymap = merge_keymaps(
@@ -179,6 +185,7 @@ impl KeymapHintCatalog {
         KeymapHintCatalog {
             merged_keymap: Arc::new(merged_keymap),
             chord_timeout_duration,
+            which_key_delay_duration,
             unlock_chord,
             hint_bindings_by_mode_name,
             removed_key_sequences_by_mode_name,
@@ -229,6 +236,13 @@ impl KeymapHintCatalog {
     /// longer binding — waits for its next chord, from `chord_timeout_ms`.
     pub fn get_chord_timeout(&self) -> Duration {
         self.chord_timeout_duration
+    }
+
+    /// How long the hint bar keeps its face after a sequence's first chord
+    /// before it shows the chords that continue the sequence, from
+    /// `which_key_delay_ms`. `Duration::ZERO` shows them with the first chord.
+    pub fn get_which_key_delay(&self) -> Duration {
+        self.which_key_delay_duration
     }
 
     /// The chord that unlocks a locked client: the configured

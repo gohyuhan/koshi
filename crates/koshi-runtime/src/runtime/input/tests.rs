@@ -869,9 +869,14 @@ fn prefix_pending_never_expires() {
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
         current_time,
     );
-    // A prefix-only sequence arms no deadline and outlives any wait: the
-    // continuation hints stay up until the user presses another key.
-    assert_eq!(viewer.compute_next_key_wakeup(current_time), None);
+    // A prefix-only sequence arms no ambiguity deadline and outlives any
+    // wait. Its one wakeup is the hint deadline, one which-key delay out;
+    // from it the continuation hints stay up until the user presses another
+    // key.
+    assert_eq!(
+        viewer.compute_next_key_wakeup(current_time),
+        Some(Duration::from_millis(300))
+    );
     expire_pending_key_sequence(
         &mut server,
         &mut viewer,
@@ -889,6 +894,11 @@ fn prefix_pending_never_expires() {
             BindingModifierFlags::CTRL,
             'p'
         )))
+    );
+    assert!(!viewer.is_continuation_hint_hidden());
+    assert_eq!(
+        viewer.compute_next_key_wakeup(current_time + Duration::from_secs(3600)),
+        None
     );
 }
 

@@ -7820,14 +7820,20 @@ fn a_frame_moves_the_viewer_to_the_mode_it_reports() {
 }
 
 #[test]
-fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
-    // One drained batch carries a frame and a keypress together. The frame is
-    // drawn first, the key opens a sequence after it, and the end of the pass
-    // draws again.
+fn a_prefix_key_draws_its_breadcrumb_once_when_its_hint_deadline_passes() {
+    // A frame is drawn, then a key opens a sequence after it. The key draws
+    // nothing. The end-of-pass input timers judge the hint deadline: one
+    // millisecond before it nothing is drawn, at it the breadcrumb is drawn
+    // once, and no request goes up.
     let mut client = build_test_client();
     let mut screen = build_test_screen();
     let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
     let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut sent_border_moves = Vec::new();
+    let mut pending_mouse_actions = Vec::new();
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
 
     screen
         .draw_painted_frame(&mut client, Box::new(painted_frame))
@@ -7835,12 +7841,64 @@ fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
     let drawn_hint_row = get_hint_row(&screen);
 
     let sequence_opener_chord = get_sequence_opener(&client);
+    let key_read_at = Instant::now();
     assert_eq!(
-        client.resolve_key(sequence_opener_chord, Instant::now()),
+        client.resolve_key(sequence_opener_chord, key_read_at),
         KeyOutcome::Pending
     );
-    screen.refresh(&mut client, Some(active_tab_id));
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
+        None,
+        "the key draws nothing"
+    );
 
+    assert_eq!(
+        expire_input_timers(
+            &mut client,
+            &mut uplink,
+            None,
+            &mut sent_border_moves,
+            &mut pending_mouse_actions,
+            key_read_at + which_key_delay - Duration::from_millis(1),
+        ),
+        ControlFlow::Continue(())
+    );
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
+        None,
+        "one millisecond before the hint deadline nothing is drawn"
+    );
+    assert_eq!(get_hint_row(&screen), drawn_hint_row);
+
+    assert_eq!(
+        expire_input_timers(
+            &mut client,
+            &mut uplink,
+            None,
+            &mut sent_border_moves,
+            &mut pending_mouse_actions,
+            key_read_at + which_key_delay,
+        ),
+        ControlFlow::Continue(())
+    );
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
+        Some(active_tab_id),
+        "the hint deadline draws the breadcrumb"
+    );
+    assert_eq!(
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .map(|viewer_paint| viewer_paint.pending_key_sequence.clone()),
+        Some(Some(KeySequence::from(sequence_opener_chord)))
+    );
     // The breadcrumb view opens with the chord that was pressed and ends with
     // the arrow that separates it from the chords continuing it.
     let breadcrumb_hint_row = get_hint_row(&screen);
@@ -7849,6 +7907,67 @@ fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
         breadcrumb_hint_row.contains(" ▶ "),
         "the bar draws the open sequence: {breadcrumb_hint_row}"
     );
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
+        None,
+        "the breadcrumb is drawn once"
+    );
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[test]
+fn a_shortcut_completed_within_the_which_key_delay_draws_no_breadcrumb() {
+    // `<C-p> n` typed 299 ms apart fires `core:new-pane` before the hint
+    // deadline. The hint bar keeps the face it had, and no pass draws for the
+    // sequence.
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    let drawn_hint_row = get_hint_row(&screen);
+    let key_read_at = Instant::now();
+
+    assert_eq!(
+        client.resolve_key(
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
+            key_read_at
+        ),
+        KeyOutcome::Pending
+    );
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
+        None
+    );
+    assert_eq!(
+        client.resolve_key(
+            build_plain_chord('n'),
+            key_read_at + which_key_delay - Duration::from_millis(1)
+        ),
+        KeyOutcome::Fire(build_core_bound_action("new-pane"))
+    );
+    assert_eq!(
+        client.expire_key_sequence(key_read_at + which_key_delay),
+        None
+    );
+
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .map(|mouse_frame| mouse_frame.client_snapshot.active_tab_id),
+        None
+    );
+    assert_eq!(get_hint_row(&screen), drawn_hint_row);
 }
 
 #[test]
@@ -8325,8 +8444,9 @@ fn locking_the_client_moves_what_the_viewer_paints() {
 }
 
 #[test]
-fn opening_a_key_sequence_moves_what_the_viewer_paints() {
-    // An opened sequence reaches no session, and no frame comes back.
+fn opening_a_key_sequence_moves_what_the_viewer_paints_at_its_hint_deadline() {
+    // An opened sequence reaches no session, and no frame comes back. Until
+    // its hint deadline `ViewerPaint` stays as it was. From the deadline on,
     // `ViewerPaint` carries the sequence, and the hint bar draws it as a
     // breadcrumb.
     let mut client = build_test_client();
@@ -8335,22 +8455,28 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints() {
     ));
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let sequence_opener_chord = get_sequence_opener(&client);
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let paint_before_key_sequence =
         ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    let key_read_at = Instant::now();
 
     assert_eq!(
-        client.resolve_key(sequence_opener_chord, Instant::now()),
+        client.resolve_key(sequence_opener_chord, key_read_at),
         KeyOutcome::Pending
     );
-
-    let paint_after_key_sequence =
+    let paint_during_which_key_delay =
         ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    client.expire_key_sequence(key_read_at + which_key_delay);
+    let paint_after_hint_deadline =
+        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+
     assert_eq!(paint_before_key_sequence.pending_key_sequence, None);
+    assert_eq!(paint_during_which_key_delay, paint_before_key_sequence);
     assert_eq!(
-        paint_after_key_sequence.pending_key_sequence,
+        paint_after_hint_deadline.pending_key_sequence,
         Some(KeySequence::from(sequence_opener_chord))
     );
-    assert_ne!(paint_after_key_sequence, paint_before_key_sequence);
+    assert_ne!(paint_after_hint_deadline, paint_before_key_sequence);
 }
 
 #[test]
@@ -9183,6 +9309,41 @@ fn a_quit_bound_as_a_key_sequence_leaves_while_reconnecting() {
     assert_eq!(
         stretch_result.err(),
         Some(AttachmentEnding::LeftWhileReconnecting)
+    );
+}
+
+#[test]
+fn while_reconnecting_an_open_sequence_shows_its_hint_once_its_hint_deadline_passed() {
+    // `<C-p>` was read one which-key delay ago. The stretch judges the open
+    // sequence's deadlines at its first pass, and the frame it draws carries
+    // the sequence.
+    let mut viewer = TestViewerWithoutLink::new();
+    let prefix_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
+    let key_read_at =
+        compute_instant_before_now(viewer.client.keymap_catalog.get_which_key_delay());
+    assert_eq!(
+        viewer.client.resolve_key(prefix_chord, key_read_at),
+        KeyOutcome::Pending
+    );
+    assert!(viewer.client.is_continuation_hint_hidden());
+    viewer.queue_incoming_event(build_input_incoming(RuntimeEvent::Quit, Instant::now()));
+    let (attempt_rejoin, _attempt_count) = build_counted_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::Redial(RedialSchedule::from_link_drop_at(Instant::now())),
+        Vec::new(),
+        attempt_rejoin,
+    );
+
+    assert_eq!(stretch_result.err(), Some(AttachmentEnding::TerminalGone));
+    assert!(!viewer.client.is_continuation_hint_hidden());
+    assert_eq!(
+        viewer
+            .screen
+            .shown_viewer_paint
+            .as_ref()
+            .map(|viewer_paint| viewer_paint.pending_key_sequence.clone()),
+        Some(Some(KeySequence::from(prefix_chord)))
     );
 }
 
@@ -12829,7 +12990,7 @@ fn a_key_the_loop_takes_lets_the_deadline_it_opens_wake_the_loop() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     bind_ambiguous_ctrl_y(&mut client);
-    let chord_timeout = client.keymap_catalog.get_chord_timeout();
+    let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let ctrl_y_read_at = client
         .get_input_read_clock()
         .stamp_input_read(Instant::now());
@@ -12848,8 +13009,8 @@ fn a_key_the_loop_takes_lets_the_deadline_it_opens_wake_the_loop() {
 
     assert_eq!(
         client.compute_next_key_wakeup(ctrl_y_read_at),
-        Some(chord_timeout),
-        "the deadline runs from the read of `<C-y>`, and no key is on its way"
+        Some(which_key_delay),
+        "the hint deadline, the earlier of the two, runs from the read of `<C-y>`, and no key is on its way"
     );
 }
 

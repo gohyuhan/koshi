@@ -330,7 +330,8 @@ pub(crate) struct ViewerPaint {
     pub(crate) is_mouse_selection_enabled: bool,
     /// The multi-chord sequence being typed, which the hint bar draws as a
     /// breadcrumb ahead of the chords that continue it. `None` when no sequence
-    /// is open.
+    /// is open, and while the open sequence waits for its hint deadline
+    /// ([`Client::is_continuation_hint_hidden`]).
     pub(crate) pending_key_sequence: Option<KeySequence>,
     /// The checked placement target outlined in the active pane area.
     pub(crate) placement_target: Option<TiledPlacementTarget>,
@@ -479,7 +480,11 @@ impl ViewerPaint {
             chrome: client.build_viewer_chrome(displayed_active_tab_id),
             lock_mode: client.get_active_input_mode(),
             is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
-            pending_key_sequence: client.get_pending_key_sequence().cloned(),
+            pending_key_sequence: if client.is_continuation_hint_hidden() {
+                None
+            } else {
+                client.get_pending_key_sequence().cloned()
+            },
             placement_target: client.get_placement_target().cloned(),
             placement_presentation: build_pane_placement_presentation(client, render_snapshot),
         }
@@ -2798,12 +2803,12 @@ fn attach_once(
 ///
 /// Each input event is judged at the instant the input thread read it. Every
 /// input timer due at that instant runs before the event: an open sequence's
-/// ambiguity deadline, a placement tab hover, and a selection drag's edge
-/// scroll ([`expire_input_timers`]). At the end of a pass the timers run at the
-/// clock, and they do not run while an event the input thread read has not
-/// reached the loop. Example: the input thread reads `a` 400 ms into
-/// `<C-y>`'s 500 ms deadline, and the loop draws a frame until 600 ms: `a`
-/// continues the sequence.
+/// ambiguity deadline and hint deadline, a placement tab hover, and a
+/// selection drag's edge scroll ([`expire_input_timers`]). At the end of a
+/// pass the timers run at the clock, and they do not run while an event the
+/// input thread read has not reached the loop. Example: the input thread reads
+/// `a` 400 ms into `<C-y>`'s 500 ms deadline, and the loop draws a frame until
+/// 600 ms: `a` continues the sequence.
 ///
 /// On `Home::Remote`, the loop sends `Ping` in its first pass, after the first
 /// group of events already queued, at most
@@ -5583,10 +5588,12 @@ fn process_runtime_input_with_cell_size(
                     pane_key_inputs.push(key_input);
                 }
                 // Held or dropped: nothing more reaches the session. A chord
-                // that opens or closes a sequence moves the breadcrumb the
-                // hint bar draws. An `Esc` that ends a grab-handle drag clears
-                // the breadcrumb, and the floating pane is drawn where the
-                // frame places it. Any other discard draws nothing.
+                // that continues or closes a sequence the hint bar shows moves
+                // the breadcrumb it draws; a chord that opens a sequence moves
+                // it once the sequence's hint deadline passes. An `Esc` that
+                // ends a grab-handle drag clears the breadcrumb, and the
+                // floating pane is drawn where the frame places it. Any other
+                // discard draws nothing.
                 KeyOutcome::Pending | KeyOutcome::Discard => {
                     send_pane_key_inputs(uplink, pane_key_inputs);
                 }
@@ -5630,7 +5637,9 @@ fn process_runtime_input_with_cell_size(
 /// 1. An open key sequence whose ambiguity deadline passed fires. The held
 ///    mouse actions go up first as one round ([`flush_mouse_round`]), then the
 ///    commands the sequence resolves to. A viewer-local action reads
-///    `mouse_frame`, the frame this terminal last painted.
+///    `mouse_frame`, the frame this terminal last painted. An open sequence
+///    whose hint deadline passed shows in the hint bar from the next paint
+///    ([`Client::expire_key_sequence`]).
 /// 2. A placement tab hover that has lasted
 ///    [`PLACEMENT_TAB_HOVER_DELAY_DURATION`](crate::PLACEMENT_TAB_HOVER_DELAY_DURATION)
 ///    selects the tab under the pointer as the placement destination.

@@ -324,9 +324,12 @@ impl Default for ScrollbackView {
 /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingsConfig {
-    /// Milliseconds to wait for the next chord in a multi-key sequence.
+    /// Milliseconds a sequence that is a complete binding and also a longer
+    /// binding's prefix waits for its next chord before the complete binding
+    /// fires.
     pub chord_timeout_ms: u32,
-    /// Milliseconds before the which-key continuation hint appears.
+    /// Milliseconds from a sequence's first chord until the hint bar shows the
+    /// chords that continue it. `0` shows them with the first chord.
     pub which_key_delay_ms: u32,
     /// Maximum number of chords in one key sequence.
     pub maximum_chord_depth: u8,

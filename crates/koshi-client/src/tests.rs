@@ -1124,6 +1124,7 @@ fn build_client_with_submitted_placement(
             Vec::new(),
         ),
         ambiguity_deadline: None,
+        continuation_hint_hidden_until: None,
     });
     client
 }

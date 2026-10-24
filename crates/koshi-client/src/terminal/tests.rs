@@ -1893,7 +1893,8 @@ fn the_launch_hands_the_viewer_the_config_files_it_read() {
 #[test]
 fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
     // A keymap layer that validates replaces the built-in keybinding settings:
-    // `chord_timeout_ms` becomes `1234`.
+    // `chord_timeout_ms` becomes `1234`, and the keymap the viewer matches keys
+    // against waits `40` ms before its hint bar shows an open sequence.
     let (_server, client_id, _pane_id) = build_test_server_with_pane();
 
     let client = build_launch_client_with_config(
@@ -1903,6 +1904,7 @@ fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
             theme_config_layer: None,
             keybindings_config_layer: Some(PartialKeybindingsConfig {
                 chord_timeout_ms: Some(1234),
+                which_key_delay_ms: Some(40),
                 ..PartialKeybindingsConfig::default()
             }),
         },
@@ -1911,6 +1913,10 @@ fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
     assert_eq!(
         client.get_client_config().keybindings.chord_timeout_ms,
         1234
+    );
+    assert_eq!(
+        client.keymap_catalog.get_which_key_delay(),
+        Duration::from_millis(40)
     );
 }
 
