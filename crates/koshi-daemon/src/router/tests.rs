@@ -8473,7 +8473,11 @@ fn a_caller_speaking_no_remote_protocol_version_this_build_has_is_told_both_rang
         )
         .expect("the server answers the opening frame");
 
-    let RemoteServerFrame::Refused { message } = remote_server_response else {
+    let RemoteServerFrame::Refused {
+        message,
+        remote_protocol_version,
+    } = remote_server_response
+    else {
         panic!(
             "a remote protocol range with no overlap is refused, and got {remote_server_response:?}"
         );
@@ -8489,6 +8493,10 @@ fn a_caller_speaking_no_remote_protocol_version_this_build_has_is_told_both_rang
     assert_ne!(
         message, REMOTE_REFUSED,
         "a version refusal is not the sentence a wrong secret gets"
+    );
+    assert_eq!(
+        remote_protocol_version, None,
+        "a version refusal names no settled version"
     );
 }
 
@@ -8822,6 +8830,55 @@ fn a_secret_the_store_does_not_hold_admits_nothing_and_writes_nothing() {
     assert_eq!(
         std::fs::read(&token_store_path).expect("the store file is still there"),
         token_store_bytes_before_unknown_secret,
+        "the refused secret wrote nothing"
+    );
+}
+
+#[test]
+fn an_expired_secret_admits_nothing_and_writes_nothing() {
+    // A secret whose grant expired one second ago registers no connection and
+    // writes nothing to the store.
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
+    let current_time = SystemTime::now();
+    let mut token_store = TokenStore::new();
+    let (connection_token, _) = token_store.grant_token(
+        "alice".to_string(),
+        TokenScope::HostWide,
+        current_time - Duration::from_secs(3600),
+        Some(current_time - Duration::from_secs(1)),
+    );
+    token_store
+        .write_token_store_to_path(&token_store_path)
+        .expect("the token store is written");
+    let token_store_bytes_before_expired_secret =
+        rewrite_token_store_with_spacing(&token_store_path);
+    let mut remote_state = build_no_remote_state();
+    let (caller_stream, _served_stream) = build_loopback_connection_pair();
+
+    assert_eq!(
+        admit_remote_token(
+            Some(&token_store_path),
+            &mut remote_state,
+            &connection_token,
+            caller_stream
+        ),
+        None,
+        "a secret whose grant expired reaches nothing"
+    );
+
+    assert_eq!(
+        remote_state.admitted_remote_connections.len(),
+        0,
+        "nothing was registered for it"
+    );
+    assert_eq!(
+        remote_state.next_remote_connection_id, 0,
+        "and it took no number"
+    );
+    assert_eq!(
+        std::fs::read(&token_store_path).expect("the store file is still there"),
+        token_store_bytes_before_expired_secret,
         "the refused secret wrote nothing"
     );
 }

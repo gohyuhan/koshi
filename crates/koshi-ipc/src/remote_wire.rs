@@ -60,7 +60,12 @@ pub const REMOTE_HELLO_MAX_BYTE_COUNT: u32 = 4096;
 
 /// The one sentence every refusal carries: a wrong secret, a revoked one, an
 /// expired one, a session that does not exist, and a session the secret holds
-/// no grant for all read the same.
+/// no grant for all carry it.
+///
+/// The refusal of a Hello whose remote protocol version the server settled
+/// also carries that version in
+/// [`RemoteServerFrame::Refused::remote_protocol_version`]. That refusal is the
+/// same for every secret the server does not admit.
 ///
 /// A remote protocol range that does not overlap carries
 /// [`format_version_refusal`] instead, and an attach that arrives while the
@@ -138,8 +143,9 @@ pub enum RemoteClientFrame {
 /// One message from the machine serving a remote client back to it.
 ///
 /// A field this build does not know is ignored. A server that adds one still
-/// decodes here. Every field below is required: a misspelled name is the
-/// missing-field error for the name it displaced.
+/// decodes here. Every field below but `remote_protocol_version` on `Refused`
+/// is required: a misspelled name is the missing-field error for the name it
+/// displaced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteServerFrame {
     /// Answers [`RemoteClientFrame::Hello`]: the stream is open.
@@ -155,6 +161,12 @@ pub enum RemoteServerFrame {
         /// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE)
         /// for an attach that arrives while the router is about to restart.
         message: String,
+        /// The remote protocol version the server settled from the Hello
+        /// before it refused the secret, or `None` on every other refusal.
+        /// koshi 0.3.0, 0.4.0 and 0.5.0 never send it. Left off the wire when
+        /// `None`; absent, it reads as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remote_protocol_version: Option<u32>,
     },
     /// Answers [`RemoteClientFrame::List`]: one row per session this secret
     /// reaches.

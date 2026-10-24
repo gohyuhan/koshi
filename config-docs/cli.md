@@ -1371,8 +1371,14 @@ hidden. It prints the same sentence that `koshi attach --remote work` prints,
 which names what to do:
 
 ```text
-koshi: work: the server 192.0.2.10:7654 did not admit the connection. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or revoked: re-grant it on that machine with `koshi share grant`, then store the new secret with `koshi remote set-secret work`
+koshi: work: the server 192.0.2.10:7654 did not admit the connection: the token expired, was revoked, or was never granted on that machine, or that machine already serves as many remote connections as it admits. `koshi share list` on that machine shows when each grant expires or was revoked. to replace the token, run `koshi share grant` there, then store the new secret with `koshi remote set-secret work`
 ```
+
+The serving machine sends the same refusal for each of these causes, and the
+sentence names every one. A serving machine that runs koshi 0.5.0 or older
+sends a refusal that does not say whether it read the request. For that
+machine the sentence also names koshi 0.3.0 and 0.4.0, which cannot read it,
+and ends with `if that machine runs koshi 0.3.0 or 0.4.0, update koshi there`.
 
 A machine that runs koshi 0.3.0 or 0.4.0 prints its own sentence for a saved
 server that runs this koshi. Its `koshi list-sessions` prints ``koshi: work:

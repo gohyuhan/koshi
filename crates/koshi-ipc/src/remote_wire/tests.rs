@@ -361,8 +361,16 @@ fn every_server_frame_travels_as_these_exact_bytes() {
         (
             RemoteServerFrame::Refused {
                 message: REMOTE_REFUSED.to_string(),
+                remote_protocol_version: None,
             },
             r#"{"Refused":{"message":"this server did not admit the connection"}}"#,
+        ),
+        (
+            RemoteServerFrame::Refused {
+                message: REMOTE_REFUSED.to_string(),
+                remote_protocol_version: Some(2),
+            },
+            r#"{"Refused":{"message":"this server did not admit the connection","remote_protocol_version":2}}"#,
         ),
         (
             RemoteServerFrame::Sessions {
@@ -514,6 +522,27 @@ fn a_server_frame_or_row_carrying_an_unknown_field_still_decodes() {
     assert_eq!(
         missing_field_error.to_string(),
         "missing field `session_name` at line 1 column 72"
+    );
+}
+
+/// The server frame of koshi 0.5.0: its `Refused` carries `message` alone.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+enum PreviousReleaseRemoteServerFrame {
+    Refused { message: String },
+}
+
+#[test]
+fn a_refusal_naming_the_settled_version_reads_as_its_sentence_in_the_koshi_0_5_0_frame() {
+    let previous_release_frame = serde_json::from_str::<PreviousReleaseRemoteServerFrame>(
+        r#"{"Refused":{"message":"this server did not admit the connection","remote_protocol_version":2}}"#,
+    )
+    .expect("koshi 0.5.0 ignores the settled version");
+
+    assert_eq!(
+        previous_release_frame,
+        PreviousReleaseRemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }
     );
 }
 

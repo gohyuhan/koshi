@@ -241,6 +241,11 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
 /// An `Attach` may carry `link_timeout_ms`, and a value below `1000` is
 /// refused. A listener that does not know the field ignores it, and an
 /// `Attach` without it sets no time limit on the bridge.
+///
+/// The `Refused` that answers a Hello whose secret the listener does not
+/// admit carries `remote_protocol_version`, the version settled from that
+/// Hello. A `v0.5.0` dialer ignores the field, and a `v0.5.0` listener leaves
+/// it out, which reads as `None`.
 pub const REMOTE_PROTOCOL: Surface = Surface {
     surface_name: "remote protocol",
     minimum_version: 2,

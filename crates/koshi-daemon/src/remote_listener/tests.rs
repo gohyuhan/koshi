@@ -663,6 +663,7 @@ fn remote_server_frame_uses_a_big_endian_length_prefix() {
     // little-endian bytes of the same length.
     let remote_server_frame = RemoteServerFrame::Refused {
         message: REMOTE_REFUSED.to_string(),
+        remote_protocol_version: None,
     };
     let payload_bytes = serde_json::to_vec(&remote_server_frame).expect("the frame encodes");
     let frame_byte_count = u32::try_from(payload_bytes.len()).expect("the answer fits");
@@ -768,6 +769,7 @@ fn send_remote_frame_writes_every_byte_to_a_one_byte_writer() {
 fn send_remote_frame_returns_a_broken_pipe_error() {
     let remote_server_frame = RemoteServerFrame::Refused {
         message: REMOTE_REFUSED.to_string(),
+        remote_protocol_version: None,
     };
 
     let frame_write_error = send_remote_frame(&mut BrokenWriter, &remote_server_frame)
@@ -904,6 +906,7 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }],
     );
 }
@@ -934,6 +937,7 @@ fn the_hello_of_koshi_0_4_0_on_an_admitted_connection_is_refused() {
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }],
     );
 }
@@ -1028,6 +1032,7 @@ fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
         served_attach.written_server_frames,
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }],
     );
     assert_eq!(served_attach.locate_ask_count, 1);
@@ -1043,6 +1048,7 @@ fn an_attach_arriving_while_the_router_restarts_is_refused_with_the_restarting_s
         served_attach.written_server_frames,
         vec![RemoteServerFrame::Refused {
             message: ROUTER_RESTARTING_MESSAGE.to_string(),
+            remote_protocol_version: None,
         }],
     );
     assert_eq!(served_attach.locate_ask_count, 1);
@@ -1075,6 +1081,7 @@ fn an_attach_naming_a_link_timeout_below_the_minimum_is_refused_before_the_dispa
         served_attach.written_server_frames,
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }],
     );
     assert_eq!(
@@ -1128,6 +1135,7 @@ fn bytes_an_admitted_connection_sends_that_are_not_a_frame_are_refused() {
         parse_remote_server_frames(&writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }],
     );
 }
@@ -1521,6 +1529,7 @@ mod admission_answers {
                     REMOTE_PROTOCOL_VERSION + 1,
                     REMOTE_PROTOCOL_VERSION + 2,
                 ),
+                remote_protocol_version: None,
             }
         );
     }
@@ -1560,12 +1569,13 @@ mod admission_answers {
                 message: "the caller speaks remote protocol versions 1 to 1, this koshi speaks \
                           2 to 2"
                     .to_string(),
+                remote_protocol_version: None,
             }]
         );
     }
 
     #[test]
-    fn a_secret_the_dispatcher_refuses_reads_as_every_other_refusal_does() {
+    fn a_secret_the_dispatcher_refuses_reads_as_the_sentence_and_the_settled_version() {
         let test_remote_listener = start_test_remote_listener(false);
 
         let response_frame = request_test_remote_listener(
@@ -1581,6 +1591,7 @@ mod admission_answers {
             response_frame,
             RemoteServerFrame::Refused {
                 message: REMOTE_REFUSED.to_string(),
+                remote_protocol_version: Some(REMOTE_PROTOCOL_VERSION),
             }
         );
     }
@@ -1598,6 +1609,7 @@ mod admission_answers {
             response_frame,
             RemoteServerFrame::Refused {
                 message: REMOTE_REFUSED.to_string(),
+                remote_protocol_version: None,
             }
         );
     }
@@ -1638,6 +1650,7 @@ mod admission_answers {
                 request_test_remote_listener(&test_remote_listener, &wrong_secret_hello),
                 RemoteServerFrame::Refused {
                     message: REMOTE_REFUSED.to_string(),
+                    remote_protocol_version: Some(REMOTE_PROTOCOL_VERSION),
                 }
             );
         }
@@ -2699,6 +2712,7 @@ mod bridge_round_trip {
             refusal_frame,
             RemoteServerFrame::Refused {
                 message: REMOTE_REFUSED.to_string(),
+                remote_protocol_version: None,
             }
         );
         assert_eq!(
@@ -2925,6 +2939,7 @@ fn a_refusal_written_before_admission_never_outlives_the_admission_window() {
         parse_remote_server_frames(&deadline_writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }],
         "the refusal frame is written"
     );
@@ -2949,6 +2964,7 @@ fn a_refusal_after_admission_gets_the_whole_refusal_window() {
         parse_remote_server_frames(&deadline_writer.written_frame_bytes),
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
+            remote_protocol_version: None,
         }]
     );
 }
