@@ -1,7 +1,8 @@
 //! Tests for the dialling side: which strings count as an address, which saved
 //! names and certificate fingerprints are refused, which of the three lookup
 //! answers leads to a dial and with which fingerprint, which saved server is
-//! refused before any dial, how a saved server with no name takes a name,
+//! refused before any dial, which value of `KOSHI_REMOTE_SECRET` a saved
+//! server refuses, how a saved server with no name takes a name,
 //! which answer to a Hello reads as a refusal a repeat dial cannot change, what
 //! an open link makes of each frame a server can answer a listing with, what
 //! one sweep of the saved servers reports, and how the lock that guards a
@@ -189,6 +190,129 @@ fn a_fingerprint_given_for_a_saved_server_holding_none_resolves_to_its_record() 
     assert_eq!(
         resolved_server_reference,
         ServerReference::Saved(saved_server)
+    );
+}
+
+/// A saved server named `desk` at `desk.local:7655`, holding a secret of its
+/// own.
+fn build_second_saved_server() -> SavedServer {
+    SavedServer {
+        server_name: Some("desk".to_string()),
+        server_address: "desk.local:7655".to_string(),
+        ..build_saved_server()
+    }
+}
+
+#[test]
+fn an_unset_or_empty_secret_variable_passes_for_a_saved_server() {
+    let saved_server = build_saved_server();
+    let saved_servers = vec![saved_server.clone()];
+
+    for environment_secret in [None, Some(OsStr::new("")), Some(OsStr::new(" \t "))] {
+        assert_eq!(
+            validate_environment_secret(&saved_servers, &saved_server, environment_secret)
+                .map_err(|refusal| refusal.to_string()),
+            Ok(()),
+            "{environment_secret:?}"
+        );
+    }
+}
+
+#[test]
+fn a_secret_variable_holding_a_secret_any_saved_server_holds_passes_for_a_saved_server() {
+    let saved_server = build_saved_server();
+    let second_saved_server = build_second_saved_server();
+    let saved_servers = vec![saved_server.clone(), second_saved_server.clone()];
+    let held_secret_texts = [
+        saved_server.connection_token.expose_secret().to_string(),
+        format!(" {}\n", saved_server.connection_token.expose_secret()),
+        second_saved_server
+            .connection_token
+            .expose_secret()
+            .to_string(),
+    ];
+
+    for held_secret_text in held_secret_texts {
+        assert_eq!(
+            validate_environment_secret(
+                &saved_servers,
+                &saved_server,
+                Some(OsStr::new(&held_secret_text))
+            )
+            .map_err(|refusal| refusal.to_string()),
+            Ok(()),
+            "{held_secret_text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_secret_variable_holding_a_secret_no_saved_server_holds_is_refused_naming_set_secret() {
+    let named_saved_server = build_saved_server();
+    let unnamed_saved_server = SavedServer {
+        server_name: None,
+        ..build_second_saved_server()
+    };
+    let saved_servers = vec![named_saved_server.clone(), unnamed_saved_server.clone()];
+    let refused_server_cases = [
+        (
+            named_saved_server,
+            "work holds a saved secret, and KOSHI_REMOTE_SECRET gives one that no saved server \
+             holds; run `koshi remote set-secret work` to replace the saved secret with it, or \
+             unset KOSHI_REMOTE_SECRET to dial with the saved one",
+        ),
+        (
+            unnamed_saved_server,
+            "desk.local:7655 holds a saved secret, and KOSHI_REMOTE_SECRET gives one that no \
+             saved server holds; run `koshi remote set-secret desk.local:7655` to replace the \
+             saved secret with it, or unset KOSHI_REMOTE_SECRET to dial with the saved one",
+        ),
+    ];
+
+    for (dialled_saved_server, expected_detail) in refused_server_cases {
+        let refusal = validate_environment_secret(
+            &saved_servers,
+            &dialled_saved_server,
+            Some(OsStr::new("unsaved-secret")),
+        )
+        .expect_err("a secret no saved server holds is refused");
+
+        let CliError::InvalidArgs { detail } = refusal else {
+            panic!("a secret the dial would not present is a bad argument");
+        };
+        assert_eq!(detail, expected_detail);
+    }
+}
+
+#[test]
+fn a_secret_variable_that_is_not_utf8_is_refused() {
+    #[cfg(unix)]
+    let environment_secret = {
+        use std::os::unix::ffi::OsStrExt;
+        OsStr::from_bytes(b"\xff").to_os_string()
+    };
+    #[cfg(windows)]
+    let environment_secret = {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&[0xD800])
+    };
+    let saved_server = build_saved_server();
+
+    let refusal = validate_environment_secret(
+        std::slice::from_ref(&saved_server),
+        &saved_server,
+        Some(&environment_secret),
+    )
+    .expect_err("a value that is not UTF-8 is no saved secret");
+
+    let CliError::InvalidArgs { detail } = refusal else {
+        panic!("a secret the dial would not present is a bad argument");
+    };
+    assert_eq!(
+        detail,
+        "work holds a saved secret, and KOSHI_REMOTE_SECRET gives one that no saved server \
+         holds; run `koshi remote set-secret work` to replace the saved secret with it, or \
+         unset KOSHI_REMOTE_SECRET to dial with the saved one"
     );
 }
 
@@ -485,12 +609,14 @@ fn a_welcome_naming_a_remote_protocol_version_this_build_speaks_opens_the_connec
         let server_frame = RemoteServerFrame::Welcome {
             remote_protocol_version,
         };
-        validate_remote_server_answer("desk.local:7654", &server_frame).unwrap_or_else(|_| {
-            panic!(
+        validate_remote_server_answer("desk.local:7654", None, &server_frame).unwrap_or_else(
+            |_| {
+                panic!(
                 "remote protocol version {remote_protocol_version} is inside the range this build \
                  speaks"
             )
-        });
+            },
+        );
     }
 }
 
@@ -500,7 +626,7 @@ fn a_welcome_naming_a_remote_protocol_version_this_build_does_not_speak_is_refus
         remote_protocol_version: REMOTE_PROTOCOL_VERSION + 1,
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("the remote protocol version is too new");
 
     let DialError::Refused(CliError::Runtime { detail }) = refusal else {
@@ -522,7 +648,7 @@ fn a_welcome_naming_a_remote_protocol_version_older_than_this_build_speaks_is_re
         remote_protocol_version: MIN_REMOTE_PROTOCOL_VERSION - 1,
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("the remote protocol version is too old");
 
     let DialError::Refused(CliError::Runtime { detail }) = refusal else {
@@ -544,7 +670,7 @@ fn a_session_listing_where_a_welcome_belongs_is_refused() {
         session_rows: Vec::new(),
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("a listing is not a welcome");
 
     // Every refusal `validate_remote_server_answer` builds carries
@@ -609,7 +735,7 @@ fn the_refusal_every_rejected_token_carries_names_an_old_server_and_both_ways_to
         message: remote_wire::REMOTE_REFUSED.to_string(),
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("a refusal is not a welcome");
 
     let DialError::Refused(CliError::Runtime { detail }) = refusal else {
@@ -626,12 +752,33 @@ fn the_refusal_every_rejected_token_carries_names_an_old_server_and_both_ways_to
 }
 
 #[test]
+fn the_refusal_of_a_saved_servers_secret_names_set_secret_with_that_servers_label() {
+    let server_frame = RemoteServerFrame::Refused {
+        message: remote_wire::REMOTE_REFUSED.to_string(),
+    };
+
+    let refusal = validate_remote_server_answer("desk.local:7654", Some("work"), &server_frame)
+        .expect_err("a refusal is not a welcome");
+
+    let DialError::Refused(CliError::Runtime { detail }) = refusal else {
+        panic!("a server that answered gives every dial after it the same answer");
+    };
+    assert_eq!(
+        detail,
+        "the server desk.local:7654 did not admit the connection. if that machine runs \
+         koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or \
+         revoked: re-grant it on that machine with `koshi share grant`, then store the new \
+         secret with `koshi remote set-secret work`"
+    );
+}
+
+#[test]
 fn any_other_refusal_keeps_the_servers_own_sentence_and_names_the_server() {
     let server_frame = RemoteServerFrame::Refused {
         message: "the session is gone".to_string(),
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("a refusal is not a welcome");
 
     let DialError::Refused(CliError::Runtime { detail }) = refusal else {
@@ -645,11 +792,15 @@ fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a
     // `probe_saved_server` reads a refused dial carrying `CliError::IpcUnavailable` as the
     // certificate check and answers `Reach::CertificateMismatch`; every
     // refusal `validate_remote_server_answer` builds carries `CliError::Runtime` instead.
-    let certificate_mismatch_error = classify_dial_failure(IpcError::CertificateMismatch {
-        server_address: "desk.local:7654".to_string(),
-        expected_certificate_fingerprint: "aa".repeat(32),
-        presented_certificate_fingerprint: "bb".repeat(32),
-    });
+    let certificate_mismatch_error = classify_dial_failure(
+        IpcError::CertificateMismatch {
+            server_address: "desk.local:7654".to_string(),
+            expected_certificate_fingerprint: "aa".repeat(32),
+            presented_certificate_fingerprint: "bb".repeat(32),
+            saved_server_label: None,
+        },
+        None,
+    );
 
     let DialError::Refused(CliError::IpcUnavailable { detail }) = certificate_mismatch_error else {
         panic!(
@@ -663,6 +814,38 @@ fn a_certificate_that_is_not_the_expected_one_carries_an_ipc_failure_and_never_a
              presented {}. the secret was not sent. if that machine's certificate changed on \
              purpose, `koshi share open` there prints the new fingerprint: give it with \
              --certificate-fingerprint, or with `koshi remote edit` for a saved server.",
+            "aa".repeat(32),
+            "bb".repeat(32)
+        )
+    );
+}
+
+#[test]
+fn a_certificate_that_is_not_the_expected_one_on_a_saved_server_names_the_edit_of_it() {
+    // The TLS layer names no saved server; the dial of a saved record names
+    // it.
+    let certificate_mismatch_error = classify_dial_failure(
+        IpcError::CertificateMismatch {
+            server_address: "desk.local:7654".to_string(),
+            expected_certificate_fingerprint: "aa".repeat(32),
+            presented_certificate_fingerprint: "bb".repeat(32),
+            saved_server_label: None,
+        },
+        Some("work"),
+    );
+
+    let DialError::Refused(CliError::IpcUnavailable { detail }) = certificate_mismatch_error else {
+        panic!(
+            "a certificate that is not the expected one is the shape `probe_saved_server` reads"
+        );
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "the certificate desk.local:7654 presented is not the expected one: expected {}, \
+             presented {}. the secret was not sent. if that machine's certificate changed on \
+             purpose, `koshi share open` there prints the new fingerprint: give it with `koshi \
+             remote edit work`.",
             "aa".repeat(32),
             "bb".repeat(32)
         )
@@ -1315,7 +1498,7 @@ fn a_refused_dial_loses_what_a_terminal_would_act_on() {
         message: "\u{1b}[2Jthe session\u{7f} is gone".to_string(),
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("a refusal is not a welcome");
 
     let DialError::Refused(CliError::Runtime { detail }) = refusal else {
@@ -1330,7 +1513,7 @@ fn a_refusal_longer_than_the_cap_is_cut_to_it() {
         message: "n".repeat(MAX_REPORTED_TEXT_BYTE_COUNT + 100),
     };
 
-    let refusal = validate_remote_server_answer("desk.local:7654", &server_frame)
+    let refusal = validate_remote_server_answer("desk.local:7654", None, &server_frame)
         .expect_err("a refusal is not a welcome");
 
     let DialError::Refused(CliError::Runtime { detail }) = refusal else {

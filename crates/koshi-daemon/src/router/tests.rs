@@ -7738,6 +7738,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let attaching_connection = remote_client::connect_remote_server(
         &remote_listen_address.to_string(),
         &connection_token,
+        None,
         &certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         None,
@@ -7758,6 +7759,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
     let mut listing_connection = remote_client::connect_remote_server(
         &remote_listen_address.to_string(),
         &connection_token,
+        None,
         &certificate_fingerprint,
         DIAL_TIMEOUT_DURATION,
         None,
