@@ -2588,6 +2588,52 @@ mod bridge_round_trip {
         }
     }
 
+    #[test]
+    fn an_attach_to_a_session_that_cannot_be_opened_reads_as_that_session_not_answering() {
+        // The located session advertises no endpoint file and is not replacing
+        // its image: the caller reads that the session did not answer, and the
+        // connection is reported ended.
+        let runtime_directory = build_test_runtime_directory();
+        let session_id = SessionId::new();
+        let test_remote_listener = start_test_remote_listener(LocatedSession {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            session_id,
+        });
+        let remote_link = connect_test_remote_client(&test_remote_listener);
+
+        let (mut reader, _writer) = remote_client::attach_remote_session(
+            remote_link,
+            SessionSelector::SessionId(session_id),
+            Duration::from_secs(30),
+        )
+        .expect("the attach request is written");
+        let forwarded_answer_result = remote_client::read_forwarded_hello_answer(
+            &mut reader,
+            &test_remote_listener.remote_listen_address,
+            &SessionSelector::SessionId(session_id),
+        );
+
+        let Err(remote_client::DialError::Refused(koshi_link::error::CliError::Runtime { detail })) =
+            forwarded_answer_result
+        else {
+            panic!("expected a refusal, got {forwarded_answer_result:?}");
+        };
+        assert_eq!(
+            detail,
+            format!(
+                "session {session_id} did not answer on the server {}",
+                test_remote_listener.remote_listen_address
+            )
+        );
+        assert_eq!(
+            test_remote_listener
+                .ended_connection_id_receiver
+                .recv_timeout(BRIDGE_END_TIMEOUT_DURATION),
+            Ok(7),
+            "the connection is reported ended"
+        );
+    }
+
     /// Attach to a running session through a listener with an Attach naming
     /// `link_timeout_ms`, read the session's Hello answer, send no byte for
     /// `SILENCE_PAST_TIMEOUT_DURATION` past `ADMITTED_FRAME_TIMEOUT_DURATION`,

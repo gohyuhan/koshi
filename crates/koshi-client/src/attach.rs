@@ -3519,6 +3519,7 @@ fn dial_remote(
     )?;
     join_remote_session(
         remote_link,
+        &saved_server.server_address,
         saved_server.connection_token,
         session_selector,
         resume_client_id,
@@ -3531,8 +3532,9 @@ fn dial_remote(
 }
 
 /// Join the session `session_selector` names, as a client, over `remote_link`:
-/// an open connection to a server that admitted `connection_token`. The
-/// returned session carries `connection_token`.
+/// an open connection to the server at `server_address` that admitted
+/// `connection_token`. The returned session carries `connection_token`. A
+/// refusal of the join names `server_address`.
 ///
 /// The serving machine presents that session's endpoint token and writes the
 /// Hello on this client's behalf, so the first frame read back is the session
@@ -3569,13 +3571,14 @@ fn dial_remote(
 /// [`CliError::SessionRestarting`] when the session refused the `Prepare` or
 /// the `Commit` while it replaces its process image. [`DialError::Refused`]
 /// when the server answered and every identical join after it gets the same
-/// answer: the admitted secret does not reach `session_selector`, the session
-/// protocol versions do not overlap, or its answer is a frame this attach
-/// cannot read. An answer to the `Commit` of another kind carries
+/// answer: the admitted secret does not reach `session_selector`, that session
+/// does not answer, the session protocol versions do not overlap, or its
+/// answer is a frame this attach cannot read. An answer to the `Commit` of another kind carries
 /// [`CliError::CommittedRequestUnanswered`].
 #[allow(clippy::too_many_arguments)]
 fn join_remote_session(
     remote_link: remote_client::RemoteLink,
+    server_address: &str,
     connection_token: ConnectionToken,
     session_selector: &SessionSelector,
     resume_client_id: Option<ClientId>,
@@ -3589,7 +3592,8 @@ fn join_remote_session(
     let (mut reader, mut writer) =
         remote_client::attach_remote_session(remote_link, session_selector.clone(), link_timeout)
             .map_err(DialError::Unreachable)?;
-    let hello_response = remote_client::read_forwarded_hello_answer(&mut reader, session_selector)?;
+    let hello_response =
+        remote_client::read_forwarded_hello_answer(&mut reader, server_address, session_selector)?;
     talk::parse_session_hello_answer(hello_response).map_err(DialError::Refused)?;
     writer
         .send(&build_attach_prepare_request(

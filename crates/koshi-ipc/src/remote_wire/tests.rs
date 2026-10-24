@@ -373,6 +373,13 @@ fn every_server_frame_travels_as_these_exact_bytes() {
             r#"{"Refused":{"message":"this server did not admit the connection","remote_protocol_version":2}}"#,
         ),
         (
+            RemoteServerFrame::Refused {
+                message: SESSION_NOT_ANSWERING_MESSAGE.to_string(),
+                remote_protocol_version: None,
+            },
+            r#"{"Refused":{"message":"the session did not answer"}}"#,
+        ),
+        (
             RemoteServerFrame::Sessions {
                 session_rows: vec![RemoteSessionRow {
                     session_id: SessionId::from_uuid(build_fixed_test_uuid()),

@@ -58,7 +58,7 @@ use koshi_ipc::remote_servers::{
 };
 use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
-    REMOTE_PROTOCOL_VERSION,
+    REMOTE_PROTOCOL_VERSION, SESSION_NOT_ANSWERING_MESSAGE,
 };
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::tls::{format_certificate_fingerprint, CERTIFICATE_FINGERPRINT_PREFIX};
@@ -1364,15 +1364,21 @@ pub fn attach_remote_session(
 /// Read the frame that answers the Hello the serving machine wrote on this
 /// caller's behalf after an Attach for `session_selector`.
 ///
+/// `server_address` is the address of the serving machine. Every refusal read
+/// here names it.
+///
 /// Two senders write this one frame: the serving machine writes a refusal when
 /// it does not attach the caller, and otherwise the session server's own
 /// answer arrives unread through the bridge. The frame is held as its JSON
 /// text and parsed as a refusal first, then as an [`IncomingResponse`].
 ///
 /// Example — a `Refused` frame carrying [`ROUTER_RESTARTING_MESSAGE`] is
-/// [`DialError::Restarting`]; one carrying any other sentence for the selector
-/// `quiet-lake` is [`DialError::Refused`] reading `the token this server saved
-/// does not reach session quiet-lake`. An answer from a koshi 0.4.0 session
+/// [`DialError::Restarting`]. One carrying
+/// [`SESSION_NOT_ANSWERING_MESSAGE`] from `desk.local:7654` for the selector
+/// `quiet-lake` is [`DialError::Refused`] reading `session quiet-lake did not
+/// answer on the server desk.local:7654`, and one carrying any other sentence
+/// reads `the token saved for the server desk.local:7654 does not reach
+/// session quiet-lake`. An answer from a koshi 0.4.0 session
 /// `quiet-lake` is [`DialError::Refused`] reading `session quiet-lake answered
 /// in the format of koshi 0.4.0 or older, which this koshi cannot talk to; on
 /// the machine that serves it, the user who started it runs: koshi
@@ -1387,6 +1393,7 @@ pub fn attach_remote_session(
 /// filtered by [`sanitize_reported_text`].
 pub fn read_forwarded_hello_answer(
     frame_reader: &mut FrameReader,
+    server_address: &str,
     session_selector: &SessionSelector,
 ) -> Result<IncomingResponse, DialError> {
     let hello_answer_frame: Box<RawValue> = frame_reader
@@ -1402,9 +1409,17 @@ pub fn read_forwarded_hello_answer(
                 detail: refusal_message,
             }));
         }
+        if refusal_message == SESSION_NOT_ANSWERING_MESSAGE {
+            return Err(DialError::Refused(CliError::Runtime {
+                detail: format!(
+                    "session {} did not answer on the server {server_address}",
+                    format_session_selector_name(session_selector)
+                ),
+            }));
+        }
         return Err(DialError::Refused(CliError::Runtime {
             detail: format!(
-                "the token this server saved does not reach session {}",
+                "the token saved for the server {server_address} does not reach session {}",
                 format_session_selector_name(session_selector)
             ),
         }));
@@ -1641,7 +1656,11 @@ fn run_remote_session_exchange<ExchangeAnswer>(
             REPLY_TIMEOUT_DURATION,
         )
         .map_err(DialError::Unreachable)?;
-        let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
+        let hello_response = read_forwarded_hello_answer(
+            &mut frame_reader,
+            &saved_server_record.server_address,
+            &session_selector,
+        )?;
         talk::parse_session_hello_answer(hello_response).map_err(DialError::Refused)?;
         frame_writer.send(ipc_request).map_err(build_link_failure)?;
         let incoming_response: IncomingResponse =

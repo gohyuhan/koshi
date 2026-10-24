@@ -272,7 +272,7 @@ fn a_session_picked_from_a_bare_attach_is_dialled_without_reading_the_secret_var
         home_directory.path(),
         vec![build_saved_server(
             "work",
-            server_address,
+            server_address.clone(),
             Some(certificate_fingerprint),
         )],
     );
@@ -295,7 +295,10 @@ fn a_session_picked_from_a_bare_attach_is_dialled_without_reading_the_secret_var
 
     assert_eq!(
         String::from_utf8_lossy(&attach_output.stderr),
-        format!("koshi: the token this server saved does not reach session {session_id}\n")
+        format!(
+            "koshi: the token saved for the server {server_address} does not reach session \
+             {session_id}\n"
+        )
     );
     assert_eq!(
         String::from_utf8_lossy(&attach_output.stdout),
