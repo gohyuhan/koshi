@@ -72,7 +72,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
-    compute_placement_handle_rect, find_first_visible_tab_index, find_pane_content_rect,
+    compute_tiled_pane_top_border, find_first_visible_tab_index, find_pane_content_rect,
     resolve_hit_region, HitRegion,
 };
 
@@ -2725,7 +2725,8 @@ fn find_visible_pane_handle(
             row_count: content_rect.size.row_count.saturating_add(2),
         },
     );
-    compute_placement_handle_rect(pane_outer_rect)
+    compute_tiled_pane_top_border(pane_outer_rect)
+        .placement_handle_rect
         .filter(|handle_rect| handle_rect.is_point_inside(screen_point))
         .map(|_| pane_id)
 }

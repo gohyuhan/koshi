@@ -45,7 +45,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
-use crate::hit_test::{compute_placement_handle_rect, PLACEMENT_HANDLE_COLUMN_COUNT};
+use crate::hit_test::compute_tiled_pane_top_border;
 use crate::images::{
     compute_floating_pane_image_placeholder_rects, compute_image_placeholder_rects,
     draw_image_placeholders, ImagePlacementKey, ImageRenderMode,
@@ -657,9 +657,11 @@ pub fn get_cursor_style(render_snapshot: &RenderSnapshot) -> Option<CursorStyle>
 /// into the top border, and drawing its scroll position when it is scrolled back.
 ///
 /// Each border takes [`compute_pane_border_style`], with every pane
-/// `placement_target` names as a placement target. The top border of the pane
-/// whose placement handle the pointer rests on
-/// ([`is_placement_handle_hovered`]) shows the handle `⠿⠿⠿`. While
+/// `placement_target` names as a placement target. The title ` <title> ` is
+/// cut to the label cells [`compute_tiled_pane_top_border`] gives. The top
+/// border of the pane whose placement handle the pointer rests on
+/// ([`is_placement_handle_hovered`]) shows the handle `⠿⠿⠿` on the handle
+/// cells that function gives, so `user@host` reads `┌⠿⠿⠿ user@host ─┐`. While
 /// `viewer_chrome.is_pane_placement_visible` is `true`, the pointer colors and
 /// the handle are not drawn: hovering `pane-123` does not change its border
 /// color. `layout_origin` shifts each pane into the centered content rect. A
@@ -698,31 +700,33 @@ fn draw_panes(
 
         let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
 
-        // The pane label starts two cells in and stops four cells short of the
-        // box width, which leaves the corner glyphs.
         let pane_label = pane_snapshot
             .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
             .unwrap_or("");
+        let top_border = compute_tiled_pane_top_border(pane_slot.outer_rect);
         let is_top_border_drawn = drawn_rows.is_row_drawn(pane_rect.y);
-        if !pane_label.is_empty() && pane_rect.width > 4 && is_top_border_drawn {
-            let pane_label_line = Line::from(Span::styled(format!(" {pane_label} "), border_style));
-            set_line_clipped(
-                screen_buffer,
-                pane_rect.x + 2,
-                pane_rect.y,
-                &pane_label_line,
-                pane_rect.width - 4,
-            );
+        if !pane_label.is_empty() && is_top_border_drawn {
+            if let Some(title_rect) = top_border.title_rect {
+                let title_area = place_cell_rect(title_rect, layout_origin);
+                let pane_label_line =
+                    Line::from(Span::styled(format!(" {pane_label} "), border_style));
+                set_line_clipped(
+                    screen_buffer,
+                    title_area.x,
+                    title_area.y,
+                    &pane_label_line,
+                    title_area.width,
+                );
+            }
         }
 
         if is_top_border_drawn && is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome) {
-            if let Some(handle_rect) = compute_placement_handle_rect(pane_slot.outer_rect) {
-                let handle_origin = place_cell_rect(handle_rect, layout_origin);
-                let handle_text = "⠿".repeat(usize::from(PLACEMENT_HANDLE_COLUMN_COUNT));
+            if let Some(handle_rect) = top_border.placement_handle_rect {
+                let handle_area = place_cell_rect(handle_rect, layout_origin);
                 screen_buffer.set_string(
-                    handle_origin.x,
-                    handle_origin.y,
-                    &handle_text,
+                    handle_area.x,
+                    handle_area.y,
+                    "⠿".repeat(usize::from(handle_area.width)),
                     border_style,
                 );
             }
