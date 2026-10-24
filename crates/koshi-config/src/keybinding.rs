@@ -21,8 +21,8 @@
 //! effective depth.
 //!
 //! Validation is all-or-nothing per file: every problem is collected as a
-//! span-tagged [`KeybindingDiagnostic`], and a file with any problem yields no
-//! layer at all. The running map stays as it was.
+//! span-tagged [`KeybindingDiagnostic`], in file order, and a file with any
+//! problem yields no layer at all. The running map stays as it was.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -35,7 +35,7 @@ use koshi_core::key::KeySequence;
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
-use crate::error::ConfigParseDiagnostic;
+use crate::error::{format_problems_at_line_and_column, ConfigParseDiagnostic};
 use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
@@ -67,18 +67,21 @@ pub enum KeybindingParseError {
     Invalid {
         /// Path of the keybinding file, for the header line.
         keybinding_path: String,
-        /// Every schema violation, each pointing at its own span.
+        /// Every schema violation of the file at `keybinding_path`, each
+        /// pointing at its own span, in file order: ascending span start, and
+        /// the order found for one start.
         #[related]
         diagnostics: Vec<KeybindingDiagnostic>,
     },
 }
 
 impl KeybindingParseError {
-    /// One message per problem, in file order. A syntax error gives the one
-    /// [`ConfigError::Parse`](crate::error::ConfigError::Parse) message, such as
-    /// `config parse error in keybinding.kdl: line 2, column 15: No closing '}'
-    /// for child block`. A schema error gives each diagnostic's message, such
-    /// as ``unknown key `unlock_alternative`; did you mean
+    /// One message per problem, in the order of `diagnostics`. A syntax error
+    /// gives the one [`ConfigError::Parse`](crate::error::ConfigError::Parse)
+    /// message, such as `config parse error in keybinding.kdl: line 2, column
+    /// 15: No closing '}' for child block`. A schema error gives each
+    /// diagnostic's message after the line and column its span starts at, such
+    /// as ``line 2, column 1: unknown key `unlock_alternative`; did you mean
     /// `unlock-alternative`?``.
     #[must_use]
     pub fn list_problem_messages(&self) -> Vec<String> {
@@ -86,10 +89,18 @@ impl KeybindingParseError {
             Self::Syntax(parse_diagnostic) => {
                 vec![parse_diagnostic.build_config_error().to_string()]
             }
-            Self::Invalid { diagnostics, .. } => diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
-                .collect(),
+            Self::Invalid { diagnostics, .. } => match diagnostics.first() {
+                Some(first_diagnostic) => format_problems_at_line_and_column(
+                    first_diagnostic.keybinding_source.inner(),
+                    diagnostics.iter().map(|diagnostic| {
+                        (
+                            diagnostic.diagnostic_span.offset(),
+                            diagnostic.get_diagnostic_message(),
+                        )
+                    }),
+                ),
+                None => Vec::new(),
+            },
         }
     }
 }
@@ -145,6 +156,9 @@ pub fn parse_keybindings(
     };
     let partial_keybindings_config =
         keybinding_document_walker.parse_keybinding_document(&keybinding_document);
+    keybinding_document_walker
+        .diagnostics
+        .sort_by_key(|keybinding_diagnostic| keybinding_diagnostic.diagnostic_span.offset());
     if keybinding_document_walker.diagnostics.is_empty() {
         Ok(partial_keybindings_config)
     } else {

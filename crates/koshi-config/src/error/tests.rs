@@ -152,24 +152,50 @@ fn parse_conversion_names_the_line_and_column_of_the_first_sub_diagnostic() {
 
 #[test]
 fn line_and_column_count_every_line_break_and_characters_not_bytes() {
-    // (source text, byte offset, expected line and column)
+    // (source text, byte offset, expected located message)
     let line_and_column_cases = [
-        ("pane {", 0, (1, 1)),
-        ("pane {", 5, (1, 6)),
-        ("a\nb", 2, (2, 1)),
-        ("a\r\nb", 3, (2, 1)),
-        ("a\rb", 2, (2, 1)),
-        ("a\n\nb", 3, (3, 1)),
-        ("éé {", 5, (1, 4)),
-        ("ab", 2, (1, 3)),
+        ("pane {", 0, "line 1, column 1: problem"),
+        ("pane {", 5, "line 1, column 6: problem"),
+        ("a\nb", 2, "line 2, column 1: problem"),
+        ("a\r\nb", 3, "line 2, column 1: problem"),
+        ("a\rb", 2, "line 2, column 1: problem"),
+        ("a\n\nb", 3, "line 3, column 1: problem"),
+        ("éé {", 5, "line 1, column 4: problem"),
+        ("ab", 2, "line 1, column 3: problem"),
+        ("ab", 9, "line 1, column 3: problem"),
     ];
-    for (source_text, byte_offset, expected_line_and_column) in line_and_column_cases {
+    for (source_text, byte_offset, expected_located_message) in line_and_column_cases {
         assert_eq!(
-            compute_line_and_column(source_text, byte_offset),
-            expected_line_and_column,
+            format_problems_at_line_and_column(source_text, [(byte_offset, "problem")]),
+            [expected_located_message],
             "byte {byte_offset} of {source_text:?}"
         );
     }
+}
+
+#[test]
+fn ascending_problems_each_get_their_own_location_in_one_pass() {
+    // Byte 2 is the `\n` of `\r\n`: the problem there and the one at byte 3
+    // both sit at line 2, column 1.
+    assert_eq!(
+        format_problems_at_line_and_column(
+            "a\r\nb\nc",
+            [
+                (2, "at the line feed"),
+                (3, "at b"),
+                (3, "at b again"),
+                (5, "at c"),
+                (9, "past the end"),
+            ]
+        ),
+        [
+            "line 2, column 1: at the line feed",
+            "line 2, column 1: at b",
+            "line 2, column 1: at b again",
+            "line 3, column 1: at c",
+            "line 3, column 2: past the end",
+        ]
+    );
 }
 
 #[test]

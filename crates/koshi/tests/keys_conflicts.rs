@@ -89,28 +89,31 @@ fn keys_conflicts_rejects_a_keybinding_file_that_breaks_the_schema() {
     let schema_error_cases = [
         (
             "version 2\nunlock_alternative \"<A-u>\"\n".to_string(),
-            "unknown key `unlock_alternative`; did you mean `unlock-alternative`?".to_string(),
+            "line 2, column 1: unknown key `unlock_alternative`; did you mean \
+             `unlock-alternative`?"
+                .to_string(),
         ),
         (
             "chord-timeout-ms 750\n".to_string(),
-            "keybinding file must declare `version`".to_string(),
+            "line 1, column 1: keybinding file must declare `version`".to_string(),
         ),
         (
             "version 0\n".to_string(),
-            "config schema version must be at least 1".to_string(),
+            "line 1, column 1: config schema version must be at least 1".to_string(),
         ),
         (
             format!("version {newer_schema_version}\n"),
             format!(
-                "config schema version {newer_schema_version} is newer than this koshi supports \
-                 ({SCHEMA_VERSION})"
+                "line 1, column 1: config schema version {newer_schema_version} is newer than \
+                 this koshi supports ({SCHEMA_VERSION})"
             ),
         ),
         (
             "version 2\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n    bind \"<A-\" \
              \"core:new-tab\"\n}\n"
                 .to_string(),
-            "invalid key `<C-`: missing closing `>`; invalid key `<A-`: missing closing `>`"
+            "line 3, column 10: invalid key `<C-`: missing closing `>`; line 4, column 10: \
+             invalid key `<A-`: missing closing `>`"
                 .to_string(),
         ),
     ];
@@ -143,7 +146,7 @@ fn keys_conflicts_json_rejects_an_ignored_file() {
         KoshiRunOutput {
             standard_output: r#"{
   "verdict": "reject",
-  "file_error": "unknown key `unlock_alternative`; did you mean `unlock-alternative`?",
+  "file_error": "line 2, column 1: unknown key `unlock_alternative`; did you mean `unlock-alternative`?",
   "conflict_findings": []
 }
 "#

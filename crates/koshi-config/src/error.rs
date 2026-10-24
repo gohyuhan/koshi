@@ -9,6 +9,7 @@
 //! [`ColorParseError`] reports a theme color value that is not valid
 //! `#RRGGBB` hex.
 
+use std::fmt::Display;
 use std::path::Path;
 
 use kdl::KdlError;
@@ -83,11 +84,11 @@ impl ConfigParseDiagnostic {
     pub fn build_config_error(&self) -> ConfigError {
         let parse_error_detail = match self.kdl_parse_error.diagnostics.first() {
             Some(kdl_diagnostic) => {
-                let (line_number, column_number) = compute_line_and_column(
+                let mut located_messages = format_problems_at_line_and_column(
                     &self.kdl_parse_error.input,
-                    kdl_diagnostic.span.offset(),
+                    [(kdl_diagnostic.span.offset(), kdl_diagnostic)],
                 );
-                format!("line {line_number}, column {column_number}: {kdl_diagnostic}")
+                located_messages.remove(0)
             }
             None => self.kdl_parse_error.to_string(),
         };
@@ -98,31 +99,48 @@ impl ConfigParseDiagnostic {
     }
 }
 
-/// The 1-based line and column of the character that starts at byte
-/// `byte_offset` of `source_text`. `\n`, `\r`, and `\r\n` each end one line,
-/// and the column counts characters, not bytes.
+/// Each problem of `problems`, a `(byte offset in source_text, message)` pair,
+/// as `line <L>, column <C>: <message>`, in the order given. `L` and `C` are the
+/// 1-based line and column of the character that starts at the byte offset:
+/// `\n`, `\r`, and `\r\n` each end one line, and the column counts characters,
+/// not bytes. An offset past the last character gives the position after it.
 ///
-/// Example — in `a\nnode "é" {`, the `{` starts at byte 12 and sits at line
-/// 2, column 10.
-fn compute_line_and_column(source_text: &str, byte_offset: usize) -> (usize, usize) {
+/// The offsets ascend: each one is at least the one before it. The scan passes
+/// over `source_text` once for all the problems.
+///
+/// Example — in `a\nnode "é" {`, the problem at byte 12 with the message
+/// `No closing '}' for child block` gives `line 2, column 10: No closing '}'
+/// for child block`.
+pub(crate) fn format_problems_at_line_and_column<ProblemMessage: Display>(
+    source_text: &str,
+    problems: impl IntoIterator<Item = (usize, ProblemMessage)>,
+) -> Vec<String> {
+    let mut scanned_byte_count = 0;
     let mut line_number = 1;
     let mut column_number = 1;
     let mut previous_character = None;
-    for (character_byte_offset, character) in source_text.char_indices() {
-        if character_byte_offset >= byte_offset {
-            break;
-        }
-        match character {
-            '\n' if previous_character == Some('\r') => {}
-            '\n' | '\r' => {
-                line_number += 1;
-                column_number = 1;
+    let mut located_messages = Vec::new();
+    for (byte_offset, problem_message) in problems {
+        for character in source_text[scanned_byte_count..].chars() {
+            if scanned_byte_count >= byte_offset {
+                break;
             }
-            _ => column_number += 1,
+            match character {
+                '\n' if previous_character == Some('\r') => {}
+                '\n' | '\r' => {
+                    line_number += 1;
+                    column_number = 1;
+                }
+                _ => column_number += 1,
+            }
+            previous_character = Some(character);
+            scanned_byte_count += character.len_utf8();
         }
-        previous_character = Some(character);
+        located_messages.push(format!(
+            "line {line_number}, column {column_number}: {problem_message}"
+        ));
     }
-    (line_number, column_number)
+    located_messages
 }
 
 impl Diagnostic for ConfigParseDiagnostic {

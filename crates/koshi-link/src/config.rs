@@ -514,9 +514,9 @@ pub fn load_keybinding_file(
 /// The [`load_keybinding_file`] layer, or `None` when the file is absent or
 /// gives no layer. A file that gives no layer records one warning in
 /// `config_warnings`. The warning for a file that does not parse names every
-/// problem, joined by `; `, such as ``keybinding.kdl not applied (<path>):
-/// unknown key `unlock_alternative`; did you mean `unlock-alternative`?; using
-/// defaults``.
+/// problem with its line and column, joined by `; `, such as
+/// ``keybinding.kdl not applied (<path>): line 2, column 1: unknown key
+/// `unlock_alternative`; did you mean `unlock-alternative`?; using defaults``.
 fn load_keybindings_config(
     config_path: &Path,
     config_warnings: &mut Vec<String>,
@@ -553,8 +553,8 @@ fn append_config_field_warnings(
 /// Read and parse `profile/<profile_name>.kdl` from `config_directory`. A
 /// `config_directory` of `None` returns `None`. A missing, unreadable, or
 /// invalid profile is logged and returns `None`; the caller then starts a
-/// single shell. The log line of an invalid profile names every problem,
-/// joined by `; `. Profiles are all-or-nothing: any schema violation drops the
+/// single shell. The log line of an invalid profile names every problem with
+/// its line and column, joined by `; `. Profiles are all-or-nothing: any schema violation drops the
 /// whole file, and no pane of a broken profile starts.
 #[must_use]
 pub fn load_profile_template(
