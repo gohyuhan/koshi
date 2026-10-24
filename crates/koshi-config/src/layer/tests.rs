@@ -521,12 +521,13 @@ fn theme_accent_override_keeps_other_color_roles() {
 }
 
 #[test]
-fn logging_override_sets_enabled_level_and_format() {
+fn logging_override_sets_enabled_level_format_and_max_log_file_size() {
     let config_layer = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
             is_enabled: Some(true),
             log_level: Some(LogLevel::Error),
             log_format: Some(LogFormat::Json),
+            max_log_file_size_in_mb: Some(16),
         }),
         ..Default::default()
     };
@@ -538,16 +539,19 @@ fn logging_override_sets_enabled_level_and_format() {
     assert!(merged_server_config.logging.is_enabled);
     assert_eq!(merged_server_config.logging.log_level, LogLevel::Error);
     assert_eq!(merged_server_config.logging.log_format, LogFormat::Json);
+    assert_eq!(merged_server_config.logging.max_log_file_size_in_mb, 16);
     assert!(merged_client_config.logging.is_enabled);
     assert_eq!(merged_client_config.logging.log_level, LogLevel::Error);
     assert_eq!(merged_client_config.logging.log_format, LogFormat::Json);
+    assert_eq!(merged_client_config.logging.max_log_file_size_in_mb, 16);
 
-    // An absent logging section leaves the defaults (disabled, warning, pretty).
+    // An absent logging section leaves the defaults (disabled, warning, pretty, 4 MiB).
     let default_server_config =
         merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
     assert!(!default_server_config.logging.is_enabled);
     assert_eq!(default_server_config.logging.log_level, LogLevel::Warning);
     assert_eq!(default_server_config.logging.log_format, LogFormat::Pretty);
+    assert_eq!(default_server_config.logging.max_log_file_size_in_mb, 4);
 }
 
 #[test]
@@ -565,6 +569,7 @@ fn partial_logging_config_keeps_unset_fields_at_defaults() {
             is_enabled: Some(true),
             log_level: Some(LogLevel::Info),
             log_format: None,
+            max_log_file_size_in_mb: None,
         }),
         ..Default::default()
     };
@@ -574,6 +579,10 @@ fn partial_logging_config_keeps_unset_fields_at_defaults() {
     assert_eq!(
         resolved_logging_config.log_format,
         LogFormat::Pretty,
+        "unset field keeps the default"
+    );
+    assert_eq!(
+        resolved_logging_config.max_log_file_size_in_mb, 4,
         "unset field keeps the default"
     );
 }

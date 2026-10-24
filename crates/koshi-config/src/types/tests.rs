@@ -138,6 +138,7 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert!(!server_config.logging.is_enabled);
     assert_eq!(server_config.logging.log_level, LogLevel::Warning);
     assert_eq!(server_config.logging.log_format, LogFormat::Pretty);
+    assert_eq!(server_config.logging.max_log_file_size_in_mb, 4);
     assert!(!client_config.logging.is_enabled);
 }
 

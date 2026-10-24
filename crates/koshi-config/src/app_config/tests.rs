@@ -4,7 +4,7 @@ use super::*;
 
 use std::net::Ipv6Addr;
 
-use crate::types::ClientConfig;
+use crate::types::{ClientConfig, LoggingConfig};
 
 /// Parses `config_source_text` as `koshi.kdl`, panicking on error, and drops
 /// warnings.
@@ -1905,6 +1905,92 @@ fn a_bad_logging_format_is_skipped_with_a_warning() {
         parse_warnings,
         vec![
             r#"line 3, column 5: ignored `logging.format`: expected "pretty" or "json""#
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn max_log_file_size_in_mb_records_each_value_from_1_to_1024() {
+    for max_log_file_size_in_mb in [1, 4, 1024] {
+        let logging = parse_config(&format!(
+            "logging {{\n    max-log-file-size-in-mb {max_log_file_size_in_mb}\n}}"
+        ))
+        .logging
+        .expect("logging section present");
+        assert_eq!(
+            logging.max_log_file_size_in_mb,
+            Some(max_log_file_size_in_mb)
+        );
+    }
+}
+
+#[test]
+fn an_absent_max_log_file_size_in_mb_leaves_4() {
+    let logging = parse_config("logging {\n    enabled #true\n}")
+        .logging
+        .expect("logging section present");
+    assert_eq!(logging.max_log_file_size_in_mb, None);
+    assert_eq!(LoggingConfig::default().max_log_file_size_in_mb, 4);
+}
+
+#[test]
+fn a_max_log_file_size_in_mb_out_of_range_or_not_an_integer_is_skipped_with_a_warning() {
+    for (config_text, expected_warning) in [
+        (
+            "logging {\n    max-log-file-size-in-mb 0\n    enabled #true\n}",
+            "line 3, column 5: ignored `logging.max-log-file-size-in-mb`: must be between 1 and 1024",
+        ),
+        (
+            "logging {\n    max-log-file-size-in-mb 1025\n    enabled #true\n}",
+            "line 3, column 5: ignored `logging.max-log-file-size-in-mb`: must be between 1 and 1024",
+        ),
+        (
+            "logging {\n    max-log-file-size-in-mb -4\n    enabled #true\n}",
+            "line 3, column 5: ignored `logging.max-log-file-size-in-mb`: must be between 1 and 1024",
+        ),
+        (
+            "logging {\n    max-log-file-size-in-mb 4294967300\n    enabled #true\n}",
+            "line 3, column 5: ignored `logging.max-log-file-size-in-mb`: must be between 1 and 1024",
+        ),
+        (
+            "logging {\n    max-log-file-size-in-mb \"4\"\n    enabled #true\n}",
+            "line 3, column 5: ignored `logging.max-log-file-size-in-mb`: expected an integer",
+        ),
+        (
+            "logging {\n    max-log-file-size-in-mb 4.5\n    enabled #true\n}",
+            "line 3, column 5: ignored `logging.max-log-file-size-in-mb`: expected an integer",
+        ),
+    ] {
+        let (app_config_layer, parse_warnings) = parse_with_warnings(config_text);
+        let logging = app_config_layer
+            .logging
+            .expect("logging section present");
+        assert_eq!(logging.max_log_file_size_in_mb, None, "{config_text}");
+        assert_eq!(logging.is_enabled, Some(true), "{config_text}");
+        assert_eq!(
+            parse_warnings,
+            vec![expected_warning.to_string()],
+            "{config_text}"
+        );
+    }
+}
+
+#[test]
+fn a_misspelled_max_log_file_size_in_mb_names_the_real_key() {
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("logging {\n    max-log-file-size-mb 8\n}");
+    assert_eq!(
+        app_config_layer
+            .logging
+            .expect("logging section present")
+            .max_log_file_size_in_mb,
+        None
+    );
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "line 3, column 5: ignored unknown key `logging.max-log-file-size-mb`; did you mean `logging.max-log-file-size-in-mb`?"
                 .to_string()
         ]
     );

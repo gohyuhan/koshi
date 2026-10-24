@@ -276,6 +276,7 @@ pub fn load_app_layer(config_directory: Option<&Path>) -> Option<PartialKoshiCon
 /// router, the session server, every client attached to a session, and on
 /// Windows the process holding a session's panes build their parameters here.
 /// One session's lines all land in one file, and the router's in another.
+/// `max-log-file-size-in-mb 4` gives a `max_log_file_size_bytes` of 4194304.
 #[must_use]
 pub fn build_logging_parameters(
     app_config_layer: Option<&PartialKoshiConfig>,
@@ -289,6 +290,7 @@ pub fn build_logging_parameters(
         log_level: logging_config.log_level,
         log_format: logging_config.log_format,
         log_file_owner,
+        max_log_file_size_bytes: u64::from(logging_config.max_log_file_size_in_mb) * 1024 * 1024,
     }
 }
 

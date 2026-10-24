@@ -46,6 +46,15 @@ pub const SCHEMA_VERSION: u32 = koshi_core::compat::CONFIG_SCHEMA.maximum_versio
 /// names one whose `themes/<name>.kdl` cannot be loaded.
 pub const DEFAULT_THEME_NAME: &str = "default";
 
+/// The `logging.max-log-file-size-in-mb` of a `koshi.kdl` that sets none: 4.
+pub const DEFAULT_MAX_LOG_FILE_SIZE_IN_MB: u32 = 4;
+
+/// The least `logging.max-log-file-size-in-mb` that `koshi.kdl` takes: 1.
+pub const LOWEST_MAX_LOG_FILE_SIZE_IN_MB: u32 = 1;
+
+/// The greatest `logging.max-log-file-size-in-mb` that `koshi.kdl` takes: 1024.
+pub const HIGHEST_MAX_LOG_FILE_SIZE_IN_MB: u32 = 1024;
+
 /// The settings the session host reads: the shared layout floor, the
 /// scrollback buffers it owns, the environment it spawns children into, its
 /// own log file, who else on this machine may reach it, and whether its panes
@@ -1116,16 +1125,21 @@ pub struct LoggingConfig {
     pub log_level: LogLevel,
     /// How each written line is rendered.
     pub log_format: LogFormat,
+    /// The size a log file may reach, in mebibytes of 1,048,576 bytes, from
+    /// [`LOWEST_MAX_LOG_FILE_SIZE_IN_MB`] to [`HIGHEST_MAX_LOG_FILE_SIZE_IN_MB`].
+    /// A line that takes the file over it moves the file to `<name>.1`.
+    pub max_log_file_size_in_mb: u32,
 }
 
 impl Default for LoggingConfig {
     /// Logging is off, and when turned on writes warnings and errors in the
-    /// human-readable format.
+    /// human-readable format, and moves a file to `<name>.1` over 4 MiB.
     fn default() -> Self {
         Self {
             is_enabled: false,
             log_level: LogLevel::Warning,
             log_format: LogFormat::Pretty,
+            max_log_file_size_in_mb: DEFAULT_MAX_LOG_FILE_SIZE_IN_MB,
         }
     }
 }

@@ -243,6 +243,7 @@ logging {
     enabled #true
     level "info"
     format "json"
+    max-log-file-size-in-mb 16
 }
 update {
     auto-check #false
@@ -291,6 +292,7 @@ update {
                     is_enabled: Some(true),
                     log_level: Some(LogLevel::Info),
                     log_format: Some(LogFormat::Json),
+                    max_log_file_size_in_mb: Some(16),
                 }),
                 update: Some(PartialUpdateConfig {
                     should_auto_check_for_updates: Some(false),

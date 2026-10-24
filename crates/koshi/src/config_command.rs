@@ -266,6 +266,12 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "Human or JSON log format.",
     ),
     build_config_field_help(
+        "koshi.logging.max-log-file-size-in-mb",
+        "koshi.kdl",
+        "4",
+        "Size of a log file in MiB, from 1 to 1024. A bigger file moves to <name>.1.",
+    ),
+    build_config_field_help(
         "koshi.update.auto-check",
         "koshi.kdl",
         "#true",
