@@ -4659,16 +4659,12 @@ fn set_recovery_notice_visible_records_only_a_real_change() {
     );
 }
 
-/// A horizontal split of three leaves whose middle leaf aims for 10 cells,
-/// with resize deltas `+60`, `-60` and `0`.
-fn build_preferred_middle_split() -> LayoutNode {
+/// A horizontal split of the three leaves `pane_ids` whose middle leaf aims
+/// for 10 cells, with resize deltas `+60`, `-60` and `0`.
+fn build_preferred_middle_split(pane_ids: [PaneId; 3]) -> LayoutNode {
     let mut split = SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(PaneId::new()),
-            LayoutNode::Pane(PaneId::new()),
-            LayoutNode::Pane(PaneId::new()),
-        ],
+        pane_ids.into_iter().map(LayoutNode::Pane).collect(),
     );
     split.weights[0].resize_delta = 60;
     split.weights[1].resize_delta = -60;
@@ -4688,50 +4684,63 @@ fn list_tab_resize_deltas(session: &Session, tab_id: TabId) -> Vec<i32> {
         .collect()
 }
 
+/// The carried terminal sizes: `column_counts[index]` columns by `row_count`
+/// rows for `pane_ids[index]`.
+fn build_carried_pty_sizes(
+    pane_ids: &[PaneId],
+    column_counts: &[u16],
+    row_count: u16,
+) -> HashMap<PaneId, PtySize> {
+    pane_ids
+        .iter()
+        .zip(column_counts)
+        .map(|(&pane_id, &column_count)| {
+            (
+                pane_id,
+                PtySize {
+                    column_count,
+                    row_count,
+                },
+            )
+        })
+        .collect()
+}
+
 #[test]
-fn resize_deltas_are_rewritten_at_the_tab_size_or_the_smallest_attached_pane_area() {
-    // A 90x24 client views the first tab and an 80x24 client the second. The
-    // third tab has no viewer and is rewritten at the smaller pane area, 80x22.
+fn every_tab_is_rewritten_at_the_sizes_its_panes_carry_and_not_at_a_client_size() {
+    // An 80x24 client views the first tab, drawn at 90 columns before the
+    // restart: 80, 6 and 4. The second tab has no viewer and was drawn at 80
+    // columns: 70, 6 and 4. The shares and the target give 30, 10 and 50 at
+    // 90 columns, and 26, 10 and 44 at 80.
     let mut session = build_empty_session();
-    let (wide_tab_id, narrow_tab_id, unviewed_tab_id) = (TabId::new(), TabId::new(), TabId::new());
-    let mut unchanged_split = SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![
-            LayoutNode::Pane(PaneId::new()),
-            LayoutNode::Pane(PaneId::new()),
-        ],
-    );
-    unchanged_split.weights[0].resize_delta = 5;
-    unchanged_split.weights[1].resize_delta = -5;
+    let (viewed_tab_id, unviewed_tab_id) = (TabId::new(), TabId::new());
+    let viewed_pane_ids = [PaneId::new(), PaneId::new(), PaneId::new()];
+    let unviewed_pane_ids = [PaneId::new(), PaneId::new(), PaneId::new()];
     let _ = session.add_tab(build_tab(
-        wide_tab_id,
-        "wide",
+        viewed_tab_id,
+        "viewed",
         0,
-        build_preferred_middle_split(),
-    ));
-    let _ = session.add_tab(build_tab(
-        narrow_tab_id,
-        "narrow",
-        1,
-        LayoutNode::Split(unchanged_split),
+        build_preferred_middle_split(viewed_pane_ids),
     ));
     let _ = session.add_tab(build_tab(
         unviewed_tab_id,
         "unviewed",
-        2,
-        build_preferred_middle_split(),
+        1,
+        build_preferred_middle_split(unviewed_pane_ids),
     ));
-    let _ = attach_viewer(&mut session, wide_tab_id, 90, 24);
-    let _ = attach_viewer(&mut session, narrow_tab_id, 80, 24);
+    let _ = attach_viewer(&mut session, viewed_tab_id, 80, 24);
+    let mut pty_size_by_pane_id = build_carried_pty_sizes(&viewed_pane_ids, &[78, 4, 2], 22);
+    pty_size_by_pane_id.extend(build_carried_pty_sizes(&unviewed_pane_ids, &[68, 4, 2], 22));
 
-    session.convert_resize_deltas_to_apply_after_preferred(PaneSizing::default());
+    session.convert_resize_deltas_to_apply_after_preferred(
+        &pty_size_by_pane_id,
+        PaneSizing::default(),
+    );
 
-    // At 90 columns the earlier solve gave 80, 6 and 4, and the shares and the
-    // target give 30, 10 and 50. At 80 columns it gave 70, 6 and 4, and the
-    // shares and the target give 26, 10 and 44. A split with no target keeps
-    // its deltas.
-    assert_eq!(list_tab_resize_deltas(&session, wide_tab_id), [50, -4, -46]);
-    assert_eq!(list_tab_resize_deltas(&session, narrow_tab_id), [5, -5]);
+    assert_eq!(
+        list_tab_resize_deltas(&session, viewed_tab_id),
+        [50, -4, -46]
+    );
     assert_eq!(
         list_tab_resize_deltas(&session, unviewed_tab_id),
         [44, -4, -40]
@@ -4739,43 +4748,42 @@ fn resize_deltas_are_rewritten_at_the_tab_size_or_the_smallest_attached_pane_are
 }
 
 #[test]
-fn resize_deltas_stay_without_an_attached_client_or_with_only_starving_viewers() {
-    let mut detached_session = build_empty_session();
-    let detached_tab_id = TabId::new();
-    let _ = detached_session.add_tab(build_tab(
-        detached_tab_id,
-        "detached",
-        0,
-        build_preferred_middle_split(),
-    ));
+fn a_session_with_no_client_drops_the_resize_deltas_that_moved_nothing() {
+    // 80 columns, the left pane aiming for 20, ten presses stored `+10` and
+    // `-10`, and the panes were drawn at 20 and 60 columns: 18 and 58 inside
+    // their borders.
+    let mut session = build_empty_session();
+    let tab_id = TabId::new();
+    let pane_ids = [PaneId::new(), PaneId::new()];
+    let mut split = SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        pane_ids.into_iter().map(LayoutNode::Pane).collect(),
+    );
+    split.weights[0].preferred_cell_count = Some(20);
+    split.weights[0].resize_delta = 10;
+    split.weights[1].resize_delta = -10;
+    let _ = session.add_tab(build_tab(tab_id, "detached", 0, LayoutNode::Split(split)));
 
-    detached_session.convert_resize_deltas_to_apply_after_preferred(PaneSizing::default());
-
-    assert_eq!(
-        list_tab_resize_deltas(&detached_session, detached_tab_id),
-        [60, -60, 0]
+    session.convert_resize_deltas_to_apply_after_preferred(
+        &build_carried_pty_sizes(&pane_ids, &[18, 58], 22),
+        PaneSizing::default(),
     );
 
-    let mut starving_session = build_empty_session();
-    let starving_tab_id = TabId::new();
-    let _ = starving_session.add_tab(build_tab(
-        starving_tab_id,
-        "starving",
-        0,
-        build_preferred_middle_split(),
-    ));
-    let _ = attach_viewer_with_pane_area(
-        &mut starving_session,
-        starving_tab_id,
-        90,
-        24,
-        Some(PaneArea::Starving),
+    assert_eq!(list_tab_resize_deltas(&session, tab_id), [0, 0]);
+    let layout_solve = solve_layout_with_sizing(
+        session.tabs[&tab_id].get_layout_tree(),
+        Rect::from_size_at_origin(Size {
+            column_count: 80,
+            row_count: 24,
+        }),
+        PaneSizing::default(),
     );
-
-    starving_session.convert_resize_deltas_to_apply_after_preferred(PaneSizing::default());
-
     assert_eq!(
-        list_tab_resize_deltas(&starving_session, starving_tab_id),
-        [60, -60, 0]
+        pane_ids.map(|pane_id| layout_solve
+            .find_pane_rect(pane_id)
+            .expect("every pane is solved")
+            .size
+            .column_count),
+        [20, 60]
     );
 }

@@ -23,9 +23,12 @@ use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
     GridPosition, NewPaneArgs, NewPanePlacement, NewTabArgs, Selection, SelectionKind,
 };
+use koshi_core::geometry::Rect;
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_layout::content::find_content_rect;
+use koshi_layout::solver::solve_layout_with_sizing;
 use koshi_layout::tree::LayoutNode;
 use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend};
@@ -162,45 +165,68 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     );
 }
 
-#[test]
-fn migrate_format_four_keeps_the_pane_sizes_beside_a_preferred_size() {
-    // The fixture's first tab splits pane 4 beside a pair, and a 22x9 client
-    // views it: 22 columns. With pane 4 aiming for 6 columns and resize deltas
-    // `+3` and `-3`, the format-4 solve gave 6 and 16: the deltas first, then
-    // the target. The deltas are rewritten to `0` and `0`, and the panes keep
-    // 6 and 16 columns.
+/// The key of the format-4 fixture's session.
+const FORMAT_FOUR_SESSION_KEY: &str = "00000000-0000-7000-8000-abcd00000001";
+
+/// The key of the format-4 fixture's first tab, which holds panes 4, 5 and 6.
+const FORMAT_FOUR_FIRST_TAB_KEY: &str = "00000000-0000-7000-8000-abcd00000003";
+
+/// Read the format-4 fixture after `edit_fixture_json` changes its JSON.
+fn read_edited_format_four_fixture(
+    edit_fixture_json: impl FnOnce(&mut serde_json::Value),
+) -> (ResumeHeader, ResumeBody) {
     let mut fixture_json: serde_json::Value =
         serde_json::from_slice(include_bytes!("fixtures/format_four.json"))
             .expect("the format-4 fixture is JSON");
-    let first_tab_key = "00000000-0000-7000-8000-abcd00000003";
-    let root_weights = &mut fixture_json["raw_body"]["session_by_id"]
-        ["00000000-0000-7000-8000-abcd00000001"]["tabs"][first_tab_key]["layout"]["Split"]
-        ["weights"];
-    root_weights[0]["preferred_cell_count"] = serde_json::json!(6);
-    root_weights[0]["resize_delta"] = serde_json::json!(3);
-    root_weights[1]["resize_delta"] = serde_json::json!(-3);
-    let (resume_header, resume_body) = read_released_resume_fixture(
+    edit_fixture_json(&mut fixture_json);
+    read_released_resume_fixture(
         &serde_json::to_vec(&fixture_json).expect("the edited fixture serializes"),
-    );
+    )
+}
+
+/// The format-4 fixture's first tab id.
+fn get_format_four_first_tab_id() -> TabId {
+    serde_json::from_value(serde_json::json!(FORMAT_FOUR_FIRST_TAB_KEY)).expect("a tab id")
+}
+
+/// Each `resize_delta` of the root split of `layout_tree`.
+fn list_root_resize_deltas(layout_tree: &LayoutNode) -> Vec<i32> {
+    let LayoutNode::Split(root_split) = layout_tree else {
+        panic!("the tab holds a split");
+    };
+    root_split
+        .weights
+        .iter()
+        .map(|size_weight| size_weight.resize_delta)
+        .collect()
+}
+
+#[test]
+fn migrate_format_four_keeps_the_pane_sizes_beside_a_preferred_size() {
+    // The first tab splits pane 4 beside a pair, and a 22x9 client views it.
+    // With pane 4 aiming for 6 columns and resize deltas `+3` and `-3`, the
+    // format-4 solve gave 6 and 16 of 22 columns: 4 and 14 inside the
+    // borders, as the header carries them. The deltas are rewritten to `0` and
+    // `0`, and the panes keep 6 and 16 columns. Left as `+3` and `-3`, the
+    // solve would give 9 and 13.
+    let (resume_header, resume_body) = read_edited_format_four_fixture(|fixture_json| {
+        let root_weights = &mut fixture_json["raw_body"]["session_by_id"][FORMAT_FOUR_SESSION_KEY]
+            ["tabs"][FORMAT_FOUR_FIRST_TAB_KEY]["layout"]["Split"]["weights"];
+        root_weights[0]["preferred_cell_count"] = serde_json::json!(6);
+        root_weights[0]["resize_delta"] = serde_json::json!(3);
+        root_weights[1]["resize_delta"] = serde_json::json!(-3);
+        let carried_panes = &mut fixture_json["header"]["carried_panes"];
+        carried_panes[0]["column_count"] = serde_json::json!(4);
+        carried_panes[1]["column_count"] = serde_json::json!(14);
+        carried_panes[2]["column_count"] = serde_json::json!(14);
+    });
     assert_eq!(resume_header.resume_format, 4);
 
     let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
 
-    let session = &resumed_server.session_by_id[&resume_header.session_id];
-    let first_tab_id: TabId =
-        serde_json::from_value(serde_json::json!(first_tab_key)).expect("a tab id");
-    let first_tab = &session.tabs[&first_tab_id];
-    let LayoutNode::Split(root_split) = first_tab.get_layout_tree() else {
-        panic!("the first tab holds a split");
-    };
-    assert_eq!(
-        root_split
-            .weights
-            .iter()
-            .map(|size_weight| size_weight.resize_delta)
-            .collect::<Vec<i32>>(),
-        [0, 0]
-    );
+    let first_tab = &resumed_server.session_by_id[&resume_header.session_id].tabs
+        [&get_format_four_first_tab_id()];
+    assert_eq!(list_root_resize_deltas(first_tab.get_layout_tree()), [0, 0]);
     let first_pane_id = resume_header.carried_panes[0].pane_id;
     assert_eq!(
         first_tab
@@ -210,6 +236,69 @@ fn migrate_format_four_keeps_the_pane_sizes_beside_a_preferred_size() {
             .size
             .column_count,
         6
+    );
+}
+
+#[test]
+fn migrate_format_four_with_no_client_keeps_the_sizes_the_header_carries() {
+    // The session holds no client, and its first tab lays panes 4, 5 and 6
+    // side by side: resize deltas `+60`, `-60` and `0`, pane 5 aiming for 10
+    // columns. The format-4 solve drew them at 80, 6 and 4 of 90 columns, and
+    // the header carries 78, 4 and 2 by 22 rows. The deltas become `+50`, `-4`
+    // and `-46`. Without the carried sizes they would read `+60`, `0` and
+    // `-60`.
+    let (resume_header, resume_body) = read_edited_format_four_fixture(|fixture_json| {
+        let session_json = &mut fixture_json["raw_body"]["session_by_id"][FORMAT_FOUR_SESSION_KEY];
+        session_json["clients"]["client_by_id"] = serde_json::json!({});
+        let pane_keys = [
+            "00000000-0000-7000-8000-abcd00000004",
+            "00000000-0000-7000-8000-abcd00000005",
+            "00000000-0000-7000-8000-abcd00000006",
+        ];
+        session_json["tabs"][FORMAT_FOUR_FIRST_TAB_KEY]["layout"] = serde_json::json!({
+            "Split": {
+                "direction": "Horizontal",
+                "children": pane_keys.map(|pane_key| serde_json::json!({"Pane": pane_key})),
+                "weights": [
+                    {"primary_constraint": {"Flex": 1}, "minimum_cell_count": null, "preferred_cell_count": null, "resize_delta": 60},
+                    {"primary_constraint": {"Flex": 1}, "minimum_cell_count": null, "preferred_cell_count": 10, "resize_delta": -60},
+                    {"primary_constraint": {"Flex": 1}, "minimum_cell_count": null, "preferred_cell_count": null, "resize_delta": 0},
+                ],
+                "active_child_index": 0,
+            }
+        });
+        let carried_panes = &mut fixture_json["header"]["carried_panes"];
+        for (carried_pane_index, column_count) in [78, 4, 2].into_iter().enumerate() {
+            carried_panes[carried_pane_index]["column_count"] = serde_json::json!(column_count);
+            carried_panes[carried_pane_index]["row_count"] = serde_json::json!(22);
+        }
+    });
+
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    assert_eq!(session.clients.list_attached_clients().count(), 0);
+    let first_layout_tree = session.tabs[&get_format_four_first_tab_id()].get_layout_tree();
+    assert_eq!(list_root_resize_deltas(first_layout_tree), [50, -4, -46]);
+    let layout_solve = solve_layout_with_sizing(
+        first_layout_tree,
+        Rect::from_size_at_origin(Size {
+            column_count: 90,
+            row_count: 24,
+        }),
+        resumed_server.get_pane_sizing(),
+    );
+    assert_eq!(
+        resume_header.carried_panes[..3]
+            .iter()
+            .map(|carried_pane| {
+                find_content_rect(&layout_solve, carried_pane.pane_id)
+                    .expect("every pane shows content")
+                    .size
+                    .column_count
+            })
+            .collect::<Vec<u16>>(),
+        [78, 4, 2]
     );
 }
 
