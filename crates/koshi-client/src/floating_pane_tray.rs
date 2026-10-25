@@ -2,11 +2,12 @@
 //! act on, and the command a key or a click on it sends.
 //!
 //! The tray is this viewer's alone. Opening, closing and selecting send
-//! nothing. A tile toggle sends `SetPaneMinimized` for the tile's pane, and the
-//! header label or `core:toggle-minimize-all-floating-panes` sends
-//! `SetAllFloatingPanesMinimized`. Each changes the view of this client only.
+//! nothing. A tile toggle sends `TogglePaneMinimized` for the tile's pane, and
+//! the header label sends `ToggleAllFloatingPanesMinimized`. The session reads
+//! this client's view when it runs each, and changes the view of this client
+//! only.
 
-use koshi_core::command::{Command, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs};
+use koshi_core::command::{Command, TogglePaneMinimizedArgs};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{CommandId, PaneId};
 use koshi_core::lock::LockMode;
@@ -15,16 +16,16 @@ use koshi_renderer::floating_pane_tray::{
     compute_floating_pane_tray_layout, find_floating_pane_tray_glyph_cell, FloatingPaneTrayLayout,
 };
 use koshi_renderer::snapshot::{
-    CommittedRegions, FloatingPane, FloatingPaneTray, FrameLayout, LinkStatus, MouseFrame,
-    RenderSnapshot, SessionSnapshot, ViewerChrome,
+    CommittedRegions, FloatingPaneTray, FrameLayout, LinkStatus, MouseFrame, RenderSnapshot,
+    SessionSnapshot, ViewerChrome,
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 
-use crate::mouse::MouseAction;
+use crate::mouse::{build_frame_layout_without_tray, MouseAction};
 use crate::{Client, PlacementInputAction};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 impl Client {
     /// Close the tray when it is open, and open it
@@ -127,7 +128,7 @@ impl Client {
         }
     }
 
-    /// The `SetPaneMinimized` that toggles the selected tile's pane
+    /// The `TogglePaneMinimized` of the selected tile's pane
     /// ([`build_tray_tile_toggle_command`]), sent as a key binding's command.
     /// `Consumed` while the tray is closed, with no painted frame, or when the
     /// selected tile shows no pane.
@@ -148,7 +149,7 @@ impl Client {
         };
         PlacementInputAction::SubmitCommand {
             command_id: CommandId::new(),
-            command: build_tray_tile_toggle_command(floating_pane),
+            command: build_tray_tile_toggle_command(floating_pane.get_pane_id()),
         }
     }
 
@@ -161,16 +162,17 @@ impl Client {
     /// the session holds no floating pane, every pane is suppressed, or the
     /// pane area is too small. Does nothing while the tray is closed.
     ///
+    /// Returns where the frame lays out the open tray, or `None` while the
+    /// tray is closed, this call closing it included.
+    ///
     /// With the tray open on tile `2` of three, a frame with two floating
     /// panes selects tile `1`, and a frame with none closes the tray.
     pub(crate) fn update_floating_pane_tray(
         &mut self,
         render_snapshot: &RenderSnapshot,
         committed_regions: &CommittedRegions,
-    ) {
-        let Some(floating_pane_tray) = self.floating_pane_tray else {
-            return;
-        };
+    ) -> Option<FloatingPaneTrayLayout> {
+        let floating_pane_tray = self.floating_pane_tray?;
         let floating_pane_count = render_snapshot.session_snapshot.floating_panes.len();
         self.floating_pane_tray = Some(FloatingPaneTray {
             selected_tile_index: floating_pane_tray
@@ -183,34 +185,45 @@ impl Client {
         let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
         let frame_layout =
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
-        if compute_floating_pane_tray_layout(frame_layout).is_none() {
+        let floating_pane_tray_layout = compute_floating_pane_tray_layout(frame_layout);
+        if floating_pane_tray_layout.is_none() {
             self.close_floating_pane_tray();
         }
+        floating_pane_tray_layout
     }
 
-    /// The box the floating pane `pane_id` of `render_snapshot` minimizes into
-    /// and restores out of, counted from the pane-area origin of
-    /// `committed_regions`: the pane's tile while this viewer's tray is open,
-    /// else the pane-area cell under the tray button's glyph `⧉`. `None` while
-    /// the tray is open and the frame has no room for it or no tile for the
-    /// pane, and while the frame draws no tray button.
+    /// Where the floating panes of `render_snapshot`, painted with
+    /// `committed_regions`, minimize into and restore out of. While this
+    /// viewer's tray is open, it is the tray at `open_floating_pane_tray_layout`,
+    /// the layout [`update_floating_pane_tray`](Self::update_floating_pane_tray)
+    /// returns for that frame, and `None` when that layout is `None`. While
+    /// the tray is closed, it is the pane-area cell under the tray button's
+    /// glyph `⧉`, and `None` when the frame draws no tray button or the glyph
+    /// sits left of the pane area.
     ///
     /// Over a pane area at `(0, 1)`, a closed tray whose glyph sits at
-    /// `(72, 0)` gives `(72, 0)` `1x1`, and an open six-slot tray at `(17, 1)`
-    /// gives tile `1` at `(28, 1)` `8x3`.
-    pub(crate) fn find_floating_pane_tray_anchor_rect(
+    /// `(72, 0)` gives the cell `(72, 0)` `1x1`.
+    pub(crate) fn find_floating_pane_tray_anchor(
         &self,
         render_snapshot: &RenderSnapshot,
         committed_regions: &CommittedRegions,
-        pane_id: PaneId,
-    ) -> Option<Rect> {
-        let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
-        let frame_layout =
-            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
+        open_floating_pane_tray_layout: Option<FloatingPaneTrayLayout>,
+    ) -> Option<FloatingPaneTrayAnchor> {
         let pane_area_origin = committed_regions.solved_regions.pane_rect.origin;
-        if self.floating_pane_tray.is_none() {
-            let glyph_cell = find_floating_pane_tray_glyph_cell(frame_layout)?;
-            return Some(Rect::from_origin_and_size(
+        if self.floating_pane_tray.is_some() {
+            return open_floating_pane_tray_layout.map(|tray_layout| {
+                FloatingPaneTrayAnchor::OpenTray {
+                    tray_layout,
+                    pane_area_origin,
+                }
+            });
+        }
+        let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+        let glyph_cell = find_floating_pane_tray_glyph_cell(
+            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+        )?;
+        Some(FloatingPaneTrayAnchor::ClosedTrayGlyphCell(
+            Rect::from_origin_and_size(
                 Point {
                     column: glyph_cell.column.checked_sub(pane_area_origin.column)?,
                     row: 0,
@@ -219,23 +232,7 @@ impl Client {
                     column_count: 1,
                     row_count: 1,
                 },
-            ));
-        }
-        let tile_index = render_snapshot
-            .session_snapshot
-            .find_floating_pane_index(pane_id)?;
-        let tile_rect = *compute_floating_pane_tray_layout(frame_layout)?
-            .slot_rects
-            .get(tile_index)?;
-        Some(Rect::from_origin_and_size(
-            Point {
-                column: tile_rect
-                    .origin
-                    .column
-                    .checked_sub(pane_area_origin.column)?,
-                row: tile_rect.origin.row.checked_sub(pane_area_origin.row)?,
-            },
-            tile_rect.size,
+            ),
         ))
     }
 
@@ -245,17 +242,22 @@ impl Client {
     /// normal mouse path while the tray is closed, where a left press on the
     /// tray button opens the tray.
     ///
-    /// The event is placed against the tray as this viewer holds it:
+    /// The event is placed against the tray as this viewer holds it, where a
+    /// frame with the tray open draws it ([`build_tray_frame_layout`]). A
+    /// press off the tray is placed against `mouse_frame` as it was painted,
+    /// with no tray ([`build_frame_layout_without_tray`]):
     ///
     /// - A pointer motion sets the hovered tile to the tile under the pointer,
     ///   or to none. Over the tray it also clears the hovered pane and the
     ///   placement handle hover, and sends nothing.
     /// - A left press on a tile selects it and sends its
     ///   [`build_tray_tile_toggle_command`]. A left press on the header label
-    ///   sends [`build_minimize_all_toggle_command`]. A left press on any other
+    ///   sends `ToggleAllFloatingPanesMinimized`. A left press on any other
     ///   cell of the tray sends nothing.
-    /// - A press on the tray button closes the tray and sends nothing.
-    /// - A press outside the tray and its button closes the tray and returns
+    /// - A press on the tray button `mouse_frame` shows closes the tray and
+    ///   sends nothing. Two left presses on that button in one read, before a
+    ///   paint, open the tray and close it.
+    /// - A press outside the tray and that button closes the tray and returns
     ///   `None`: the press then acts as it does with no tray.
     /// - Every other event over the tray is consumed and sends nothing. Off
     ///   the tray it returns `None`.
@@ -300,60 +302,92 @@ impl Client {
                     selected_tile_index: tile_index,
                     ..floating_pane_tray
                 });
-                Some(
-                    mouse_frame
-                        .session_snapshot
-                        .floating_panes
-                        .get(tile_index)
-                        .map(|floating_pane| {
-                            MouseAction::Command(Box::new(build_tray_tile_toggle_command(
-                                floating_pane,
-                            )))
-                        })
-                        .into_iter()
-                        .collect(),
-                )
+                let pane_id = mouse_frame.session_snapshot.floating_panes[tile_index].get_pane_id();
+                Some(vec![MouseAction::Command(Box::new(
+                    build_tray_tile_toggle_command(pane_id),
+                ))])
             }
             (MouseKind::Press(MouseButton::Left), HitRegion::FloatingPaneTrayToggleMinimizeAll) => {
                 Some(vec![MouseAction::Command(Box::new(
-                    build_minimize_all_toggle_command(&mouse_frame.session_snapshot),
+                    Command::ToggleAllFloatingPanesMinimized,
                 ))])
-            }
-            (MouseKind::Press(_), HitRegion::FloatingPaneTrayButton) => {
-                self.close_floating_pane_tray();
-                Some(Vec::new())
             }
             (MouseKind::Press(_), _) if !is_on_tray => {
                 self.close_floating_pane_tray();
-                None
+                let painted_hit_region = resolve_hit_region(
+                    build_frame_layout_without_tray(mouse_frame),
+                    mouse_input.position,
+                );
+                (painted_hit_region == HitRegion::FloatingPaneTrayButton).then(Vec::new)
             }
             _ => is_on_tray.then(Vec::new),
         }
     }
 }
 
-/// The command that toggles `floating_pane` for the viewer:
-/// `SetPaneMinimized { is_minimized: false }` while the viewer minimized the
-/// pane, and `SetPaneMinimized { is_minimized: true }` otherwise. The session
-/// restores a minimized pane on top and focuses it.
+/// The command a tile of the floating pane `pane_id` sends:
+/// `TogglePaneMinimized` for `pane_id`. The session minimizes the pane while
+/// the viewer shows it, and restores it on top and focuses it while the viewer
+/// minimized it.
 #[must_use]
-fn build_tray_tile_toggle_command(floating_pane: &FloatingPane) -> Command {
-    Command::SetPaneMinimized(SetPaneMinimizedArgs {
-        pane_id: Some(floating_pane.pane_id),
-        is_minimized: !floating_pane.is_minimized,
+fn build_tray_tile_toggle_command(pane_id: PaneId) -> Command {
+    Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+        pane_id: Some(pane_id),
     })
 }
 
-/// The command that `core:toggle-minimize-all-floating-panes` sends for the
-/// viewer of `session_snapshot`: `SetAllFloatingPanesMinimized {
-/// is_minimized: false }` while the viewer minimized every floating pane
-/// ([`SessionSnapshot::are_all_floating_panes_minimized`]), and
-/// `SetAllFloatingPanesMinimized { is_minimized: true }` otherwise.
-#[must_use]
-pub(crate) fn build_minimize_all_toggle_command(session_snapshot: &SessionSnapshot) -> Command {
-    Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
-        is_minimized: !session_snapshot.are_all_floating_panes_minimized(),
-    })
+/// Where the floating panes of one frame minimize into and restore out of,
+/// for this viewer ([`Client::find_floating_pane_tray_anchor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatingPaneTrayAnchor {
+    /// The tray is closed: every pane uses this box, the cell under the tray
+    /// button's glyph `⧉`, counted from the pane-area origin.
+    ClosedTrayGlyphCell(Rect),
+    /// The tray is open: each pane uses its tile in `tray_layout`, counted
+    /// from `pane_area_origin`.
+    OpenTray {
+        /// Where the frame lays out the open tray, in screen cells.
+        tray_layout: FloatingPaneTrayLayout,
+        /// The pane area's top-left cell, in screen cells.
+        pane_area_origin: Point,
+    },
+}
+
+impl FloatingPaneTrayAnchor {
+    /// The box the floating pane `pane_id` of `session_snapshot` minimizes
+    /// into and restores out of, counted from the pane-area origin: the cell
+    /// under the glyph for every pane while the tray is closed, and the
+    /// pane's tile while it is open. `None` when the open tray holds no tile
+    /// for the pane, or the tile sits left of or above the pane area.
+    ///
+    /// An open six-slot tray at `(5, 1)` over a pane area at `(0, 1)` gives
+    /// tile `1` at `(18, 1)` `10x3`.
+    pub(crate) fn find_anchor_rect(
+        &self,
+        session_snapshot: &SessionSnapshot,
+        pane_id: PaneId,
+    ) -> Option<Rect> {
+        match self {
+            Self::ClosedTrayGlyphCell(glyph_cell_rect) => Some(*glyph_cell_rect),
+            Self::OpenTray {
+                tray_layout,
+                pane_area_origin,
+            } => {
+                let tile_index = session_snapshot.find_floating_pane_index(pane_id)?;
+                let tile_rect = *tray_layout.slot_rects.get(tile_index)?;
+                Some(Rect::from_origin_and_size(
+                    Point {
+                        column: tile_rect
+                            .origin
+                            .column
+                            .checked_sub(pane_area_origin.column)?,
+                        row: tile_rect.origin.row.checked_sub(pane_area_origin.row)?,
+                    },
+                    tile_rect.size,
+                ))
+            }
+        }
+    }
 }
 
 /// `mouse_frame`'s frame layout with `floating_pane_tray` open: the viewer

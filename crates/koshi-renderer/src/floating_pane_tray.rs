@@ -3,17 +3,17 @@
 //! The tabline draws the tray button ` ⧉ ` left of the mode tag while the
 //! session holds a floating pane. The tray hangs from the top row of the pane
 //! area, and its right border sits under the button's last cell. A tray of six
-//! slots per row, with three floating panes and tile 1 selected:
+//! slots per row, with three floating panes and tile `0` selected:
 //!
 //! ```text
-//! ┌─ htop ───────────────────────────────── minimize all ─┐   row 0: header
-//! │ ┌ 1 ───┐ ┌ 2 ───┐ ┌ 3 ───┐ ┌──────┐ ┌──────┐ ┌──────┐ │   rows 1 to 3: slots 0 to 5
-//! │ │ htop │ │ logs │ │ vim  │ │      │ │      │ │      │ │
-//! │ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ │
-//! │ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ │   rows 4 to 6: slots 6 to 11
-//! │ │      │ │      │ │      │ │      │ │      │ │      │ │
-//! │ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ │
-//! └───────────────────────────────────────────────────────┘   row 7: bottom border
+//! ┌─ htop ───────────────────────────────────────────── minimize all ─┐   row 0: header
+//! │ ┌ 1 ─────┐ ┌ 2 ─────┐ ┌ 3 ─────┐ ┌────────┐ ┌────────┐ ┌────────┐ │   rows 1 to 3: slots 0 to 5
+//! │ │ htop   │ │ logs   │ │ vim    │ │        │ │        │ │        │ │
+//! │ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │
+//! │ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │   rows 4 to 6: slots 6 to 11
+//! │ │        │ │        │ │        │ │        │ │        │ │        │ │
+//! │ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │
+//! └───────────────────────────────────────────────────────────────────┘   row 7: bottom border
 //! ```
 //!
 //! Every rect here is in screen cells, `(0, 0)` at the viewport's top-left
@@ -38,8 +38,8 @@ const MINIMIZE_ALL_LABEL_TEXT: &str = " minimize all ";
 /// The header label while the viewer shows no floating pane.
 const RESTORE_ALL_LABEL_TEXT: &str = " restore all ";
 
-/// The columns one slot takes: its border ring and six cells inside it.
-const SLOT_COLUMN_COUNT: u16 = 8;
+/// The columns one slot takes: its border ring and eight cells inside it.
+const SLOT_COLUMN_COUNT: u16 = 10;
 
 /// The rows one slot takes: its top border, its title row and its bottom
 /// border.
@@ -68,8 +68,8 @@ pub struct FloatingPaneTrayLayout {
     /// bottom. Slot `i` shows the session's floating pane `i` while the
     /// session holds one.
     pub slot_rects: [Rect; FLOATING_PANE_TRAY_SLOT_COUNT],
-    /// The slots in each row: `6`, or fewer when the pane area is narrower
-    /// than a six-slot tray.
+    /// The slots in each row: `6`, or fewer when the pane area left of the
+    /// tray's right border is narrower than a six-slot tray (`69` columns).
     pub slots_per_row: u16,
     /// The header cells that ` <title> ` may take, on the tray's top border.
     pub header_title_rect: Rect,
@@ -138,19 +138,19 @@ pub fn find_floating_pane_tray_glyph_cell(frame_layout: FrameLayout<'_>) -> Opti
 /// the pane area's top row. Its row holds the most slots, at most `6`, that
 /// fit between the pane area's left edge and that border, and its rows hold
 /// all [`FLOATING_PANE_TRAY_SLOT_COUNT`] slots. A row of `n` slots is
-/// `3 + 9n` columns wide, and `r` rows are `2 + 3r` rows tall.
+/// `3 + 11n` columns wide, and `r` rows are `2 + 3r` rows tall.
 ///
 /// `None` when the button is not drawn
 /// ([`find_floating_pane_tray_button_rect`]), the pane area left of the border
-/// is narrower than a one-slot tray (`12` columns), or the pane area is
+/// is narrower than a one-slot tray (`14` columns), or the pane area is
 /// shorter than the tray.
 ///
 /// The header label is ` restore all ` while the viewer minimized every
 /// floating pane, and ` minimize all ` otherwise.
 ///
 /// A button at `(71, 0)` over a pane area at `(0, 1)` `80x22` gives a six-slot
-/// tray at `(17, 1)` `57x8`, slot `0` at `(19, 2)` `8x3` and slot `7` at
-/// `(28, 5)`.
+/// tray at `(5, 1)` `69x8`, slot `0` at `(7, 2)` `10x3` and slot `7` at
+/// `(18, 5)`.
 #[must_use]
 pub fn compute_floating_pane_tray_layout(
     frame_layout: FrameLayout<'_>,
@@ -245,13 +245,13 @@ pub fn find_drawn_floating_pane_tray_layout(
 
 /// The tray header's label: ` restore all ` while the viewer minimized every
 /// floating pane of `session_snapshot`
-/// ([`SessionSnapshot::are_all_floating_panes_minimized`]), and
+/// ([`SessionSnapshot::is_every_floating_pane_minimized`]), and
 /// ` minimize all ` otherwise.
 #[must_use]
 pub(crate) fn select_toggle_minimize_all_label_text(
     session_snapshot: &SessionSnapshot,
 ) -> &'static str {
-    if session_snapshot.are_all_floating_panes_minimized() {
+    if session_snapshot.is_every_floating_pane_minimized() {
         RESTORE_ALL_LABEL_TEXT
     } else {
         MINIMIZE_ALL_LABEL_TEXT
@@ -259,8 +259,8 @@ pub(crate) fn select_toggle_minimize_all_label_text(
 }
 
 /// The columns of a tray whose rows hold `slots_per_row` slots: the two side
-/// strips, the slots and the gaps between them. `6` gives `57`, and `1` gives
-/// `12`.
+/// strips, the slots and the gaps between them. `6` gives `69`, and `1` gives
+/// `14`.
 fn compute_tray_column_count(slots_per_row: u16) -> u16 {
     2 * TRAY_SIDE_COLUMN_COUNT
         + slots_per_row * SLOT_COLUMN_COUNT

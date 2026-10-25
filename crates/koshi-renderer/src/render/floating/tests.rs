@@ -28,8 +28,8 @@ use koshi_terminal::style::Style as TerminalStyle;
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::images::ImageRenderMode;
-use crate::render::render_frame;
 use crate::render::tests::{format_rendered_cells, get_pane_snapshot_mut};
+use crate::render::{build_frame_geometry, render_frame};
 use crate::snapshot::{
     ClientSnapshot, CursorSnapshot, FloatingPaneMoveDraft, GridView, ImagePlacementSnapshot,
     KeymapHints, PaneSlot, PaneSnapshot, PlacementHandleHover, ScrollbackMetadata, SessionSnapshot,
@@ -179,17 +179,19 @@ fn render_core_frame(
     let viewport_area = RatatuiRect::new(0, 0, viewport_size.column_count, viewport_size.row_count);
     let mut render_buffer = Buffer::empty(viewport_area);
     render_frame(
-        render_snapshot,
-        &CommittedRegions::build_core(viewport_size, 0),
+        &build_frame_geometry(
+            render_snapshot,
+            &CommittedRegions::build_core(viewport_size, 0),
+            viewer_chrome,
+            viewport_area,
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        viewer_chrome,
         image_render_mode,
         &[],
         None,
         None,
-        viewport_area,
         DrawnRows::Every,
         &mut render_buffer,
     );

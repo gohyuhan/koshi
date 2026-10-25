@@ -292,7 +292,7 @@ pub(crate) enum PlacementInputAction {
     /// floats the tiled pane dock/undock mode selected, the `MoveFloatingPane`
     /// that floating pane move mode or dock/undock mode recorded as sent, the
     /// `FocusPane` that focuses the floating pane floating pane move mode
-    /// selected, or the `SetPaneMinimized` that toggles the floating pane tray's
+    /// selected, or the `TogglePaneMinimized` of the floating pane tray's
     /// selected tile.
     SubmitCommand {
         /// The id the command carries.
@@ -610,7 +610,7 @@ impl Client {
         let previous_active_input_mode = self.get_active_input_mode();
         self.link_status = link_status;
         if link_status != LinkStatus::Linked {
-            self.floating_pane_tray = None;
+            self.close_floating_pane_tray();
         }
         if self.get_active_input_mode() != previous_active_input_mode {
             self.pending_key_sequence = None;

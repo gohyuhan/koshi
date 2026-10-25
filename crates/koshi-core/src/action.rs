@@ -72,7 +72,7 @@ impl fmt::Display for ActionNameError {
 impl std::error::Error for ActionNameError {}
 
 /// The local name of an action within its namespace, validated against
-/// `^[a-z][a-z0-9-]{0,30}$`.
+/// `^[a-z][a-z0-9-]{0,39}$`.
 ///
 /// [`ActionName::parse_action_name`] and deserialization (via
 /// [`TryFrom<String>`]) both run the grammar check: a name decoded from a
@@ -343,9 +343,6 @@ pub enum ClientActionKind {
     /// Minimize the selected tray tile's floating pane when the viewer shows
     /// it, and restore it when the viewer minimized it.
     ToggleSelectedTrayTile,
-    /// Minimize every floating pane the viewer shows when it shows at least
-    /// one, and restore every floating pane when it shows none.
-    ToggleMinimizeAllFloatingPanes,
 }
 
 /// Where an action's key sorts among the keys of its modifier group in the
@@ -459,7 +456,9 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `FocusTab`; `undock-pane` builds `PlacePane` with a floating target;
 /// `pin-pane`/`unpin-pane` both build `SetPanePinned`; `minimize-pane` builds
 /// `SetPaneMinimized`; `minimize-all-floating-panes` and
-/// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`.
+/// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
+/// `toggle-minimize-all-floating-panes` builds
+/// `ToggleAllFloatingPanesMinimized`.
 ///
 /// The `resize-pane-*` and `focus-pane-*` direction families,
 /// `focus-next-floating-pane`, `focus-previous-floating-pane`, and
@@ -890,14 +889,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::ToggleSelectedTrayTile),
         ),
         build_core_action_seed(
-            "toggle-minimize-all-floating-panes",
-            "Toggle Minimize All Floating Panes",
-            "Minimize every floating pane this client shows, or restore every one when it shows none",
-            Client,
-            vec![ClientTarget],
-            CoreClient(ClientActionKind::ToggleMinimizeAllFloatingPanes),
-        ),
-        build_core_action_seed(
             "move-pane",
             "Move Pane",
             "Swap a pane with its visible neighbor in one direction and commit the swap at once",
@@ -984,6 +975,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::SetAllFloatingPanesMinimized),
+        ),
+        build_core_action_seed(
+            "toggle-minimize-all-floating-panes",
+            "Toggle Minimize All Floating Panes",
+            "Minimize every floating pane the issuing client shows, or restore every one when it shows none",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::ToggleAllFloatingPanesMinimized),
         ),
         build_core_action_seed(
             "focus-pane",

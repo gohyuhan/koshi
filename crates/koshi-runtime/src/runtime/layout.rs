@@ -149,13 +149,11 @@ impl Server {
 ///
 /// The visibility follows the client's shown floating panes
 /// ([`Client::list_shown_floating_pane_ids`]):
-/// - a pane the client does not show is [`FloatingPaneVisibility::Minimized`];
 /// - a shown pane is [`FloatingPaneVisibility::Drawn`] at the top-left cell of
 ///   the rectangle the session places it in for the client
 ///   ([`Session::find_client_floating_pane_rect`]), with its index in the shown
 ///   list as its layer;
-/// - a shown pane with no such rectangle, from a client with no floating
-///   viewport, is [`FloatingPaneVisibility::NoFloatingViewport`].
+/// - every other pane is [`FloatingPaneVisibility::Minimized`].
 fn build_floating_pane_client_view(
     session: &Session,
     client_record: &Client,
@@ -174,7 +172,7 @@ fn build_floating_pane_client_view(
                 top_left_cell: drawn_rect.origin,
                 layer_index,
             },
-            None => FloatingPaneVisibility::NoFloatingViewport,
+            None => FloatingPaneVisibility::Minimized,
         },
     };
     Some(FloatingPaneClientView {

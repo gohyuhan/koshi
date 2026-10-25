@@ -118,37 +118,15 @@ fn build_tabline_area(column_count: u16) -> RatatuiRect {
     }
 }
 
-/// Everything `draw_tabline` paints from `tabline_test_frame`.
+/// Everything `draw_tabline` paints from `tabline_test_frame`: the tab-row
+/// facts of its frame ([`FrameLayout::get_tabline_inputs`]).
+///
+/// [`FrameLayout::get_tabline_inputs`]: crate::snapshot::FrameLayout::get_tabline_inputs
 fn build_tabline_inputs(tabline_test_frame: &TablineTestFrame) -> TablineInputs<'_> {
-    TablineInputs {
-        session_name: &tabline_test_frame
-            .render_snapshot
-            .session_snapshot
-            .session_name,
-        tabs_metadata: &tabline_test_frame
-            .render_snapshot
-            .session_snapshot
-            .tabs_metadata,
-        lock_mode: tabline_test_frame.render_snapshot.client_snapshot.lock_mode,
-        is_mouse_selection_enabled: tabline_test_frame
-            .render_snapshot
-            .client_snapshot
-            .is_mouse_selection_enabled,
-        reconnecting: match tabline_test_frame.viewer_chrome.link_status {
-            LinkStatus::Redialing(reconnecting) => Some(reconnecting),
-            LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
-        },
-        tabline_offset: tabline_test_frame.viewer_chrome.tabline_offset,
-        has_floating_panes: !tabline_test_frame
-            .render_snapshot
-            .session_snapshot
-            .floating_panes
-            .is_empty(),
-        is_floating_pane_tray_open: tabline_test_frame
-            .viewer_chrome
-            .floating_pane_tray
-            .is_some(),
-    }
+    tabline_test_frame
+        .render_snapshot
+        .build_frame_layout(tabline_test_frame.viewer_chrome)
+        .get_tabline_inputs()
 }
 
 /// Paint the tabline into a fresh one-row buffer of `column_count` cells.
@@ -170,13 +148,7 @@ fn solve_tabline_layout(
     tabline_test_frame: &TablineTestFrame,
     tabline_area: RatatuiRect,
 ) -> TablineLayout {
-    super::solve_tabline_layout(
-        tabline_test_frame
-            .render_snapshot
-            .build_frame_layout(tabline_test_frame.viewer_chrome)
-            .get_tabline_inputs(),
-        tabline_area,
-    )
+    super::solve_tabline_layout(build_tabline_inputs(tabline_test_frame), tabline_area)
 }
 
 /// The symbol at `column_index` of the single rendered row.
@@ -1439,10 +1411,9 @@ fn a_session_with_a_floating_pane_puts_the_tray_button_left_of_the_mode_tag_and_
         .render_snapshot
         .session_snapshot
         .floating_panes
-        .push(FloatingPane {
+        .push(FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: None,
-            is_minimized: true,
         });
 
     let tabline_layout_with_float = solve_tabline_layout(&tabline_test_frame, tabline_area);

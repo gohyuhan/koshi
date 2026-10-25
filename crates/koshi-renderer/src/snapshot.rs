@@ -375,12 +375,12 @@ pub enum Delivery {
 
 /// The viewer-owned frame state: which pane the pointer is over, which pane
 /// shows its placement handle and whether the pointer rests on that handle,
-/// which input mode owns the keymap, where
-/// the tab strip is scrolled, whether the viewer holds a link to its session,
-/// where it draws a floating pane it is moving, and its floating pane tray. While pane placement is
-/// shown, including while a confirmation waits, the viewer clears the pointer
-/// and handle fields before hit-testing and painting, and the renderer ignores
-/// the pointer field: hovering `pane-123` leaves its border color unchanged.
+/// which input mode owns the keymap, where the tab strip is scrolled, whether
+/// the viewer holds a link to its session, where it draws a floating pane it
+/// is moving, and its floating pane tray. While pane placement is shown,
+/// including while a confirmation waits, the viewer clears the pointer and
+/// handle fields before hit-testing and painting, and the renderer ignores the
+/// pointer field: hovering `pane-123` leaves its border color unchanged.
 ///
 /// These values belong to one viewer. None is stored on the session or carried
 /// in a snapshot; the viewer hands them in when it hit-tests a frame and again
@@ -740,7 +740,7 @@ impl<'a> FrameLayout<'a> {
 ///
 /// It carries no cells, no cursor and no pane content titles, so a viewer
 /// holding one between paints holds no pane's rows. The session's floating
-/// pane list keeps its titles.
+/// pane list keeps the titles of the floating panes the viewer minimized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseFrame {
     /// The session being viewed, including its solved active tab.
@@ -853,10 +853,9 @@ pub struct SessionSnapshot {
     /// narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FloatingPaneSlot>,
     /// Every floating pane of the session, in the order the panes became
-    /// floating, whether or not the viewing client shows it, each with its
-    /// title and whether the viewing client minimized it. With floats `a`,
-    /// `b` and `c` made in that order and `b` minimized, it lists `a`, `b`
-    /// and `c`, and only `b` has `is_minimized` set.
+    /// floating, shown or minimized for the viewing client. With floats `a`,
+    /// `b` and `c` made in that order and `b` minimized, it holds `Shown` `a`,
+    /// `Minimized` `b` with `b`'s title, and `Shown` `c`.
     pub floating_panes: Vec<FloatingPane>,
 }
 
@@ -869,7 +868,7 @@ impl SessionSnapshot {
     pub fn find_floating_pane_index(&self, pane_id: PaneId) -> Option<usize> {
         self.floating_panes
             .iter()
-            .position(|floating_pane| floating_pane.pane_id == pane_id)
+            .position(|floating_pane| floating_pane.get_pane_id() == pane_id)
     }
 
     /// Whether `pane_id` is one of the session's
@@ -884,37 +883,83 @@ impl SessionSnapshot {
     /// minimized it.
     #[must_use]
     pub fn is_floating_pane_minimized(&self, pane_id: PaneId) -> bool {
-        self.floating_panes
-            .iter()
-            .any(|floating_pane| floating_pane.pane_id == pane_id && floating_pane.is_minimized)
+        self.floating_panes.iter().any(|floating_pane| {
+            floating_pane.get_pane_id() == pane_id && floating_pane.is_minimized()
+        })
     }
 
     /// Whether the viewing client minimized every one of the session's
     /// [`floating_panes`](Self::floating_panes). `true` when the session
     /// holds no floating pane.
     #[must_use]
-    pub fn are_all_floating_panes_minimized(&self) -> bool {
-        self.floating_panes
-            .iter()
-            .all(|floating_pane| floating_pane.is_minimized)
+    pub fn is_every_floating_pane_minimized(&self) -> bool {
+        self.floating_panes.iter().all(FloatingPane::is_minimized)
+    }
+
+    /// Whether this frame and `other_session_snapshot` list the same
+    /// [`floating_panes`](Self::floating_panes) in the same order, each shown
+    /// in both or minimized in both. Titles are not compared. `[a shown, b
+    /// minimized]` against `[a shown, b shown]` → `false`; against `[a shown,
+    /// b minimized]` with another title for `b` → `true`.
+    #[must_use]
+    pub fn has_same_floating_pane_visibility(
+        &self,
+        other_session_snapshot: &SessionSnapshot,
+    ) -> bool {
+        self.floating_panes.len() == other_session_snapshot.floating_panes.len()
+            && self
+                .floating_panes
+                .iter()
+                .zip(&other_session_snapshot.floating_panes)
+                .all(|(floating_pane, other_floating_pane)| {
+                    floating_pane.get_pane_id() == other_floating_pane.get_pane_id()
+                        && floating_pane.is_minimized() == other_floating_pane.is_minimized()
+                })
     }
 }
 
 /// One floating pane of the session, shown or minimized for the viewing
-/// client.
+/// client. The frame carries each pane's title once: in the pane's
+/// [`PaneSnapshot`] while the client shows the pane, and here while the
+/// client minimized it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FloatingPane {
-    /// The floating pane.
-    pub pane_id: PaneId,
-    /// The pane's resolved display title, by the rule of
-    /// [`PaneSnapshot::pane_title`]. `None` when the pane has reported neither
-    /// a working directory nor a title.
-    pub pane_title: Option<String>,
-    /// Whether the viewing client minimized the pane. The session gives a
-    /// minimized pane no slot in
-    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots), and a
-    /// pane the client did not minimize a slot.
-    pub is_minimized: bool,
+pub enum FloatingPane {
+    /// The viewing client shows the pane. The frame holds the pane's slot in
+    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots) and its
+    /// [`PaneSnapshot`], which holds its title. A client that loses its
+    /// floating viewport has every pane it shows minimized by the session in
+    /// the same change.
+    Shown {
+        /// The floating pane.
+        pane_id: PaneId,
+    },
+    /// The viewing client minimized the pane. The frame holds no slot and no
+    /// snapshot of it.
+    Minimized {
+        /// The floating pane.
+        pane_id: PaneId,
+        /// The pane's resolved display title, by the rule of
+        /// [`PaneSnapshot::pane_title`]. `None` when the pane has reported
+        /// neither a working directory nor a title.
+        pane_title: Option<String>,
+    },
+}
+
+impl FloatingPane {
+    /// The id of the floating pane, shown or minimized.
+    #[must_use]
+    pub fn get_pane_id(&self) -> PaneId {
+        match self {
+            FloatingPane::Shown { pane_id } | FloatingPane::Minimized { pane_id, .. } => *pane_id,
+        }
+    }
+
+    /// Whether the viewing client minimized the pane: `true` for
+    /// [`FloatingPane::Minimized`].
+    #[must_use]
+    pub fn is_minimized(&self) -> bool {
+        matches!(self, FloatingPane::Minimized { .. })
+    }
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its full

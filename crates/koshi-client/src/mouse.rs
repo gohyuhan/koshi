@@ -57,7 +57,7 @@ use koshi_config::types::WheelScroll;
 use koshi_core::command::{
     ClearSelectionArgs, ClosePaneArgs, Command, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
     GridPosition, MoveFloatingPaneArgs, PanePlacementAnchor, Selection, SelectionKind,
-    SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget,
+    SetPaneMinimizedArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget, TogglePanePinnedArgs,
     VisualCommand,
 };
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -488,7 +488,7 @@ impl Client {
             self.end_placement_drag();
             return Some(PlacementInputAction::Consumed);
         }
-        let frame_layout = mouse_frame.build_frame_layout();
+        let frame_layout = build_frame_layout_without_tray(mouse_frame);
         if !self.is_placement_mode_active() {
             if mouse_input.mouse_kind != MouseKind::Press(MouseButton::Left)
                 || mouse_input
@@ -657,7 +657,10 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> PlacementInputAction {
-        let hit_region = resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
+        let hit_region = resolve_hit_region(
+            build_frame_layout_without_tray(mouse_frame),
+            mouse_input.position,
+        );
         self.update_placement_hovers(mouse_frame, mouse_input, hit_region, current_time);
         match mouse_input.mouse_kind {
             MouseKind::Press(MouseButton::Left) => {
@@ -1008,11 +1011,11 @@ impl Client {
     /// floating pane's grab-handle drag moves that pane in this viewer's own
     /// view, a tab-strip drag scrolls the strip, a content drag highlights, and
     /// anything else is the program's. A **left press** acts on the region it
-    /// landed on — a tab focuses that tab, a scroll arrow steps the strip one tab, the
-    /// floating pane tray button opens the tray, a
-    /// stack header focuses that pane, pane content focuses the pane or begins
-    /// a highlight, a border begins a resize, the bare tab strip begins a
-    /// peek-drag. On a floating pane, a press on the grab handle begins a move,
+    /// landed on — a tab focuses that tab, a scroll arrow steps the strip one
+    /// tab, the floating pane tray button opens the tray, a stack header
+    /// focuses that pane, pane content focuses the pane or begins a highlight,
+    /// a border begins a resize, the bare tab strip begins a peek-drag. On a
+    /// floating pane, a press on the grab handle begins a move,
     /// a press on the border, the grab handle or the titlebar also focuses and
     /// raises the pane, and the pin toggle, minimize and close buttons act
     /// without focusing it. A **left release** ends whichever drag was under
@@ -1104,8 +1107,10 @@ impl Client {
                 self.release_mouse_gesture(mouse_input, mouse_frame)
             }
             MouseKind::Motion => {
-                let hit_region =
-                    resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
+                let hit_region = resolve_hit_region(
+                    build_frame_layout_without_tray(mouse_frame),
+                    mouse_input.position,
+                );
                 self.update_pointer_hover(mouse_frame, mouse_input, hit_region);
                 self.forward_mouse_input(mouse_input, mouse_frame)
             }
@@ -1451,7 +1456,7 @@ impl Client {
         let MouseKind::Scroll(scroll_direction) = mouse_input.mouse_kind else {
             return None;
         };
-        let frame_layout = mouse_frame.build_frame_layout();
+        let frame_layout = build_frame_layout_without_tray(mouse_frame);
         let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
         if is_tab_strip_region(hit_region) {
             self.step_tabline_peek(mouse_frame, scroll_direction);
@@ -1522,7 +1527,7 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> Vec<MouseAction> {
-        let frame_layout = mouse_frame.build_frame_layout();
+        let frame_layout = build_frame_layout_without_tray(mouse_frame);
         match resolve_hit_region(frame_layout, mouse_input.position) {
             HitRegion::Tab { tab_id } => {
                 // The click reveals the tab it names, so any peek is over.
@@ -1600,14 +1605,9 @@ impl Client {
                 vec![build_focus_pane_action(self.client_id, pane_id)]
             }
             HitRegion::PanePinToggle { pane_id } => {
-                let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id)
-                else {
-                    return Vec::new();
-                };
-                vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-                    SetPanePinnedArgs {
+                vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+                    TogglePanePinnedArgs {
                         pane_id: Some(pane_id),
-                        is_pinned: !floating_pane_slot.is_pinned,
                     },
                 )))]
             }
@@ -2073,7 +2073,7 @@ impl Client {
         mouse_input: MouseInput,
         mouse_frame: &MouseFrame,
     ) -> Vec<MouseAction> {
-        let frame_layout = mouse_frame.build_frame_layout();
+        let frame_layout = build_frame_layout_without_tray(mouse_frame);
         if let MouseKind::Release(_) = mouse_input.mouse_kind {
             let Some(mouse_capture) = self.mouse_capture.take() else {
                 return Vec::new();
@@ -2638,6 +2638,16 @@ impl Client {
             self.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id);
         frame_layout
     }
+}
+
+/// `mouse_frame`'s frame layout with the chrome it was painted with, and no
+/// floating pane tray. Escape and a left press on a painted tray tile at
+/// `(8, 3)` in one read, before a paint, place the press on the pane under
+/// that cell.
+pub(crate) fn build_frame_layout_without_tray(mouse_frame: &MouseFrame) -> FrameLayout<'_> {
+    let mut frame_layout = mouse_frame.build_frame_layout();
+    frame_layout.viewer_chrome.floating_pane_tray = None;
+    frame_layout
 }
 
 /// A `FocusPane` for `pane_id`, naming `client_id` so the switch moves that viewer's

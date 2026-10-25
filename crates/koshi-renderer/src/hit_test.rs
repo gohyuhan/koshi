@@ -298,9 +298,10 @@ fn classify_floating_pane_region(
 /// of a floating pane, then the header label, then
 /// [`FloatingPaneTray`](HitRegion::FloatingPaneTray) for every other cell.
 ///
-/// With two floating panes in a tray whose slot `1` is at `(28, 2)`, `(30, 3)`
-/// gives `FloatingPaneTrayTile { tile_index: 1 }`, and a cell of slot `2`
-/// gives `FloatingPaneTray`.
+/// With two floating panes on an `80`-column viewport, whose tray holds slot
+/// `1` at `(18, 2)` `10x3`, `(20, 3)` gives
+/// `FloatingPaneTrayTile { tile_index: 1 }`, and a cell of slot `2` gives
+/// `FloatingPaneTray`.
 fn classify_floating_pane_tray_region(
     frame_layout: FrameLayout<'_>,
     tray_layout: &FloatingPaneTrayLayout,

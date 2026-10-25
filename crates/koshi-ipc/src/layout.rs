@@ -128,8 +128,8 @@ pub struct FloatingPaneClientView {
 
 /// What one attached client draws for one floating pane.
 ///
-/// Encodes as `{"Drawn":{"top_left_cell":{"column":16,"row":4},"layer_index":0}}`,
-/// `"Minimized"` or `"NoFloatingViewport"`.
+/// Encodes as `{"Drawn":{"top_left_cell":{"column":16,"row":4},"layer_index":0}}`
+/// or `"Minimized"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FloatingPaneVisibility {
     /// The client shows the pane and draws it: a box of
@@ -147,10 +147,6 @@ pub enum FloatingPaneVisibility {
     },
     /// The client holds the pane minimized and draws nothing for it.
     Minimized,
-    /// The client shows the pane and draws nothing for it: the client has no
-    /// floating viewport. Its pane area is smaller than `5x6`, or it reported
-    /// no room to draw a pane.
-    NoFloatingViewport,
 }
 
 /// One attached client's focus.

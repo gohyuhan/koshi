@@ -1722,9 +1722,9 @@ it holds. Under it, one line per attached client says what that client draws:
 
 - `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the pane there.
   Layer `0` draws first, and a higher layer draws over a lower one.
-- `minimized`: the client holds the pane minimized.
-- `no floating viewport`: the client shows the pane and draws nothing. Its
-  pane area is smaller than `5x6`, or it has no room to draw a pane.
+- `minimized`: the client holds the pane minimized. A client whose pane area
+  is smaller than `5x6`, or that has no room to draw a pane, holds every
+  floating pane minimized.
 
 Each client line ends with the position that client stored: `default`,
 `moved <x>,<y>`, or `pinned <x>,<y>`. A session with no floating pane prints
@@ -1750,8 +1750,8 @@ the words above. Each client solve has `layout_mode`
 (`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each client view of a
 floating pane has `position` (`default`, or `moved` or `pinned` with
 `stored_cell`) and `visibility` (`drawn` with `top_left_cell` and
-`layer_index`, `minimized`, or `no floating viewport`). `desired_size` writes
-each axis as `--cols` and `--rows` take it: `"60%"` or `"80"`.
+`layer_index`, or `minimized`). `desired_size` writes each axis as `--cols`
+and `--rows` take it: `"60%"` or `"80"`.
 
 A session that started before you installed this Koshi cannot report its
 layout. `dump-layout` says so and names what to do: restart that session, or

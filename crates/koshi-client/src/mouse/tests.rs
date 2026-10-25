@@ -1104,7 +1104,7 @@ fn a_tick_aimed_at_a_pane_the_frame_carries_no_content_for_decides_nothing() {
 // ============================================================================
 
 /// A `mouse_kind` event at `position`, with `modifier_flags` held.
-fn build_mouse_event(
+pub(crate) fn build_mouse_event(
     mouse_kind: MouseKind,
     position: Point,
     modifier_flags: BindingModifierFlags,
@@ -5039,10 +5039,8 @@ pub(crate) fn add_floating_mouse_pane(
     mouse_frame
         .session_snapshot
         .floating_panes
-        .push(FloatingPane {
+        .push(FloatingPane::Shown {
             pane_id: floating_mouse_pane.pane_id,
-            pane_title: None,
-            is_minimized: false,
         });
     mouse_frame
         .session_snapshot
@@ -6897,19 +6895,17 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
 
     assert_eq!(
         press_titlebar(&unpinned_mouse_frame, 39, 0),
-        vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-            SetPanePinnedArgs {
+        vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+            TogglePanePinnedArgs {
                 pane_id: Some(floating_pane_id),
-                is_pinned: true,
             }
         )))]
     );
     assert_eq!(
         press_titlebar(&pinned_mouse_frame, 38, 1),
-        vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-            SetPanePinnedArgs {
+        vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+            TogglePanePinnedArgs {
                 pane_id: Some(floating_pane_id),
-                is_pinned: false,
             }
         )))]
     );
@@ -7842,10 +7838,9 @@ fn a_locked_viewer_moves_and_pins_a_floating_pane_the_same_way() {
     );
     assert_eq!(
         pin_actions,
-        vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-            SetPanePinnedArgs {
+        vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+            TogglePanePinnedArgs {
                 pane_id: Some(floating_pane_id),
-                is_pinned: true,
             }
         )))]
     );
@@ -9041,10 +9036,8 @@ fn a_frame_that_floats_a_dragged_tiled_pane_keeps_the_drag_from_where_the_frame_
     floating_frame
         .session_snapshot
         .floating_panes
-        .push(FloatingPane {
+        .push(FloatingPane::Shown {
             pane_id: upper_pane_id,
-            pane_title: None,
-            is_minimized: false,
         });
     floating_frame
         .session_snapshot

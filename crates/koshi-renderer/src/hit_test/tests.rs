@@ -1966,34 +1966,31 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
 fn an_open_tray_hits_its_tiles_its_label_and_its_body_over_the_floating_pane_under_it() {
     use crate::floating_pane_tray::tests::{
         build_open_tray_viewer_chrome, build_tray_test_render_snapshot,
-        show_tray_test_floating_pane,
+        show_tray_test_floating_pane, EIGHTY_BY_TWENTY_FOUR_SIZE,
     };
 
-    let viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
-    };
-    let mut render_snapshot = build_tray_test_render_snapshot(viewport_size, &["htop", "logs"]);
+    let mut render_snapshot =
+        build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop", "logs"]);
     // Outer box at screen (16, 5) 48x13: its content starts at screen row 8,
     // the tray's bottom border.
     let htop_pane_id =
         show_tray_test_floating_pane(&mut render_snapshot, 0, build_cell_rect(16, 4, 48, 13));
-    let committed_regions = CommittedRegions::build_core(viewport_size, 0);
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
     let open_frame_layout = render_snapshot
         .build_painted_frame_layout(build_open_tray_viewer_chrome(0), &committed_regions);
 
     for (screen_point, expected_hit_region) in [
         (
-            build_screen_point(20, 3),
+            build_screen_point(10, 3),
             HitRegion::FloatingPaneTrayTile { tile_index: 0 },
         ),
         (
-            build_screen_point(35, 4),
+            build_screen_point(25, 4),
             HitRegion::FloatingPaneTrayTile { tile_index: 1 },
         ),
         (build_screen_point(37, 2), HitRegion::FloatingPaneTray),
         (build_screen_point(20, 6), HitRegion::FloatingPaneTray),
-        (build_screen_point(27, 3), HitRegion::FloatingPaneTray),
+        (build_screen_point(17, 3), HitRegion::FloatingPaneTray),
         (
             build_screen_point(58, 1),
             HitRegion::FloatingPaneTrayToggleMinimizeAll,
@@ -2003,7 +2000,7 @@ fn an_open_tray_hits_its_tiles_its_label_and_its_body_over_the_floating_pane_und
             HitRegion::FloatingPaneTrayToggleMinimizeAll,
         ),
         (build_screen_point(57, 1), HitRegion::FloatingPaneTray),
-        (build_screen_point(17, 1), HitRegion::FloatingPaneTray),
+        (build_screen_point(5, 1), HitRegion::FloatingPaneTray),
         (build_screen_point(20, 8), HitRegion::FloatingPaneTray),
         (build_screen_point(73, 8), HitRegion::FloatingPaneTray),
         (build_screen_point(72, 0), HitRegion::FloatingPaneTrayButton),
@@ -2025,14 +2022,11 @@ fn an_open_tray_hits_its_tiles_its_label_and_its_body_over_the_floating_pane_und
 #[test]
 fn a_closed_tray_leaves_its_cells_to_the_panes_and_keeps_its_button() {
     use crate::floating_pane_tray::tests::{
-        build_tray_test_render_snapshot, show_tray_test_floating_pane,
+        build_tray_test_render_snapshot, show_tray_test_floating_pane, EIGHTY_BY_TWENTY_FOUR_SIZE,
     };
 
-    let viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
-    };
-    let mut render_snapshot = build_tray_test_render_snapshot(viewport_size, &["htop", "logs"]);
+    let mut render_snapshot =
+        build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop", "logs"]);
     let htop_pane_id =
         show_tray_test_floating_pane(&mut render_snapshot, 0, build_cell_rect(16, 4, 48, 13));
     let tiled_pane_id = render_snapshot
@@ -2040,7 +2034,7 @@ fn a_closed_tray_leaves_its_cells_to_the_panes_and_keeps_its_button() {
         .active_tab_snapshot
         .pane_slots[0]
         .pane_id;
-    let committed_regions = CommittedRegions::build_core(viewport_size, 0);
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
     let closed_frame_layout =
         render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
 
@@ -2072,14 +2066,12 @@ fn a_closed_tray_leaves_its_cells_to_the_panes_and_keeps_its_button() {
 
 #[test]
 fn a_session_with_no_floating_pane_leaves_the_button_cells_to_the_tabline() {
-    use crate::floating_pane_tray::tests::build_tray_test_render_snapshot;
-
-    let viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
     };
-    let render_snapshot = build_tray_test_render_snapshot(viewport_size, &[]);
-    let committed_regions = CommittedRegions::build_core(viewport_size, 0);
+
+    let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
 
     assert_eq!(
         resolve_hit_region(

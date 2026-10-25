@@ -2282,10 +2282,9 @@ fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
     let tiled_pane_id = PaneId::new();
     let floating_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(ClientId::new(), LockMode::Normal, false);
-    render_snapshot.session_snapshot.floating_panes = vec![FloatingPane {
+    render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
         pane_id: floating_pane_id,
         pane_title: None,
-        is_minimized: true,
     }];
     for (focused_pane_id, expected_is_focused_pane_floating) in [
         (Some(floating_pane_id), true),

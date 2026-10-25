@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::frame::{
-    FrameGraphicsProtocol, FrameImageAction, FrameImageDimension, FrameImageDisplay,
-    FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
+    FrameFloatingPane, FrameGraphicsProtocol, FrameImageAction, FrameImageDimension,
+    FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
     FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
     MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
@@ -64,9 +64,9 @@ pub(crate) mod tests;
 /// placement preview built anew (`build_placement_preview`).
 ///
 /// The session name, every tab's name, every tab-bar entry's name, every pane
-/// title and every floating pane's title are filtered by
-/// [`sanitize_reported_text`]. A frame naming its
-/// session `"dev\u{7}"` reads back naming it `"dev"`.
+/// title and every minimized floating pane's title are filtered by
+/// [`sanitize_reported_text`]. A frame naming its session `"dev\u{7}"` reads
+/// back naming it `"dev"`.
 #[must_use]
 pub fn build_render_snapshot(received_painted_frame: &ReceivedPaintedFrame) -> RenderSnapshot {
     let placement_preview = received_painted_frame
@@ -114,19 +114,17 @@ fn build_render_snapshot_with_images(
                 .session_snapshot
                 .floating_panes
                 .iter()
-                .map(|frame_floating_pane| FloatingPane {
-                    pane_id: frame_floating_pane.pane_id,
-                    pane_title: frame_floating_pane
-                        .pane_title
-                        .as_deref()
-                        .map(sanitize_reported_text),
-                    is_minimized: !painted_frame
-                        .session_snapshot
-                        .floating_pane_slots
-                        .iter()
-                        .any(|frame_floating_pane_slot| {
-                            frame_floating_pane_slot.pane_id == frame_floating_pane.pane_id
-                        }),
+                .map(|frame_floating_pane| match frame_floating_pane {
+                    FrameFloatingPane::Shown { pane_id } => {
+                        FloatingPane::Shown { pane_id: *pane_id }
+                    }
+                    FrameFloatingPane::Minimized {
+                        pane_id,
+                        pane_title,
+                    } => FloatingPane::Minimized {
+                        pane_id: *pane_id,
+                        pane_title: pane_title.as_deref().map(sanitize_reported_text),
+                    },
                 })
                 .collect(),
         },

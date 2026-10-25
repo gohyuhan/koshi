@@ -79,9 +79,9 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
-    FloatingPaneSlot, GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot,
-    PlacementHandleHover, PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata,
-    SessionSnapshot, TabMetadata, TabSnapshot,
+    FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot, MousePane, PaneSlot,
+    PaneSnapshot, PlacementHandleHover, PlacementSnapshot, PlacementSource, RenderSnapshot,
+    ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 use koshi_terminal::graphics::{
@@ -92,6 +92,8 @@ use koshi_terminal::style::Style;
 
 use super::*;
 use crate::attach::paint::build_render_snapshot;
+use crate::floating_pane_tray::tests::{build_client_with_open_tray, build_tray_mouse_frame};
+use crate::input::tests::build_client_viewing;
 use crate::mouse::tests::build_plain_mouse_pane;
 use crate::tests::{
     build_core_bound_action, build_test_client, create_session_with_attached_client,
@@ -3476,10 +3478,8 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
         mouse_frame
             .session_snapshot
             .floating_panes
-            .push(FloatingPane {
+            .push(FloatingPane::Shown {
                 pane_id: floating_pane_id,
-                pane_title: None,
-                is_minimized: false,
             });
         mouse_frame
             .session_snapshot
@@ -8567,7 +8567,7 @@ fn build_quit_chord() -> KeyChord {
 }
 
 /// `character` typed with no modifier.
-fn build_plain_chord(character: char) -> KeyChord {
+pub(crate) fn build_plain_chord(character: char) -> KeyChord {
     KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(character))
 }
 
@@ -9753,6 +9753,93 @@ fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
         client.get_pending_lock_command_id(),
         Some(sent_commands[1].0)
     );
+}
+
+#[test]
+fn the_minimize_all_binding_sends_the_session_toggle_and_keeps_the_tray_open() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true, false]);
+    let mut client = build_client_with_open_tray(&mouse_frame);
+    let open_floating_pane_tray = client.floating_pane_tray;
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.submit_bound_action(
+            &mut client,
+            build_core_bound_action("toggle-minimize-all-floating-panes"),
+            Some(&mouse_frame),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    let sent_commands: Vec<Command> = request_receiver
+        .try_iter()
+        .map(|sent_request| match sent_request.request_kind {
+            IpcRequestKind::SubmitCommand(command_envelope) => command_envelope.command,
+            other_request_kind => panic!("the binding sends a command, not {other_request_kind:?}"),
+        })
+        .collect();
+    assert_eq!(sent_commands, [Command::ToggleAllFloatingPanesMinimized]);
+    assert_eq!(client.floating_pane_tray, open_floating_pane_tray);
+}
+
+#[test]
+fn two_presses_on_the_painted_tray_button_in_one_read_open_the_tray_and_close_it() {
+    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[false]);
+    mouse_frame.client_snapshot.is_mouse_selection_enabled = true;
+    // The painted tabline ends in ` SELECT ` and shows the tray button at
+    // (69, 0) to (71, 0). The open tray's tabline ends in ` TRAY · SELECT `
+    // and puts the button at (62, 0) to (64, 0).
+    let button_cell = Point { column: 70, row: 0 };
+    for (press_count, expected_floating_pane_tray) in [
+        (
+            1,
+            Some(FloatingPaneTray {
+                selected_tile_index: 0,
+                hovered_tile_index: None,
+            }),
+        ),
+        (2, None),
+    ] {
+        let mut client = build_client_viewing(&mouse_frame);
+        let client_id = client.get_client_id();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let mut uplink = build_test_uplink(request_sender);
+        let mut cell_size_query =
+            terminal::CellSizeQuery::from_current_measurement(None, false, false);
+        let mut pending_mouse_actions = Vec::new();
+
+        assert_eq!(
+            handle_terminal_input_event(
+                &mut client,
+                &mut uplink,
+                &mut cell_size_query,
+                Some(&mouse_frame),
+                TerminalInput {
+                    runtime_events: (0..press_count)
+                        .map(|_| RuntimeEvent::MouseInput {
+                            client_id,
+                            mouse_input: build_mouse_press(button_cell),
+                        })
+                        .collect(),
+                    read_at: Instant::now(),
+                },
+                &mut Vec::new(),
+                &mut pending_mouse_actions,
+            ),
+            ControlFlow::Continue(())
+        );
+
+        assert_eq!(
+            client.floating_pane_tray, expected_floating_pane_tray,
+            "{press_count} presses"
+        );
+        assert_eq!(pending_mouse_actions, Vec::new());
+        assert_eq!(
+            request_receiver.try_recv().err(),
+            Some(mpsc::TryRecvError::Empty)
+        );
+    }
 }
 
 #[test]
@@ -13470,9 +13557,8 @@ fn build_undocked_pane_frames(
         content_rect: floating_pane_slot.content_rect,
         is_pinned: false,
     }];
-    undocked_frame.session_snapshot.floating_panes = vec![FrameFloatingPane {
+    undocked_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
         pane_id: undocked_pane_id,
-        pane_title: None,
     }];
     (initial_frame, undocked_frame)
 }
@@ -13709,9 +13795,8 @@ fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
     );
     undocked_frame.session_snapshot.floating_panes.insert(
         0,
-        FrameFloatingPane {
+        FrameFloatingPane::Shown {
             pane_id: left_pane_id,
-            pane_title: None,
         },
     );
     screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
@@ -14342,7 +14427,7 @@ fn a_restart_hold_counts_each_key_of_a_read() {
 /// one image. In the second, the client minimized it.
 fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, RenderSnapshot) {
     let mut minimized_frame = build_test_painted_frame();
-    minimized_frame.session_snapshot.floating_panes = vec![FrameFloatingPane {
+    minimized_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Minimized {
         pane_id: floating_pane_id,
         pane_title: Some(String::from("htop")),
     }];
@@ -14363,6 +14448,9 @@ fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, 
         outer_rect: floating_pane_slot.outer_rect,
         content_rect: floating_pane_slot.content_rect,
         is_pinned: false,
+    }];
+    shown_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
+        pane_id: floating_pane_id,
     }];
     let mut shown_snapshot = build_render_snapshot(&build_received_painted_frame(shown_frame));
     shown_snapshot.pane_snapshots.push(PaneSnapshot {
@@ -14531,14 +14619,14 @@ fn a_minimized_pane_slides_into_its_tile_while_the_tray_is_open() {
         )
         .expect("the slide repaints without a session frame");
 
-    // Tile 0 sits at screen (19, 2), pane-area (19, 1) 8x3.
+    // Tile 0 sits at screen (7, 2), pane-area (7, 1) 10x3.
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
             floating_pane_id,
-            19,
+            8,
             1,
-            13,
+            15,
             4
         )]
     );

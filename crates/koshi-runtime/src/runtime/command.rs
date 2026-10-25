@@ -31,9 +31,9 @@ use koshi_core::{
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
         NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetAllFloatingPanesMinimizedArgs,
-        SetPaneMinimizedArgs, SetPanePinnedArgs, SetSelectionArgs, SwitchSessionArgs, TabTarget,
-        TiledPlacementTarget, ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
+        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
+        SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, VisualCommand,
+        WriteToPaneArgs,
     },
     constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
@@ -295,7 +295,8 @@ struct FloatingPaneResize {
 
 /// The resolved target of a command that changes one client's own view of a
 /// floating pane ([`Command::MoveFloatingPane`], [`Command::SetPanePinned`],
-/// [`Command::SetPaneMinimized`], and [`Command::FocusPane`] on a floating
+/// [`Command::TogglePanePinned`], [`Command::SetPaneMinimized`],
+/// [`Command::TogglePaneMinimized`], and [`Command::FocusPane`] on a floating
 /// pane): the session that owns the pane, the client whose view changes, and
 /// the pane. The `Ok` half of [`Server::resolve_floating_pane_view_target`].
 struct FloatingPaneViewTarget {
@@ -304,8 +305,38 @@ struct FloatingPaneViewTarget {
     pane_id: PaneId,
 }
 
-/// The change a [`Command::SetPanePinned`] makes to the acting client's view
-/// of a floating pane.
+/// The on-or-off state that a command asks for in one client's view of the
+/// floating panes: whether a pane is pinned, whether a pane is minimized, or
+/// whether every floating pane is minimized.
+///
+/// [`Command::SetPanePinned`], [`Command::SetPaneMinimized`] and
+/// [`Command::SetAllFloatingPanesMinimized`] ask for `Set`.
+/// [`Command::TogglePanePinned`], [`Command::TogglePaneMinimized`] and
+/// [`Command::ToggleAllFloatingPanesMinimized`] ask for `Toggle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewFlagChange {
+    /// Turn the state on with `true`, and off with `false`.
+    Set(bool),
+    /// Turn the state to the opposite of what the view holds when the command
+    /// runs.
+    Toggle,
+}
+
+impl ViewFlagChange {
+    /// Whether the state is on after this change, in a view whose state is
+    /// `is_flag_on`: `Set(is_requested_on)` gives `is_requested_on`, and
+    /// `Toggle` gives `!is_flag_on`. `Toggle` on a pinned pane gives `false`,
+    /// an unpin.
+    fn is_flag_on_after(self, is_flag_on: bool) -> bool {
+        match self {
+            ViewFlagChange::Set(is_requested_on) => is_requested_on,
+            ViewFlagChange::Toggle => !is_flag_on,
+        }
+    }
+}
+
+/// The change a [`Command::SetPanePinned`] or [`Command::TogglePanePinned`]
+/// makes to the acting client's view of a floating pane.
 enum PanePinChange {
     /// Pin the pane at this top-left cell, counted from the client's
     /// pane-area origin.
@@ -466,17 +497,41 @@ impl Server {
             Command::MoveFloatingPane(command_args) => {
                 self.handle_move_floating_pane(command_id, &envelope.command_source, &command_args)
             }
-            Command::SetPanePinned(command_args) => {
-                self.handle_set_pane_pinned(command_id, &envelope.command_source, &command_args)
-            }
-            Command::SetPaneMinimized(command_args) => {
-                self.handle_set_pane_minimized(command_id, &envelope.command_source, &command_args)
-            }
+            Command::SetPanePinned(command_args) => self.handle_pane_pin_change(
+                command_id,
+                &envelope.command_source,
+                command_args.pane_id,
+                ViewFlagChange::Set(command_args.is_pinned),
+            ),
+            Command::TogglePanePinned(command_args) => self.handle_pane_pin_change(
+                command_id,
+                &envelope.command_source,
+                command_args.pane_id,
+                ViewFlagChange::Toggle,
+            ),
+            Command::SetPaneMinimized(command_args) => self.handle_pane_minimize_change(
+                command_id,
+                &envelope.command_source,
+                command_args.pane_id,
+                ViewFlagChange::Set(command_args.is_minimized),
+            ),
+            Command::TogglePaneMinimized(command_args) => self.handle_pane_minimize_change(
+                command_id,
+                &envelope.command_source,
+                command_args.pane_id,
+                ViewFlagChange::Toggle,
+            ),
             Command::SetAllFloatingPanesMinimized(command_args) => self
-                .handle_set_all_floating_panes_minimized(
+                .handle_all_floating_panes_minimize_change(
                     command_id,
                     &envelope.command_source,
-                    &command_args,
+                    ViewFlagChange::Set(command_args.is_minimized),
+                ),
+            Command::ToggleAllFloatingPanesMinimized => self
+                .handle_all_floating_panes_minimize_change(
+                    command_id,
+                    &envelope.command_source,
+                    ViewFlagChange::Toggle,
                 ),
             Command::FocusPane(command_args) => {
                 self.handle_focus_pane(command_id, &envelope.command_source, &command_args)

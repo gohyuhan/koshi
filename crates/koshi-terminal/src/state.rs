@@ -183,6 +183,16 @@ pub struct TerminalState {
     /// decoded path), or `None` until the shell reports one. Read by working-directory
     /// inheritance when a new pane spawns.
     reported_working_directory: Option<ReportedWorkingDirectory>,
+    /// Whether [`title`](Self::title) changed value since the last
+    /// [`take_title_change`](Self::take_title_change). The resume file does
+    /// not carry it: a state read back holds `false`.
+    is_title_changed: bool,
+    /// Whether
+    /// [`reported_working_directory`](Self::reported_working_directory)
+    /// changed value since the last
+    /// [`take_working_directory_change`](Self::take_working_directory_change).
+    /// The resume file does not carry it: a state read back holds `false`.
+    is_working_directory_changed: bool,
     /// The shell lifecycle point last reported through OSC 133.
     shell_integration_state: ShellIntegrationState,
     /// Shell-integration facts not yet taken by the terminal engine caller.
@@ -1128,6 +1138,8 @@ impl TerminalState {
             tab_stops: fields.tab_stops,
             title: fields.title,
             reported_working_directory: fields.reported_working_directory,
+            is_title_changed: false,
+            is_working_directory_changed: false,
             shell_integration_state: fields.shell_integration_state,
             shell_integration_facts: fields.shell_integration_facts,
             scrollback: fields.scrollback,
@@ -1316,6 +1328,8 @@ impl TerminalState {
             tab_stops: build_default_tab_stops(pty_size.column_count),
             title: None,
             reported_working_directory: None,
+            is_title_changed: false,
+            is_working_directory_changed: false,
             shell_integration_state: ShellIntegrationState::default(),
             shell_integration_facts: Vec::new(),
             scrollback: Scrollback::from_scrollback_limit(scrollback_limit),
@@ -1581,12 +1595,33 @@ impl TerminalState {
         self.title.as_deref()
     }
 
+    /// Whether the title ([`get_title`](Self::get_title)) changed value since
+    /// the last call, and clear the mark. An OSC 0/1/2 naming another title,
+    /// and a reset (`ESC c`) that cleared a title, set the mark. An OSC 0/1/2
+    /// that repeats the current title leaves it as it is.
+    ///
+    /// On a pane titled `htop`, `ESC ] 2 ; vim BEL` makes the next call give
+    /// `true`. A second `ESC ] 2 ; vim BEL` makes the call after that give
+    /// `false`.
+    pub fn take_title_change(&mut self) -> bool {
+        std::mem::take(&mut self.is_title_changed)
+    }
+
     /// The working directory last reported by the shell via OSC 7 (its host and
     /// decoded path), or `None` if none has been reported. The pane-spawn layer
     /// compares the host to the local machine before inheriting the path; a
     /// directory reported from a remote host (over SSH) is not opened locally.
     pub fn get_current_working_directory(&self) -> Option<&ReportedWorkingDirectory> {
         self.reported_working_directory.as_ref()
+    }
+
+    /// Whether the reported working directory
+    /// ([`get_current_working_directory`](Self::get_current_working_directory))
+    /// changed value since the last call, and clear the mark. An OSC 7 naming
+    /// another host or path sets the mark. An OSC 7 that repeats the current
+    /// directory, or that does not parse, leaves it as it is.
+    pub fn take_working_directory_change(&mut self) -> bool {
+        std::mem::take(&mut self.is_working_directory_changed)
     }
 
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).

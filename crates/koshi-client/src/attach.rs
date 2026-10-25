@@ -172,6 +172,7 @@ use ratatui::backend::Backend;
 use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
 
+use crate::floating_pane_tray::FloatingPaneTrayAnchor;
 use crate::input::{InputReadClock, KeyOutcome};
 use crate::mouse::MouseAction;
 use crate::PlacementInputAction;
@@ -936,7 +937,17 @@ impl<B: Backend> Screen<B> {
     /// rejected paint puts `client` back as it was before the frame and keeps
     /// the frame pending. Before a native image retry is due, it paints nothing
     /// and changes nothing. The paint shows no placement preview while
-    /// [`Client::is_floating_dock_selection_idle`] is `true`.
+    /// [`Client::is_floating_dock_selection_idle`] is `true`. The frame starts
+    /// the floating pane slides of an undock, a restore and a minimize only
+    /// while it shows no placement preview and reduced motion is off. It
+    /// starts restore and minimize slides only when the pending frame and the
+    /// last frame differ in which floating panes they list or which of them
+    /// are minimized ([`SessionSnapshot::has_same_floating_pane_visibility`]),
+    /// all from one tray anchor ([`Client::find_floating_pane_tray_anchor`]).
+    /// The tray layout that keeps the open tray in step with the pending frame
+    /// ([`Client::update_floating_pane_tray`]) is the one that anchor uses.
+    ///
+    /// [`SessionSnapshot::has_same_floating_pane_visibility`]: koshi_renderer::snapshot::SessionSnapshot::has_same_floating_pane_visibility
     fn commit_pending_snapshot(
         &mut self,
         client: &mut Client,
@@ -958,7 +969,8 @@ impl<B: Backend> Screen<B> {
             .client_snapshot
             .viewport_size;
         let committed_regions = self.compute_committed_regions(viewport_size);
-        client.update_floating_pane_tray(self.pending_snapshot.as_ref()?, &committed_regions);
+        let open_floating_pane_tray_layout =
+            client.update_floating_pane_tray(self.pending_snapshot.as_ref()?, &committed_regions);
         let placement_display = self.update_previewed_placement_display(client, current_time);
         let committed_placement_tab_ids = std::mem::take(&mut self.committed_placement_tab_ids);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
@@ -967,9 +979,25 @@ impl<B: Backend> Screen<B> {
             placement_display.is_some(),
             current_time,
         );
-        self.start_undock_animations(current_time);
-        self.start_restore_animations(client, &committed_regions, current_time);
-        self.start_minimize_animations(client, &committed_regions, current_time);
+        if placement_display.is_none() && !client.get_client_config().should_reduce_motion {
+            self.start_undock_animations(current_time);
+            let pending_snapshot = self.pending_snapshot.as_ref()?;
+            let has_floating_pane_visibility_change =
+                self.last_snapshot.as_ref().is_some_and(|last_snapshot| {
+                    !pending_snapshot
+                        .session_snapshot
+                        .has_same_floating_pane_visibility(&last_snapshot.session_snapshot)
+                });
+            if has_floating_pane_visibility_change {
+                let floating_pane_tray_anchor = client.find_floating_pane_tray_anchor(
+                    pending_snapshot,
+                    &committed_regions,
+                    open_floating_pane_tray_layout,
+                );
+                self.start_restore_animations(floating_pane_tray_anchor.as_ref(), current_time);
+                self.start_minimize_animations(floating_pane_tray_anchor.as_ref(), current_time);
+            }
+        }
         let animated_floating_pane_slots =
             self.update_floating_pane_animations(client, placement_display.is_some(), current_time);
         let snapshot = self.pending_snapshot.as_ref()?;
@@ -1447,19 +1475,18 @@ impl<B: Backend> Screen<B> {
     /// Start one slide at `current_time` for each pane that the pending frame
     /// draws floating and the frame this screen drew last names minimized. A
     /// pane whose minimize slide runs slides from the box that slide draws it
-    /// in, and its minimize slide ends. Every other pane slides from its tray
-    /// anchor in the pending frame
-    /// ([`Client::find_floating_pane_tray_anchor_rect`] with
-    /// `committed_regions`), and a pane with no tray anchor starts no slide. A
-    /// pane whose slide after an undock or a restore runs keeps it.
+    /// in, and its minimize slide ends. Every other pane slides from its box
+    /// in `floating_pane_tray_anchor`
+    /// ([`FloatingPaneTrayAnchor::find_anchor_rect`]), and a pane with no
+    /// such box starts no slide. A pane whose slide after an undock or a
+    /// restore runs keeps it.
     ///
     /// With the tray closed and its glyph `⧉` at `(72, 0)` over a pane area at
     /// `(0, 1)`, a pane restored to `(16, 4)` `48x13` slides from `(72, 0)`
     /// `1x1`.
     fn start_restore_animations(
         &mut self,
-        client: &Client,
-        committed_regions: &CommittedRegions,
+        floating_pane_tray_anchor: Option<&FloatingPaneTrayAnchor>,
         current_time: Instant,
     ) {
         let (Some(pending_snapshot), Some(last_snapshot)) =
@@ -1484,11 +1511,10 @@ impl<B: Backend> Screen<B> {
                     .floating_pane_minimize_animations
                     .remove(minimize_animation_index)
                     .compute_outer_rect(current_time),
-                None => match client.find_floating_pane_tray_anchor_rect(
-                    pending_snapshot,
-                    committed_regions,
-                    pane_id,
-                ) {
+                None => match floating_pane_tray_anchor.and_then(|floating_pane_tray_anchor| {
+                    floating_pane_tray_anchor
+                        .find_anchor_rect(&pending_snapshot.session_snapshot, pane_id)
+                }) {
                     Some(tray_anchor_rect) => tray_anchor_rect,
                     None => continue,
                 },
@@ -1505,19 +1531,18 @@ impl<B: Backend> Screen<B> {
     /// Start one minimize slide at `current_time` for each floating pane that
     /// the frame this screen drew last drew, and the pending frame names
     /// minimized. The slide runs from the box the last paint drew the pane in
-    /// to its tray anchor in the pending frame
-    /// ([`Client::find_floating_pane_tray_anchor_rect`] with
-    /// `committed_regions`), and draws the last frame's content of the pane
-    /// with no image placement. The pane's slide after an undock or a restore
-    /// ends. A pane with no tray anchor or no content in the last frame starts
-    /// no slide, and a pane whose minimize slide runs keeps it.
+    /// to its box in `floating_pane_tray_anchor`
+    /// ([`FloatingPaneTrayAnchor::find_anchor_rect`]), and draws the last
+    /// frame's content of the pane with no image placement. The pane's slide
+    /// after an undock or a restore ends. A pane with no such box or no
+    /// content in the last frame starts no slide, and a pane whose minimize
+    /// slide runs keeps it.
     ///
     /// With the tray closed and its glyph `⧉` at `(72, 0)` over a pane area at
     /// `(0, 1)`, a pane drawn at `(16, 4)` `48x13` slides to `(72, 0)` `1x1`.
     fn start_minimize_animations(
         &mut self,
-        client: &Client,
-        committed_regions: &CommittedRegions,
+        floating_pane_tray_anchor: Option<&FloatingPaneTrayAnchor>,
         current_time: Instant,
     ) {
         let (Some(pending_snapshot), Some(last_snapshot), Some(shown_viewer_paint)) = (
@@ -1543,11 +1568,10 @@ impl<B: Backend> Screen<B> {
             }
             let (Some(pane_snapshot), Some(to_outer_rect)) = (
                 last_snapshot.find_pane_snapshot(pane_id),
-                client.find_floating_pane_tray_anchor_rect(
-                    pending_snapshot,
-                    committed_regions,
-                    pane_id,
-                ),
+                floating_pane_tray_anchor.and_then(|floating_pane_tray_anchor| {
+                    floating_pane_tray_anchor
+                        .find_anchor_rect(&pending_snapshot.session_snapshot, pane_id)
+                }),
             ) else {
                 continue;
             };
@@ -3742,7 +3766,7 @@ fn dial_session(
 ///
 /// # Errors
 /// [`DialError::Refused`] carrying [`CliError::Runtime`] with the text of the
-/// [`SavedServerAtAddressError`](remote_client::SavedServerAtAddressError)
+/// [`SavedServerAtAddressError`]
 /// that [`find_saved_server_at_address`](remote_client::find_saved_server_at_address)
 /// gives when the store holds no single saved server at `server_address` or
 /// cannot be read, and nothing is dialled.
@@ -6816,7 +6840,7 @@ fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> i
 /// reads `koshi attach --remote lab`.
 ///
 /// With no single saved server at that address, the way back names the next
-/// step for each [`SavedServerAtAddressError`](remote_client::SavedServerAtAddressError):
+/// step for each [`SavedServerAtAddressError`]:
 ///
 /// - `NotSaved`: ``run `koshi remote list` to find the name that server is
 ///   saved under now, then reattach with `koshi attach --remote <server>
@@ -6824,8 +6848,8 @@ fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> i
 ///   machine, then reattach with the command it prints, giving <session id>
 ///   as the session``.
 /// - `SavedMoreThanOnce`: ``run `koshi remote list` to see the saved servers
-///   at <address>, keep one of them, then reattach with `koshi attach --remote
-///   <address> <session id>` ``.
+///   at <address>, keep one of them, then reattach with
+///   `koshi attach --remote <address> <session id>` ``.
 /// - `StoreUnreadable`: ``once the saved servers can be read, run `koshi
 ///   attach --remote <address>` to see that server's sessions; …``, the two
 ///   commands a saved server gets, naming the address.

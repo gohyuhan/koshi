@@ -19,11 +19,11 @@ mod tests;
 /// The session name with the `[v…]` version badge sits on the left and the mode
 /// tag on the right, painted as colored text over that fill. While the session
 /// holds a floating pane, the tray button ` ⧉ ` sits left of the mode tag in
-/// the mode tag's style, in reverse video while the viewer's tray is open. Only the tab list
-/// between them carries block backgrounds — each tab is a two-block ribbon on
-/// its own stop of the theme's chrome ramp (light-purple → light-blue by
-/// default). A tab that does not fit is dropped whole, and a `◀` or `▶` marks
-/// the side it went off.
+/// the mode tag's style, in reverse video while the viewer's tray is open.
+/// Only the tab list between them carries block backgrounds — each tab is a
+/// two-block ribbon on its own stop of the theme's chrome ramp (light-purple →
+/// light-blue by default). A tab that does not fit is dropped whole, and a `◀`
+/// or `▶` marks the side it went off.
 ///
 /// The block widths and per-tab cell spans come from [`solve_tabline_layout`], the
 /// same solve [`crate::resolve_hit_region()`] reads. A row outside `screen_buffer` paints
@@ -183,8 +183,9 @@ pub(crate) struct VisibleTabSpan {
 /// While `tabline_inputs.has_floating_panes` is `true`, the tray button takes
 /// the three cells left of the right block when the row has them, and the gap
 /// ends at the button. If every tab fits in the gap, all are shown from index 0
-/// with no arrows. Otherwise the strip scrolls, a one-cell arrow is reserved on each
-/// side and drawn on whichever side still hides tabs, and the window starts at:
+/// with no arrows. Otherwise the strip scrolls, a one-cell arrow is reserved on
+/// each side and drawn on whichever side still hides tabs, and the window
+/// starts at:
 ///
 /// - the client's
 ///   [`tabline_offset`](crate::snapshot::ViewerChrome::tabline_offset) when it
@@ -431,8 +432,7 @@ pub(crate) fn format_version_badge_text() -> String {
 ///
 /// `session_block_room` is the cells the block has before the tray button, or
 /// before the right-anchored mode tag with no tray button. When both parts do
-/// not fit in `session_block_room`, the badge is
-/// dropped whole: a 16-cell row
+/// not fit in `session_block_room`, the badge is dropped whole: a 16-cell row
 /// ending in the 6-cell ` BASE ` tag shows ` s ` alone, never a badge cut off
 /// part-way. The returned width is not clipped to `session_block_room`; a name
 /// wider than `session_block_room` carries its own full width out.

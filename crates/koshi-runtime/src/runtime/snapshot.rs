@@ -56,11 +56,11 @@ impl Server {
     /// `is_every_pane_suppressed`. `session_snapshot.floating_pane_slots`
     /// holds the floating panes the client shows, placed for it.
     /// `session_snapshot.floating_panes` lists every floating pane of the
-    /// session, in the order the panes became floating, with its title and
-    /// whether the client minimized it. `pane_snapshots` holds one entry per
-    /// tiled slot, then one per floating
-    /// pane slot, then one per pane of the client's placement preview that
-    /// neither lists
+    /// session, in the order the panes became floating: `Shown` while the
+    /// client shows it, and `Minimized` with its title while the client
+    /// minimized it. `pane_snapshots` holds one entry per tiled slot, then one
+    /// per floating pane slot, then one per pane of the client's placement
+    /// preview that neither lists
     /// (`ClientPlacementPreview::list_preview_pane_ids`).
     /// `placement_preview` is the client's preview while it names a target in
     /// this session, else `None`.
@@ -106,12 +106,18 @@ impl Server {
                 .floating_set
                 .list_pane_ids()
                 .into_iter()
-                .map(|pane_id| FloatingPane {
-                    pane_id,
-                    pane_title: self.terminal_engine_by_pane_id.get(&pane_id).and_then(
-                        |terminal_engine| resolve_pane_title(terminal_engine.get_terminal_state()),
-                    ),
-                    is_minimized: !client.is_floating_pane_shown(pane_id),
+                .map(|pane_id| {
+                    if client.is_floating_pane_shown(pane_id) {
+                        return FloatingPane::Shown { pane_id };
+                    }
+                    FloatingPane::Minimized {
+                        pane_id,
+                        pane_title: self.terminal_engine_by_pane_id.get(&pane_id).and_then(
+                            |terminal_engine| {
+                                resolve_pane_title(terminal_engine.get_terminal_state())
+                            },
+                        ),
+                    }
                 })
                 .collect(),
         };
@@ -311,6 +317,38 @@ fn resolve_pane_title(terminal_state: &TerminalState) -> Option<String> {
                 format_display_path(reported_working_directory.get_working_directory_path())
             })
             .or_else(|| terminal_state.get_title().map(str::to_owned)),
+    }
+}
+
+/// Whether [`resolve_pane_title`] can give `terminal_state` another title than
+/// it gave before one terminal advance. The advance started on
+/// `active_screen_before`, changed the OSC 0/1/2 title when
+/// `is_title_changed`, and changed the OSC 7 working directory when
+/// `is_working_directory_changed`.
+///
+/// - A change of the active screen counts.
+/// - On the alternate screen, a title change counts.
+/// - On the primary screen, a working directory change counts, and a title
+///   change counts while the pane reports no working directory.
+///
+/// A shell in `/home/user/project` that sets its title to `make` gives
+/// `false`, and `cd /tmp` gives `true`.
+pub(crate) fn is_pane_title_input_changed(
+    terminal_state: &TerminalState,
+    active_screen_before: Screen,
+    is_title_changed: bool,
+    is_working_directory_changed: bool,
+) -> bool {
+    let active_screen = terminal_state.get_active_screen();
+    if active_screen != active_screen_before {
+        return true;
+    }
+    match active_screen {
+        Screen::Alternate => is_title_changed,
+        Screen::Primary => {
+            is_working_directory_changed
+                || (is_title_changed && terminal_state.get_current_working_directory().is_none())
+        }
     }
 }
 

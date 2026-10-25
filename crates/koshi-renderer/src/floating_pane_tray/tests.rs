@@ -61,10 +61,9 @@ pub(crate) fn build_tray_test_render_snapshot(
             floating_pane_slots: Vec::new(),
             floating_panes: floating_pane_titles
                 .iter()
-                .map(|floating_pane_title| FloatingPane {
+                .map(|floating_pane_title| FloatingPane::Minimized {
                     pane_id: PaneId::new(),
                     pane_title: Some(floating_pane_title.to_string()),
-                    is_minimized: true,
                 })
                 .collect(),
         },
@@ -95,9 +94,14 @@ pub(crate) fn show_tray_test_floating_pane(
     outer_rect: Rect,
 ) -> PaneId {
     let floating_pane = &mut render_snapshot.session_snapshot.floating_panes[tile_index];
-    floating_pane.is_minimized = false;
-    let pane_id = floating_pane.pane_id;
-    let pane_title = floating_pane.pane_title.clone();
+    let FloatingPane::Minimized {
+        pane_id,
+        pane_title,
+    } = floating_pane.clone()
+    else {
+        panic!("tile {tile_index} shows a minimized pane before it is shown");
+    };
+    *floating_pane = FloatingPane::Shown { pane_id };
     render_snapshot
         .session_snapshot
         .floating_pane_slots
@@ -146,8 +150,9 @@ fn find_core_button_rect(render_snapshot: &RenderSnapshot) -> Option<Rect> {
 }
 
 /// The `80x24` viewport the tray tests paint: the tabline on row `0`, the
-/// pane area at `(0, 1)` `80x22`, and the mode tag ` BASE ` at column `74`.
-const EIGHTY_BY_TWENTY_FOUR_SIZE: Size = Size {
+/// pane area at `(0, 1)` `80x22`, the mode tag ` BASE ` at column `74`, and
+/// the tray of a session with a floating pane at `(5, 1)` `69x8`.
+pub(crate) const EIGHTY_BY_TWENTY_FOUR_SIZE: Size = Size {
     column_count: 80,
     row_count: 24,
 };
@@ -212,26 +217,26 @@ fn an_eighty_column_tray_holds_six_slots_per_row_under_the_button() {
 
     let tray_layout = compute_core_tray_layout(&render_snapshot).expect("the tray fits");
 
-    assert_eq!(tray_layout.tray_rect, build_cell_rect(17, 1, 57, 8));
+    assert_eq!(tray_layout.tray_rect, build_cell_rect(5, 1, 69, 8));
     assert_eq!(tray_layout.slots_per_row, 6);
     assert_eq!(
         tray_layout.slot_rects,
         [
-            build_cell_rect(19, 2, 8, 3),
-            build_cell_rect(28, 2, 8, 3),
-            build_cell_rect(37, 2, 8, 3),
-            build_cell_rect(46, 2, 8, 3),
-            build_cell_rect(55, 2, 8, 3),
-            build_cell_rect(64, 2, 8, 3),
-            build_cell_rect(19, 5, 8, 3),
-            build_cell_rect(28, 5, 8, 3),
-            build_cell_rect(37, 5, 8, 3),
-            build_cell_rect(46, 5, 8, 3),
-            build_cell_rect(55, 5, 8, 3),
-            build_cell_rect(64, 5, 8, 3),
+            build_cell_rect(7, 2, 10, 3),
+            build_cell_rect(18, 2, 10, 3),
+            build_cell_rect(29, 2, 10, 3),
+            build_cell_rect(40, 2, 10, 3),
+            build_cell_rect(51, 2, 10, 3),
+            build_cell_rect(62, 2, 10, 3),
+            build_cell_rect(7, 5, 10, 3),
+            build_cell_rect(18, 5, 10, 3),
+            build_cell_rect(29, 5, 10, 3),
+            build_cell_rect(40, 5, 10, 3),
+            build_cell_rect(51, 5, 10, 3),
+            build_cell_rect(62, 5, 10, 3),
         ]
     );
-    assert_eq!(tray_layout.header_title_rect, build_cell_rect(19, 1, 38, 1));
+    assert_eq!(tray_layout.header_title_rect, build_cell_rect(7, 1, 50, 1));
     assert_eq!(
         tray_layout.toggle_minimize_all_rect,
         Some(build_cell_rect(58, 1, 14, 1))
@@ -245,7 +250,7 @@ fn the_restore_all_label_takes_one_cell_less_than_the_minimize_all_label() {
 
     let tray_layout = compute_core_tray_layout(&render_snapshot).expect("the tray fits");
 
-    assert_eq!(tray_layout.header_title_rect, build_cell_rect(19, 1, 39, 1));
+    assert_eq!(tray_layout.header_title_rect, build_cell_rect(7, 1, 51, 1));
     assert_eq!(
         tray_layout.toggle_minimize_all_rect,
         Some(build_cell_rect(59, 1, 13, 1))
@@ -270,7 +275,7 @@ fn the_label_reads_restore_all_only_while_every_floating_pane_is_minimized() {
 }
 
 #[test]
-fn a_forty_column_tray_holds_three_slots_per_row_and_still_twelve_slots() {
+fn a_forty_column_tray_holds_two_slots_per_row_and_still_twelve_slots() {
     let render_snapshot = build_tray_test_render_snapshot(
         Size {
             column_count: 40,
@@ -282,13 +287,14 @@ fn a_forty_column_tray_holds_three_slots_per_row_and_still_twelve_slots() {
     let tray_layout = compute_core_tray_layout(&render_snapshot).expect("the tray fits");
 
     // ` BASE ` starts at column 34, so the button takes 31 to 33 and the tray
-    // ends at column 34: 3 slots per row is 30 columns, 4 rows is 14 rows.
-    assert_eq!(tray_layout.tray_rect, build_cell_rect(4, 1, 30, 14));
-    assert_eq!(tray_layout.slots_per_row, 3);
-    assert_eq!(tray_layout.slot_rects[0], build_cell_rect(6, 2, 8, 3));
-    assert_eq!(tray_layout.slot_rects[3], build_cell_rect(6, 5, 8, 3));
-    assert_eq!(tray_layout.slot_rects[11], build_cell_rect(24, 11, 8, 3));
-    assert_eq!(tray_layout.header_title_rect, build_cell_rect(6, 1, 12, 1));
+    // ends at column 34: 3 slots per row would take 36 columns, 2 slots per
+    // row take 25, and 6 rows take 20 rows.
+    assert_eq!(tray_layout.tray_rect, build_cell_rect(9, 1, 25, 20));
+    assert_eq!(tray_layout.slots_per_row, 2);
+    assert_eq!(tray_layout.slot_rects[0], build_cell_rect(11, 2, 10, 3));
+    assert_eq!(tray_layout.slot_rects[3], build_cell_rect(22, 5, 10, 3));
+    assert_eq!(tray_layout.slot_rects[11], build_cell_rect(22, 17, 10, 3));
+    assert_eq!(tray_layout.header_title_rect, build_cell_rect(11, 1, 7, 1));
     assert_eq!(
         tray_layout.toggle_minimize_all_rect,
         Some(build_cell_rect(19, 1, 13, 1))
@@ -297,12 +303,12 @@ fn a_forty_column_tray_holds_three_slots_per_row_and_still_twelve_slots() {
 
 #[test]
 fn a_one_slot_tray_fits_a_pane_area_of_exactly_its_height_and_drops_the_label() {
-    // ` BASE ` starts at column 12 of an 18-column row, so the button takes 9
-    // to 11 and 12 columns hold one slot per row: 12 rows of slots are 38
+    // ` BASE ` starts at column 14 of a 20-column row, so the button takes 11
+    // to 13 and 14 columns hold one slot per row: 12 rows of slots are 38
     // rows tall, the pane area's height.
     let render_snapshot = build_tray_test_render_snapshot(
         Size {
-            column_count: 18,
+            column_count: 20,
             row_count: 40,
         },
         &["htop"],
@@ -310,10 +316,10 @@ fn a_one_slot_tray_fits_a_pane_area_of_exactly_its_height_and_drops_the_label() 
 
     let tray_layout = compute_core_tray_layout(&render_snapshot).expect("the tray fits");
 
-    assert_eq!(tray_layout.tray_rect, build_cell_rect(0, 1, 12, 38));
+    assert_eq!(tray_layout.tray_rect, build_cell_rect(0, 1, 14, 38));
     assert_eq!(tray_layout.slots_per_row, 1);
-    assert_eq!(tray_layout.slot_rects[11], build_cell_rect(2, 35, 8, 3));
-    assert_eq!(tray_layout.header_title_rect, build_cell_rect(2, 1, 8, 1));
+    assert_eq!(tray_layout.slot_rects[11], build_cell_rect(2, 35, 10, 3));
+    assert_eq!(tray_layout.header_title_rect, build_cell_rect(2, 1, 10, 1));
     assert_eq!(tray_layout.toggle_minimize_all_rect, None);
 }
 
@@ -343,17 +349,17 @@ fn a_pane_area_shorter_than_the_tray_has_no_room_for_it() {
     assert_eq!(compute_core_tray_layout(&short_render_snapshot), None);
     assert_eq!(
         compute_core_tray_layout(&exact_render_snapshot).map(|tray_layout| tray_layout.tray_rect),
-        Some(build_cell_rect(17, 1, 57, 8))
+        Some(build_cell_rect(5, 1, 69, 8))
     );
 }
 
 #[test]
 fn a_pane_area_narrower_than_a_one_slot_tray_left_of_the_border_has_no_room_for_it() {
-    // ` BASE ` starts at column 11 of a 17-column row, so the tray would end
-    // at column 11: 11 columns, one short of a one-slot tray.
+    // ` BASE ` starts at column 13 of a 19-column row, so the tray would end
+    // at column 13: 13 columns, one short of a one-slot tray.
     let render_snapshot = build_tray_test_render_snapshot(
         Size {
-            column_count: 17,
+            column_count: 19,
             row_count: 40,
         },
         &["htop"],
@@ -361,7 +367,7 @@ fn a_pane_area_narrower_than_a_one_slot_tray_left_of_the_border_has_no_room_for_
 
     assert_eq!(
         find_core_button_rect(&render_snapshot),
-        Some(build_cell_rect(8, 0, 3, 1))
+        Some(build_cell_rect(10, 0, 3, 1))
     );
     assert_eq!(compute_core_tray_layout(&render_snapshot), None);
 }
@@ -383,6 +389,6 @@ fn the_drawn_tray_follows_the_viewers_tray_state() {
                 .build_painted_frame_layout(build_open_tray_viewer_chrome(0), &committed_regions)
         )
         .map(|tray_layout| tray_layout.tray_rect),
-        Some(build_cell_rect(17, 1, 57, 8))
+        Some(build_cell_rect(5, 1, 69, 8))
     );
 }

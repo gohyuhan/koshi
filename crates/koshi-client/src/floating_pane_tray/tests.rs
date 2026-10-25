@@ -4,8 +4,8 @@
 //! the ones it leaves to the normal path, and the keys its keymap mode binds.
 //!
 //! Every frame here is `80x24`: the tray button ` ⧉ ` takes `(71, 0)` to
-//! `(73, 0)`, and the tray takes `(17, 1)` `57x8`, tile `i` at
-//! `(19 + 9 * (i % 6), 2 + 3 * (i / 6))` `8x3` and the header label from
+//! `(73, 0)`, and the tray takes `(5, 1)` `69x8`, tile `i` at
+//! `(7 + 11 * (i % 6), 2 + 3 * (i / 6))` `10x3` and the header label from
 //! `(58, 1)`.
 
 use super::*;
@@ -17,19 +17,23 @@ use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{ModeBindings, ModeName};
 use koshi_core::action::ClientActionKind;
-use koshi_core::command::{FocusPaneArgs, FocusTarget};
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::command::{ClearSelectionArgs, FocusPaneArgs, FocusTarget, VisualCommand};
+use koshi_core::ids::SessionId;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use koshi_core::mouse::{MouseTracking, ScrollDirection};
-use koshi_observability::cleanup::TerminalCleanupGuard;
-use koshi_renderer::snapshot::Reconnecting;
+use koshi_renderer::snapshot::{
+    FloatingPane, FloatingPaneMoveDraft, PlacementHandleHover, Reconnecting,
+};
 
+use crate::attach::tests::build_plain_chord;
+use crate::input::tests::{build_client_viewing, find_submitted_command};
 use crate::input::KeyOutcome;
 use crate::mouse::tests::{
-    add_floating_mouse_pane, build_mouse_frame, build_plain_mouse_pane,
-    build_render_snapshot_from_mouse_frame,
+    add_floating_mouse_pane, build_left_mouse_press, build_mouse_event, build_mouse_frame,
+    build_plain_mouse_pane, build_render_snapshot_from_mouse_frame,
 };
-use crate::tests::{build_core_bound_action, TEST_VIEWPORT_SIZE};
+use crate::mouse::WheelDecision;
+use crate::tests::build_core_bound_action;
 use crate::PaneMoveMode;
 
 /// A frame of one focused tiled pane and one floating pane per entry of
@@ -37,7 +41,7 @@ use crate::PaneMoveMode;
 /// when its entry is `true`, at pane-area `(2 + 10 * i, 12)` `9x6`, below the
 /// tray, and minimized it otherwise. Returns the frame and the floating pane
 /// ids.
-fn build_tray_mouse_frame(is_shown_by_tile: &[bool]) -> (MouseFrame, Vec<PaneId>) {
+pub(crate) fn build_tray_mouse_frame(is_shown_by_tile: &[bool]) -> (MouseFrame, Vec<PaneId>) {
     let tiled_pane_id = PaneId::new();
     let mut mouse_frame = build_mouse_frame(
         &[build_plain_mouse_pane(tiled_pane_id)],
@@ -67,40 +71,25 @@ fn build_tray_mouse_frame(is_shown_by_tile: &[bool]) -> (MouseFrame, Vec<PaneId>
             mouse_frame
                 .session_snapshot
                 .floating_panes
-                .push(FloatingPane {
+                .push(FloatingPane::Minimized {
                     pane_id: floating_pane_id,
                     pane_title: None,
-                    is_minimized: true,
                 });
         }
     }
     (mouse_frame, floating_pane_ids)
 }
 
-/// A client `client_id` that recorded the session of `mouse_frame` and
-/// applied `mouse_frame`.
-fn build_client_viewing_with_id(mouse_frame: &MouseFrame, client_id: ClientId) -> Client {
-    let mut client = Client::from_client_id_and_viewport_size(
-        client_id,
-        TEST_VIEWPORT_SIZE,
-        TerminalCleanupGuard::new(),
-    );
-    client.set_session_id(mouse_frame.session_snapshot.session_id);
-    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(mouse_frame));
-    client
-}
-
-/// A client that recorded the session of `mouse_frame` and applied
-/// `mouse_frame`.
-fn build_client_viewing(mouse_frame: &MouseFrame) -> Client {
-    build_client_viewing_with_id(mouse_frame, ClientId::new())
-}
-
-/// A client that applied `mouse_frame` and opened its tray with a key.
-fn build_client_with_open_tray(mouse_frame: &MouseFrame) -> Client {
+/// A client that applied `mouse_frame`, whose focused pane is tiled, and
+/// opened its tray with a key, on tile `0`.
+pub(crate) fn build_client_with_open_tray(mouse_frame: &MouseFrame) -> Client {
     let mut client = build_client_viewing(mouse_frame);
     client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(mouse_frame));
-    assert!(client.floating_pane_tray.is_some(), "the tray opens");
+    assert_eq!(
+        client.floating_pane_tray,
+        build_open_floating_pane_tray(0, None),
+        "the tray opens on tile 0"
+    );
     client
 }
 
@@ -116,42 +105,11 @@ fn build_open_floating_pane_tray(
     })
 }
 
-/// The mouse event `mouse_kind` at screen `(column, row)` with no modifier
-/// held.
-fn build_mouse_input(mouse_kind: MouseKind, column: u16, row: u16) -> MouseInput {
-    MouseInput {
-        mouse_kind,
-        position: Point { column, row },
-        modifier_flags: BindingModifierFlags::NONE,
-    }
-}
-
-/// A left press at screen `(column, row)`.
-fn build_left_press(column: u16, row: u16) -> MouseInput {
-    build_mouse_input(MouseKind::Press(MouseButton::Left), column, row)
-}
-
-/// The command `placement_input_action` sends, or `None` when it sends none.
-fn find_submitted_command(placement_input_action: PlacementInputAction) -> Option<Command> {
-    match placement_input_action {
-        PlacementInputAction::SubmitCommand { command, .. } => Some(command),
-        PlacementInputAction::FocusPane { .. }
-        | PlacementInputAction::ConfirmPlacement { .. }
-        | PlacementInputAction::Consumed => None,
-    }
-}
-
-/// `SetPaneMinimized` of `pane_id` to `is_minimized`.
-fn build_set_pane_minimized_command(pane_id: PaneId, is_minimized: bool) -> Command {
-    Command::SetPaneMinimized(SetPaneMinimizedArgs {
+/// `TogglePaneMinimized` of `pane_id`.
+fn build_toggle_pane_minimized_command(pane_id: PaneId) -> Command {
+    Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
         pane_id: Some(pane_id),
-        is_minimized,
     })
-}
-
-/// `SetAllFloatingPanesMinimized` to `is_minimized`.
-fn build_set_all_minimized_command(is_minimized: bool) -> Command {
-    Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs { is_minimized })
 }
 
 /// A redial in progress: the first attempt, the next in 2 seconds.
@@ -165,11 +123,6 @@ fn build_redialing_link_status() -> LinkStatus {
 /// The chord of `named_key` with no modifier held.
 fn build_named_key_chord(named_key: NamedKey) -> KeyChord {
     KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(named_key))
-}
-
-/// The chord of `key_character` with no modifier held.
-fn build_character_key_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(key_character))
 }
 
 #[test]
@@ -249,7 +202,14 @@ fn opening_the_tray_ends_a_held_capture_and_owes_its_program_a_release() {
     let tiled_pane_id = mouse_frame.mouse_panes[0].pane_id;
     let mut client = build_client_viewing(&mouse_frame);
     // The tiled pane's content starts at screen (1, 2).
-    client.handle_mouse(build_left_press(40, 20), &mouse_frame, Instant::now());
+    client.handle_mouse(
+        build_left_mouse_press(Point {
+            column: 40,
+            row: 20,
+        }),
+        &mouse_frame,
+        Instant::now(),
+    );
 
     client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
 
@@ -268,21 +228,9 @@ fn opening_the_tray_ends_a_held_capture_and_owes_its_program_a_release() {
 }
 
 #[test]
-fn a_viewer_action_outside_the_tray_closes_it_and_the_minimize_all_toggle_keeps_it_open() {
+fn a_viewer_action_outside_the_tray_closes_it() {
     let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true, false]);
     let mut client = build_client_with_open_tray(&mouse_frame);
-
-    assert_eq!(
-        find_submitted_command(client.apply_client_action(
-            ClientActionKind::ToggleMinimizeAllFloatingPanes,
-            Some(&mouse_frame)
-        )),
-        Some(build_set_all_minimized_command(true))
-    );
-    assert_eq!(
-        client.floating_pane_tray,
-        build_open_floating_pane_tray(0, None)
-    );
 
     assert_eq!(
         client.apply_client_action(ClientActionKind::CancelDockUndock, Some(&mouse_frame)),
@@ -320,7 +268,9 @@ fn a_lock_mouse_select_focus_link_or_session_change_closes_the_tray() {
         assert_eq!(client.floating_pane_tray, None, "{change_name}");
     }
 
-    let mut client = build_client_with_open_tray(&mouse_frame);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.set_session_id(session_id);
+    client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
     client.set_session_id(session_id);
     client.set_lock_mode(LockMode::Normal);
     client.set_mouse_selection_enabled(false);
@@ -370,7 +320,7 @@ fn the_arrow_keys_move_the_selection_inside_the_grid_without_wrapping() {
 }
 
 #[test]
-fn the_tile_toggle_minimizes_a_shown_pane_and_restores_a_minimized_one() {
+fn the_tile_toggle_sends_a_minimize_toggle_for_a_shown_and_a_minimized_pane() {
     let (mouse_frame, floating_pane_ids) = build_tray_mouse_frame(&[true, false]);
     let mut client = build_client_with_open_tray(&mouse_frame);
 
@@ -379,7 +329,7 @@ fn the_tile_toggle_minimizes_a_shown_pane_and_restores_a_minimized_one() {
             client
                 .apply_client_action(ClientActionKind::ToggleSelectedTrayTile, Some(&mouse_frame))
         ),
-        Some(build_set_pane_minimized_command(floating_pane_ids[0], true))
+        Some(build_toggle_pane_minimized_command(floating_pane_ids[0]))
     );
     client.apply_client_action(
         ClientActionKind::SelectTrayTile(Direction::Right),
@@ -390,50 +340,13 @@ fn the_tile_toggle_minimizes_a_shown_pane_and_restores_a_minimized_one() {
             client
                 .apply_client_action(ClientActionKind::ToggleSelectedTrayTile, Some(&mouse_frame))
         ),
-        Some(build_set_pane_minimized_command(
-            floating_pane_ids[1],
-            false
-        ))
+        Some(build_toggle_pane_minimized_command(floating_pane_ids[1]))
     );
 
     client.apply_client_action(ClientActionKind::CloseFloatingPaneTray, Some(&mouse_frame));
     assert_eq!(client.floating_pane_tray, None);
     assert_eq!(
         client.apply_client_action(ClientActionKind::ToggleSelectedTrayTile, Some(&mouse_frame)),
-        PlacementInputAction::Consumed
-    );
-}
-
-#[test]
-fn the_minimize_all_toggle_restores_only_while_every_floating_pane_is_minimized() {
-    let (some_shown_mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[false, true]);
-    let (none_shown_mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[false, false]);
-    let (no_pane_mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[]);
-    let mut client = build_client_viewing(&some_shown_mouse_frame);
-
-    assert_eq!(
-        find_submitted_command(client.apply_client_action(
-            ClientActionKind::ToggleMinimizeAllFloatingPanes,
-            Some(&some_shown_mouse_frame)
-        )),
-        Some(build_set_all_minimized_command(true))
-    );
-    assert_eq!(
-        find_submitted_command(client.apply_client_action(
-            ClientActionKind::ToggleMinimizeAllFloatingPanes,
-            Some(&none_shown_mouse_frame)
-        )),
-        Some(build_set_all_minimized_command(false))
-    );
-    assert_eq!(
-        client.apply_client_action(
-            ClientActionKind::ToggleMinimizeAllFloatingPanes,
-            Some(&no_pane_mouse_frame)
-        ),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::ToggleMinimizeAllFloatingPanes, None),
         PlacementInputAction::Consumed
     );
 }
@@ -446,18 +359,32 @@ fn a_frame_with_fewer_floating_panes_moves_the_selection_and_one_with_none_close
     let mut client = build_client_with_open_tray(&three_pane_mouse_frame);
     client.floating_pane_tray = build_open_floating_pane_tray(2, Some(2));
 
-    client.update_floating_pane_tray(
-        &build_render_snapshot_from_mouse_frame(&two_pane_mouse_frame),
-        &two_pane_mouse_frame.committed_regions,
+    assert_eq!(
+        client
+            .update_floating_pane_tray(
+                &build_render_snapshot_from_mouse_frame(&two_pane_mouse_frame),
+                &two_pane_mouse_frame.committed_regions,
+            )
+            .map(|tray_layout| tray_layout.tray_rect),
+        Some(Rect::from_origin_and_size(
+            Point { column: 5, row: 1 },
+            Size {
+                column_count: 69,
+                row_count: 8,
+            },
+        ))
     );
     assert_eq!(
         client.floating_pane_tray,
         build_open_floating_pane_tray(1, None)
     );
 
-    client.update_floating_pane_tray(
-        &build_render_snapshot_from_mouse_frame(&no_pane_mouse_frame),
-        &no_pane_mouse_frame.committed_regions,
+    assert_eq!(
+        client.update_floating_pane_tray(
+            &build_render_snapshot_from_mouse_frame(&no_pane_mouse_frame),
+            &no_pane_mouse_frame.committed_regions,
+        ),
+        None
     );
     assert_eq!(client.floating_pane_tray, None);
 }
@@ -474,11 +401,13 @@ fn a_frame_whose_pane_area_is_too_short_for_the_tray_closes_it() {
     let mut short_render_snapshot = build_render_snapshot_from_mouse_frame(&mouse_frame);
     short_render_snapshot.client_snapshot.viewport_size = short_viewport_size;
 
-    client.update_floating_pane_tray(
-        &short_render_snapshot,
-        &CommittedRegions::build_core(short_viewport_size, 1),
+    assert_eq!(
+        client.update_floating_pane_tray(
+            &short_render_snapshot,
+            &CommittedRegions::build_core(short_viewport_size, 1),
+        ),
+        None
     );
-
     assert_eq!(client.floating_pane_tray, None);
 }
 
@@ -495,7 +424,11 @@ fn a_left_click_on_the_button_opens_the_tray_and_drops_an_open_sequence() {
     );
 
     assert_eq!(
-        client.handle_mouse(build_left_press(72, 0), &mouse_frame, Instant::now()),
+        client.handle_mouse(
+            build_left_mouse_press(Point { column: 72, row: 0 }),
+            &mouse_frame,
+            Instant::now()
+        ),
         Vec::new()
     );
     assert_eq!(
@@ -505,7 +438,10 @@ fn a_left_click_on_the_button_opens_the_tray_and_drops_an_open_sequence() {
     assert_eq!(client.get_pending_key_sequence(), None);
 
     assert_eq!(
-        client.handle_floating_pane_tray_mouse(build_left_press(71, 0), &mouse_frame),
+        client.handle_floating_pane_tray_mouse(
+            build_left_mouse_press(Point { column: 71, row: 0 }),
+            &mouse_frame
+        ),
         Some(Vec::new())
     );
     assert_eq!(client.floating_pane_tray, None);
@@ -517,10 +453,21 @@ fn a_closed_tray_leaves_every_mouse_event_to_the_normal_path_and_another_mode_ke
     let mut client = build_client_viewing(&mouse_frame);
 
     for mouse_input in [
-        build_left_press(40, 20),
-        build_left_press(72, 0),
-        build_mouse_input(MouseKind::Press(MouseButton::Right), 72, 0),
-        build_mouse_input(MouseKind::Motion, 72, 0),
+        build_left_mouse_press(Point {
+            column: 40,
+            row: 20,
+        }),
+        build_left_mouse_press(Point { column: 72, row: 0 }),
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Right),
+            Point { column: 72, row: 0 },
+            BindingModifierFlags::NONE,
+        ),
+        build_mouse_event(
+            MouseKind::Motion,
+            Point { column: 72, row: 0 },
+            BindingModifierFlags::NONE,
+        ),
     ] {
         assert_eq!(
             client.handle_floating_pane_tray_mouse(mouse_input, &mouse_frame),
@@ -532,7 +479,11 @@ fn a_closed_tray_leaves_every_mouse_event_to_the_normal_path_and_another_mode_ke
 
     client.pane_move_mode = Some(PaneMoveMode::Choice);
     assert_eq!(
-        client.handle_mouse(build_left_press(72, 0), &mouse_frame, Instant::now()),
+        client.handle_mouse(
+            build_left_mouse_press(Point { column: 72, row: 0 }),
+            &mouse_frame,
+            Instant::now()
+        ),
         Vec::new()
     );
     assert_eq!(client.floating_pane_tray, None);
@@ -547,7 +498,11 @@ fn the_pointer_over_a_tile_hovers_it_and_no_pane() {
 
     assert_eq!(
         client.handle_floating_pane_tray_mouse(
-            build_mouse_input(MouseKind::Motion, 30, 3),
+            build_mouse_event(
+                MouseKind::Motion,
+                Point { column: 20, row: 3 },
+                BindingModifierFlags::NONE
+            ),
             &mouse_frame
         ),
         Some(Vec::new())
@@ -560,7 +515,11 @@ fn the_pointer_over_a_tile_hovers_it_and_no_pane() {
 
     assert_eq!(
         client.handle_floating_pane_tray_mouse(
-            build_mouse_input(MouseKind::Motion, 60, 1),
+            build_mouse_event(
+                MouseKind::Motion,
+                Point { column: 60, row: 1 },
+                BindingModifierFlags::NONE
+            ),
             &mouse_frame
         ),
         Some(Vec::new())
@@ -572,7 +531,14 @@ fn the_pointer_over_a_tile_hovers_it_and_no_pane() {
 
     assert_eq!(
         client.handle_floating_pane_tray_mouse(
-            build_mouse_input(MouseKind::Motion, 40, 20),
+            build_mouse_event(
+                MouseKind::Motion,
+                Point {
+                    column: 40,
+                    row: 20
+                },
+                BindingModifierFlags::NONE
+            ),
             &mouse_frame
         ),
         None
@@ -589,9 +555,12 @@ fn a_click_on_a_tile_selects_it_and_toggles_its_pane() {
     let mut client = build_client_with_open_tray(&mouse_frame);
 
     assert_eq!(
-        client.handle_floating_pane_tray_mouse(build_left_press(30, 3), &mouse_frame),
+        client.handle_floating_pane_tray_mouse(
+            build_left_mouse_press(Point { column: 20, row: 3 }),
+            &mouse_frame
+        ),
         Some(vec![MouseAction::Command(Box::new(
-            build_set_pane_minimized_command(floating_pane_ids[1], false)
+            build_toggle_pane_minimized_command(floating_pane_ids[1])
         ))])
     );
     assert_eq!(
@@ -600,9 +569,12 @@ fn a_click_on_a_tile_selects_it_and_toggles_its_pane() {
     );
 
     assert_eq!(
-        client.handle_floating_pane_tray_mouse(build_left_press(20, 3), &mouse_frame),
+        client.handle_floating_pane_tray_mouse(
+            build_left_mouse_press(Point { column: 10, row: 3 }),
+            &mouse_frame
+        ),
         Some(vec![MouseAction::Command(Box::new(
-            build_set_pane_minimized_command(floating_pane_ids[0], true)
+            build_toggle_pane_minimized_command(floating_pane_ids[0])
         ))])
     );
     assert_eq!(
@@ -617,9 +589,12 @@ fn a_click_on_the_label_toggles_every_floating_pane() {
     let mut client = build_client_with_open_tray(&mouse_frame);
 
     assert_eq!(
-        client.handle_floating_pane_tray_mouse(build_left_press(60, 1), &mouse_frame),
+        client.handle_floating_pane_tray_mouse(
+            build_left_mouse_press(Point { column: 60, row: 1 }),
+            &mouse_frame
+        ),
         Some(vec![MouseAction::Command(Box::new(
-            build_set_all_minimized_command(true)
+            Command::ToggleAllFloatingPanesMinimized
         ))])
     );
     assert_eq!(
@@ -635,13 +610,29 @@ fn every_other_event_on_the_open_tray_is_consumed_and_sends_nothing() {
 
     for mouse_input in [
         // Slot 2 shows no pane.
-        build_left_press(38, 3),
+        build_left_mouse_press(Point { column: 33, row: 3 }),
         // The tray's left border.
-        build_left_press(17, 4),
-        build_mouse_input(MouseKind::Press(MouseButton::Right), 30, 3),
-        build_mouse_input(MouseKind::Drag(MouseButton::Left), 30, 3),
-        build_mouse_input(MouseKind::Release(MouseButton::Left), 30, 3),
-        build_mouse_input(MouseKind::Scroll(ScrollDirection::Down), 30, 3),
+        build_left_mouse_press(Point { column: 5, row: 4 }),
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Right),
+            Point { column: 20, row: 3 },
+            BindingModifierFlags::NONE,
+        ),
+        build_mouse_event(
+            MouseKind::Drag(MouseButton::Left),
+            Point { column: 20, row: 3 },
+            BindingModifierFlags::NONE,
+        ),
+        build_mouse_event(
+            MouseKind::Release(MouseButton::Left),
+            Point { column: 20, row: 3 },
+            BindingModifierFlags::NONE,
+        ),
+        build_mouse_event(
+            MouseKind::Scroll(ScrollDirection::Down),
+            Point { column: 20, row: 3 },
+            BindingModifierFlags::NONE,
+        ),
     ] {
         assert_eq!(
             client.handle_floating_pane_tray_mouse(mouse_input, &mouse_frame),
@@ -662,8 +653,22 @@ fn a_wheel_or_a_release_off_the_open_tray_takes_the_normal_path_and_keeps_it_ope
     let mut client = build_client_with_open_tray(&mouse_frame);
 
     for mouse_input in [
-        build_mouse_input(MouseKind::Scroll(ScrollDirection::Up), 40, 20),
-        build_mouse_input(MouseKind::Release(MouseButton::Left), 40, 20),
+        build_mouse_event(
+            MouseKind::Scroll(ScrollDirection::Up),
+            Point {
+                column: 40,
+                row: 20,
+            },
+            BindingModifierFlags::NONE,
+        ),
+        build_mouse_event(
+            MouseKind::Release(MouseButton::Left),
+            Point {
+                column: 40,
+                row: 20,
+            },
+            BindingModifierFlags::NONE,
+        ),
     ] {
         assert_eq!(
             client.handle_floating_pane_tray_mouse(mouse_input, &mouse_frame),
@@ -681,13 +686,11 @@ fn a_wheel_or_a_release_off_the_open_tray_takes_the_normal_path_and_keeps_it_ope
 #[test]
 fn a_click_outside_the_open_tray_closes_it_and_acts_as_with_no_tray() {
     let (mouse_frame, floating_pane_ids) = build_tray_mouse_frame(&[true, false]);
-    let client_id = ClientId::new();
-    let mut tray_client = build_client_viewing_with_id(&mouse_frame, client_id);
-    tray_client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
-    let mut plain_client = build_client_viewing_with_id(&mouse_frame, client_id);
+    let mut tray_client = build_client_with_open_tray(&mouse_frame);
+    let mut plain_client = build_client_viewing(&mouse_frame);
     // Floating pane 0's titlebar row is screen row 14, its title cells from
     // screen column 8.
-    let titlebar_press = build_left_press(8, 14);
+    let titlebar_press = build_left_mouse_press(Point { column: 8, row: 14 });
     let press_time = Instant::now();
 
     assert_eq!(
@@ -695,20 +698,273 @@ fn a_click_outside_the_open_tray_closes_it_and_acts_as_with_no_tray() {
         None
     );
     assert_eq!(tray_client.floating_pane_tray, None);
-    let expected_mouse_actions = vec![MouseAction::Command(Box::new(Command::FocusPane(
-        FocusPaneArgs {
-            focus_target: FocusTarget::Pane(floating_pane_ids[0]),
-            client_id: Some(client_id),
-        },
-    )))];
+    let build_expected_mouse_actions = |client: &Client| {
+        vec![MouseAction::Command(Box::new(Command::FocusPane(
+            FocusPaneArgs {
+                focus_target: FocusTarget::Pane(floating_pane_ids[0]),
+                client_id: Some(client.client_id),
+            },
+        )))]
+    };
     assert_eq!(
         plain_client.handle_mouse(titlebar_press, &mouse_frame, press_time),
-        expected_mouse_actions
+        build_expected_mouse_actions(&plain_client)
     );
     assert_eq!(
         tray_client.handle_mouse(titlebar_press, &mouse_frame, press_time),
-        expected_mouse_actions
+        build_expected_mouse_actions(&tray_client)
     );
+}
+
+#[test]
+fn a_tray_closed_before_its_frame_repaints_leaves_its_cells_to_the_panes_under_them() {
+    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let tiled_pane_id = mouse_frame
+        .client_snapshot
+        .focused_pane_id
+        .expect("the tiled pane is focused");
+    let mut client = build_client_with_open_tray(&mouse_frame);
+    mouse_frame.viewer_chrome.floating_pane_tray = client.floating_pane_tray;
+    client.close_floating_pane_tray();
+    // Tile 0 takes (7, 2) 10x3 in the painted frame, over the tiled pane.
+    let tile_cell = Point { column: 8, row: 3 };
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), tile_cell),
+        HitRegion::FloatingPaneTrayTile { tile_index: 0 }
+    );
+    let event_time = Instant::now();
+
+    client.handle_mouse(
+        build_mouse_event(MouseKind::Motion, tile_cell, BindingModifierFlags::NONE),
+        &mouse_frame,
+        event_time,
+    );
+    assert_eq!(client.hovered_pane_id, Some(tiled_pane_id));
+    assert_eq!(
+        client.handle_mouse_wheel(
+            build_mouse_event(
+                MouseKind::Scroll(ScrollDirection::Up),
+                tile_cell,
+                BindingModifierFlags::NONE
+            ),
+            &mouse_frame
+        ),
+        Some(WheelDecision {
+            hovered_pane_id: Some(tiled_pane_id),
+            mouse_action: Some(MouseAction::Scroll {
+                pane_id: tiled_pane_id,
+                is_scrolling_up: true,
+                scroll_line_count: usize::from(client.client_config.mouse.scroll_line_count),
+            }),
+        })
+    );
+    assert_eq!(
+        client.handle_mouse(build_left_mouse_press(tile_cell), &mouse_frame, event_time),
+        vec![MouseAction::Command(Box::new(Command::Visual(
+            VisualCommand::ClearSelection(ClearSelectionArgs {
+                pane_id: tiled_pane_id
+            })
+        )))]
+    );
+
+    // The tiled pane's content starts at (1, 2), so (8, 3) is its cell (7, 1).
+    mouse_frame
+        .mouse_panes
+        .iter_mut()
+        .find(|mouse_pane| mouse_pane.pane_id == tiled_pane_id)
+        .expect("the tiled pane is in the frame")
+        .mouse_tracking = MouseTracking::AnyMotion;
+    let mut tracking_client = build_client_viewing(&mouse_frame);
+    assert_eq!(
+        tracking_client.handle_mouse(build_left_mouse_press(tile_cell), &mouse_frame, event_time),
+        vec![MouseAction::Forward {
+            pane_id: tiled_pane_id,
+            mouse_kind: MouseKind::Press(MouseButton::Left),
+            modifier_flags: BindingModifierFlags::NONE,
+            pane_local_cell: Point { column: 7, row: 1 },
+        }]
+    );
+}
+
+#[test]
+fn a_dock_press_on_a_tray_closed_before_its_frame_repaints_drags_the_pane_under_it() {
+    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let tiled_pane_id = mouse_frame
+        .client_snapshot
+        .focused_pane_id
+        .expect("the tiled pane is focused");
+    mouse_frame.viewer_chrome.floating_pane_tray = build_open_floating_pane_tray(0, None);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame));
+    // Tile 0 takes (7, 2) 10x3 in the painted frame, over the tiled pane,
+    // which the frame draws at (0, 0).
+    let tile_cell = Point { column: 8, row: 3 };
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(tile_cell),
+            &mouse_frame,
+            Instant::now()
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        client
+            .build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id)
+            .floating_pane_move_draft,
+        Some(FloatingPaneMoveDraft {
+            pane_id: tiled_pane_id,
+            top_left_cell: Point { column: 0, row: 0 },
+        })
+    );
+}
+
+#[test]
+fn a_press_on_a_placement_handle_under_a_tray_closed_before_its_frame_repaints_starts_placement() {
+    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let tiled_pane_id = mouse_frame
+        .client_snapshot
+        .focused_pane_id
+        .expect("the tiled pane is focused");
+    let tiled_pane_slot = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter_mut()
+        .find(|pane_slot| pane_slot.pane_id == tiled_pane_id)
+        .expect("the tiled pane has a slot");
+    tiled_pane_slot.outer_rect = Rect::from_origin_and_size(
+        Point { column: 20, row: 0 },
+        Size {
+            column_count: 60,
+            row_count: 22,
+        },
+    );
+    tiled_pane_slot.content_rect = Some(Rect::from_origin_and_size(
+        Point { column: 21, row: 1 },
+        Size {
+            column_count: 58,
+            row_count: 20,
+        },
+    ));
+    mouse_frame.viewer_chrome.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+        pane_id: tiled_pane_id,
+    });
+    mouse_frame.viewer_chrome.floating_pane_tray = build_open_floating_pane_tray(0, None);
+    let mut client = build_client_viewing(&mouse_frame);
+    // The tiled pane's handle takes (21, 1) to (23, 1), under the header row
+    // of the painted tray.
+    let handle_cell = Point { column: 22, row: 1 };
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), handle_cell),
+        HitRegion::FloatingPaneTray
+    );
+
+    assert_eq!(
+        client.handle_placement_mouse(
+            build_left_mouse_press(handle_cell),
+            &mouse_frame,
+            Instant::now()
+        ),
+        Some(PlacementInputAction::FocusPane {
+            pane_id: tiled_pane_id
+        })
+    );
+}
+
+#[test]
+fn a_tray_opened_before_its_frame_repaints_leaves_the_cells_beside_it_to_the_panes_under_them() {
+    let top_pane_id = PaneId::new();
+    let bottom_pane_id = PaneId::new();
+    let mut mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(top_pane_id),
+            build_plain_mouse_pane(bottom_pane_id),
+        ],
+        Some(bottom_pane_id),
+    );
+    mouse_frame
+        .session_snapshot
+        .floating_panes
+        .push(FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: None,
+        });
+    mouse_frame.client_snapshot.is_mouse_selection_enabled = true;
+    let mut client = build_client_with_open_tray(&mouse_frame);
+    // The painted tabline ends in ` SELECT `, and a tray drawn on it takes
+    // (3, 1) 69x8. The open tray's tabline ends in ` TRAY · SELECT `, and the
+    // tray takes (7, 1) 58x11. (68, 3) is a content cell of the top pane.
+    let beside_tray_cell = Point { column: 68, row: 3 };
+    let mut painted_tray_frame_layout = mouse_frame.build_frame_layout();
+    painted_tray_frame_layout.viewer_chrome.floating_pane_tray = client.floating_pane_tray;
+    assert_eq!(
+        resolve_hit_region(painted_tray_frame_layout, beside_tray_cell),
+        HitRegion::FloatingPaneTray
+    );
+    let wheel_up = build_mouse_event(
+        MouseKind::Scroll(ScrollDirection::Up),
+        beside_tray_cell,
+        BindingModifierFlags::NONE,
+    );
+    assert_eq!(
+        client.handle_floating_pane_tray_mouse(wheel_up, &mouse_frame),
+        None
+    );
+
+    assert_eq!(
+        client.handle_mouse_wheel(wheel_up, &mouse_frame),
+        Some(WheelDecision {
+            hovered_pane_id: Some(top_pane_id),
+            mouse_action: Some(MouseAction::Scroll {
+                pane_id: top_pane_id,
+                is_scrolling_up: true,
+                scroll_line_count: usize::from(client.client_config.mouse.scroll_line_count),
+            }),
+        })
+    );
+    client.handle_mouse(
+        build_mouse_event(
+            MouseKind::Motion,
+            beside_tray_cell,
+            BindingModifierFlags::NONE,
+        ),
+        &mouse_frame,
+        Instant::now(),
+    );
+    assert_eq!(client.hovered_pane_id, Some(top_pane_id));
+}
+
+#[test]
+fn a_press_where_only_the_open_trays_frame_draws_the_button_closes_the_tray_and_passes_on() {
+    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[false]);
+    mouse_frame.client_snapshot.is_mouse_selection_enabled = true;
+    let mut client = build_client_with_open_tray(&mouse_frame);
+    let floating_pane_tray = client.floating_pane_tray.expect("the tray is open");
+    // The painted tabline ends in ` SELECT ` and shows the tray button at
+    // (69, 0) to (71, 0). The open tray's tabline ends in ` TRAY · SELECT `
+    // and puts the button at (62, 0) to (64, 0).
+    let open_tray_button_cell = Point { column: 63, row: 0 };
+    assert_eq!(
+        resolve_hit_region(
+            build_tray_frame_layout(&mouse_frame, floating_pane_tray),
+            open_tray_button_cell
+        ),
+        HitRegion::FloatingPaneTrayButton
+    );
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), open_tray_button_cell),
+        HitRegion::Tabline
+    );
+
+    assert_eq!(
+        client.handle_floating_pane_tray_mouse(
+            build_left_mouse_press(open_tray_button_cell),
+            &mouse_frame
+        ),
+        None
+    );
+    assert_eq!(client.floating_pane_tray, None);
 }
 
 #[test]
@@ -727,7 +983,7 @@ fn the_tray_mode_resolves_its_own_keys_and_discards_the_rest() {
             KeyOutcome::Fire(build_core_bound_action("select-tray-tile-right")),
         ),
         (
-            build_character_key_chord('a'),
+            build_plain_chord('a'),
             KeyOutcome::Fire(build_core_bound_action(
                 "toggle-minimize-all-floating-panes",
             )),
@@ -737,7 +993,7 @@ fn the_tray_mode_resolves_its_own_keys_and_discards_the_rest() {
             KeyOutcome::Fire(build_core_bound_action("close-floating-pane-tray")),
         ),
         (build_named_key_chord(NamedKey::Space), KeyOutcome::Discard),
-        (build_character_key_chord('q'), KeyOutcome::Discard),
+        (build_plain_chord('q'), KeyOutcome::Discard),
     ] {
         assert_eq!(
             client.resolve_key(key_chord, current_time),
@@ -753,7 +1009,7 @@ fn a_tile_toggle_bound_to_x_fires_from_x() {
     let mut client = build_client_viewing(&mouse_frame);
     let mut bound_action_by_key_sequence = BTreeMap::new();
     bound_action_by_key_sequence.insert(
-        KeySequence::from(build_character_key_chord('x')),
+        KeySequence::from(build_plain_chord('x')),
         build_core_bound_action("toggle-selected-tray-tile"),
     );
     let mut mode_bindings_by_name = BTreeMap::new();
@@ -781,7 +1037,7 @@ fn a_tile_toggle_bound_to_x_fires_from_x() {
     client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
 
     assert_eq!(
-        client.resolve_key(build_character_key_chord('x'), Instant::now()),
+        client.resolve_key(build_plain_chord('x'), Instant::now()),
         KeyOutcome::Fire(build_core_bound_action("toggle-selected-tray-tile"))
     );
     assert_eq!(
@@ -789,7 +1045,7 @@ fn a_tile_toggle_bound_to_x_fires_from_x() {
             client
                 .apply_client_action(ClientActionKind::ToggleSelectedTrayTile, Some(&mouse_frame))
         ),
-        Some(build_set_pane_minimized_command(floating_pane_ids[0], true))
+        Some(build_toggle_pane_minimized_command(floating_pane_ids[0]))
     );
 }
 
@@ -798,42 +1054,74 @@ fn the_anchor_is_the_cell_under_the_closed_trays_glyph_or_the_open_trays_tile() 
     let (mouse_frame, floating_pane_ids) = build_tray_mouse_frame(&[true, false]);
     let render_snapshot = build_render_snapshot_from_mouse_frame(&mouse_frame);
     let mut client = build_client_viewing(&mouse_frame);
+    let glyph_cell_rect = Rect::from_origin_and_size(
+        Point { column: 72, row: 0 },
+        Size {
+            column_count: 1,
+            row_count: 1,
+        },
+    );
 
+    let closed_tray_anchor = client
+        .find_floating_pane_tray_anchor(&render_snapshot, &mouse_frame.committed_regions, None)
+        .expect("the frame draws the tray button");
     assert_eq!(
-        client.find_floating_pane_tray_anchor_rect(
-            &render_snapshot,
-            &mouse_frame.committed_regions,
-            floating_pane_ids[1]
-        ),
-        Some(Rect::from_origin_and_size(
-            Point { column: 72, row: 0 },
-            Size {
-                column_count: 1,
-                row_count: 1,
-            },
-        ))
+        closed_tray_anchor,
+        FloatingPaneTrayAnchor::ClosedTrayGlyphCell(glyph_cell_rect)
+    );
+    assert_eq!(
+        closed_tray_anchor
+            .find_anchor_rect(&render_snapshot.session_snapshot, floating_pane_ids[1]),
+        Some(glyph_cell_rect)
     );
 
     client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
+    let open_tray_layout = client
+        .update_floating_pane_tray(&render_snapshot, &mouse_frame.committed_regions)
+        .expect("the open tray fits the frame");
     assert_eq!(
-        client.find_floating_pane_tray_anchor_rect(
+        open_tray_layout.tray_rect,
+        Rect::from_origin_and_size(
+            Point { column: 5, row: 1 },
+            Size {
+                column_count: 69,
+                row_count: 8,
+            },
+        )
+    );
+    let open_tray_anchor = client
+        .find_floating_pane_tray_anchor(
             &render_snapshot,
             &mouse_frame.committed_regions,
-            floating_pane_ids[1]
-        ),
+            Some(open_tray_layout),
+        )
+        .expect("the open tray gives the anchor");
+    assert_eq!(
+        open_tray_anchor,
+        FloatingPaneTrayAnchor::OpenTray {
+            tray_layout: open_tray_layout,
+            pane_area_origin: Point { column: 0, row: 1 },
+        }
+    );
+    assert_eq!(
+        open_tray_anchor.find_anchor_rect(&render_snapshot.session_snapshot, floating_pane_ids[1]),
         Some(Rect::from_origin_and_size(
-            Point { column: 28, row: 1 },
+            Point { column: 18, row: 1 },
             Size {
-                column_count: 8,
+                column_count: 10,
                 row_count: 3,
             },
         ))
     );
     assert_eq!(
-        client.find_floating_pane_tray_anchor_rect(
+        open_tray_anchor.find_anchor_rect(&render_snapshot.session_snapshot, PaneId::new()),
+        None
+    );
+    assert_eq!(
+        client.find_floating_pane_tray_anchor(
             &render_snapshot,
             &mouse_frame.committed_regions,
-            PaneId::new()
+            None
         ),
         None
     );

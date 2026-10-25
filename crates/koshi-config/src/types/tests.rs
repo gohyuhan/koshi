@@ -1116,11 +1116,11 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "toggle-selected-tray-tile",
             ClientActionKind::ToggleSelectedTrayTile,
         ),
-        build_expected_client_binding(
+        build_expected_binding(
             "floating-pane-tray",
             "a",
             "toggle-minimize-all-floating-panes",
-            ClientActionKind::ToggleMinimizeAllFloatingPanes,
+            Ok(Command::ToggleAllFloatingPanesMinimized),
         ),
         build_expected_client_binding(
             "floating-pane-tray",

@@ -19,14 +19,11 @@ use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
 use koshi_terminal::style::Style as CellStyle;
 
-use crate::floating_pane_tray::find_drawn_floating_pane_tray_layout;
 use crate::render::{
-    compute_layout_origin, list_placed_floating_panes, list_visible_tiled_panes, place_screen_rect,
-    PlacedFloatingPane,
+    list_visible_tiled_panes, place_screen_rect, FrameGeometry, PlacedFloatingPane,
 };
 use crate::snapshot::{
-    CommittedRegions, ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot,
-    RenderSnapshot, ViewerChrome,
+    ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot, RenderSnapshot,
 };
 
 /// The text a client paints when it cannot display terminal image pixels.
@@ -109,15 +106,15 @@ impl ImageCellSnapshot {
     }
 }
 
-/// Snapshot the rendered cell facts of the frame drawn in `viewport_area`,
-/// over the cells of `snapshot_area` inside it: the cells of every visible
-/// tiled pane, then those of each floating pane this viewer draws, back to
-/// front. A floating pane first resets every cell of its outer area to a blank
-/// cell, then writes the cells of its visible content area. `viewer_chrome`
-/// decides which floating panes are drawn, as it does for
+/// Snapshot the rendered cell facts of the frame `frame_geometry` draws in its
+/// viewport area, over the cells of `snapshot_area` inside it: the cells of
+/// every visible tiled pane, then those of each floating pane this viewer
+/// draws, back to front. A floating pane first resets every cell of its outer
+/// area to a blank cell, then writes the cells of its visible content area.
+/// The viewer chrome decides which floating panes are drawn, as it does for
 /// [`render_frame`](crate::render_frame). The snapshot's `screen_area` is
-/// `snapshot_area` clipped to `viewport_area`, and each of its cells holds the
-/// fact a snapshot of the whole viewport holds at that cell. Returns `None`
+/// `snapshot_area` clipped to the viewport area, and each of its cells holds
+/// the fact a snapshot of the whole viewport holds at that cell. Returns `None`
 /// when that area holds more than [`MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT`] cells
 /// or their memory cannot be reserved.
 ///
@@ -125,13 +122,11 @@ impl ImageCellSnapshot {
 /// `(10, 10)` give an 800-cell snapshot whose cell `(10, 10)` is the frame's
 /// cell `(10, 10)`.
 pub fn build_image_cell_snapshot(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    viewer_chrome: ViewerChrome,
-    viewport_area: RatatuiRect,
+    frame_geometry: &FrameGeometry<'_>,
     snapshot_area: RatatuiRect,
 ) -> Option<ImageCellSnapshot> {
-    let screen_area = snapshot_area.intersection(viewport_area);
+    let render_snapshot = frame_geometry.render_snapshot;
+    let screen_area = snapshot_area.intersection(frame_geometry.viewport_area);
     let cell_count = usize::from(screen_area.width).checked_mul(usize::from(screen_area.height))?;
     if cell_count > MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT {
         return None;
@@ -146,9 +141,8 @@ pub fn build_image_cell_snapshot(
         });
     }
 
-    let layout_origin = compute_layout_origin(render_snapshot, committed_regions, viewport_area);
     for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, layout_origin)
+        list_visible_tiled_panes(render_snapshot, frame_geometry.get_layout_origin())
     {
         write_pane_cell_states(
             pane_snapshot,
@@ -158,12 +152,7 @@ pub fn build_image_cell_snapshot(
             &mut cell_states,
         )?;
     }
-    for placed_floating_pane in list_placed_floating_panes(
-        render_snapshot,
-        committed_regions,
-        viewer_chrome,
-        viewport_area,
-    ) {
+    for placed_floating_pane in &frame_geometry.placed_floating_panes {
         let outer_cell_area = placed_floating_pane.outer_area.intersection(screen_area);
         for screen_row in outer_cell_area.top()..outer_cell_area.bottom() {
             for screen_column in outer_cell_area.left()..outer_cell_area.right() {
@@ -338,27 +327,24 @@ impl ImagePaint {
 /// Return clipped image paints, bottom to top: sorted by z-index, then by the
 /// record's image id and placement id (`0` when absent), then by draw order.
 /// The draw order lists the images of every visible tiled pane, then those of
-/// each floating pane this viewer draws, back to front. `viewer_chrome`
-/// decides which floating panes are drawn, as it does for
+/// each floating pane this viewer draws, back to front. The viewer chrome of
+/// `frame_geometry` decides which floating panes are drawn, as it does for
 /// [`render_frame`](crate::render_frame).
 ///
 /// An image is anchored at its pane's content area and cut to the cells of it
 /// that are drawn: a tiled pane's content rect, or a floating pane's content
-/// rect inside the pane area. An image whose cut rectangle meets the outer
-/// rect of a floating pane drawn above its pane, or the viewer's open floating
-/// pane tray ([`find_drawn_floating_pane_tray_layout`]), is left out.
+/// rect inside the pane area, each cut to the viewport area. An image whose
+/// cut rectangle meets the outer rect of a floating pane drawn above its pane,
+/// or the viewer's open floating pane tray, is left out.
 ///
 /// A placement at `(row: 1, column: 2)` with `column_count: 4` and `row_count: 3` in a
 /// pane whose content starts at `(10, 5)` targets `(12, 6)` through
 /// `(15, 8)`. If the pane ends at column 14, the target becomes two columns
 /// wide and the source rectangle is cropped to the matching left half.
 #[must_use]
-pub fn build_image_paints(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    viewer_chrome: ViewerChrome,
-    screen_area: RatatuiRect,
-) -> Vec<ImagePaint> {
+pub fn build_image_paints(frame_geometry: &FrameGeometry<'_>) -> Vec<ImagePaint> {
+    let render_snapshot = frame_geometry.render_snapshot;
+    let screen_area = frame_geometry.viewport_area;
     if screen_area.width == 0
         || screen_area.height == 0
         || render_snapshot
@@ -369,23 +355,17 @@ pub fn build_image_paints(
         return Vec::new();
     }
 
-    let layout_origin = compute_layout_origin(render_snapshot, committed_regions, screen_area);
-    let placed_floating_panes = list_placed_floating_panes(
-        render_snapshot,
-        committed_regions,
-        viewer_chrome,
-        screen_area,
-    );
+    let placed_floating_panes = &frame_geometry.placed_floating_panes;
     let mut image_paints = Vec::new();
 
     for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, layout_origin)
+        list_visible_tiled_panes(render_snapshot, frame_geometry.get_layout_origin())
     {
         push_pane_image_paints(
             pane_snapshot,
             placed_content_rect,
             placed_content_rect,
-            &placed_floating_panes,
+            placed_floating_panes,
             screen_area,
             &mut image_paints,
         );
@@ -406,9 +386,7 @@ pub fn build_image_paints(
         );
     }
 
-    if let Some(tray_layout) = find_drawn_floating_pane_tray_layout(
-        render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
-    ) {
+    if let Some(tray_layout) = frame_geometry.floating_pane_tray_layout {
         let tray_area = place_screen_rect(tray_layout.tray_rect);
         image_paints
             .retain(|image_paint| tray_area.intersection(image_paint.target_area).is_empty());
@@ -487,23 +465,22 @@ fn push_pane_image_paints(
     }
 }
 
-/// Return the visible cell rectangles of the tiled panes' images that show
-/// the unavailable-image text, in draw order.
+/// Return the visible cell rectangles of the images of `frame_geometry`'s
+/// tiled panes that show the unavailable-image text, in draw order.
 ///
 /// In `Placeholder` mode every image placement shows it. In `Native` mode a
 /// placement shows it while its image record is missing, or while
 /// `unavailable_image_keys` names the placement, and never while a floating
-/// pane in `placed_floating_panes` covers it.
+/// pane that `frame_geometry` draws covers it.
 /// A placement preview hides placeholders in its softened panes.
 pub(crate) fn compute_image_placeholder_rects(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    placed_floating_panes: &[PlacedFloatingPane],
-    screen_area: RatatuiRect,
+    frame_geometry: &FrameGeometry<'_>,
     image_mode: ImageRenderMode,
     unavailable_image_keys: &[ImagePlacementKey],
     placement_presentation: Option<&PanePlacementPresentation>,
 ) -> Vec<RatatuiRect> {
+    let render_snapshot = frame_geometry.render_snapshot;
+    let screen_area = frame_geometry.viewport_area;
     if screen_area.width == 0
         || screen_area.height == 0
         || render_snapshot
@@ -514,10 +491,9 @@ pub(crate) fn compute_image_placeholder_rects(
         return Vec::new();
     }
 
-    let layout_origin = compute_layout_origin(render_snapshot, committed_regions, screen_area);
     let mut placeholder_rects = Vec::new();
     for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, layout_origin)
+        list_visible_tiled_panes(render_snapshot, frame_geometry.get_layout_origin())
     {
         if placement_presentation.is_some_and(|placement_presentation| {
             placement_presentation.is_pane_affected(pane_snapshot.pane_id)
@@ -534,7 +510,7 @@ pub(crate) fn compute_image_placeholder_rects(
                 pane_snapshot.pane_id,
                 image_placement_snapshot,
                 target_area,
-                placed_floating_panes,
+                &frame_geometry.placed_floating_panes,
                 image_mode,
                 unavailable_image_keys,
             ) {

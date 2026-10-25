@@ -30,8 +30,8 @@ use koshi_ipc::placement::{
     PanePlacementTabSnapshot as WirePlacementTabSnapshot,
 };
 use koshi_renderer::snapshot::{
-    ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPreview, PlacementSource,
-    PlacementTabSnapshot, RenderSnapshot, TabMetadata, TabSnapshot,
+    FloatingPane, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPreview,
+    PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
@@ -88,9 +88,17 @@ pub(crate) fn build_wire_frame_with_content_ids(
             floating_panes: session_snapshot
                 .floating_panes
                 .iter()
-                .map(|floating_pane| FrameFloatingPane {
-                    pane_id: floating_pane.pane_id,
-                    pane_title: floating_pane.pane_title.clone(),
+                .map(|floating_pane| match floating_pane {
+                    FloatingPane::Shown { pane_id } => {
+                        FrameFloatingPane::Shown { pane_id: *pane_id }
+                    }
+                    FloatingPane::Minimized {
+                        pane_id,
+                        pane_title,
+                    } => FrameFloatingPane::Minimized {
+                        pane_id: *pane_id,
+                        pane_title: pane_title.clone(),
+                    },
                 })
                 .collect(),
         },

@@ -48,8 +48,9 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
-    build_image_cell_snapshot, build_image_paints, get_cursor_position, get_cursor_style,
-    list_changed_screen_rows, render_frame, DrawnRows, ImagePlacementKey, ImageRenderMode,
+    build_frame_geometry, build_image_cell_snapshot, build_image_paints, get_cursor_position,
+    get_cursor_style, list_changed_screen_rows, render_frame, DrawnRows, FrameGeometry,
+    ImagePlacementKey, ImageRenderMode,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
@@ -107,18 +108,16 @@ const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
 /// placement tab and a placement target, it then outlines the target's slot
 /// in the preview's displayed tab.
 pub(crate) struct SnapshotWidget<'a> {
-    /// The frame the session handed out.
-    pub(crate) render_snapshot: &'a RenderSnapshot,
+    /// The frame the session handed out, with the region solve and the viewer
+    /// chrome it is painted with, placed over the area this widget renders
+    /// into.
+    pub(crate) frame_geometry: &'a FrameGeometry<'a>,
     /// The colors this viewer paints koshi's chrome in.
     pub(crate) theme: &'a Theme,
     /// The hint-bar data for the mode this viewer is in.
     pub(crate) keymap_hints: &'a KeymapHints,
     /// The multi-chord sequence this viewer has open.
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
-    /// The pane this viewer's pointer is over, and where its tab strip sits.
-    pub(crate) viewer_chrome: ViewerChrome,
-    /// The region solve committed with the frame being painted.
-    pub(crate) committed_regions: &'a CommittedRegions,
     /// The image mode selected for this outer terminal.
     pub(crate) image_mode: ImageRenderMode,
     /// The image placements that show the unavailable-image text in native
@@ -139,17 +138,14 @@ pub(crate) struct SnapshotWidget<'a> {
 impl Widget for SnapshotWidget<'_> {
     fn render(self, render_area: Rect, render_buffer: &mut Buffer) {
         render_frame(
-            self.render_snapshot,
-            self.committed_regions,
+            self.frame_geometry,
             self.theme,
             self.keymap_hints,
             self.pending_key_sequence,
-            self.viewer_chrome,
             self.image_mode,
             self.unavailable_image_placement_keys,
             self.placement_presentation,
             self.placement_target,
-            render_area,
             self.drawn_rows,
             render_buffer,
         );
@@ -165,10 +161,10 @@ impl Widget for SnapshotWidget<'_> {
             draw_placement_target_outline(
                 placement_snapshot,
                 placement_display_tab_snapshot,
-                self.render_snapshot,
+                self.frame_geometry.get_render_snapshot(),
                 placement_target,
                 self.theme,
-                self.committed_regions,
+                self.frame_geometry.get_committed_regions(),
                 render_area,
                 render_buffer,
             );
@@ -248,33 +244,15 @@ pub(crate) fn build_committed_placement_render_snapshot(
             .session_snapshot
             .active_tab_snapshot = animated_tab_snapshot;
     }
-    for floating_pane_slot in &mut committed_placement_render_snapshot
+    let floating_pane_slots = &mut committed_placement_render_snapshot
         .session_snapshot
-        .floating_pane_slots
-    {
-        let animated_floating_pane_slot =
-            animated_floating_pane_slots
-                .iter()
-                .find(|animated_floating_pane_slot| {
-                    animated_floating_pane_slot.pane_id == floating_pane_slot.pane_id
-                });
-        if let Some(animated_floating_pane_slot) = animated_floating_pane_slot {
-            *floating_pane_slot = *animated_floating_pane_slot;
-        }
-    }
+        .floating_pane_slots;
     for animated_floating_pane_slot in animated_floating_pane_slots {
-        let is_slot_listed = render_snapshot
-            .session_snapshot
-            .floating_pane_slots
-            .iter()
-            .any(|floating_pane_slot| {
-                floating_pane_slot.pane_id == animated_floating_pane_slot.pane_id
-            });
-        if !is_slot_listed {
-            committed_placement_render_snapshot
-                .session_snapshot
-                .floating_pane_slots
-                .push(*animated_floating_pane_slot);
+        match floating_pane_slots.iter_mut().find(|floating_pane_slot| {
+            floating_pane_slot.pane_id == animated_floating_pane_slot.pane_id
+        }) {
+            Some(floating_pane_slot) => *floating_pane_slot = *animated_floating_pane_slot,
+            None => floating_pane_slots.push(*animated_floating_pane_slot),
         }
     }
     committed_placement_render_snapshot
@@ -1769,13 +1747,18 @@ pub(crate) struct FrameInputs {
 impl FrameInputs {
     /// The rows in which the cells of a frame drawn from `next_frame_inputs`
     /// can differ from those of a frame drawn from these inputs, as
-    /// [`list_changed_screen_rows`] gives them. `None` when any input other
-    /// than the render snapshot differs, when either frame draws a placement
-    /// state, or when the render snapshots differ in anything other than pane
-    /// rows.
-    fn list_changed_screen_rows(&self, next_frame_inputs: &FrameInputs) -> Option<Vec<u16>> {
+    /// [`list_changed_screen_rows`] gives them. `next_frame_geometry` is the
+    /// geometry of the frame drawn from `next_frame_inputs`. `None` when any
+    /// input other than the render snapshot differs, when either frame draws a
+    /// placement state, or when the render snapshots differ in anything other
+    /// than pane rows.
+    fn list_changed_screen_rows(
+        &self,
+        next_frame_inputs: &FrameInputs,
+        next_frame_geometry: &FrameGeometry<'_>,
+    ) -> Option<Vec<u16>> {
         let FrameInputs {
-            render_snapshot,
+            render_snapshot: _,
             committed_regions,
             theme,
             keymap_hints,
@@ -1799,13 +1782,7 @@ impl FrameInputs {
         {
             return None;
         }
-        list_changed_screen_rows(
-            &self.render_snapshot,
-            render_snapshot,
-            committed_regions,
-            *viewer_chrome,
-            Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count),
-        )
+        list_changed_screen_rows(&self.render_snapshot, next_frame_geometry)
     }
 }
 
@@ -1897,6 +1874,12 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     );
     let terminal_size = client.get_viewport_size();
     let render_area = Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count);
+    let frame_geometry = build_frame_geometry(
+        displayed_snapshot,
+        committed_regions,
+        frame_paint.chrome,
+        render_area,
+    );
     let is_focused_pane_softened = displayed_snapshot
         .client_snapshot
         .focused_pane_id
@@ -1908,23 +1891,13 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
                     placement_presentation.is_pane_affected(focused_pane_id)
                 })
         });
-    let hardware_cursor_position = get_cursor_position(
-        displayed_snapshot,
-        committed_regions,
-        frame_paint.chrome,
-        render_area,
-    )
-    .filter(|_| !is_focused_pane_softened);
+    let hardware_cursor_position =
+        get_cursor_position(&frame_geometry).filter(|_| !is_focused_pane_softened);
     let is_native_image_output = image_output_state.get_output_kind().is_some();
     if paint_driver.needs_screen_erase(terminal_size) {
         image_output_state.clear_host_images();
     }
-    let mut image_paint_commands = build_image_paints(
-        displayed_snapshot,
-        committed_regions,
-        frame_paint.chrome,
-        render_area,
-    );
+    let mut image_paint_commands = build_image_paints(&frame_geometry);
     if let Some(placement_presentation) = &frame_paint.placement_presentation {
         image_paint_commands
             .retain(|image_paint| !placement_presentation.is_pane_affected(image_paint.pane_id));
@@ -1938,14 +1911,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
             (Some(output_kind), Some(image_target_bounds))
                 if output_kind.needs_cell_composition() =>
             {
-                build_image_cell_snapshot(
-                    displayed_snapshot,
-                    committed_regions,
-                    frame_paint.chrome,
-                    render_area,
-                    image_target_bounds,
-                )
-                .map(Arc::new)
+                build_image_cell_snapshot(&frame_geometry, image_target_bounds).map(Arc::new)
             }
             _ => None,
         };
@@ -1986,9 +1952,9 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
             || frame_paint.placement_target.is_some()
             || frame_paint.placement_presentation.is_some(),
     };
-    let changed_rows = shown_frame_inputs
-        .take()
-        .and_then(|last_frame_inputs| last_frame_inputs.list_changed_screen_rows(&frame_inputs));
+    let changed_rows = shown_frame_inputs.take().and_then(|last_frame_inputs| {
+        last_frame_inputs.list_changed_screen_rows(&frame_inputs, &frame_geometry)
+    });
     let paint_result = (|| {
         if is_native_image_commit {
             queue!(writer, BeginSynchronizedUpdate).map_err(PaintError::Output)?;
@@ -2006,12 +1972,10 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
                 changed_rows.as_deref(),
                 |frame_buffer, drawn_rows| {
                     SnapshotWidget {
-                        render_snapshot: &frame_inputs.render_snapshot,
+                        frame_geometry: &frame_geometry,
                         theme: &frame_inputs.theme,
                         keymap_hints: &frame_inputs.keymap_hints,
                         pending_key_sequence: frame_inputs.pending_key_sequence.as_ref(),
-                        viewer_chrome: frame_inputs.viewer_chrome,
-                        committed_regions: &frame_inputs.committed_regions,
                         image_mode,
                         unavailable_image_placement_keys: &frame_inputs
                             .unavailable_image_placement_keys,

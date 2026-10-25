@@ -559,6 +559,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
         (
+            "core:toggle-minimize-all-floating-panes",
+            CommandKind::ToggleAllFloatingPanesMinimized,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
             "core:focus-pane",
             CommandKind::FocusPane,
             Client,
@@ -943,12 +949,6 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
         (
             "core:toggle-selected-tray-tile".to_string(),
             ClientActionKind::ToggleSelectedTrayTile,
-            Client,
-            vec![ClientTarget],
-        ),
-        (
-            "core:toggle-minimize-all-floating-panes".to_string(),
-            ClientActionKind::ToggleMinimizeAllFloatingPanes,
             Client,
             vec![ClientTarget],
         ),

@@ -509,20 +509,15 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         },
     ];
     expected_render_snapshot.session_snapshot.floating_panes = vec![
-        FloatingPane {
+        FloatingPane::Shown {
             pane_id: upper_floating_pane_id,
-            pane_title: Some("logs".to_string()),
-            is_minimized: false,
         },
-        FloatingPane {
+        FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: Some("htop".to_string()),
-            is_minimized: true,
         },
-        FloatingPane {
+        FloatingPane::Shown {
             pane_id: lower_floating_pane_id,
-            pane_title: None,
-            is_minimized: false,
         },
     ];
     assert_eq!(
@@ -1869,6 +1864,11 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         String::from("\u{202e}gpj.exe");
     expected_render_snapshot.pane_snapshots[0].pane_title =
         Some(String::from("~/work\u{7}\u{1b}]0;owned\u{7}"));
+    let minimized_floating_pane_id = PaneId::new();
+    expected_render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
+        pane_id: minimized_floating_pane_id,
+        pane_title: Some(String::from("htop\u{1b}[2J")),
+    }];
     let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
         focused_pane_id,
         expected_render_snapshot.client_snapshot.active_tab_id,
@@ -1912,6 +1912,14 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         received_snapshot.pane_snapshots[0].pane_title.as_deref(),
         Some("~/work]0;owned"),
         "the pane title reaches the window title"
+    );
+    assert_eq!(
+        received_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Minimized {
+            pane_id: minimized_floating_pane_id,
+            pane_title: Some(String::from("htop[2J")),
+        }],
+        "the minimized floating pane's title reaches the tray"
     );
     let received_placement_snapshot = received_snapshot
         .placement_preview
@@ -2023,10 +2031,17 @@ fn a_typed_character_lists_only_its_row_after_the_painted_updates_travel() {
     assert_eq!(
         koshi_renderer::list_changed_screen_rows(
             &first_received_render_snapshot,
-            &second_received_render_snapshot,
-            &koshi_renderer::snapshot::CommittedRegions::build_core(viewport_size, 0),
-            koshi_renderer::snapshot::ViewerChrome::default(),
-            ratatui::layout::Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
+            &koshi_renderer::build_frame_geometry(
+                &second_received_render_snapshot,
+                &koshi_renderer::snapshot::CommittedRegions::build_core(viewport_size, 0),
+                koshi_renderer::snapshot::ViewerChrome::default(),
+                ratatui::layout::Rect::new(
+                    0,
+                    0,
+                    viewport_size.column_count,
+                    viewport_size.row_count
+                )
+            )
         ),
         Some(vec![3])
     );

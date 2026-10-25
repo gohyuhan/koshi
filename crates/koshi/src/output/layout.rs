@@ -279,8 +279,8 @@ enum FloatingPanePositionReport {
 }
 
 /// What one client draws for one floating pane. JSON writes the case as
-/// `"visibility"`: `"drawn"` with `"top_left_cell"` and `"layer_index"`,
-/// `"minimized"`, or `"no floating viewport"`.
+/// `"visibility"`: `"drawn"` with `"top_left_cell"` and `"layer_index"`, or
+/// `"minimized"`.
 #[derive(Serialize)]
 #[serde(tag = "visibility")]
 enum FloatingPaneVisibilityReport {
@@ -298,9 +298,6 @@ enum FloatingPaneVisibilityReport {
     /// The client holds the pane minimized.
     #[serde(rename = "minimized")]
     Minimized,
-    /// The client shows the pane and has no floating viewport to draw it in.
-    #[serde(rename = "no floating viewport")]
-    NoFloatingViewport,
 }
 
 /// One attached client's focus.
@@ -457,9 +454,6 @@ fn build_floating_pane_report(floating_pane_layout: &FloatingPaneLayout) -> Floa
                         layer_index,
                     },
                     FloatingPaneVisibility::Minimized => FloatingPaneVisibilityReport::Minimized,
-                    FloatingPaneVisibility::NoFloatingViewport => {
-                        FloatingPaneVisibilityReport::NoFloatingViewport
-                    }
                 },
             })
             .collect(),
@@ -524,9 +518,7 @@ fn render_solved_tab(rendered_output: &mut String, solved_tab_report: &SolvedTab
 ///
 /// A view the client draws prints the pane's rectangle and its layer:
 /// `client client-… rect 16,4 48x13 layer 0 position default`. A minimized view
-/// prints `minimized`, and a view from a client with no floating viewport
-/// prints `no floating viewport`: `client client-… minimized position pinned
-/// 20,5`.
+/// prints `minimized`: `client client-… minimized position pinned 20,5`.
 fn render_floating_pane(rendered_output: &mut String, floating_pane_report: &FloatingPaneReport) {
     rendered_output.push_str(&format!(
         "    pane {} asks {}x{} size {}\n",
@@ -548,7 +540,6 @@ fn render_floating_pane(rendered_output: &mut String, floating_pane_report: &Flo
                 ))
             ),
             FloatingPaneVisibilityReport::Minimized => "minimized".to_string(),
-            FloatingPaneVisibilityReport::NoFloatingViewport => "no floating viewport".to_string(),
         };
         let position_cell = match client_view_report.position {
             FloatingPanePositionReport::Default => "default".to_string(),

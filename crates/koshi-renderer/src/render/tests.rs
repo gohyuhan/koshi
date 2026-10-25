@@ -234,17 +234,19 @@ fn render_frame_to_buffer(
     };
     let mut render_buffer = Buffer::empty(viewport_area);
     render_frame(
-        render_snapshot,
-        committed_regions,
+        &build_frame_geometry(
+            render_snapshot,
+            committed_regions,
+            viewer_chrome,
+            viewport_area,
+        ),
         theme,
         keymap_hints,
         None,
-        viewer_chrome,
         ImageRenderMode::Placeholder,
         &[],
         None,
         None,
-        viewport_area,
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -298,17 +300,19 @@ fn render_placement_preview(
     let viewport_area = build_viewport_area(render_snapshot);
     let mut render_buffer = Buffer::empty(buffer_area);
     render_frame(
-        render_snapshot,
-        &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
+        &build_frame_geometry(
+            render_snapshot,
+            &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
+            viewer_chrome,
+            viewport_area,
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        viewer_chrome,
         ImageRenderMode::Placeholder,
         &[],
         Some(placement_presentation),
         placement_target,
-        viewport_area,
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -455,12 +459,12 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
     assert_eq!(render_buffer[(20, 1)].symbol(), "┌");
     assert_eq!(render_buffer[(10, 1)].symbol(), " ");
     assert_eq!(
-        get_cursor_position(
+        get_cursor_position(&build_frame_geometry(
             &render_snapshot,
             &committed_regions,
             ViewerChrome::default(),
-            build_viewport_area(&render_snapshot),
-        ),
+            build_viewport_area(&render_snapshot)
+        )),
         Some(Position::new(21, 2))
     );
 }
@@ -648,8 +652,8 @@ fn a_solve_that_leaves_no_pane_rectangle_letterboxes_everything_but_the_chrome()
 }
 
 /// The client's viewport as an origin-`(0, 0)` render area: the
-/// `viewport_area` [`get_cursor_position`] takes.
-fn build_viewport_area(render_snapshot: &RenderSnapshot) -> RatatuiRect {
+/// `viewport_area` [`build_frame_geometry`] takes.
+pub(crate) fn build_viewport_area(render_snapshot: &RenderSnapshot) -> RatatuiRect {
     RatatuiRect {
         x: 0,
         y: 0,
@@ -663,12 +667,12 @@ fn build_viewport_area(render_snapshot: &RenderSnapshot) -> RatatuiRect {
 fn get_whole_viewport_cursor_position(render_snapshot: &RenderSnapshot) -> Option<Position> {
     let viewport_area = build_viewport_area(render_snapshot);
     let committed_regions = build_whole_viewport_regions(viewport_area.width, viewport_area.height);
-    get_cursor_position(
+    get_cursor_position(&build_frame_geometry(
         render_snapshot,
         &committed_regions,
         ViewerChrome::default(),
         viewport_area,
-    )
+    ))
 }
 
 /// The visible text of a render buffer row.
@@ -2068,17 +2072,19 @@ fn reused_buffer_is_blanked_before_painting() {
     }
 
     render_frame(
-        &render_snapshot,
-        &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
+        &build_frame_geometry(
+            &render_snapshot,
+            &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
+            ViewerChrome::default(),
+            viewport_area,
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        ViewerChrome::default(),
         ImageRenderMode::Placeholder,
         &[],
         None,
         None,
-        viewport_area,
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -3486,8 +3492,8 @@ fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
 
 #[test]
 fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
-    // A resize race can hand `render_frame` a `viewport_area` larger than the
-    // buffer. The letterbox fill clips to the buffer.
+    // A resize race can hand `render_frame` a frame geometry whose viewport
+    // area is larger than the buffer. The letterbox fill clips to the buffer.
     let pane_id = PaneId::new();
     let render_snapshot = build_letterbox_render_snapshot(
         pane_id,
@@ -3502,17 +3508,19 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
     );
     let mut render_buffer = Buffer::empty(RatatuiRect::new(0, 0, 30, 6));
     render_frame(
-        &render_snapshot,
-        &build_core_regions(60, 12),
+        &build_frame_geometry(
+            &render_snapshot,
+            &build_core_regions(60, 12),
+            ViewerChrome::default(),
+            RatatuiRect::new(0, 0, 60, 12),
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        ViewerChrome::default(),
         ImageRenderMode::Placeholder,
         &[],
         None,
         None,
-        RatatuiRect::new(0, 0, 60, 12),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -3542,17 +3550,19 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
     let viewport_area = RatatuiRect::new(0, 0, 30, 6);
     let mut render_buffer = Buffer::empty(viewport_area);
     render_frame(
-        &render_snapshot,
-        &build_core_regions(60, 12),
+        &build_frame_geometry(
+            &render_snapshot,
+            &build_core_regions(60, 12),
+            ViewerChrome::default(),
+            viewport_area,
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        ViewerChrome::default(),
         ImageRenderMode::Placeholder,
         &[],
         None,
         None,
-        viewport_area,
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -4772,12 +4782,12 @@ fn get_core_cursor_position(
     viewer_chrome: ViewerChrome,
 ) -> Option<Position> {
     let viewport_area = build_viewport_area(render_snapshot);
-    get_cursor_position(
+    get_cursor_position(&build_frame_geometry(
         render_snapshot,
         &build_core_regions(viewport_area.width, viewport_area.height),
         viewer_chrome,
         viewport_area,
-    )
+    ))
 }
 
 #[test]
@@ -5251,17 +5261,19 @@ fn render_core_frame_rows(
     screen_buffer: &mut Buffer,
 ) {
     render_frame(
-        render_snapshot,
-        &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        &build_frame_geometry(
+            render_snapshot,
+            &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+            viewer_chrome,
+            build_viewport_area(render_snapshot),
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        viewer_chrome,
         image_render_mode,
         &[],
         None,
         None,
-        build_viewport_area(render_snapshot),
         drawn_rows,
         screen_buffer,
     );
@@ -5369,10 +5381,12 @@ fn list_core_changed_screen_rows(
 ) -> Option<Vec<u16>> {
     list_changed_screen_rows(
         previous_render_snapshot,
-        next_render_snapshot,
-        &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
-        ViewerChrome::default(),
-        build_viewport_area(next_render_snapshot),
+        &build_frame_geometry(
+            next_render_snapshot,
+            &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
+            ViewerChrome::default(),
+            build_viewport_area(next_render_snapshot),
+        ),
     )
 }
 

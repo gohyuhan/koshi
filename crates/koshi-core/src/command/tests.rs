@@ -218,6 +218,32 @@ fn pane_command_variants_round_trip_through_json() {
             }
         })
     );
+    assert_json_roundtrip(&Command::TogglePanePinned(TogglePanePinnedArgs {
+        pane_id: Some(floating_pane_id),
+    }));
+    assert_eq!(
+        serde_json::to_value(Command::TogglePanePinned(TogglePanePinnedArgs {
+            pane_id: None
+        }))
+        .expect("serialize pin toggle command"),
+        json!({ "TogglePanePinned": { "pane_id": null } })
+    );
+    assert_json_roundtrip(&Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+        pane_id: Some(floating_pane_id),
+    }));
+    assert_eq!(
+        serde_json::to_value(Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+            pane_id: None
+        }))
+        .expect("serialize minimize toggle command"),
+        json!({ "TogglePaneMinimized": { "pane_id": null } })
+    );
+    assert_json_roundtrip(&Command::ToggleAllFloatingPanesMinimized);
+    assert_eq!(
+        serde_json::to_value(Command::ToggleAllFloatingPanesMinimized)
+            .expect("serialize minimize-all toggle command"),
+        json!("ToggleAllFloatingPanesMinimized")
+    );
     assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
         placement: NewPanePlacement::Split {
             source_pane_id: Some(PaneId::new()),
@@ -1181,7 +1207,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `MoveFloatingPane`, `SetPanePinned`, `SetPaneMinimized`, `SetAllFloatingPanesMinimized`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`, `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

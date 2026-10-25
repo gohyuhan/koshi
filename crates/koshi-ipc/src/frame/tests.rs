@@ -77,12 +77,15 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 is_pinned: true,
             }],
             floating_panes: vec![
-                FrameFloatingPane {
+                FrameFloatingPane::Minimized {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(6)),
                     pane_title: Some("htop".to_string()),
                 },
-                FrameFloatingPane {
+                FrameFloatingPane::Shown {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(5)),
+                },
+                FrameFloatingPane::Minimized {
+                    pane_id: PaneId::from_uuid(Uuid::from_u128(8)),
                     pane_title: None,
                 },
             ],
@@ -194,8 +197,19 @@ fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
     assert_eq!(
         encoded_json["session_snapshot"]["floating_panes"],
         json!([
-            { "pane_id": Uuid::from_u128(6).to_string(), "pane_title": "htop" },
-            { "pane_id": Uuid::from_u128(5).to_string(), "pane_title": null }
+            {
+                "Minimized": {
+                    "pane_id": Uuid::from_u128(6).to_string(),
+                    "pane_title": "htop"
+                }
+            },
+            { "Shown": { "pane_id": Uuid::from_u128(5).to_string() } },
+            {
+                "Minimized": {
+                    "pane_id": Uuid::from_u128(8).to_string(),
+                    "pane_title": null
+                }
+            }
         ])
     );
 
@@ -421,12 +435,21 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 }],
                 "floating_panes": [
                     {
-                        "pane_id": "00000000-0000-0000-0000-000000000006",
-                        "pane_title": "htop"
+                        "Minimized": {
+                            "pane_id": "00000000-0000-0000-0000-000000000006",
+                            "pane_title": "htop"
+                        }
                     },
                     {
-                        "pane_id": "00000000-0000-0000-0000-000000000005",
-                        "pane_title": null
+                        "Shown": {
+                            "pane_id": "00000000-0000-0000-0000-000000000005"
+                        }
+                    },
+                    {
+                        "Minimized": {
+                            "pane_id": "00000000-0000-0000-0000-000000000008",
+                            "pane_title": null
+                        }
                     }
                 ]
             },

@@ -55,9 +55,8 @@ use koshi_layout::placement::{
     find_stack_target_pane_id, is_same_tab_placement_noop as is_layout_placement_noop,
     InsertionSpan, PlacementDestinations, PlacementTarget,
 };
-use koshi_renderer::snapshot::{MouseFrame, PlacementSnapshot, TabSnapshot};
+use koshi_renderer::snapshot::{FloatingPane, MouseFrame, PlacementSnapshot, TabSnapshot};
 
-use crate::floating_pane_tray::build_minimize_all_toggle_command;
 use crate::{
     is_focused_pane_floating, Client, DockUndockMode, FloatingPaneMoveSelection, LinkStatus,
     PaneMoveMode, PlacementInputAction, PlacementModeLifetime, PlacementTargetOutcome,
@@ -65,7 +64,7 @@ use crate::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The read times of this terminal's input events, shared by its input thread
 /// and the attach loop under one lock.
@@ -409,9 +408,6 @@ impl Client {
     ///
     /// An action that is not a floating pane tray action closes the tray
     /// first ([`close_floating_pane_tray`](Self::close_floating_pane_tray)).
-    /// `core:toggle-minimize-all-floating-panes` sends
-    /// [`build_minimize_all_toggle_command`], and is `Consumed` with no
-    /// painted frame and while the frame lists no floating pane.
     pub(crate) fn apply_client_action(
         &mut self,
         client_action_kind: ClientActionKind,
@@ -423,7 +419,6 @@ impl Client {
                 | ClientActionKind::CloseFloatingPaneTray
                 | ClientActionKind::SelectTrayTile(_)
                 | ClientActionKind::ToggleSelectedTrayTile
-                | ClientActionKind::ToggleMinimizeAllFloatingPanes
         );
         if !is_floating_pane_tray_action {
             self.close_floating_pane_tray();
@@ -499,15 +494,6 @@ impl Client {
                 PlacementInputAction::Consumed
             }
             ClientActionKind::ToggleSelectedTrayTile => self.toggle_selected_tray_tile(mouse_frame),
-            ClientActionKind::ToggleMinimizeAllFloatingPanes => match mouse_frame {
-                Some(mouse_frame) if !mouse_frame.session_snapshot.floating_panes.is_empty() => {
-                    PlacementInputAction::SubmitCommand {
-                        command_id: CommandId::new(),
-                        command: build_minimize_all_toggle_command(&mouse_frame.session_snapshot),
-                    }
-                }
-                _ => PlacementInputAction::Consumed,
-            },
         }
     }
 
@@ -854,7 +840,7 @@ impl Client {
             .session_snapshot
             .floating_panes
             .iter()
-            .map(|floating_pane| floating_pane.pane_id)
+            .map(FloatingPane::get_pane_id)
             .filter(|pane_id| movable_slot_pane_ids.contains(pane_id))
             .collect();
         let movable_pane_count = movable_pane_ids.len();

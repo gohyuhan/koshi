@@ -1708,10 +1708,8 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     );
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
-        [FloatingPane {
+        [FloatingPane::Shown {
             pane_id: floating_pane_id,
-            pane_title: None,
-            is_minimized: false,
         }]
     );
     assert_eq!(
@@ -1745,20 +1743,15 @@ fn floating_panes_list_every_floating_pane_in_the_order_it_became_floating() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [
-            FloatingPane {
+            FloatingPane::Shown {
                 pane_id: first_floating_pane_id,
-                pane_title: None,
-                is_minimized: false,
             },
-            FloatingPane {
+            FloatingPane::Minimized {
                 pane_id: second_floating_pane_id,
                 pane_title: None,
-                is_minimized: true,
             },
-            FloatingPane {
+            FloatingPane::Shown {
                 pane_id: third_floating_pane_id,
-                pane_title: None,
-                is_minimized: false,
             },
         ]
     );
@@ -1790,10 +1783,9 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
     assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
-        [FloatingPane {
+        [FloatingPane::Minimized {
             pane_id: floating_pane_id,
             pane_title: None,
-            is_minimized: true,
         }]
     );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
@@ -1825,10 +1817,9 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
     assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
-        [FloatingPane {
+        [FloatingPane::Minimized {
             pane_id: floating_pane_id,
             pane_title: Some("htop".to_string()),
-            is_minimized: true,
         }]
     );
 }
@@ -1849,10 +1840,9 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
-        [FloatingPane {
+        [FloatingPane::Minimized {
             pane_id: floating_pane_id,
             pane_title: None,
-            is_minimized: true,
         }]
     );
 }

@@ -857,6 +857,12 @@ pub struct TerminalEngine {
     dropped_graphics_event_count: usize,
     /// Number of dropped events that were graphics errors.
     dropped_graphics_error_count: usize,
+    /// Number of parser advances that changed the title
+    /// ([`TerminalState::take_title_change`]).
+    title_change_count: u64,
+    /// Number of parser advances that changed the reported working directory
+    /// ([`TerminalState::take_working_directory_change`]).
+    working_directory_change_count: u64,
     /// Reads the `OSC 52` clipboard copies in the bytes `parser` reads. `None`
     /// until [`start_reading_clipboard_copies`](Self::start_reading_clipboard_copies)
     /// runs: the engine then reads no copy and spends no work on one.
@@ -893,6 +899,8 @@ impl TerminalEngine {
             queued_graphics_rgba_byte_count: 0,
             dropped_graphics_event_count: 0,
             dropped_graphics_error_count: 0,
+            title_change_count: 0,
+            working_directory_change_count: 0,
             clipboard_copy_parser: None,
         }
     }
@@ -993,6 +1001,12 @@ impl TerminalEngine {
                 &mut self.printed_text,
                 &terminal_bytes[parser_byte_index..],
             );
+        }
+        if self.terminal_state.take_title_change() {
+            self.title_change_count += 1;
+        }
+        if self.terminal_state.take_working_directory_change() {
+            self.working_directory_change_count += 1;
         }
         self.capture_undecoded_terminal_bytes(terminal_bytes);
     }
@@ -1110,6 +1124,25 @@ impl TerminalEngine {
     /// reached its count or image-byte limit.
     pub fn get_dropped_graphics_error_count(&self) -> usize {
         self.dropped_graphics_error_count
+    }
+
+    /// Return the number of parser advances that changed the title: an OSC
+    /// 0/1/2 naming another title, or a reset that cleared it
+    /// ([`TerminalState::take_title_change`]). Read before and after one
+    /// chunk, two different values mean that the chunk changed the title: on
+    /// a pane titled `htop`, `ESC ] 2 ; vim BEL` adds `1`, and a second
+    /// `ESC ] 2 ; vim BEL` adds `0`.
+    pub fn get_title_change_count(&self) -> u64 {
+        self.title_change_count
+    }
+
+    /// Return the number of parser advances that changed the reported working
+    /// directory: an OSC 7 naming another host or path
+    /// ([`TerminalState::take_working_directory_change`]). Read before and
+    /// after one chunk, two different values mean that the chunk changed the
+    /// directory.
+    pub fn get_working_directory_change_count(&self) -> u64 {
+        self.working_directory_change_count
     }
 
     /// Drain complete image records and recoverable image errors in the order

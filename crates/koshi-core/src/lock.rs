@@ -72,10 +72,10 @@ pub enum LockMode {
     /// - The viewer overlays the mode on Normal or Locked without changing the
     ///   stored base mode. Opening and closing the tray sends no command.
     /// - `core:toggle-selected-tray-tile` sends
-    ///   [`Command::SetPaneMinimized`](crate::command::Command::SetPaneMinimized)
+    ///   [`Command::TogglePaneMinimized`](crate::command::Command::TogglePaneMinimized)
     ///   for the selected tile's pane, and
     ///   `core:toggle-minimize-all-floating-panes` sends
-    ///   [`Command::SetAllFloatingPanesMinimized`](crate::command::Command::SetAllFloatingPanesMinimized).
+    ///   [`Command::ToggleAllFloatingPanesMinimized`](crate::command::Command::ToggleAllFloatingPanesMinimized).
     ///   The tray stays open after each.
     /// - `core:close-floating-pane-tray` sends nothing and ends the mode.
     FloatingPaneTray,

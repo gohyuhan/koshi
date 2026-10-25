@@ -438,14 +438,19 @@ holds at least one floating pane. `<leader>p w`
 the button. The tray lists every floating pane of the session as a tile, in the
 order the panes became floating:
 
-- A tile shows its number and the pane's title, cut to the tile.
+- A tile shows its number, `1` to `12`, on its top border, and the pane's
+  title under it. A tile is 10 cells wide. A title of 8 cells or more shows
+  the characters that fit in its first 6 cells, then `…`: `logserver` reads
+  `logser…`. A pane with no title shows its number alone.
 - A lit tile is a pane that this client shows. A gray tile is a pane that
   this client minimized.
 - The tray holds 12 slots in 2 rows of 6. A narrow terminal puts fewer slots
   in each row.
-- The tray's top border shows the full title of the selected tile, or of the
-  tile under the pointer. Its right end reads `minimize all` while this client
-  shows a floating pane, and `restore all` while it shows none.
+- The tray's top border shows the full title of the tile under the pointer,
+  else of the selected tile. A title too long for the border ends in `…`. Its
+  right end reads `minimize all` while this client shows a floating pane, and
+  `restore all` while it shows none. A tray of one slot per row has no room
+  for this label and leaves it out.
 
 While the tray is open, the tabline shows the tag `TRAY`. The
 `floating-pane-tray` keymap has priority over the normal or locked keymap, and
