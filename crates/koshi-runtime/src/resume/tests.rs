@@ -26,6 +26,7 @@ use koshi_core::command::{
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_layout::tree::LayoutNode;
 use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend};
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
@@ -158,6 +159,57 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
             resumed_server.terminal_engine_by_pane_id[&first_pane_id].get_terminal_state()
         ),
         "pane 0 output"
+    );
+}
+
+#[test]
+fn migrate_format_four_keeps_the_pane_sizes_beside_a_preferred_size() {
+    // The fixture's first tab splits pane 4 beside a pair, and a 22x9 client
+    // views it: 22 columns. With pane 4 aiming for 6 columns and resize deltas
+    // `+3` and `-3`, the format-4 solve gave 6 and 16: the deltas first, then
+    // the target. The deltas are rewritten to `0` and `0`, and the panes keep
+    // 6 and 16 columns.
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_four.json"))
+            .expect("the format-4 fixture is JSON");
+    let first_tab_key = "00000000-0000-7000-8000-abcd00000003";
+    let root_weights = &mut fixture_json["raw_body"]["session_by_id"]
+        ["00000000-0000-7000-8000-abcd00000001"]["tabs"][first_tab_key]["layout"]["Split"]
+        ["weights"];
+    root_weights[0]["preferred_cell_count"] = serde_json::json!(6);
+    root_weights[0]["resize_delta"] = serde_json::json!(3);
+    root_weights[1]["resize_delta"] = serde_json::json!(-3);
+    let (resume_header, resume_body) = read_released_resume_fixture(
+        &serde_json::to_vec(&fixture_json).expect("the edited fixture serializes"),
+    );
+    assert_eq!(resume_header.resume_format, 4);
+
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    let first_tab_id: TabId =
+        serde_json::from_value(serde_json::json!(first_tab_key)).expect("a tab id");
+    let first_tab = &session.tabs[&first_tab_id];
+    let LayoutNode::Split(root_split) = first_tab.get_layout_tree() else {
+        panic!("the first tab holds a split");
+    };
+    assert_eq!(
+        root_split
+            .weights
+            .iter()
+            .map(|size_weight| size_weight.resize_delta)
+            .collect::<Vec<i32>>(),
+        [0, 0]
+    );
+    let first_pane_id = resume_header.carried_panes[0].pane_id;
+    assert_eq!(
+        first_tab
+            .get_layout_solve()
+            .find_pane_rect(first_pane_id)
+            .expect("pane 4 is solved")
+            .size
+            .column_count,
+        6
     );
 }
 
@@ -1280,6 +1332,7 @@ fn build_resumed_server_with_config_and_exit_statuses(
         inbox_receiver,
         startup_app_config,
         resume_body,
+        resume_header.resume_format,
         pty_size_by_pane_id,
         exit_status_by_pane_id,
     );
@@ -2449,6 +2502,7 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
         inbox_receiver,
         None,
         build_resume_body_with_quit(None),
+        RESUME_FORMAT,
         HashMap::from([(stray_pane_id, stray_pty_size)]),
         HashMap::new(),
     );

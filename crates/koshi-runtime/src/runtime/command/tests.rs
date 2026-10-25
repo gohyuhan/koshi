@@ -10483,7 +10483,7 @@ fn a_vertical_resize_past_the_minimum_stops_there_and_names_up_and_the_bottom_bo
 }
 
 #[test]
-fn resize_pane_against_a_preferred_size_is_refused_as_held_and_changes_nothing() {
+fn resize_pane_beside_a_preferred_size_moves_the_border() {
     let ResizeFixture {
         mut runtime,
         session_id,
@@ -10502,10 +10502,66 @@ fn resize_pane_against_a_preferred_size_is_refused_as_held_and_changes_nothing()
     };
     preferred_split.weights[0].preferred_cell_count = Some(20);
     let _ = session.update_tab_layout(tab_id, preferred_layout_tree);
+    assert_eq!(
+        list_content_column_counts(&runtime, session_id),
+        vec![(root_pane_id, Some(18)), (split_pane_id, Some(58))]
+    );
+
+    // The split pane grows left by 5, then the root pane shrinks from the
+    // right by 5: the root pane moves off its preferred 20 columns each time.
+    let moving_resizes = [
+        (split_pane_id, Direction::Left, 5, [Some(13), Some(63)]),
+        (root_pane_id, Direction::Right, -5, [Some(8), Some(68)]),
+    ];
+    for (resized_pane_id, direction, resize_amount_cells, expected_content_column_counts) in
+        moving_resizes
+    {
+        let (_, command_result) = dispatch_resize_pane(
+            &mut runtime,
+            CommandSource::from_key_binding(client_id),
+            resized_pane_id,
+            direction,
+            resize_amount_cells,
+        );
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Ok(vec!["LayoutChanged", "PtyResized"])
+        );
+        assert_eq!(
+            list_content_column_counts(&runtime, session_id),
+            vec![
+                (root_pane_id, expected_content_column_counts[0]),
+                (split_pane_id, expected_content_column_counts[1]),
+            ]
+        );
+    }
+}
+
+#[test]
+fn resize_pane_toward_a_suppressed_pane_is_refused_as_held_and_changes_nothing() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    // The root pane's floor of 78 columns leaves the split pane no room in 80
+    // columns: the split pane is suppressed, and the root pane holds 2 columns
+    // above its floor.
+    let tab_id = get_only_tab_id(&runtime, session_id);
+    let session = runtime.session_by_id.get_mut(&session_id).expect("session");
+    let mut suppressing_layout_tree = session.tabs[&tab_id].get_layout_tree().clone();
+    let LayoutNode::Split(suppressing_split) = &mut suppressing_layout_tree else {
+        unreachable!("the fixture tab is a split");
+    };
+    suppressing_split.weights[0].minimum_cell_count = Some(78);
+    let _ = session.update_tab_layout(tab_id, suppressing_layout_tree);
     let content_column_counts_before = list_content_column_counts(&runtime, session_id);
     assert_eq!(
         content_column_counts_before,
-        vec![(root_pane_id, Some(18)), (split_pane_id, Some(58))]
+        vec![(root_pane_id, Some(78)), (split_pane_id, None)]
     );
 
     let held_resizes = [
@@ -10518,7 +10574,7 @@ fn resize_pane_against_a_preferred_size_is_refused_as_held_and_changes_nothing()
         (
             root_pane_id,
             Direction::Right,
-            -5,
+            -1,
             format!(
                 "{root_pane_id} cannot shrink from the right here; the layout holds this border in place"
             ),

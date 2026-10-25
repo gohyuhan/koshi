@@ -305,7 +305,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// detached clients left with the resume-token hashes, and the process IDs of
 /// the children closed panes left running. It turns each client's focused pane
 /// in each tab into a one-pane focus history, and drops each pane record's
-/// lifecycle and close policy.
+/// lifecycle and close policy. Format 5 layout trees hold resize deltas that
+/// the solve applies after the `preferred` targets, and formats 1 through 4
+/// hold resize deltas applied before them: a restored body of format 4 or
+/// older has its resize deltas rewritten, and each pane keeps its size.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.
 ///

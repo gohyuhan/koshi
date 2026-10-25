@@ -37,7 +37,8 @@ use koshi_terminal::engine::TerminalEngine;
 use crate::{
     ipc_server::IpcServer,
     resume::{
-        CarriedPane, CarriedPaneState, CarriedQuit, ResumeBody, ResumeHeader, RESUME_FORMAT,
+        CarriedPane, CarriedPaneState, CarriedQuit, ResumeBody, ResumeHeader,
+        NEWEST_FORMAT_WITH_RESIZE_DELTAS_BEFORE_PREFERRED, RESUME_FORMAT,
         SCREEN_NOT_RESTORED_NOTICE_BYTES,
     },
     runtime::{
@@ -388,6 +389,12 @@ impl Server {
     /// is solved with its pane sizes ([`Session::update_pane_sizing`]). `None` keeps the built-in
     /// defaults.
     ///
+    /// `source_resume_format` is the format the resume file was written in. A body of format
+    /// [`NEWEST_FORMAT_WITH_RESIZE_DELTAS_BEFORE_PREFERRED`] or older has every carried session's
+    /// resize deltas rewritten with those pane sizes before the first solve
+    /// ([`Session::convert_resize_deltas_to_apply_after_preferred`]): each pane then solves to the
+    /// size the writing build solved it to.
+    ///
     /// `pty_size_by_pane_id` names every pane whose child the backend drives, with the size its
     /// terminal holds. Two callers reach this: the new image after a successful swap passes the
     /// panes it took back, and the old image after a swap that failed to start passes every pane
@@ -424,6 +431,7 @@ impl Server {
         inbox_receiver: Receiver<RuntimeEvent>,
         startup_app_config: Option<PartialKoshiConfig>,
         body: ResumeBody,
+        source_resume_format: u32,
         pty_size_by_pane_id: HashMap<PaneId, PtySize>,
         exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
     ) -> Self {
@@ -437,6 +445,12 @@ impl Server {
             .collect();
         server.saved_view_store = body.saved_view_store;
         server.session_by_id = body.session_by_id;
+        if source_resume_format <= NEWEST_FORMAT_WITH_RESIZE_DELTAS_BEFORE_PREFERRED {
+            let pane_sizing = server.get_pane_sizing();
+            for session in server.session_by_id.values_mut() {
+                session.convert_resize_deltas_to_apply_after_preferred(pane_sizing);
+            }
+        }
         let mut resume_events = server.update_every_session_pane_sizing();
         // A quit applied before the swap comes back with its kind. The serve
         // loop leaves it alone while any carried client is still expected, so

@@ -94,7 +94,7 @@ impl SizeConstraint {
 /// `preferred_cell_count` overlay a
 /// floor and a target on top of any primary; `resize_delta` is the
 /// accumulated user resize in cells, applied after the primary distribution
-/// on every solve, at any terminal size.
+/// and the target on every solve, at any terminal size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SizeWeight {
     /// The distribution strategy for this child.
@@ -108,7 +108,9 @@ pub struct SizeWeight {
     /// without pushing anyone below a floor. Combinable with
     /// `minimum_cell_count`.
     pub preferred_cell_count: Option<u16>,
-    /// Accumulated user-resize offset in cells, applied after `primary_constraint`.
+    /// Accumulated user-resize offset in cells, applied after `primary_constraint`
+    /// and the `preferred_cell_count` target: a pane at `preferred 20` with a
+    /// `resize_delta` of `+5` solves to 25 cells when its sibling has the room.
     pub resize_delta: i32,
 }
 

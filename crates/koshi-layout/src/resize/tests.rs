@@ -6,7 +6,7 @@ use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::layout_assert::check_exact_tiling;
 
 use super::*;
-use crate::solver::tests::build_pane_sizing;
+use crate::solver::tests::{build_pane_sizing, build_size_weight_strategy};
 
 use crate::solver::{solve_layout, solve_layout_with_sizing};
 use crate::tree::{LayoutNode, SplitNode};
@@ -1519,7 +1519,7 @@ fn build_preferred_left_split(
 }
 
 #[test]
-fn a_donor_at_its_preferred_size_keeps_it_when_its_resize_delta_drops() {
+fn a_negative_resize_delta_moves_a_pane_below_its_preferred_size() {
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree = build_preferred_left_split(left_pane_id, right_pane_id, 20);
     let mut offset_layout_tree = layout_tree.clone();
@@ -1531,62 +1531,86 @@ fn a_donor_at_its_preferred_size_keeps_it_when_its_resize_delta_drops() {
 
     // The left pane's 40-column share is cut to its preferred 20, and the
     // right pane takes the rest. Ten cells of offset away from the left pane
-    // leave both panes where they were.
-    for solved_layout_tree in [&layout_tree, &offset_layout_tree] {
+    // then move the border ten columns left.
+    for (solved_layout_tree, expected_column_counts) in
+        [(&layout_tree, [20, 60]), (&offset_layout_tree, [10, 70])]
+    {
         assert_eq!(
-            compute_solved_pane_size(
+            [left_pane_id, right_pane_id].map(|pane_id| compute_solved_pane_size(
                 solved_layout_tree,
                 build_cell_rect(0, 0, 80, 24),
-                left_pane_id
+                pane_id
             )
-            .column_count,
-            20
-        );
-        assert_eq!(
-            compute_solved_pane_size(
-                solved_layout_tree,
-                build_cell_rect(0, 0, 80, 24),
-                right_pane_id
-            )
-            .column_count,
-            60
+            .column_count),
+            expected_column_counts
         );
     }
 }
 
 #[test]
-fn a_border_beside_a_pane_at_its_preferred_size_is_held_in_every_direction() {
+fn a_border_beside_a_pane_at_its_preferred_size_moves_in_every_direction() {
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let layout_tree = build_preferred_left_split(left_pane_id, right_pane_id, 20);
+    let layout_area = build_cell_rect(0, 0, 80, 24);
 
-    // The left pane holds 16 columns above its floor of 4, and still no
-    // offset moves the border between the two panes.
-    let held_resizes = [
-        (right_pane_id, Direction::Left, 5, true),
-        (left_pane_id, Direction::Right, 5, true),
-        (left_pane_id, Direction::Right, -5, false),
-        (right_pane_id, Direction::Left, i16::MAX, true),
+    // The left pane holds 20 columns, 16 above its floor of 4. A request
+    // larger than that moves the border 16 columns.
+    let moving_resizes = [
+        (right_pane_id, Direction::Left, 5, 5, [15, 65], [-5, 5]),
+        (left_pane_id, Direction::Right, 5, 5, [25, 55], [5, -5]),
+        (left_pane_id, Direction::Right, -5, 5, [15, 65], [-5, 5]),
+        (
+            right_pane_id,
+            Direction::Left,
+            i16::MAX,
+            16,
+            [4, 76],
+            [-16, 16],
+        ),
     ];
-    for (resized_pane_id, direction, resize_cell_delta, is_pane_growing) in held_resizes {
+    for (
+        resized_pane_id,
+        direction,
+        resize_cell_delta,
+        expected_moved_cell_count,
+        expected_column_counts,
+        expected_resize_deltas,
+    ) in moving_resizes
+    {
+        let (resized_layout_tree, moved_cell_count) = resize_layout(
+            &layout_tree,
+            layout_area,
+            resized_pane_id,
+            direction,
+            resize_cell_delta,
+        )
+        .unwrap();
+        assert_eq!(moved_cell_count, expected_moved_cell_count);
         assert_eq!(
-            resize_layout(
-                &layout_tree,
-                build_cell_rect(0, 0, 80, 24),
-                resized_pane_id,
-                direction,
-                resize_cell_delta,
-            ),
-            Err(ResizeError::BorderHeld {
-                pane_id: resized_pane_id,
-                direction,
-                is_pane_growing,
-            })
+            [left_pane_id, right_pane_id].map(|pane_id| compute_solved_pane_size(
+                &resized_layout_tree,
+                layout_area,
+                pane_id
+            )
+            .column_count),
+            expected_column_counts
+        );
+        let LayoutNode::Split(resized_split) = &resized_layout_tree else {
+            unreachable!("the tree is a split");
+        };
+        assert_eq!(
+            resized_split
+                .weights
+                .iter()
+                .map(|size_weight| size_weight.resize_delta)
+                .collect::<Vec<i32>>(),
+            expected_resize_deltas
         );
     }
 }
 
 #[test]
-fn a_border_moves_its_on_screen_distance_while_the_donor_holds_its_preferred_size() {
+fn a_border_moves_until_a_donor_with_a_preferred_size_reaches_its_floor() {
     // Ninety columns in three equal shares. The middle pane aims for ten, and
     // its surplus goes to the right pane: 30, 10, 50.
     let (left_pane_id, middle_pane_id, right_pane_id) =
@@ -1609,18 +1633,16 @@ fn a_border_moves_its_on_screen_distance_while_the_donor_holds_its_preferred_siz
     };
     assert_eq!(list_column_counts(&layout_tree), [30, 10, 50]);
 
-    // Growing the left pane by five moves the border five columns: the middle
-    // pane keeps its ten, and the right pane gives the cells.
+    // Growing the left pane by five moves the border five columns, and the
+    // middle pane gives the cells.
     let (grown_layout_tree, moved_cell_count) =
         resize_layout(&layout_tree, layout_area, left_pane_id, Direction::Right, 5).unwrap();
     assert_eq!(moved_cell_count, 5);
-    assert_eq!(list_column_counts(&grown_layout_tree), [35, 10, 45]);
+    assert_eq!(list_column_counts(&grown_layout_tree), [35, 5, 50]);
 
-    // Asking for 50 moves 50. Offset cells 47 to 56 move nothing: the right
-    // pane is at its floor of 4, and the middle pane takes each cell back
-    // from the left pane. From cell 57 on, the right pane's floor takes its
-    // cells from the middle pane, and the border moves again.
-    let (grown_past_hold_layout_tree, moved_past_hold_cell_count) = resize_layout(
+    // Asking for 50 moves the 6 columns the middle pane holds above its floor
+    // of 4, and keeps the 6 cells of offset that moved them.
+    let (grown_to_floor_layout_tree, moved_to_floor_cell_count) = resize_layout(
         &layout_tree,
         layout_area,
         left_pane_id,
@@ -1628,23 +1650,23 @@ fn a_border_moves_its_on_screen_distance_while_the_donor_holds_its_preferred_siz
         50,
     )
     .unwrap();
-    assert_eq!(moved_past_hold_cell_count, 50);
-    assert_eq!(list_column_counts(&grown_past_hold_layout_tree), [80, 6, 4]);
-    let LayoutNode::Split(grown_past_hold_split) = &grown_past_hold_layout_tree else {
+    assert_eq!(moved_to_floor_cell_count, 6);
+    assert_eq!(list_column_counts(&grown_to_floor_layout_tree), [36, 4, 50]);
+    let LayoutNode::Split(grown_to_floor_split) = &grown_to_floor_layout_tree else {
         unreachable!("the tree is a split");
     };
     assert_eq!(
-        grown_past_hold_split
+        grown_to_floor_split
             .weights
             .iter()
             .map(|size_weight| size_weight.resize_delta)
             .collect::<Vec<i32>>(),
-        vec![60, -60, 0]
+        vec![6, -6, 0]
     );
 }
 
 #[test]
-fn a_border_held_after_a_partial_move_keeps_only_the_offset_that_moved_it() {
+fn a_border_beside_a_preferred_pane_moves_to_the_donors_floor() {
     // Sixty columns in three equal shares. The left pane aims for ten, and its
     // surplus goes to the right pane: 10, 20, 30.
     let (left_pane_id, middle_pane_id, right_pane_id) =
@@ -1667,10 +1689,8 @@ fn a_border_held_after_a_partial_move_keeps_only_the_offset_that_moved_it() {
     };
     assert_eq!(list_column_counts(&layout_tree), [10, 20, 30]);
 
-    // The middle pane grows by 20, until the right pane's own share is spent.
-    // Every further offset cell is trimmed off the middle pane again, while
-    // the left pane's surplus keeps the right pane at 10 columns, above its
-    // floor of 4. The tree keeps the 20 cells of offset that moved the border.
+    // The middle pane grows by the 26 columns the right pane holds above its
+    // floor of 4, and the tree keeps the 26 cells of offset that moved them.
     let (grown_layout_tree, moved_cell_count) = resize_layout(
         &layout_tree,
         layout_area,
@@ -1679,8 +1699,8 @@ fn a_border_held_after_a_partial_move_keeps_only_the_offset_that_moved_it() {
         200,
     )
     .unwrap();
-    assert_eq!(moved_cell_count, 20);
-    assert_eq!(list_column_counts(&grown_layout_tree), [10, 40, 10]);
+    assert_eq!(moved_cell_count, 26);
+    assert_eq!(list_column_counts(&grown_layout_tree), [10, 46, 4]);
     let LayoutNode::Split(grown_split) = &grown_layout_tree else {
         unreachable!("the tree is a split");
     };
@@ -1690,10 +1710,10 @@ fn a_border_held_after_a_partial_move_keeps_only_the_offset_that_moved_it() {
             .iter()
             .map(|size_weight| size_weight.resize_delta)
             .collect::<Vec<i32>>(),
-        vec![0, 20, -20]
+        vec![0, 26, -26]
     );
 
-    // The next press finds the border held.
+    // The next press finds the right pane at its floor.
     assert_eq!(
         resize_layout(
             &grown_layout_tree,
@@ -1702,7 +1722,7 @@ fn a_border_held_after_a_partial_move_keeps_only_the_offset_that_moved_it() {
             Direction::Right,
             1
         ),
-        Err(ResizeError::BorderHeld {
+        Err(ResizeError::DonorAtMinimumSize {
             pane_id: middle_pane_id,
             direction: Direction::Right,
             is_pane_growing: true,
@@ -1940,4 +1960,266 @@ fn offsets_at_the_i32_limits_still_move_the_border_by_the_request() {
             .collect::<Vec<i32>>(),
         vec![-31, i32::MIN + 31]
     );
+}
+
+/// The resize of the child at `target_child_index` of the horizontal split of
+/// leaves `layout_tree` over `split_rect`, found by solving the split at every
+/// candidate added count in ascending order: each count at which the
+/// receiver's or the donor's offset lies between minus and plus the split's
+/// column count. The walk keeps the first count that reaches the largest move
+/// up to the request, and stops at the first count whose border moved the
+/// whole request or whose donor holds no spare cell.
+fn walk_every_candidate(
+    layout_tree: &LayoutNode,
+    split_rect: Rect,
+    target_child_index: usize,
+    direction: Direction,
+    resize_cell_delta: i16,
+    pane_sizing: PaneSizing,
+) -> Result<(LayoutNode, u16), ResizeError> {
+    let LayoutNode::Split(split) = layout_tree else {
+        panic!("the tree is a split");
+    };
+    let LayoutNode::Pane(pane_id) = split.children[target_child_index] else {
+        panic!("every child is a leaf");
+    };
+    let adjacent_child_index = match direction {
+        Direction::Left => target_child_index.checked_sub(1),
+        Direction::Right => {
+            (target_child_index + 1 < split.children.len()).then_some(target_child_index + 1)
+        }
+        Direction::Up | Direction::Down => None,
+    }
+    .ok_or(ResizeError::NoAdjacentBorder { pane_id, direction })?;
+    let requested_cell_count = resize_cell_delta.unsigned_abs();
+    let is_pane_growing = resize_cell_delta > 0;
+    let (receiving_child_index, donating_child_index) = if is_pane_growing {
+        (target_child_index, adjacent_child_index)
+    } else {
+        (adjacent_child_index, target_child_index)
+    };
+
+    let mut walked_split = split.clone();
+    walked_split
+        .weights
+        .resize(walked_split.children.len(), SizeWeight::default());
+    let donating_slot_floor =
+        compute_slot_floor(&walked_split, donating_child_index, true, pane_sizing);
+    let border_child_index = receiving_child_index.max(donating_child_index);
+    let is_border_moving_forward = donating_child_index > receiving_child_index;
+    let measure_border = |measured_split: &SplitNode| -> (i32, u16) {
+        let child_rects = compute_directional_child_rects(measured_split, split_rect, pane_sizing);
+        let spare_cell_count = u16::try_from(donating_slot_floor).map_or(0, |floor_cell_count| {
+            child_rects[donating_child_index]
+                .size
+                .column_count
+                .saturating_sub(floor_cell_count)
+        });
+        (
+            i32::from(child_rects[border_child_index].origin.column),
+            spare_cell_count,
+        )
+    };
+    let starting_receiving_resize_delta =
+        i64::from(walked_split.weights[receiving_child_index].resize_delta);
+    let starting_donating_resize_delta =
+        i64::from(walked_split.weights[donating_child_index].resize_delta);
+    let set_added_cell_count = |walked_split: &mut SplitNode, added_cell_count: i64| {
+        walked_split.weights[receiving_child_index].resize_delta =
+            (starting_receiving_resize_delta + added_cell_count)
+                .clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+        walked_split.weights[donating_child_index].resize_delta =
+            (starting_donating_resize_delta - added_cell_count)
+                .clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+    };
+
+    let column_count = i64::from(split_rect.size.column_count);
+    let mut added_cell_counts: Vec<i64> = ((1 - column_count - starting_receiving_resize_delta)
+        .max(1)
+        ..=(column_count - starting_receiving_resize_delta))
+        .chain(
+            (1 - column_count + starting_donating_resize_delta).max(1)
+                ..=(column_count + starting_donating_resize_delta),
+        )
+        .collect();
+    added_cell_counts.sort_unstable();
+    added_cell_counts.dedup();
+
+    let (starting_border_cell, starting_spare_cell_count) = measure_border(&walked_split);
+    let mut walked_moved_cell_count: u16 = 0;
+    let mut walked_added_cell_count: i64 = 0;
+    if requested_cell_count > 0 && starting_spare_cell_count > 0 {
+        for added_cell_count in added_cell_counts {
+            set_added_cell_count(&mut walked_split, added_cell_count);
+            let (border_cell, spare_cell_count) = measure_border(&walked_split);
+            let moved_cell_count = if is_border_moving_forward {
+                border_cell - starting_border_cell
+            } else {
+                starting_border_cell - border_cell
+            };
+            if moved_cell_count > i32::from(walked_moved_cell_count)
+                && moved_cell_count <= i32::from(requested_cell_count)
+            {
+                walked_moved_cell_count = moved_cell_count as u16;
+                walked_added_cell_count = added_cell_count;
+            }
+            if moved_cell_count >= i32::from(requested_cell_count) || spare_cell_count == 0 {
+                break;
+            }
+        }
+    }
+    if requested_cell_count > 0 && walked_moved_cell_count == 0 {
+        return Err(if starting_spare_cell_count == 0 {
+            ResizeError::DonorAtMinimumSize {
+                pane_id,
+                direction,
+                is_pane_growing,
+            }
+        } else {
+            ResizeError::BorderHeld {
+                pane_id,
+                direction,
+                is_pane_growing,
+            }
+        });
+    }
+    set_added_cell_count(&mut walked_split, walked_added_cell_count);
+    Ok((LayoutNode::Split(walked_split), walked_moved_cell_count))
+}
+
+/// A horizontal split of one leaf per weight in `weights`.
+fn build_weighted_leaf_split(weights: Vec<SizeWeight>) -> LayoutNode {
+    let mut split = SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        weights
+            .iter()
+            .map(|_| build_leaf_node(PaneId::new()))
+            .collect(),
+    );
+    split.weights = weights;
+    LayoutNode::Split(split)
+}
+
+/// A content floor `minimum_column_count` columns wide and one row high, and
+/// `gap_cell_count` cells between kept children.
+fn build_narrow_pane_sizing(minimum_column_count: u16, gap_cell_count: u16) -> PaneSizing {
+    PaneSizing {
+        minimum_size: Size {
+            column_count: minimum_column_count,
+            row_count: 1,
+        },
+        gap_cell_count,
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2048))]
+
+    #[test]
+    fn the_search_lands_where_a_walk_over_every_candidate_lands(
+        weights in proptest::collection::vec(build_size_weight_strategy(), 2..=4),
+        column_count in 8u16..=120,
+        minimum_column_count in 1u16..=4,
+        gap_cell_count in 0u16..=2,
+        target_child_choice in proptest::prelude::any::<proptest::sample::Index>(),
+        is_resizing_right in proptest::prelude::any::<bool>(),
+        resize_cell_delta in -130i16..=130,
+    ) {
+        let target_child_index = target_child_choice.index(weights.len());
+        let layout_tree = build_weighted_leaf_split(weights);
+        let LayoutNode::Split(split) = &layout_tree else {
+            panic!("the tree is a split");
+        };
+        let LayoutNode::Pane(target_pane_id) = split.children[target_child_index] else {
+            panic!("every child is a leaf");
+        };
+        let direction = if is_resizing_right { Direction::Right } else { Direction::Left };
+        let split_rect = build_cell_rect(0, 0, column_count, 24);
+        let pane_sizing = build_narrow_pane_sizing(minimum_column_count, gap_cell_count);
+
+        proptest::prop_assert_eq!(
+            resize_layout_with_sizing(
+                &layout_tree,
+                split_rect,
+                target_pane_id,
+                direction,
+                resize_cell_delta,
+                pane_sizing,
+            ),
+            walk_every_candidate(
+                &layout_tree,
+                split_rect,
+                target_child_index,
+                direction,
+                resize_cell_delta,
+                pane_sizing,
+            )
+        );
+    }
+
+    #[test]
+    fn the_border_never_moves_back_while_the_donor_has_spare(
+        weights in proptest::collection::vec(build_size_weight_strategy(), 2..=4),
+        column_count in 8u16..=120,
+        minimum_column_count in 1u16..=4,
+        gap_cell_count in 0u16..=2,
+        border_choice in proptest::prelude::any::<proptest::sample::Index>(),
+        is_left_child_receiving in proptest::prelude::any::<bool>(),
+    ) {
+        let mut split = match build_weighted_leaf_split(weights) {
+            LayoutNode::Split(split) => split,
+            LayoutNode::Pane(_) => panic!("the tree is a split"),
+        };
+        let left_child_index = border_choice.index(split.children.len() - 1);
+        let (receiving_child_index, donating_child_index) = if is_left_child_receiving {
+            (left_child_index, left_child_index + 1)
+        } else {
+            (left_child_index + 1, left_child_index)
+        };
+        let split_rect = build_cell_rect(0, 0, column_count, 24);
+        let pane_sizing = build_narrow_pane_sizing(minimum_column_count, gap_cell_count);
+        let donating_slot_floor =
+            compute_slot_floor(&split, donating_child_index, true, pane_sizing);
+        let starting_receiving_resize_delta = split.weights[receiving_child_index].resize_delta;
+        let starting_donating_resize_delta = split.weights[donating_child_index].resize_delta;
+        // The border cell and the donor's spare cells at `added_cell_count`.
+        let mut measure_border = |added_cell_count: i32| -> (i32, u32) {
+            split.weights[receiving_child_index].resize_delta =
+                starting_receiving_resize_delta + added_cell_count;
+            split.weights[donating_child_index].resize_delta =
+                starting_donating_resize_delta - added_cell_count;
+            let child_rects = compute_directional_child_rects(&split, split_rect, pane_sizing);
+            let border_cell = i32::from(child_rects[left_child_index + 1].origin.column);
+            let moved_border_cell = if is_left_child_receiving { border_cell } else { -border_cell };
+            let spare_cell_count = u32::from(child_rects[donating_child_index].size.column_count)
+                .saturating_sub(donating_slot_floor);
+            (moved_border_cell, spare_cell_count)
+        };
+
+        // Past `last_added_cell_count`, both offsets lie outside minus to plus
+        // the column count, and every solve equals the one before it.
+        let last_added_cell_count = (i32::from(column_count) - starting_receiving_resize_delta)
+            .max(i32::from(column_count) + starting_donating_resize_delta)
+            + 1;
+        let (mut previous_moved_border_cell, mut previous_spare_cell_count) = measure_border(0);
+        for added_cell_count in 1..=last_added_cell_count {
+            let (moved_border_cell, spare_cell_count) = measure_border(added_cell_count);
+            if previous_spare_cell_count > 0 {
+                let moved_cell_count = moved_border_cell - previous_moved_border_cell;
+                proptest::prop_assert!(
+                    (0..=1).contains(&moved_cell_count),
+                    "added count {added_cell_count} moved the border {moved_cell_count} cells"
+                );
+            } else {
+                proptest::prop_assert_eq!(
+                    spare_cell_count,
+                    0,
+                    "the donor held a spare cell again at added count {}",
+                    added_cell_count
+                );
+            }
+            previous_moved_border_cell = moved_border_cell;
+            previous_spare_cell_count = spare_cell_count;
+        }
+    }
 }
