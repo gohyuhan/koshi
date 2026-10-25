@@ -385,10 +385,7 @@ fn a_syntax_error_lists_one_message_naming_its_line_and_column() {
     let parse_error = parse_keybinding_text("mode \"normal\" {").expect_err("unclosed block");
     assert_eq!(
         parse_error.list_problem_messages(),
-        vec![
-            "config parse error in keybinding.kdl: line 2, column 15: No closing '}' for child block"
-                .to_string()
-        ]
+        vec!["line 2, column 15: No closing '}' for child block".to_string()]
     );
 }
 

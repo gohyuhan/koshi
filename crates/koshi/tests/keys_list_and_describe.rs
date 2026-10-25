@@ -103,6 +103,36 @@ locked  <C-g>  core:new-tab  user
 }
 
 #[test]
+fn keys_list_names_the_keybinding_file_it_ignores_and_where_the_file_breaks() {
+    let home_directory = TempDir::new().expect("create test home");
+    let keybinding_file_path = create_keybinding_file_path(home_directory.path());
+    fs::write(&keybinding_file_path, "version 2\nmode \"normal\" {\n")
+        .expect("write keybinding.kdl");
+
+    assert_eq!(
+        run_koshi_under_home(
+            home_directory.path(),
+            &["keys", "list", "--mode", "locked", "--scope", "default"]
+        ),
+        KoshiRunOutput {
+            standard_output: "\
+mode    key    action             source
+locked  <C-g>  core:mouse-select  defaults
+locked  <C-l>  core:unlock        defaults
+locked  <C-q>  core:quit          defaults
+"
+            .to_string(),
+            standard_error: format!(
+                "koshi: keybinding file {} ignored: line 2, column 15: No closing '}}' for child \
+                 block\n",
+                keybinding_file_path.display()
+            ),
+            exit_code: Some(0),
+        }
+    );
+}
+
+#[test]
 fn keys_describe_lists_the_bindings_a_prefix_opens() {
     let home_directory = TempDir::new().expect("create test home");
     assert_eq!(

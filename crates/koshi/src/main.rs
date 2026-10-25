@@ -1062,12 +1062,18 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
 }
 
 /// Warn on stderr when the user's keybinding file exists but was not admitted:
-/// `koshi: keybinding file ignored: <error>` for a file that could not be
-/// loaded, or a note that the file conflicts and the built-in defaults are
+/// `koshi: keybinding file <path> ignored: <error>` for a file that could not
+/// be loaded, or a note that the file conflicts and the built-in defaults are
 /// shown.
 fn warn_keymap_reverted(keymap_view: &KeymapView) {
-    if let Some(keybinding_file_error_message) = &keymap_view.keybinding_file_error_message {
-        eprintln!("koshi: keybinding file ignored: {keybinding_file_error_message}");
+    if let (Some(user_keybinding_file_path), Some(keybinding_file_error_message)) = (
+        &keymap_view.user_keybinding_file_path,
+        &keymap_view.keybinding_file_error_message,
+    ) {
+        eprintln!(
+            "koshi: keybinding file {} ignored: {keybinding_file_error_message}",
+            user_keybinding_file_path.display()
+        );
     } else if keymap_view.keymap_verdict != KeymapVerdict::Apply {
         eprintln!(
             "koshi: keybinding file not applied (conflicts); showing built-in defaults — \

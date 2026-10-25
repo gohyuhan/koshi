@@ -66,9 +66,13 @@ const COLOR_KEYS: &[&str] = &[
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `theme_source_text` is not valid KDL.
 ///
-/// Returns [`ConfigError::Validation`] with key `version` when `version` is
-/// missing, declared twice, carries a `{ … }` block, is not a single integer
-/// from `0` to `4294967295`, is `0`, or is newer than this build supports.
+/// Returns [`ConfigError::Validation`] when `version` is missing, declared
+/// twice, carries a `{ … }` block, is not a single integer from `0` to
+/// `4294967295`, is `0`, or is newer than this build supports. The error
+/// starts with the line and column of the node or value at fault, such as
+/// ``line 2, column 1: `version` is declared more than once``. A missing
+/// `version` names the position where the first node starts, `line 1, column
+/// 1` in an empty file.
 pub fn parse_theme(
     theme_path: &Path,
     theme_source_text: &str,
@@ -95,12 +99,13 @@ pub(crate) fn parse_theme_from_document(
             "version" => {
                 if has_seen_version {
                     return Err(build_validation_error(
-                        "version",
+                        theme_source_text,
+                        config_node.span(),
                         "`version` is declared more than once",
                     ));
                 }
                 has_seen_version = true;
-                validate_version_node(config_node)?;
+                validate_version_node(config_node, theme_source_text)?;
             }
             "colors" => {
                 if has_seen_colors {
@@ -123,7 +128,8 @@ pub(crate) fn parse_theme_from_document(
     }
     if !has_seen_version {
         return Err(build_validation_error(
-            "version",
+            theme_source_text,
+            theme_document.span(),
             "file must declare `version`",
         ));
     }

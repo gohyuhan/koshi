@@ -373,10 +373,7 @@ fn problem_messages_name_the_line_and_column_of_a_syntax_error_and_of_each_schem
         parse_profile_text("tab {")
             .unwrap_err()
             .list_problem_messages(),
-        vec![
-            "config parse error in profile/dev.kdl: line 1, column 5: No closing '}' for child block"
-                .to_string()
-        ]
+        vec!["line 1, column 5: No closing '}' for child block".to_string()]
     );
     assert_eq!(
         parse_profile_text("tab {pane}")

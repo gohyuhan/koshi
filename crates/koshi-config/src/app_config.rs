@@ -117,6 +117,10 @@ pub struct AppConfigFile {
 /// carries a `{ … }` block, is not a single integer from `0` to `4294967295`,
 /// is `0`, or is newer than this build supports; when `update` is repeated; or
 /// when an `update` field is not a single value of the right type and range.
+/// The error starts with the line and column of the node or value at fault,
+/// such as ``line 3, column 5: invalid config key `update.auto-check`:
+/// expected a boolean (#true or #false)``. A missing `version` names the
+/// position where the first node starts, `line 1, column 1` in an empty file.
 pub fn parse_app_config(
     config_path: &Path,
     config_source_text: &str,
@@ -148,8 +152,9 @@ pub(crate) fn parse_app_config_from_document(
         {
             if config_section_name == "version" || config_section_name == "update" {
                 return Err(build_validation_error(
-                    config_section_name,
-                    &format!("`{config_section_name}` is declared more than once"),
+                    config_source_text,
+                    config_node.span(),
+                    format!("`{config_section_name}` is declared more than once"),
                 ));
             }
             parse_warnings.record_warning(
@@ -159,7 +164,7 @@ pub(crate) fn parse_app_config_from_document(
             continue;
         }
         match config_section_name {
-            "version" => validate_version_node(config_node)?,
+            "version" => validate_version_node(config_node, config_source_text)?,
             // `theme` names which `themes/<name>.kdl` supplies the colors; the
             // colors themselves are never spelled here.
             "theme" => set_top_level_field(
@@ -169,8 +174,11 @@ pub(crate) fn parse_app_config_from_document(
                 &mut parse_warnings,
             ),
             "update" => {
-                partial_koshi_config.update =
-                    Some(parse_update_config(config_node, &mut parse_warnings)?);
+                partial_koshi_config.update = Some(parse_update_config(
+                    config_node,
+                    config_source_text,
+                    &mut parse_warnings,
+                )?);
             }
             "pane" => {
                 partial_koshi_config.pane =
@@ -298,7 +306,8 @@ pub(crate) fn parse_app_config_from_document(
     }
     if !seen_config_section_names.contains("version") {
         return Err(build_validation_error(
-            "version",
+            config_source_text,
+            config_document.span(),
             "file must declare `version`",
         ));
     }
@@ -334,10 +343,12 @@ fn set_top_level_field<FieldValue>(
     }
 }
 
-/// Reads the strict `update { … }` block. A field whose value is the wrong
-/// kind fails the whole parse; an unknown field is dropped with a warning.
+/// Reads the strict `update { … }` block, a node of `config_source_text`. A
+/// field whose value is the wrong kind fails the whole parse; an unknown field
+/// is dropped with a warning.
 fn parse_update_config(
     config_node: &KdlNode,
+    config_source_text: &str,
     parse_warnings: &mut ParseWarnings,
 ) -> Result<PartialUpdateConfig, ConfigError> {
     let mut partial_update_config = PartialUpdateConfig::default();
@@ -349,15 +360,26 @@ fn parse_update_config(
         match field_name {
             "auto-check" => {
                 partial_update_config.should_auto_check_for_updates =
-                    Some(parse_required_boolean_field(field_node, field_name)?);
+                    Some(parse_required_update_field(
+                        field_node,
+                        parse_boolean_kdl_value,
+                        config_source_text,
+                    )?);
             }
             "check-interval-days" => {
-                partial_update_config.check_interval_days =
-                    Some(parse_required_u32_field(field_node, field_name)?);
+                partial_update_config.check_interval_days = Some(parse_required_update_field(
+                    field_node,
+                    parse_u32_kdl_value,
+                    config_source_text,
+                )?);
             }
             "allow-prerelease" => {
                 partial_update_config.should_allow_prerelease_updates =
-                    Some(parse_required_boolean_field(field_node, field_name)?);
+                    Some(parse_required_update_field(
+                        field_node,
+                        parse_boolean_kdl_value,
+                        config_source_text,
+                    )?);
             }
             unknown_field_name => parse_warnings.record_warning(
                 field_node.span(),
@@ -884,19 +906,29 @@ fn parse_wheel_scroll(field_node: &KdlNode) -> Result<WheelScroll, String> {
     }
 }
 
-/// Reads the node's single value as a boolean for the strict `update` section.
-fn parse_required_boolean_field(
+/// Reads `field_node`, a field of the strict `update` section in
+/// `config_source_text`, with `parse_field_value`.
+///
+/// # Errors
+/// Returns the [`ConfigError::Validation`] at `field_node` that names the
+/// field and the reason `parse_field_value` gives: `auto-check "yes"` on line
+/// 3, column 5 gives ``line 3, column 5: invalid config key
+/// `update.auto-check`: expected a boolean (#true or #false)``.
+fn parse_required_update_field<FieldValue>(
     field_node: &KdlNode,
-    field_name: &str,
-) -> Result<bool, ConfigError> {
-    parse_boolean_kdl_value(field_node)
-        .map_err(|parse_error_detail| build_validation_error(field_name, &parse_error_detail))
-}
-
-/// Reads the node's single value as a `u32` for the strict `update` section.
-fn parse_required_u32_field(field_node: &KdlNode, field_name: &str) -> Result<u32, ConfigError> {
-    parse_u32_kdl_value(field_node)
-        .map_err(|parse_error_detail| build_validation_error(field_name, &parse_error_detail))
+    parse_field_value: fn(&KdlNode) -> Result<FieldValue, String>,
+    config_source_text: &str,
+) -> Result<FieldValue, ConfigError> {
+    parse_field_value(field_node).map_err(|parse_error_detail| {
+        build_validation_error(
+            config_source_text,
+            field_node.span(),
+            format!(
+                "invalid config key `update.{}`: {parse_error_detail}",
+                field_node.name().value()
+            ),
+        )
+    })
 }
 
 #[cfg(test)]

@@ -486,9 +486,40 @@ fn check_collects_errors_from_all_files() {
     assert_eq!(
         config_error,
         format!(
-            "config failed: invalid config version in {}: file must declare `version`\ninvalid config file {}: line 2, column 10: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
+            "config failed: invalid config version in {}: line 1, column 1: file must declare `version`\ninvalid config file {}: line 2, column 10: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
             config_directory.path().join("koshi.kdl").display(),
             config_directory.path().join("themes").join("bad.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_names_the_line_and_column_of_each_file_that_fails_as_a_whole() {
+    let config_directory = TempDir::new().unwrap();
+    let keybinding_config_path = config_directory.path().join("keybinding.kdl");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let theme_config_path = config_directory.path().join("themes").join("repeated.kdl");
+    fs::create_dir(config_directory.path().join("themes")).unwrap();
+    fs::write(&keybinding_config_path, "version 0\n").unwrap();
+    fs::write(
+        &app_config_path,
+        "version 2\nupdate {\n    auto-check \"yes\"\n}\n",
+    )
+    .unwrap();
+    fs::write(&theme_config_path, "version 2\n  version 2\n").unwrap();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: invalid config version in {}: line 1, column 1: config schema version \
+             must be at least 1\ninvalid config file {}: line 3, column 5: invalid config key \
+             `update.auto-check`: expected a boolean (#true or #false)\ninvalid config version in \
+             {}: line 2, column 3: `version` is declared more than once",
+            keybinding_config_path.display(),
+            app_config_path.display(),
+            theme_config_path.display(),
         )
     );
 }
@@ -655,7 +686,7 @@ fn check_reports_read_and_validation_errors_together() {
     assert_eq!(
         config_error.to_string(),
         format!(
-            "config failed: read {}: expected a regular file\ninvalid config version in {}: file must declare `version`",
+            "config failed: read {}: expected a regular file\ninvalid config version in {}: line 1, column 1: file must declare `version`",
             app_config_path.display(),
             theme_config_path.display()
         )

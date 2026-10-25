@@ -11,12 +11,14 @@ use crate::types::SCHEMA_VERSION;
 
 #[test]
 fn current_version_is_accepted() {
-    validate_config_schema_version(SCHEMA_VERSION).expect("the current schema version is accepted");
+    validate_config_schema_version(SCHEMA_VERSION, SCHEMA_VERSION)
+        .expect("the current schema version is accepted");
 }
 
 #[test]
 fn version_zero_is_rejected() {
-    let version_error = validate_config_schema_version(0).expect_err("zero version must fail");
+    let version_error =
+        validate_config_schema_version(0, SCHEMA_VERSION).expect_err("zero version must fail");
     assert_eq!(
         version_error.to_string(),
         "config schema version must be at least 1"
@@ -25,8 +27,8 @@ fn version_zero_is_rejected() {
 
 #[test]
 fn newer_version_is_rejected() {
-    let version_error =
-        validate_config_schema_version(SCHEMA_VERSION + 1).expect_err("newer version must fail");
+    let version_error = validate_config_schema_version(SCHEMA_VERSION + 1, SCHEMA_VERSION)
+        .expect_err("newer version must fail");
     let ConfigVersionDiagnostic::TooNew {
         declared_schema_version,
         supported_schema_version,
@@ -40,8 +42,8 @@ fn newer_version_is_rejected() {
 
 #[test]
 fn version_diagnostic_message_and_code() {
-    let version_error =
-        validate_config_schema_version(SCHEMA_VERSION + 1).expect_err("newer version must fail");
+    let version_error = validate_config_schema_version(SCHEMA_VERSION + 1, SCHEMA_VERSION)
+        .expect_err("newer version must fail");
     assert_eq!(
         version_error.to_string(),
         format!(
@@ -59,7 +61,8 @@ fn version_diagnostic_message_and_code() {
 
 #[test]
 fn too_old_diagnostic_carries_the_version_code() {
-    let version_error = validate_config_schema_version(0).expect_err("zero version must fail");
+    let version_error =
+        validate_config_schema_version(0, SCHEMA_VERSION).expect_err("zero version must fail");
     let diagnostic_code = version_error
         .code()
         .expect("diagnostic has a code")
@@ -69,8 +72,8 @@ fn too_old_diagnostic_carries_the_version_code() {
 
 #[test]
 fn version_diagnostic_offers_an_upgrade_hint() {
-    let version_error =
-        validate_config_schema_version(SCHEMA_VERSION + 1).expect_err("newer version must fail");
+    let version_error = validate_config_schema_version(SCHEMA_VERSION + 1, SCHEMA_VERSION)
+        .expect_err("newer version must fail");
     let upgrade_help = version_error
         .help()
         .expect("diagnostic has a help line")
@@ -82,41 +85,43 @@ fn version_diagnostic_offers_an_upgrade_hint() {
 }
 
 #[test]
-fn parse_error_shows_path_and_detail() {
+fn a_parse_error_reads_as_its_detail_and_names_no_file() {
     let parse_error = ConfigError::Parse {
-        config_path: "koshi.kdl".to_string(),
-        parse_error_detail: "unexpected token".to_string(),
+        parse_error_detail: "line 1, column 6: unexpected token".to_string(),
     };
     assert_eq!(
         parse_error.to_string(),
-        "config parse error in koshi.kdl: unexpected token"
+        "line 1, column 6: unexpected token"
     );
 }
 
 #[test]
-fn validation_error_quotes_the_key() {
-    let validation_error = ConfigError::Validation {
-        config_key: "scrollback".to_string(),
-        validation_detail: "must be a positive integer".to_string(),
-    };
+fn build_validation_error_names_the_line_and_column_where_the_span_starts() {
+    let config_source_text = "version 2\nupdate {\n    auto-check \"yes\"\n}";
+    let auto_check_byte_offset = config_source_text
+        .find("auto-check")
+        .expect("the text holds the node");
+    let validation_error = build_validation_error(
+        config_source_text,
+        SourceSpan::from((auto_check_byte_offset, "auto-check \"yes\"".len())),
+        "invalid config key `update.auto-check`: expected a boolean (#true or #false)",
+    );
     assert_eq!(
         validation_error.to_string(),
-        "invalid config key `scrollback`: must be a positive integer"
+        "line 3, column 5: invalid config key `update.auto-check`: expected a boolean (#true or \
+         #false)"
     );
 }
 
 #[test]
-fn build_validation_error_names_the_key_and_detail() {
-    let validation_error = build_validation_error("scrollback", "must be a positive integer");
-    let ConfigError::Validation {
-        config_key,
-        validation_detail,
-    } = validation_error
-    else {
-        panic!("expected ConfigError::Validation, got {validation_error:?}");
-    };
-    assert_eq!(config_key, "scrollback");
-    assert_eq!(validation_detail, "must be a positive integer");
+fn a_version_newer_than_the_supported_schema_given_is_rejected() {
+    assert_eq!(
+        validate_config_schema_version(3, 2)
+            .expect_err("3 is newer than 2")
+            .to_string(),
+        "config schema version 3 is newer than this koshi supports (2)"
+    );
+    validate_config_schema_version(3, 3).expect("3 is supported when 3 is the newest");
 }
 
 #[test]
@@ -127,14 +132,9 @@ fn parse_conversion_without_sub_diagnostics_uses_the_kdl_display() {
     };
     let parse_diagnostic =
         ConfigParseDiagnostic::from_kdl_error(Path::new("koshi.kdl"), raw_kdl_error);
-    let ConfigError::Parse {
-        config_path,
-        parse_error_detail,
-    } = ConfigError::from(parse_diagnostic)
-    else {
+    let ConfigError::Parse { parse_error_detail } = ConfigError::from(parse_diagnostic) else {
         panic!("expected ConfigError::Parse");
     };
-    assert_eq!(config_path, "koshi.kdl");
     assert_eq!(parse_error_detail, "Failed to parse KDL document");
 }
 
@@ -146,7 +146,7 @@ fn parse_conversion_names_the_line_and_column_of_the_first_sub_diagnostic() {
         .expect_err("the block is not closed");
     assert_eq!(
         parse_diagnostic.build_config_error().to_string(),
-        "config parse error in koshi.kdl: line 2, column 10: No closing '}' for child block"
+        "line 2, column 10: No closing '}' for child block"
     );
 }
 

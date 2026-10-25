@@ -61,11 +61,10 @@ pub enum ProfileError {
 impl ProfileError {
     /// One message per problem, in the order of `diagnostics`. A syntax error
     /// gives the one [`ConfigError::Parse`](crate::error::ConfigError::Parse)
-    /// message, such as `config parse error in profile/dev.kdl: line 1,
-    /// column 5: No closing '}' for child block`. A schema error gives each
-    /// diagnostic's message after the line and column its span starts at, such
-    /// as ``line 2, column 14: sizing applies only to children of `horizontal`
-    /// or `vertical` ``.
+    /// message, such as `line 1, column 5: No closing '}' for child block`. A
+    /// schema error gives each diagnostic's message after the line and column
+    /// its span starts at, such as ``line 2, column 14: sizing applies only to
+    /// children of `horizontal` or `vertical` ``.
     #[must_use]
     pub fn list_problem_messages(&self) -> Vec<String> {
         match self {

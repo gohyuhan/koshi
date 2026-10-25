@@ -8,15 +8,17 @@
 //! bad KDL, an unusable version, a missing step, or a step whose result has more
 //! problems than the source file.
 
+use std::fmt::Display;
 use std::path::Path;
 
 use kdl::KdlDocument;
+use miette::SourceSpan;
 use thiserror::Error;
 
 use crate::app_config::parse_app_config_from_document;
-use crate::error::{ConfigError, ConfigParseDiagnostic, ConfigVersionDiagnostic};
+use crate::error::{format_problem_at_line_and_column, ConfigError};
 use crate::keybinding::parse_keybindings_from_document;
-use crate::parser::{parse_kdl, parse_version_argument};
+use crate::parser::{parse_kdl, parse_supported_schema_version};
 use crate::profile::parse_profile_from_document;
 use crate::theme::parse_theme_from_document;
 use crate::types::SCHEMA_VERSION;
@@ -63,9 +65,11 @@ pub struct MigratedConfig {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MigrationError {
     /// KDL text could not be parsed.
-    #[error("{parse_error_detail}")]
+    #[error("config parse error in {config_path}: {parse_error_detail}")]
     Parse {
-        /// Full parse diagnostic as plain text.
+        /// File path shown to the user.
+        config_path: String,
+        /// The [`ConfigError::Parse`] text: `line <L>, column <C>: <message>`.
         parse_error_detail: String,
     },
     /// The file did not declare one usable schema version.
@@ -73,7 +77,10 @@ pub enum MigrationError {
     Version {
         /// File path shown to the user.
         config_path: String,
-        /// Plain reason the version cannot be used.
+        /// The reason the version cannot be used, after the line and column
+        /// of the node or value at fault: ``line 2, column 1: `version` is
+        /// declared more than once``. A migration step that lands on the wrong
+        /// version gives the reason alone.
         version_error_detail: String,
     },
     /// The file does not match its declared schema.
@@ -141,14 +148,7 @@ pub fn validate_config(
 ) -> Result<ValidatedConfig, MigrationError> {
     validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION)?;
     let (config_document, schema_version) =
-        parse_versioned_config_document(config_path, config_source_text)?;
-    if schema_version > SCHEMA_VERSION {
-        return Err(build_newer_version_error(
-            config_path,
-            schema_version,
-            SCHEMA_VERSION,
-        ));
-    }
+        parse_versioned_config_document(config_path, config_source_text, SCHEMA_VERSION)?;
     let schema = find_schema_by_version(CONFIG_SCHEMAS, schema_version)?;
     let schema_problems = (schema.list_schema_problems)(
         config_file_kind,
@@ -199,14 +199,7 @@ fn migrate_with_registry(
 ) -> Result<MigratedConfig, MigrationError> {
     validate_schema_registry(config_schemas, current_schema_version)?;
     let (source_document, source_schema_version) =
-        parse_versioned_config_document(config_path, config_source_text)?;
-    if source_schema_version > current_schema_version {
-        return Err(build_newer_version_error(
-            config_path,
-            source_schema_version,
-            current_schema_version,
-        ));
-    }
+        parse_versioned_config_document(config_path, config_source_text, current_schema_version)?;
     if source_schema_version == current_schema_version {
         return Ok(MigratedConfig {
             source_schema_version,
@@ -237,7 +230,7 @@ fn migrate_with_registry(
         migrated_source =
             migrate_to_next_schema(config_path, &migrated_source, &migrated_document)?;
         let (next_document, declared_schema_version) =
-            parse_versioned_config_document(config_path, &migrated_source)?;
+            parse_versioned_config_document(config_path, &migrated_source, current_schema_version)?;
         migrated_document = next_document;
         if declared_schema_version != next_schema_version {
             return Err(MigrationError::Version {
@@ -270,51 +263,67 @@ fn migrate_with_registry(
 }
 
 /// The KDL document parsed from `config_source_text` and the schema version
-/// it declares.
+/// it declares, from 1 through `current_schema_version`.
 ///
 /// # Errors
 /// Returns [`MigrationError::Parse`] when the text is not valid KDL, and
-/// [`MigrationError::Version`] when the document declares no usable version.
+/// [`MigrationError::Version`] with the line and column of the problem when
+/// the document declares no usable version.
 fn parse_versioned_config_document(
     config_path: &Path,
     config_source_text: &str,
+    current_schema_version: u32,
 ) -> Result<(KdlDocument, u32), MigrationError> {
-    let config_document = parse_kdl(config_path, config_source_text).map_err(build_parse_error)?;
-    let schema_version = parse_schema_version_from_document(config_path, &config_document)?;
+    let config_document =
+        parse_kdl(config_path, config_source_text).map_err(|parse_diagnostic| {
+            MigrationError::Parse {
+                config_path: config_path.display().to_string(),
+                parse_error_detail: ConfigError::from(parse_diagnostic).to_string(),
+            }
+        })?;
+    let schema_version =
+        parse_schema_version_from_document(&config_document, current_schema_version).map_err(
+            |(version_error_span, version_error_detail)| {
+                build_version_error(
+                    config_path,
+                    config_source_text,
+                    version_error_span,
+                    version_error_detail,
+                )
+            },
+        )?;
     Ok((config_document, schema_version))
 }
 
+/// The schema version `config_document` declares, from 1 through
+/// `current_schema_version`.
+///
+/// # Errors
+/// Returns the span a caret points at and the reason: the span where the
+/// first node starts and ``file must declare `version` `` when no `version`
+/// node exists; the second `version` node and ``` `version` is declared more
+/// than once ```; or the error [`parse_supported_schema_version`] gives.
 fn parse_schema_version_from_document(
-    config_path: &Path,
     config_document: &KdlDocument,
-) -> Result<u32, MigrationError> {
+    current_schema_version: u32,
+) -> Result<u32, (SourceSpan, String)> {
     let mut version_nodes = config_document
         .nodes()
         .iter()
         .filter(|kdl_node| kdl_node.name().value() == "version");
     let Some(version_node) = version_nodes.next() else {
-        return Err(build_version_error(
-            config_path,
-            "file must declare `version`",
+        return Err((
+            config_document.span(),
+            "file must declare `version`".to_string(),
         ));
     };
-    if version_nodes.next().is_some() {
-        return Err(build_version_error(
-            config_path,
-            "`version` is declared more than once",
+    if let Some(repeated_version_node) = version_nodes.next() {
+        return Err((
+            repeated_version_node.span(),
+            "`version` is declared more than once".to_string(),
         ));
     }
-    let schema_version =
-        parse_version_argument(version_node).map_err(|(_, version_error_detail)| {
-            build_version_error(config_path, version_error_detail)
-        })?;
-    if schema_version == 0 {
-        return Err(build_version_error(
-            config_path,
-            ConfigVersionDiagnostic::TooOld.to_string(),
-        ));
-    }
-    Ok(schema_version)
+    parse_supported_schema_version(version_node, current_schema_version)
 }
 
 /// Lists the schema problems of one config file, one message each, read from
@@ -365,39 +374,24 @@ fn build_schema_problem_error(config_path: &Path, schema_problems: &[String]) ->
     }
 }
 
-fn build_parse_error(parse_diagnostic: ConfigParseDiagnostic) -> MigrationError {
-    let config_error: ConfigError = parse_diagnostic.into();
-    MigrationError::Parse {
-        parse_error_detail: config_error.to_string(),
-    }
-}
-
+/// The [`MigrationError::Version`] for the file at `config_path` whose text
+/// `config_source_text` has the problem `version_error_detail` at the start of
+/// `version_error_span`: ``line 2, column 1: `version` is declared more than
+/// once``.
 fn build_version_error(
     config_path: &Path,
-    version_error_detail: impl Into<String>,
+    config_source_text: &str,
+    version_error_span: SourceSpan,
+    version_error_detail: impl Display,
 ) -> MigrationError {
     MigrationError::Version {
         config_path: config_path.display().to_string(),
-        version_error_detail: version_error_detail.into(),
+        version_error_detail: format_problem_at_line_and_column(
+            config_source_text,
+            version_error_span,
+            version_error_detail,
+        ),
     }
-}
-
-/// The [`MigrationError::Version`] for a file that declares `schema_version`
-/// when this build reads up to `current_schema_version`: `config schema
-/// version 3 is newer than this koshi supports (2)`.
-fn build_newer_version_error(
-    config_path: &Path,
-    schema_version: u32,
-    current_schema_version: u32,
-) -> MigrationError {
-    build_version_error(
-        config_path,
-        ConfigVersionDiagnostic::TooNew {
-            declared_schema_version: schema_version,
-            supported_schema_version: current_schema_version,
-        }
-        .to_string(),
-    )
 }
 
 fn migrate_schema_one_to_two(
@@ -409,9 +403,21 @@ fn migrate_schema_one_to_two(
         .nodes()
         .iter()
         .find(|kdl_node| kdl_node.name().value() == "version")
-        .ok_or_else(|| build_version_error(config_path, "file must declare `version`"))?;
+        .ok_or_else(|| {
+            build_version_error(
+                config_path,
+                config_source_text,
+                config_document.span(),
+                "file must declare `version`",
+            )
+        })?;
     let version_entry = version_node.entries().first().ok_or_else(|| {
-        build_version_error(config_path, "`version` takes exactly one integer argument")
+        build_version_error(
+            config_path,
+            config_source_text,
+            version_node.span(),
+            "`version` takes exactly one integer argument",
+        )
     })?;
     let version_span = version_entry.span();
     let version_start = version_span.offset();
