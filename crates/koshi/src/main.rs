@@ -112,16 +112,20 @@ fn parse_cli_arguments() -> Cli {
 /// target from that machine's sessions instead, by the same rules.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // `koshi.kdl` is read here once for every command. A service command
-    // migrates the config files first, and its `koshi.kdl` comes from the text
-    // that migration read or wrote. A service command whose config migration
-    // fails prints the failure on stderr and starts anyway. A router and a
-    // session server also write it to their logs. The next service start runs
-    // the migration again.
+    // migrates the config files first, and its `koshi.kdl` and the profile a
+    // seeded session opens come from the text that migration read or wrote. A
+    // service command whose config migration fails prints the failure on
+    // stderr and starts anyway. A router and a session server also write it to
+    // their logs. The next service start runs the migration again.
+    // `koshi config migrate` keeps the parse of the `koshi.kdl` read here for
+    // its migration.
     let config_directory = koshi_paths::resolve_config_directory();
-    let (loaded_app_config, config_migration_error) = config_command::load_app_config_for_command(
-        cli.command.as_ref(),
-        config_directory.as_deref(),
-    );
+    let config_command::StartupConfig {
+        loaded_app_config,
+        config_migration_error,
+        loaded_profile,
+        app_config_file_for_migration,
+    } = config_command::load_config_for_command(cli.command.as_ref(), config_directory.as_deref());
     if let Some(config_migration_error) = &config_migration_error {
         eprintln!("koshi: {config_migration_error}; starting with the config files as they are");
     }
@@ -202,7 +206,11 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Config { command }) = &cli.command {
-        return config_command::run_config_command(command, &loaded_app_config.app_config_outcome);
+        return config_command::run_config_command(
+            command,
+            &loaded_app_config.app_config_outcome,
+            app_config_file_for_migration,
+        );
     }
 
     if let Some(CliCommand::Share { command }) = &cli.command {
@@ -260,7 +268,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         session_id,
         session_name,
         runtime_directory,
-        profile_name,
+        profile_name: _,
         should_allow_other_users,
         resume_state_path,
         supervisor_token,
@@ -280,7 +288,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             loaded_app_config.into_app_config_layer(),
             *session_id,
             session_name.clone(),
-            profile_name.as_deref(),
+            loaded_profile,
             should_allow_other_users.then_some(true),
             resume_state_path.as_deref(),
             supervisor_token.as_ref(),

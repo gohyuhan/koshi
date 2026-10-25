@@ -4,6 +4,7 @@ use std::fs;
 use std::net::SocketAddr;
 
 use koshi_config::app_config::{parse_app_config, AppConfigFile};
+use koshi_config::error::ConfigError;
 use koshi_config::key::Leader;
 use koshi_config::keybinding::parse_keybindings;
 use koshi_config::layer::{
@@ -20,6 +21,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord};
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_layout::template::ProfileTemplate;
+use koshi_link::config::{parse_app_config_text, ProfileOutcome};
 use tempfile::TempDir;
 
 use super::*;
@@ -41,6 +43,7 @@ fn path_prints_the_given_config_directory() {
         &ConfigCommand::Path,
         config_directory.path(),
         &AppConfigOutcome::Absent,
+        None,
     )
     .unwrap();
 
@@ -317,6 +320,7 @@ update {
             },
             theme_name: Some("midnight".to_string()),
             parse_warnings: Vec::new(),
+            schema_version: 2,
         }
     );
     assert_eq!(
@@ -797,6 +801,7 @@ fn migrate_command_updates_a_schema_one_file_to_schema_two() {
         &ConfigCommand::Migrate,
         config_directory.path(),
         &AppConfigOutcome::Absent,
+        None,
     )
     .unwrap();
 
@@ -817,6 +822,7 @@ fn migrate_command_keeps_an_unknown_key_in_a_migrated_file() {
         &ConfigCommand::Migrate,
         config_directory.path(),
         &AppConfigOutcome::Absent,
+        None,
     )
     .unwrap();
 
@@ -834,9 +840,9 @@ fn migrate_command_keeps_an_unknown_key_in_a_migrated_file() {
 /// version 1 to 2 by appending `migrated #true`.
 fn migrate_every_file_except_bad_kdl(
     _config_file_kind: ConfigFileKind,
-    config_path: &Path,
-    config_source_text: &str,
+    source_config_file: &ParsedConfigFile,
 ) -> Result<MigratedConfig, MigrationError> {
+    let config_path = source_config_file.get_config_path();
     if config_path.ends_with("bad.kdl") {
         return Err(MigrationError::Invalid {
             config_path: config_path.display().to_string(),
@@ -846,8 +852,10 @@ fn migrate_every_file_except_bad_kdl(
     Ok(MigratedConfig {
         source_schema_version: 1,
         target_schema_version: 2,
-        migrated_source: config_source_text.to_string() + "migrated #true\n",
-        is_changed: true,
+        migrated_config_file: Some(ParsedConfigFile::parse(
+            config_path,
+            source_config_file.get_source_text().to_string() + "migrated #true\n",
+        )),
     })
 }
 
@@ -862,9 +870,11 @@ fn migrate_writes_nothing_when_any_source_is_invalid() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         write_atomic,
     )
+    .config_report_text
     .unwrap_err();
 
     assert_eq!(
@@ -889,18 +899,21 @@ fn migrate_replaces_each_changed_file_after_validation() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         write_atomic,
-    )
-    .unwrap();
+    );
 
     assert_eq!(
-        migration_report.config_report_text,
+        migration_report.config_report_text.unwrap(),
         format!("{}: migrated version 1 to 2\n", app_config_path.display())
     );
     assert_eq!(
-        migration_report.app_config_source_text,
-        Some("version 1\nmigrated #true\n".to_string())
+        migration_report.config_files,
+        vec![ParsedConfigFile::parse(
+            &app_config_path,
+            "version 1\nmigrated #true\n".to_string()
+        )]
     );
     assert_eq!(
         fs::read_to_string(app_config_path).unwrap(),
@@ -921,13 +934,13 @@ fn migrate_updates_a_symlink_target_and_keeps_the_link() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         write_atomic,
-    )
-    .unwrap();
+    );
 
     assert_eq!(
-        migration_report.config_report_text,
+        migration_report.config_report_text.unwrap(),
         format!("{}: migrated version 1 to 2\n", app_config_path.display())
     );
     assert!(fs::symlink_metadata(&app_config_path)
@@ -951,6 +964,7 @@ fn migrate_write_failure_reports_files_already_migrated() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         |config_path, serialized_config_bytes| {
             write_attempt_count += 1;
@@ -962,6 +976,7 @@ fn migrate_write_failure_reports_files_already_migrated() {
             write_atomic(config_path, serialized_config_bytes)
         },
     )
+    .config_report_text
     .unwrap_err();
 
     assert_eq!(
@@ -988,6 +1003,7 @@ fn migrate_write_failure_warns_that_the_failing_file_may_have_changed() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         |config_path, serialized_config_bytes| {
             write_atomic(config_path, serialized_config_bytes)?;
@@ -996,6 +1012,7 @@ fn migrate_write_failure_warns_that_the_failing_file_may_have_changed() {
             })
         },
     )
+    .config_report_text
     .unwrap_err();
 
     assert_eq!(
@@ -1034,16 +1051,16 @@ fn migrate_of_a_directory_holding_no_config_file_says_so_and_writes_nothing() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         |config_path, _serialized_config_bytes| {
             written_config_paths.push(config_path.to_path_buf());
             Ok(())
         },
-    )
-    .unwrap();
+    );
 
     assert_eq!(
-        migration_report.config_report_text,
+        migration_report.config_report_text.unwrap(),
         format!(
             "no config files found in {}\n",
             config_directory.path().display()
@@ -1062,6 +1079,7 @@ fn run_config_command_in_directory_routes_explain_to_the_field_table() {
         },
         config_directory.path(),
         &AppConfigOutcome::Absent,
+        None,
     )
     .unwrap();
 
@@ -1082,6 +1100,7 @@ fn run_config_command_in_directory_routes_check_to_the_directory_scan() {
         &ConfigCommand::Check,
         config_directory.path(),
         &load_app_config_file(Some(config_directory.path())).app_config_outcome,
+        None,
     )
     .unwrap();
 
@@ -1103,6 +1122,7 @@ fn run_config_command_in_directory_migrate_leaves_a_file_already_on_this_schema_
         &ConfigCommand::Migrate,
         config_directory.path(),
         &AppConfigOutcome::Absent,
+        None,
     )
     .unwrap();
 
@@ -1294,6 +1314,185 @@ fn check_reports_a_koshi_kdl_that_is_not_utf8_with_its_read_error() {
 }
 
 #[test]
+fn check_validates_koshi_kdl_from_what_the_start_read_found_and_parses_no_text_again() {
+    // The start read found `version 1` with no problem. The text on disk is
+    // not KDL.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "pane {\n").unwrap();
+    let app_config_outcome = AppConfigOutcome::Parsed {
+        app_config_file: Box::new(AppConfigFile {
+            schema_version: 1,
+            layer: PartialKoshiConfig::default(),
+            theme_name: None,
+            parse_warnings: Vec::new(),
+        }),
+    };
+
+    let report_text = check_config_directory(config_directory.path(), &app_config_outcome).unwrap();
+
+    assert_eq!(
+        report_text,
+        format!(
+            "{}: valid (version 1; migrate to version 2)\n",
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
+fn check_reports_the_problems_the_start_read_found_and_parses_no_text_again() {
+    // The start read refused the file for one problem. The text on disk is a
+    // valid `version 2`.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 2\n").unwrap();
+    let app_config_outcome = AppConfigOutcome::Refused {
+        config_error: ConfigError::Validation {
+            problem_messages: vec!["line 9, column 9: a problem the start read found".to_string()],
+        },
+    };
+
+    let config_error =
+        check_config_directory(config_directory.path(), &app_config_outcome).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: invalid config file {}: line 9, column 9: a problem the start read \
+             found",
+            app_config_path.display()
+        )
+    );
+}
+
+/// What `koshi config check` gives for a new config directory whose only file
+/// is a `koshi.kdl` holding `app_config_text`, read once at start. Also gives
+/// the directory and the `koshi.kdl` path. An error is its text.
+fn run_config_check_on_app_config(
+    app_config_text: &str,
+) -> (TempDir, PathBuf, Result<String, String>) {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, app_config_text).unwrap();
+    let check_result = check_config_directory_read_at_start(config_directory.path())
+        .map_err(|config_error| config_error.to_string());
+    (config_directory, app_config_path, check_result)
+}
+
+#[test]
+fn check_names_the_line_and_column_of_a_koshi_kdl_that_is_not_kdl() {
+    let (_config_directory, app_config_path, check_result) =
+        run_config_check_on_app_config("version 2\npane {\n");
+
+    assert_eq!(
+        check_result,
+        Err(format!(
+            "config failed: config parse error in {}: line 2, column 6: No closing '}}' for \
+             child block",
+            app_config_path.display()
+        ))
+    );
+}
+
+#[test]
+fn check_names_a_repeated_koshi_kdl_version() {
+    let (_config_directory, app_config_path, check_result) =
+        run_config_check_on_app_config("version 2\nversion 2\n");
+
+    assert_eq!(
+        check_result,
+        Err(format!(
+            "config failed: invalid config file {}: line 2, column 1: `version` is declared \
+             more than once",
+            app_config_path.display()
+        ))
+    );
+}
+
+#[test]
+fn check_names_a_koshi_kdl_version_that_is_no_integer() {
+    let (_config_directory, app_config_path, check_result) =
+        run_config_check_on_app_config("version \"two\"\n");
+
+    assert_eq!(
+        check_result,
+        Err(format!(
+            "config failed: invalid config file {}: line 1, column 9: `version` must be an \
+             integer from 1 to 4294967295",
+            app_config_path.display()
+        ))
+    );
+}
+
+#[test]
+fn check_names_a_koshi_kdl_version_of_zero() {
+    let (_config_directory, app_config_path, check_result) =
+        run_config_check_on_app_config("version 0\n");
+
+    assert_eq!(
+        check_result,
+        Err(format!(
+            "config failed: invalid config file {}: line 1, column 1: config schema version \
+             must be at least 1",
+            app_config_path.display()
+        ))
+    );
+}
+
+#[test]
+fn check_reports_an_older_valid_koshi_kdl_as_valid_with_the_version_to_migrate_to() {
+    let (_config_directory, app_config_path, check_result) =
+        run_config_check_on_app_config("version 1\n");
+
+    assert_eq!(
+        check_result,
+        Ok(format!(
+            "{}: valid (version 1; migrate to version 2)\n",
+            app_config_path.display()
+        ))
+    );
+}
+
+#[test]
+fn check_reports_the_warning_of_an_older_koshi_kdl() {
+    let (_config_directory, app_config_path, check_result) =
+        run_config_check_on_app_config("version 1\nfrobnicate 1\n");
+
+    assert_eq!(
+        check_result,
+        Err(format!(
+            "config failed: invalid config file {}: line 2, column 1: ignored unknown key \
+             `frobnicate`; did you mean `update`?",
+            app_config_path.display()
+        ))
+    );
+}
+
+#[test]
+fn check_lists_read_errors_before_validation_errors_whatever_their_path_order() {
+    // `koshi.kdl` sorts before `profile/a.kdl`; its validation error still
+    // comes after the profile's read error.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let profile_path = config_directory.path().join("profile").join("a.kdl");
+    fs::write(&app_config_path, "pane {}\n").unwrap();
+    fs::create_dir_all(&profile_path).unwrap();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: read {}: expected a regular file\ninvalid config file {}: line 1, \
+             column 1: file must declare `version`",
+            profile_path.display(),
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
 fn migrate_writes_nothing_when_a_config_directory_cannot_be_read() {
     let config_directory = TempDir::new().unwrap();
     let themes_path = config_directory.path().join("themes");
@@ -1305,12 +1504,14 @@ fn migrate_writes_nothing_when_a_config_directory_cannot_be_read() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_every_file_except_bad_kdl,
         |config_path, _serialized_config_bytes| {
             written_config_paths.push(config_path.to_path_buf());
             Ok(())
         },
     )
+    .config_report_text
     .unwrap_err();
 
     assert_eq!(
@@ -1328,22 +1529,22 @@ fn migrate_writes_nothing_when_a_config_directory_cannot_be_read() {
 /// already on version 2.
 fn migrate_only_the_app_file(
     config_file_kind: ConfigFileKind,
-    _config_path: &Path,
-    config_source_text: &str,
+    source_config_file: &ParsedConfigFile,
 ) -> Result<MigratedConfig, MigrationError> {
     if config_file_kind == ConfigFileKind::App {
         return Ok(MigratedConfig {
             source_schema_version: 1,
             target_schema_version: 2,
-            migrated_source: config_source_text.to_string() + "migrated #true\n",
-            is_changed: true,
+            migrated_config_file: Some(ParsedConfigFile::parse(
+                source_config_file.get_config_path(),
+                source_config_file.get_source_text().to_string() + "migrated #true\n",
+            )),
         });
     }
     Ok(MigratedConfig {
         source_schema_version: 2,
         target_schema_version: 2,
-        migrated_source: config_source_text.to_string(),
-        is_changed: false,
+        migrated_config_file: None,
     })
 }
 
@@ -1358,16 +1559,16 @@ fn migrate_writes_only_the_files_that_changed() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_only_the_app_file,
         |config_path, serialized_config_bytes| {
             written_config_paths.push(config_path.to_path_buf());
             write_atomic(config_path, serialized_config_bytes)
         },
-    )
-    .unwrap();
+    );
 
     assert_eq!(
-        migration_report.config_report_text,
+        migration_report.config_report_text.unwrap(),
         format!(
             "{}: current (version 2)\n{}: migrated version 1 to 2\n",
             keybinding_config_path.display(),
@@ -1416,16 +1617,22 @@ fn update_migrates_every_config_kind_without_a_user_command() {
         fs::write(config_path, old_config_source_text).expect("write old schema");
     }
 
-    migrate_config_directory_for_update(config_directory.path())
-        .expect("migrate valid config files during update");
+    let (_, config_migration_error) = migrate_config_directory_for_update(config_directory.path());
+    assert_eq!(
+        config_migration_error.map(|migration_error| migration_error.to_string()),
+        None
+    );
     for (config_path, _, migrated_config_source_text) in &config_files {
         assert_eq!(
             &fs::read_to_string(config_path).expect("read migrated config"),
             migrated_config_source_text
         );
     }
-    migrate_config_directory_for_update(config_directory.path())
-        .expect("migrating current config leaves it readable");
+    let (_, config_migration_error) = migrate_config_directory_for_update(config_directory.path());
+    assert_eq!(
+        config_migration_error.map(|migration_error| migration_error.to_string()),
+        None
+    );
     for (config_path, _, migrated_config_source_text) in &config_files {
         assert_eq!(
             &fs::read_to_string(config_path).expect("read current config"),
@@ -1451,10 +1658,12 @@ fn two_concurrent_updates_leave_the_config_on_the_new_schema() {
     }
     start_barrier.wait();
     for migration_thread in migration_threads {
-        migration_thread
-            .join()
-            .expect("migration thread completed")
-            .expect("migration completed");
+        let (_, config_migration_error) =
+            migration_thread.join().expect("migration thread completed");
+        assert_eq!(
+            config_migration_error.map(|migration_error| migration_error.to_string()),
+            None
+        );
     }
     assert_eq!(
         fs::read_to_string(app_config_path).expect("read migrated config"),
@@ -1467,9 +1676,14 @@ fn update_without_config_directory_creates_no_config_files() {
     let test_directory = TempDir::new().expect("create test directory");
     let missing_config_directory = test_directory.path().join("missing-config");
 
-    migrate_config_directory_for_update(&missing_config_directory)
-        .expect("missing config directory is valid");
+    let (config_files, config_migration_error) =
+        migrate_config_directory_for_update(&missing_config_directory);
 
+    assert_eq!(config_files, Vec::new());
+    assert_eq!(
+        config_migration_error.map(|migration_error| migration_error.to_string()),
+        None
+    );
     assert!(!missing_config_directory.exists());
 }
 
@@ -1488,15 +1702,22 @@ fn update_refuses_config_migration_when_its_lock_cannot_open() {
         .open(&migration_lock_path)
         .expect_err("a directory cannot be opened as a migration lock");
 
-    let migration_error = migrate_config_directory_for_update(config_directory.path())
-        .expect_err("migration lock must open before config changes");
+    let (config_files, config_migration_error) =
+        migrate_config_directory_for_update(config_directory.path());
 
     assert_eq!(
-        migration_error.to_string(),
-        format!(
+        config_migration_error.map(|migration_error| migration_error.to_string()),
+        Some(format!(
             "config failed: open {}: {expected_open_error}",
             migration_lock_path.display()
-        )
+        ))
+    );
+    assert_eq!(
+        config_files,
+        vec![ParsedConfigFile::parse(
+            &app_config_path,
+            "version 1\n".to_string()
+        )]
     );
     assert_eq!(
         fs::read_to_string(app_config_path).expect("read unchanged config"),
@@ -1511,9 +1732,20 @@ fn update_reads_current_config_without_opening_the_migration_lock() {
     fs::write(&app_config_path, "version 2\n").expect("write current config");
     fs::create_dir(config_directory.path().join(".migration.lock")).expect("block migration lock");
 
-    migrate_config_directory_for_update(config_directory.path())
-        .expect("current config needs no migration lock");
+    let (config_files, config_migration_error) =
+        migrate_config_directory_for_update(config_directory.path());
 
+    assert_eq!(
+        config_migration_error.map(|migration_error| migration_error.to_string()),
+        None
+    );
+    assert_eq!(
+        config_files,
+        vec![ParsedConfigFile::parse(
+            &app_config_path,
+            "version 2\n".to_string()
+        )]
+    );
     assert_eq!(
         fs::read_to_string(app_config_path).expect("read current config"),
         "version 2\n"
@@ -1530,6 +1762,7 @@ fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_li
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
+        Vec::new(),
         migrate_only_the_app_file,
         |_config_path, _serialized_config_bytes| {
             Err(StorageError::Io {
@@ -1537,6 +1770,7 @@ fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_li
             })
         },
     )
+    .config_report_text
     .unwrap_err();
 
     assert_eq!(
@@ -1552,4 +1786,625 @@ fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_li
         "version 1\n"
     );
     assert_eq!(fs::read_to_string(app_config_path).unwrap(), "version 1\n");
+}
+
+/// `config_files`, sorted by path.
+fn sort_config_files_by_path(mut config_files: Vec<ParsedConfigFile>) -> Vec<ParsedConfigFile> {
+    config_files.sort_by(|left_config_file, right_config_file| {
+        left_config_file
+            .get_config_path()
+            .cmp(right_config_file.get_config_path())
+    });
+    config_files
+}
+
+/// The command `koshi` parses from `cli_arguments`.
+fn parse_cli_command(cli_arguments: &[&str]) -> CliCommand {
+    <crate::cli::Cli as clap::Parser>::try_parse_from(cli_arguments)
+        .expect("parse command")
+        .command
+        .expect("the arguments name a command")
+}
+
+/// A migration of the `koshi.kdl` at `app_config_path` read before the
+/// migration lock: its text is `app_config_source_text`, and it migrates from
+/// version 1 to version 2 as `migrated_app_config_text`.
+fn build_earlier_app_config_migration(
+    app_config_path: &Path,
+    app_config_source_text: &str,
+    migrated_app_config_text: &str,
+) -> ConfigFileMigration {
+    ConfigFileMigration {
+        source_config_file: ParsedConfigFile::parse(
+            app_config_path,
+            app_config_source_text.to_string(),
+        ),
+        migration_result: Ok(MigratedConfig {
+            source_schema_version: 1,
+            target_schema_version: 2,
+            migrated_config_file: Some(ParsedConfigFile::parse(
+                app_config_path,
+                migrated_app_config_text.to_string(),
+            )),
+        }),
+    }
+}
+
+#[test]
+fn migrate_takes_the_earlier_migration_of_a_file_whose_text_is_unchanged() {
+    // The earlier migration of `version 1` gives `from-earlier-read #true`;
+    // migrating the text again gives `version 2` alone.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+
+    let migration_report = migrate_config_directory_with(
+        config_directory.path(),
+        vec![build_earlier_app_config_migration(
+            &app_config_path,
+            "version 1\n",
+            "version 2\nfrom-earlier-read #true\n",
+        )],
+        migrate_config,
+        write_atomic,
+    );
+
+    assert_eq!(
+        migration_report.config_report_text.unwrap(),
+        format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(
+        migration_report.config_files,
+        vec![ParsedConfigFile::parse(
+            &app_config_path,
+            "version 2\nfrom-earlier-read #true\n".to_string()
+        )]
+    );
+    assert_eq!(
+        fs::read_to_string(&app_config_path).unwrap(),
+        "version 2\nfrom-earlier-read #true\n"
+    );
+}
+
+#[test]
+fn migrate_parses_and_migrates_a_file_whose_text_changed_since_the_earlier_read() {
+    // The earlier read found `edited-after-start #true`, which the text under the
+    // lock no longer holds.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+
+    let migration_report = migrate_config_directory_with(
+        config_directory.path(),
+        vec![build_earlier_app_config_migration(
+            &app_config_path,
+            "version 1\nedited-after-start #true\n",
+            "version 2\nfrom-earlier-read #true\n",
+        )],
+        migrate_config,
+        write_atomic,
+    );
+
+    assert_eq!(
+        migration_report.config_report_text.unwrap(),
+        format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(
+        migration_report.config_files,
+        vec![ParsedConfigFile::parse(
+            &app_config_path,
+            "version 2\n".to_string()
+        )]
+    );
+    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 2\n");
+}
+
+#[test]
+fn migrate_stops_on_the_earlier_error_of_a_file_whose_text_is_unchanged() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+    let earlier_config_migration = ConfigFileMigration {
+        source_config_file: ParsedConfigFile::parse(&app_config_path, "version 1\n".to_string()),
+        migration_result: Err(MigrationError::Invalid {
+            config_path: app_config_path.display().to_string(),
+            validation_error_detail: "a problem the earlier read found".to_string(),
+        }),
+    };
+
+    let migration_report = migrate_config_directory_with(
+        config_directory.path(),
+        vec![earlier_config_migration],
+        migrate_config,
+        write_atomic,
+    );
+
+    assert_eq!(
+        migration_report
+            .config_report_text
+            .map_err(|config_error| config_error.to_string()),
+        Err(format!(
+            "config failed: migration stopped before writing any file:\ninvalid config file {}: \
+             a problem the earlier read found",
+            app_config_path.display()
+        ))
+    );
+    assert_eq!(
+        migration_report.config_files,
+        vec![ParsedConfigFile::parse(
+            &app_config_path,
+            "version 1\n".to_string()
+        )]
+    );
+    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 1\n");
+}
+
+#[test]
+fn migrate_stopped_before_writing_gives_every_file_read_as_read() {
+    let config_directory = TempDir::new().unwrap();
+    fs::create_dir(config_directory.path().join("themes")).unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let invalid_theme_path = config_directory.path().join("themes").join("bad.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+    fs::write(&invalid_theme_path, "version 1\n").unwrap();
+
+    let migration_report = migrate_config_directory_with(
+        config_directory.path(),
+        Vec::new(),
+        migrate_every_file_except_bad_kdl,
+        write_atomic,
+    );
+
+    assert_eq!(
+        sort_config_files_by_path(migration_report.config_files),
+        vec![
+            ParsedConfigFile::parse(&app_config_path, "version 1\n".to_string()),
+            ParsedConfigFile::parse(&invalid_theme_path, "version 1\n".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_write_failure_gives_every_file_but_the_one_whose_write_failed() {
+    let config_directory = TempDir::new().unwrap();
+    fs::create_dir(config_directory.path().join("themes")).unwrap();
+    let keybinding_config_path = config_directory.path().join("keybinding.kdl");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let theme_config_path = config_directory.path().join("themes").join("plain.kdl");
+    for config_path in [
+        &keybinding_config_path,
+        &app_config_path,
+        &theme_config_path,
+    ] {
+        fs::write(config_path, "version 1\n").unwrap();
+    }
+    let mut write_attempt_count = 0;
+
+    let migration_report = migrate_config_directory_with(
+        config_directory.path(),
+        Vec::new(),
+        migrate_every_file_except_bad_kdl,
+        |config_path, serialized_config_bytes| {
+            write_attempt_count += 1;
+            if write_attempt_count == 2 {
+                return Err(StorageError::Io {
+                    detail: "injected failure".to_string(),
+                });
+            }
+            write_atomic(config_path, serialized_config_bytes)
+        },
+    );
+
+    assert_eq!(write_attempt_count, 2);
+    assert_eq!(
+        sort_config_files_by_path(migration_report.config_files),
+        vec![
+            ParsedConfigFile::parse(
+                &keybinding_config_path,
+                "version 1\nmigrated #true\n".to_string()
+            ),
+            ParsedConfigFile::parse(&theme_config_path, "version 1\n".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn migrate_command_takes_the_koshi_kdl_read_at_start_when_its_text_is_unchanged() {
+    // The read at start named the file `<directory>/./koshi.kdl`: the same
+    // file under another spelling. The report names the path of the
+    // migration it takes.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let start_read_app_config_path = config_directory.path().join(".").join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+
+    let config_command_output = run_config_command_in_directory(
+        &ConfigCommand::Migrate,
+        config_directory.path(),
+        &AppConfigOutcome::Absent,
+        Some(ParsedConfigFile::parse(
+            &start_read_app_config_path,
+            "version 1\n".to_string(),
+        )),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config_command_output,
+        format!(
+            "{}: migrated version 1 to 2\n",
+            start_read_app_config_path.display()
+        )
+    );
+    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 2\n");
+}
+
+#[test]
+fn migrate_command_parses_koshi_kdl_again_when_its_text_changed_since_start() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let start_read_app_config_path = config_directory.path().join(".").join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+
+    let config_command_output = run_config_command_in_directory(
+        &ConfigCommand::Migrate,
+        config_directory.path(),
+        &AppConfigOutcome::Absent,
+        Some(ParsedConfigFile::parse(
+            &start_read_app_config_path,
+            "version 1\nedited-after-start #true\n".to_string(),
+        )),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config_command_output,
+        format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 2\n");
+}
+
+#[test]
+fn update_with_a_file_that_cannot_migrate_gives_every_file_as_read_and_takes_no_lock() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let keybinding_config_path = config_directory.path().join("keybinding.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+    fs::write(&keybinding_config_path, "version 1\nnormal {").unwrap();
+    fs::create_dir(config_directory.path().join(".migration.lock")).unwrap();
+
+    let (config_files, config_migration_error) =
+        migrate_config_directory_for_update(config_directory.path());
+
+    assert_eq!(
+        config_migration_error.map(|migration_error| migration_error.to_string()),
+        Some(format!(
+            "config failed: config parse error in {}: line 2, column 8: No closing '}}' for child \
+             block",
+            keybinding_config_path.display()
+        ))
+    );
+    assert_eq!(
+        config_files,
+        vec![
+            ParsedConfigFile::parse(&keybinding_config_path, "version 1\nnormal {".to_string()),
+            ParsedConfigFile::parse(&app_config_path, "version 1\n".to_string()),
+        ]
+    );
+    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 1\n");
+}
+
+#[test]
+fn a_service_starts_on_the_koshi_kdl_its_migration_left_and_reads_no_file_again() {
+    // `koshi.kdl` on disk is not KDL.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "pane {\n").unwrap();
+    let app_config_text = "version 2\nallow-beta-features #true\n";
+
+    let startup_config = build_service_startup_config(
+        config_directory.path(),
+        None,
+        &[ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string(),
+        )],
+        None,
+    );
+
+    assert_eq!(
+        startup_config.loaded_app_config,
+        parse_app_config_text(&app_config_path, app_config_text.to_string())
+    );
+    assert_eq!(
+        startup_config
+            .config_migration_error
+            .map(|migration_error| migration_error.to_string()),
+        None
+    );
+    assert_eq!(
+        startup_config
+            .loaded_profile
+            .map(|loaded_profile| loaded_profile.profile_name),
+        None
+    );
+    assert_eq!(startup_config.app_config_file_for_migration, None);
+}
+
+#[test]
+fn a_service_whose_migration_failed_starts_on_the_koshi_kdl_it_read_and_reads_no_file_again() {
+    // `koshi.kdl` on disk is not KDL.
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "pane {\n").unwrap();
+    let app_config_text = "version 2\nallow-beta-features #true\n";
+
+    let startup_config = build_service_startup_config(
+        config_directory.path(),
+        None,
+        &[ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string(),
+        )],
+        Some(CliError::Config {
+            detail: "an injected migration failure".to_string(),
+        }),
+    );
+
+    assert_eq!(
+        startup_config.loaded_app_config,
+        parse_app_config_text(&app_config_path, app_config_text.to_string())
+    );
+    assert_eq!(
+        startup_config
+            .config_migration_error
+            .map(|migration_error| migration_error.to_string()),
+        Some("config failed: an injected migration failure".to_string())
+    );
+}
+
+#[test]
+fn a_service_whose_failed_migration_left_no_koshi_kdl_reads_it_from_disk() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let app_config_text = "version 2\nallow-beta-features #true\n";
+    fs::write(&app_config_path, app_config_text).unwrap();
+
+    let startup_config = build_service_startup_config(
+        config_directory.path(),
+        None,
+        &[],
+        Some(CliError::Config {
+            detail: "an injected migration failure".to_string(),
+        }),
+    );
+
+    assert_eq!(
+        startup_config.loaded_app_config,
+        parse_app_config_text(&app_config_path, app_config_text.to_string())
+    );
+}
+
+#[test]
+fn a_service_whose_migration_found_no_koshi_kdl_starts_on_no_layer() {
+    // A `koshi.kdl` written after the migration read the directory is not
+    // read.
+    let config_directory = TempDir::new().unwrap();
+    fs::write(
+        config_directory.path().join("koshi.kdl"),
+        "version 2\nallow-beta-features #true\n",
+    )
+    .unwrap();
+
+    let startup_config = build_service_startup_config(config_directory.path(), None, &[], None);
+
+    assert_eq!(startup_config.loaded_app_config, LoadedAppConfig::default());
+}
+
+#[test]
+fn a_seeded_session_opens_the_profile_its_migration_left_and_reads_no_file_again() {
+    // `profile/work.kdl` on disk is not KDL.
+    let config_directory = TempDir::new().unwrap();
+    let profile_path = config_directory.path().join("profile").join("work.kdl");
+    fs::create_dir(config_directory.path().join("profile")).unwrap();
+    fs::write(&profile_path, "pane {").unwrap();
+    let profile_text = "version 2\ntab { pane }\n";
+
+    let startup_config = build_service_startup_config(
+        config_directory.path(),
+        Some("work"),
+        &[ParsedConfigFile::parse(
+            &profile_path,
+            profile_text.to_string(),
+        )],
+        None,
+    );
+
+    let loaded_profile = startup_config
+        .loaded_profile
+        .expect("a seeded session with `--profile` reads its profile");
+    assert_eq!(loaded_profile.profile_name, "work");
+    let ProfileOutcome::Parsed { profile_template } = loaded_profile.profile_outcome else {
+        panic!(
+            "the profile the migration left parses: {:?}",
+            loaded_profile.profile_outcome
+        );
+    };
+    assert_eq!(
+        profile_template,
+        parse_profile(&profile_path, profile_text).unwrap()
+    );
+}
+
+#[test]
+fn a_seeded_session_start_that_migrates_opens_the_migrated_koshi_kdl_and_profile() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    let profile_path = config_directory.path().join("profile").join("work.kdl");
+    fs::write(&app_config_path, "version 1\nallow-beta-features #true\n").unwrap();
+    fs::create_dir(config_directory.path().join("profile")).unwrap();
+    fs::write(&profile_path, "version 1\ntab { pane }\n").unwrap();
+    let session_id_text = koshi_core::ids::SessionId::new().to_string();
+    let serve_session_command = parse_cli_command(&[
+        "koshi",
+        "serve-session",
+        &session_id_text,
+        "workspace",
+        "--profile",
+        "work",
+    ]);
+
+    let startup_config =
+        load_config_for_command(Some(&serve_session_command), Some(config_directory.path()));
+
+    assert_eq!(
+        startup_config
+            .config_migration_error
+            .map(|migration_error| migration_error.to_string()),
+        None
+    );
+    assert_eq!(
+        startup_config.loaded_app_config,
+        parse_app_config_text(
+            &app_config_path,
+            "version 2\nallow-beta-features #true\n".to_string()
+        )
+    );
+    let loaded_profile = startup_config
+        .loaded_profile
+        .expect("a seeded session with `--profile` reads its profile");
+    let ProfileOutcome::Parsed { profile_template } = loaded_profile.profile_outcome else {
+        panic!(
+            "the migrated profile parses: {:?}",
+            loaded_profile.profile_outcome
+        );
+    };
+    assert_eq!(
+        profile_template,
+        parse_profile(&profile_path, "version 2\ntab { pane }\n").unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(&profile_path).unwrap(),
+        "version 2\ntab { pane }\n"
+    );
+}
+
+#[test]
+fn only_a_session_that_seeds_itself_reads_a_profile() {
+    let config_directory = TempDir::new().unwrap();
+    fs::create_dir(config_directory.path().join("profile")).unwrap();
+    fs::write(
+        config_directory.path().join("profile").join("work.kdl"),
+        "version 2\ntab { pane }\n",
+    )
+    .unwrap();
+    let session_id_text = koshi_core::ids::SessionId::new().to_string();
+    let resumed_session_command = parse_cli_command(&[
+        "koshi",
+        "serve-session",
+        &session_id_text,
+        "workspace",
+        "--profile",
+        "work",
+        "--resume",
+        "/home/user/resume-state",
+    ]);
+    let session_command_without_profile =
+        parse_cli_command(&["koshi", "serve-session", &session_id_text, "workspace"]);
+    let seeded_session_command = parse_cli_command(&[
+        "koshi",
+        "serve-session",
+        &session_id_text,
+        "workspace",
+        "--profile",
+        "work",
+    ]);
+    let router_command = parse_cli_command(&["koshi", "serve-router"]);
+    let check_command = parse_cli_command(&["koshi", "config", "check"]);
+
+    for (cli_command, config_directory) in [
+        (&resumed_session_command, Some(config_directory.path())),
+        (
+            &session_command_without_profile,
+            Some(config_directory.path()),
+        ),
+        (&router_command, Some(config_directory.path())),
+        (&check_command, Some(config_directory.path())),
+        (&seeded_session_command, None),
+    ] {
+        let startup_config = load_config_for_command(Some(cli_command), config_directory);
+
+        assert_eq!(
+            startup_config
+                .loaded_profile
+                .map(|loaded_profile| loaded_profile.profile_name),
+            None,
+            "{cli_command:?}"
+        );
+    }
+}
+
+#[test]
+fn config_migrate_starts_on_the_koshi_kdl_every_other_command_starts_on() {
+    let config_migrate_command = parse_cli_command(&["koshi", "config", "migrate"]);
+    let config_check_command = parse_cli_command(&["koshi", "config", "check"]);
+    for app_config_text in [
+        None,
+        Some("version 2\nallow-beta-features #true\n"),
+        Some("version 1\nallow-beta-features #true\n"),
+        Some("pane {\n"),
+    ] {
+        let config_directory = TempDir::new().unwrap();
+        let app_config_path = config_directory.path().join("koshi.kdl");
+        if let Some(app_config_text) = app_config_text {
+            fs::write(&app_config_path, app_config_text).unwrap();
+        }
+
+        let startup_config =
+            load_config_for_command(Some(&config_migrate_command), Some(config_directory.path()));
+
+        assert_eq!(
+            startup_config.loaded_app_config,
+            load_config_for_command(Some(&config_check_command), Some(config_directory.path()))
+                .loaded_app_config,
+            "{app_config_text:?}"
+        );
+        assert_eq!(
+            startup_config.app_config_file_for_migration,
+            app_config_text.map(|app_config_text| ParsedConfigFile::parse(
+                &app_config_path,
+                app_config_text.to_string()
+            )),
+            "{app_config_text:?}"
+        );
+        assert_eq!(
+            startup_config
+                .config_migration_error
+                .map(|migration_error| migration_error.to_string()),
+            None
+        );
+    }
+
+    let unreadable_config_directory = TempDir::new().unwrap();
+    fs::create_dir(unreadable_config_directory.path().join("koshi.kdl")).unwrap();
+    let startup_config = load_config_for_command(
+        Some(&config_migrate_command),
+        Some(unreadable_config_directory.path()),
+    );
+    assert_eq!(
+        startup_config.loaded_app_config,
+        load_config_for_command(
+            Some(&config_check_command),
+            Some(unreadable_config_directory.path())
+        )
+        .loaded_app_config
+    );
+    assert_eq!(startup_config.app_config_file_for_migration, None);
+
+    let startup_config = load_config_for_command(Some(&config_migrate_command), None);
+    assert_eq!(
+        startup_config.loaded_app_config,
+        load_config_for_command(Some(&config_check_command), None).loaded_app_config
+    );
+    assert_eq!(startup_config.app_config_file_for_migration, None);
 }

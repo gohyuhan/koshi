@@ -91,6 +91,7 @@ use koshi_runtime::server::{
 use koshi_storage::error::StorageError;
 use serde::{Deserialize, Serialize};
 
+use koshi_link::config::LoadedProfile;
 use koshi_link::error::CliError;
 use koshi_link::router_client::RUNTIME_DIRECTORY_FLAG;
 
@@ -311,9 +312,13 @@ enum ServeOutcome {
 /// bound. Any failure before that returns `Err` having printed nothing: a
 /// caller reading standard output sees end of stream.
 ///
-/// `profile_name` names the profile the session opens its tabs and panes from.
-/// `None`, a name no profile file answers to, and a profile that will not
-/// launch each open one shell instead.
+/// `loaded_profile` is the profile the session opens its tabs and panes from,
+/// as the caller read it at this process's start. `None`, a profile that gives
+/// no template, and a profile that will not launch each open one shell
+/// instead. A profile that gives no template is written to the session log at
+/// warn level, as
+/// [`resolve_profile_template`](koshi_link::config::resolve_profile_template)
+/// states, after the `logging started` line.
 ///
 /// `should_allow_other_users_override` is the `--allow-other-users` flag the router
 /// passes on: `Some(true)` serves the other users of this machine whatever
@@ -355,7 +360,7 @@ pub fn run_session_server(
     app_config_layer: Option<PartialKoshiConfig>,
     session_id: SessionId,
     session_name: String,
-    profile_name: Option<&str>,
+    loaded_profile: Option<LoadedProfile>,
     should_allow_other_users_override: Option<bool>,
     resume_file_path: Option<&Path>,
     supervisor_token: Option<&ConnectionToken>,
@@ -449,7 +454,7 @@ pub fn run_session_server(
         ),
         None => seed_initial_session(
             &mut session_start,
-            profile_name,
+            loaded_profile,
             app_config_layer.clone(),
             Arc::clone(&pty_sink),
             runtime_event_receiver,
@@ -600,11 +605,13 @@ fn remove_session_clipboard_tools(runtime_directory: &Path, session_id: SessionI
     ));
 }
 
-/// Seed the one session this process serves.
+/// Seed the one session this process serves, from `loaded_profile`.
 ///
 /// No client is minted here: this process serves whoever attaches over the
 /// control socket, and until one does the session holds none. A profile that
-/// will not launch falls back to one shell.
+/// gives no template, as
+/// [`resolve_profile_template`](koshi_link::config::resolve_profile_template)
+/// states, and a profile that will not launch fall back to one shell.
 ///
 /// # Errors
 /// Returns the failure of panes that could not be opened. Returns the failure
@@ -612,7 +619,7 @@ fn remove_session_clipboard_tools(runtime_directory: &Path, session_id: SessionI
 /// every pane.
 fn seed_initial_session(
     session_start: &mut SessionStart,
-    profile_name: Option<&str>,
+    loaded_profile: Option<LoadedProfile>,
     app_config: Option<PartialKoshiConfig>,
     pty_sink: Arc<dyn PtySink>,
     runtime_event_receiver: Receiver<RuntimeEvent>,
@@ -621,12 +628,8 @@ fn seed_initial_session(
         build_server_over_new_panes(session_start, app_config, pty_sink, runtime_event_receiver)?;
 
     let session_start_time = SystemTime::now();
-    let profile_template_document = profile_name.and_then(|profile_name| {
-        koshi_link::config::load_profile_template(
-            session_start.config_directory.as_deref(),
-            profile_name,
-        )
-    });
+    let profile_template_document =
+        loaded_profile.and_then(koshi_link::config::resolve_profile_template);
     let is_profile_seeded = match profile_template_document {
         // The name is the router's, not a fresh one: the router registered this
         // session under it and a `koshi attach <name>` resolves against it.

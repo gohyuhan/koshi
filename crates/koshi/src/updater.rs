@@ -2673,14 +2673,8 @@ fn resolve_update_config(app_config_outcome: &AppConfigOutcome) -> UpdateConfig 
             ..UpdateConfig::default()
         },
         AppConfigOutcome::Parsed {
-            app_config_layer, ..
-        } => {
-            merge_client(
-                ClientConfig::default(),
-                vec![app_config_layer.as_ref().clone()],
-            )
-            .update
-        }
+            app_config_file, ..
+        } => merge_client(ClientConfig::default(), vec![app_config_file.layer.clone()]).update,
     }
 }
 

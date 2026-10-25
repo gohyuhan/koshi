@@ -3,10 +3,14 @@
 //! Each supported schema version owns one validator and, except the newest
 //! version, one migration to the next version. A validator lists the schema
 //! problems in one file: an unknown key, a bad value, an invalid binding.
-//! [`validate_config`] refuses a file with any problem. [`migrate_config`]
+//! [`validate_config`] refuses a file with any problem.
+//! [`validate_parsed_app_config`] gives the same answer for a `koshi.kdl` from
+//! what [`parse_app_config`] found, and parses no text. [`migrate_config`]
 //! carries the problems of the source file through every step, and stops on
 //! bad KDL, an unusable version, a missing step, or a step whose result has more
 //! problems than the source file.
+//!
+//! [`parse_app_config`]: crate::app_config::parse_app_config
 
 use std::fmt::Display;
 use std::path::Path;
@@ -15,10 +19,10 @@ use kdl::KdlDocument;
 use miette::SourceSpan;
 use thiserror::Error;
 
-use crate::app_config::parse_app_config_from_document;
+use crate::app_config::{parse_app_config_from_document, AppConfigFile};
 use crate::error::{format_problem_at_line_and_column, ConfigError};
 use crate::keybinding::parse_keybindings_from_document;
-use crate::parser::{parse_kdl, parse_supported_schema_version};
+use crate::parser::{parse_kdl, parse_supported_schema_version, ParsedConfigFile};
 use crate::profile::parse_profile_from_document;
 use crate::theme::parse_theme_from_document;
 use crate::types::SCHEMA_VERSION;
@@ -55,10 +59,9 @@ pub struct MigratedConfig {
     pub source_schema_version: u32,
     /// Schema version declared after migration.
     pub target_schema_version: u32,
-    /// Migrated KDL text, or the original text when no migration was needed.
-    pub migrated_source: String,
-    /// Whether at least one migration ran.
-    pub is_changed: bool,
+    /// The migrated text with its KDL document, or `None` when the file
+    /// already declares this build's newest schema version and no step ran.
+    pub migrated_config_file: Option<ParsedConfigFile>,
 }
 
 /// Config validation or migration failure.
@@ -186,8 +189,59 @@ pub fn validate_config(
         config_source_text,
         &config_document,
     );
+    resolve_validated_config(config_path, schema_version, &schema_problems)
+}
+
+/// [`validate_config`] for a `koshi.kdl` that [`parse_app_config`] already
+/// parsed: `app_config_result` is what it gave for the file at `config_path`.
+/// Parses no text.
+///
+/// Gives what [`validate_config`] gives for [`ConfigFileKind::App`] and the
+/// same text. Every schema version in this build lists the problems of a
+/// `koshi.kdl` with the parser [`parse_app_config`] runs.
+///
+/// # Errors
+/// Returns [`MigrationError::Parse`] for a [`ConfigError::Parse`], and
+/// [`MigrationError::Invalid`] with every problem for a
+/// [`ConfigError::Validation`] and for a file that parsed with warnings.
+/// Returns [`MigrationError::MissingSchema`] or [`MigrationError::MissingStep`]
+/// for a registry with a gap.
+///
+/// [`parse_app_config`]: crate::app_config::parse_app_config
+pub fn validate_parsed_app_config(
+    config_path: &Path,
+    app_config_result: Result<&AppConfigFile, &ConfigError>,
+) -> Result<ValidatedConfig, MigrationError> {
+    validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION)?;
+    match app_config_result {
+        Ok(app_config_file) => resolve_validated_config(
+            config_path,
+            app_config_file.schema_version,
+            &app_config_file.parse_warnings,
+        ),
+        Err(config_error @ ConfigError::Parse { .. }) => {
+            Err(build_parse_error(config_path, config_error))
+        }
+        Err(ConfigError::Validation { problem_messages }) => {
+            Err(build_schema_problem_error(config_path, problem_messages))
+        }
+    }
+}
+
+/// The [`ValidatedConfig`] of a file at `config_path` that declares
+/// `schema_version` and whose schema lists `schema_problems`. `version 1` with
+/// no problem gives `schema_version` 1 and `is_current` `false`.
+///
+/// # Errors
+/// Returns the [`MigrationError::Invalid`] that names every problem in
+/// `schema_problems` when it holds one or more.
+fn resolve_validated_config(
+    config_path: &Path,
+    schema_version: u32,
+    schema_problems: &[String],
+) -> Result<ValidatedConfig, MigrationError> {
     if !schema_problems.is_empty() {
-        return Err(build_schema_problem_error(config_path, &schema_problems));
+        return Err(build_schema_problem_error(config_path, schema_problems));
     }
     Ok(ValidatedConfig {
         schema_version,
@@ -195,7 +249,9 @@ pub fn validate_config(
     })
 }
 
-/// Migrates one config file through every adjacent schema version.
+/// Migrates one config file, `source_config_file`, through every adjacent
+/// schema version. Reads the KDL document `source_config_file` holds and
+/// parses no source text again. Each step's text is parsed once.
 ///
 /// The schema problems of the source file stay in the migrated text:
 /// `version 1` followed by `made-up-key "x"` becomes `version 2` followed by
@@ -208,13 +264,11 @@ pub fn validate_config(
 /// The [`MigrationError::Invalid`] detail lists the problems of that result.
 pub fn migrate_config(
     config_file_kind: ConfigFileKind,
-    config_path: &Path,
-    config_source_text: &str,
+    source_config_file: &ParsedConfigFile,
 ) -> Result<MigratedConfig, MigrationError> {
     migrate_with_registry(
         config_file_kind,
-        config_path,
-        config_source_text,
+        source_config_file,
         CONFIG_SCHEMAS,
         SCHEMA_VERSION,
     )
@@ -222,20 +276,31 @@ pub fn migrate_config(
 
 fn migrate_with_registry(
     config_file_kind: ConfigFileKind,
-    config_path: &Path,
-    config_source_text: &str,
+    source_config_file: &ParsedConfigFile,
     config_schemas: &[ConfigSchema],
     current_schema_version: u32,
 ) -> Result<MigratedConfig, MigrationError> {
     validate_schema_registry(config_schemas, current_schema_version)?;
-    let (source_document, source_schema_version) =
-        parse_versioned_config_document(config_path, config_source_text, current_schema_version)?;
+    let config_path = source_config_file.get_config_path();
+    let config_source_text = source_config_file.get_source_text();
+    let source_document =
+        source_config_file
+            .config_document
+            .as_ref()
+            .map_err(|parse_diagnostic| {
+                build_parse_error(config_path, &parse_diagnostic.build_config_error())
+            })?;
+    let source_schema_version = parse_declared_schema_version(
+        config_path,
+        config_source_text,
+        source_document,
+        current_schema_version,
+    )?;
     if source_schema_version == current_schema_version {
         return Ok(MigratedConfig {
             source_schema_version,
             target_schema_version: source_schema_version,
-            migrated_source: config_source_text.to_string(),
-            is_changed: false,
+            migrated_config_file: None,
         });
     }
 
@@ -244,12 +309,11 @@ fn migrate_with_registry(
         config_file_kind,
         config_path,
         config_source_text,
-        &source_document,
+        source_document,
     )
     .len();
     let mut schema_version = source_schema_version;
-    let mut migrated_source = config_source_text.to_string();
-    let mut migrated_document = source_document;
+    let mut migrated_text_and_document: Option<(String, KdlDocument)> = None;
     while schema_version < current_schema_version {
         let next_schema_version = schema_version + 1;
         let schema = find_schema_by_version(config_schemas, schema_version)
@@ -257,11 +321,16 @@ fn migrate_with_registry(
         let migrate_to_next_schema = schema
             .migrate_to_next_schema
             .expect("validate_schema_registry found a step below the current version");
-        migrated_source =
-            migrate_to_next_schema(config_path, &migrated_source, &migrated_document)?;
-        let (next_document, declared_schema_version) =
+        let (step_source_text, step_source_document) = match &migrated_text_and_document {
+            Some((migrated_source, migrated_document)) => {
+                (migrated_source.as_str(), migrated_document)
+            }
+            None => (config_source_text, source_document),
+        };
+        let migrated_source =
+            migrate_to_next_schema(config_path, step_source_text, step_source_document)?;
+        let (migrated_document, declared_schema_version) =
             parse_versioned_config_document(config_path, &migrated_source, current_schema_version)?;
-        migrated_document = next_document;
         if declared_schema_version != next_schema_version {
             return Err(MigrationError::Version {
                 config_path: config_path.display().to_string(),
@@ -281,14 +350,20 @@ fn migrate_with_registry(
         if migrated_problems.len() > source_problem_count {
             return Err(build_schema_problem_error(config_path, &migrated_problems));
         }
+        migrated_text_and_document = Some((migrated_source, migrated_document));
         schema_version = next_schema_version;
     }
 
+    let (migrated_source, migrated_document) = migrated_text_and_document
+        .expect("a version below the current version takes at least one step");
     Ok(MigratedConfig {
         source_schema_version,
         target_schema_version: schema_version,
-        is_changed: true,
-        migrated_source,
+        migrated_config_file: Some(ParsedConfigFile {
+            config_path: config_path.to_path_buf(),
+            config_source_text: migrated_source,
+            config_document: Ok(migrated_document),
+        }),
     })
 }
 
@@ -305,18 +380,38 @@ fn parse_versioned_config_document(
     current_schema_version: u32,
 ) -> Result<(KdlDocument, u32), MigrationError> {
     let config_document = parse_config_document(config_path, config_source_text)?;
-    let schema_version =
-        parse_schema_version_from_document(&config_document, current_schema_version).map_err(
-            |(version_error_span, version_error_detail)| {
-                build_version_error(
-                    config_path,
-                    config_source_text,
-                    version_error_span,
-                    version_error_detail,
-                )
-            },
-        )?;
+    let schema_version = parse_declared_schema_version(
+        config_path,
+        config_source_text,
+        &config_document,
+        current_schema_version,
+    )?;
     Ok((config_document, schema_version))
+}
+
+/// The schema version `config_document` declares, from 1 through
+/// `current_schema_version`. `config_document` is the KDL document parsed
+/// from `config_source_text`, the text of the file at `config_path`.
+///
+/// # Errors
+/// Returns [`MigrationError::Version`] with the line and column of the
+/// problem when the document declares no usable version.
+fn parse_declared_schema_version(
+    config_path: &Path,
+    config_source_text: &str,
+    config_document: &KdlDocument,
+    current_schema_version: u32,
+) -> Result<u32, MigrationError> {
+    parse_schema_version_from_document(config_document, current_schema_version).map_err(
+        |(version_error_span, version_error_detail)| {
+            build_version_error(
+                config_path,
+                config_source_text,
+                version_error_span,
+                version_error_detail,
+            )
+        },
+    )
 }
 
 /// The KDL document parsed from `config_source_text`, the text of the file at
@@ -328,10 +423,19 @@ fn parse_config_document(
     config_path: &Path,
     config_source_text: &str,
 ) -> Result<KdlDocument, MigrationError> {
-    parse_kdl(config_path, config_source_text).map_err(|parse_diagnostic| MigrationError::Parse {
-        config_path: config_path.display().to_string(),
-        parse_error_detail: ConfigError::from(parse_diagnostic).to_string(),
+    parse_kdl(config_path, config_source_text).map_err(|parse_diagnostic| {
+        build_parse_error(config_path, &ConfigError::from(parse_diagnostic))
     })
+}
+
+/// The [`MigrationError::Parse`] for the file at `config_path` whose text
+/// `parse_error` refused: `config parse error in koshi.kdl: line 2, column 6:
+/// No closing '}' for child block`.
+fn build_parse_error(config_path: &Path, parse_error: &ConfigError) -> MigrationError {
+    MigrationError::Parse {
+        config_path: config_path.display().to_string(),
+        parse_error_detail: parse_error.to_string(),
+    }
 }
 
 /// The schema version `config_document` declares, from 1 through

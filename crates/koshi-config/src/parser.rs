@@ -1,21 +1,26 @@
 //! KDL parsing entry point, and the field readers the file parsers share.
 //!
 //! [`parse_kdl`] wraps the `kdl` crate's document parser and attaches the
-//! config file path to any syntax error as a [`ConfigParseDiagnostic`]. The
+//! config file path to any syntax error as a [`ConfigParseDiagnostic`].
+//! [`ParsedConfigFile`] keeps one file's text with what [`parse_kdl`] gave for
+//! it, and every reader of that file reads the one document. The
 //! `parse_*_kdl_value` readers turn one field node into a typed field value,
 //! `set_parsed_field` stores one field value or records the skip in
 //! `ParseProblems`, and [`format_unknown_key`] names the nearest allowed key
 //! for an unrecognized one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
+use koshi_layout::template::ProfileTemplate;
 use miette::SourceSpan;
 
+use crate::app_config::{parse_app_config_from_document, AppConfigFile};
 use crate::error::{
     format_problem_at_line_and_column, format_problems_at_line_and_column,
     validate_config_schema_version, ConfigError, ConfigParseDiagnostic, ConfigVersionDiagnostic,
 };
+use crate::profile::{parse_profile_from_document, ProfileError};
 use crate::types::SCHEMA_VERSION;
 
 #[cfg(test)]
@@ -177,6 +182,85 @@ pub fn parse_kdl(
     config_source_text
         .parse::<KdlDocument>()
         .map_err(|parse_error| ConfigParseDiagnostic::from_kdl_error(config_path, parse_error))
+}
+
+/// One config file's path, its text, and what [`parse_kdl`] gave for that
+/// text: the KDL document, or the diagnostic of text that is not valid KDL.
+///
+/// [`ParsedConfigFile::parse`] runs [`parse_kdl`] once. Every reader of the
+/// file reads that one result: [`migrate_config`],
+/// [`ParsedConfigFile::parse_app_config`] and
+/// [`ParsedConfigFile::parse_profile`].
+///
+/// [`migrate_config`]: crate::migration::migrate_config
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedConfigFile {
+    /// The path of the file the text was read from.
+    pub(crate) config_path: PathBuf,
+    /// The text read.
+    pub(crate) config_source_text: String,
+    /// What [`parse_kdl`] gave for `config_source_text`.
+    pub(crate) config_document: Result<KdlDocument, ConfigParseDiagnostic>,
+}
+
+impl ParsedConfigFile {
+    /// Parses `config_source_text`, the text of the file at `config_path`,
+    /// with [`parse_kdl`].
+    #[must_use]
+    pub fn parse(config_path: &Path, config_source_text: String) -> Self {
+        let config_document = parse_kdl(config_path, &config_source_text);
+        Self {
+            config_path: config_path.to_path_buf(),
+            config_source_text,
+            config_document,
+        }
+    }
+
+    /// The path of the file the text was read from.
+    #[must_use]
+    pub fn get_config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    /// The text read.
+    #[must_use]
+    pub fn get_source_text(&self) -> &str {
+        &self.config_source_text
+    }
+
+    /// What [`parse_app_config`] gives for this file's text, read from the
+    /// document parsed once.
+    ///
+    /// # Errors
+    /// The errors [`parse_app_config`] states.
+    ///
+    /// [`parse_app_config`]: crate::app_config::parse_app_config
+    pub fn parse_app_config(&self) -> Result<AppConfigFile, ConfigError> {
+        match &self.config_document {
+            Ok(config_document) => {
+                parse_app_config_from_document(config_document, &self.config_source_text)
+            }
+            Err(parse_diagnostic) => Err(parse_diagnostic.build_config_error()),
+        }
+    }
+
+    /// What [`parse_profile`] gives for this file's text, read from the
+    /// document parsed once.
+    ///
+    /// # Errors
+    /// The errors [`parse_profile`] states.
+    ///
+    /// [`parse_profile`]: crate::profile::parse_profile
+    pub fn parse_profile(&self) -> Result<ProfileTemplate, ProfileError> {
+        match &self.config_document {
+            Ok(config_document) => parse_profile_from_document(
+                &self.config_path,
+                &self.config_source_text,
+                config_document,
+            ),
+            Err(parse_diagnostic) => Err(ProfileError::Syntax(parse_diagnostic.clone())),
+        }
+    }
 }
 
 // Field-value readers shared by the `koshi.kdl` and theme-file parsers. Each

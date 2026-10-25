@@ -184,7 +184,7 @@ pub struct DoctorContext {
     /// reports no home directory.
     pub config_directory: Option<PathBuf>,
     /// What the one read of `koshi.kdl` at start found. The config check
-    /// validates its text.
+    /// validates `koshi.kdl` from it and parses no text again.
     pub app_config_outcome: AppConfigOutcome,
     /// The private runtime directory holding the endpoint files, or `None`
     /// when this machine reports no home directory.

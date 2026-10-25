@@ -55,12 +55,14 @@ use crate::layer::{
     PartialScrollbackConfig, PartialTerminalConfig, PartialUpdateConfig,
 };
 use crate::parser::{
-    find_newer_version_error, find_section_block, find_version_node_problem, format_unknown_key,
-    parse_boolean_kdl_value, parse_integer_kdl_value, parse_kdl, parse_nonempty_string_kdl_value,
-    parse_string_kdl_value, parse_u16_kdl_value, parse_u32_kdl_value, set_parsed_field,
+    find_newer_version_error, find_section_block, format_unknown_key, parse_boolean_kdl_value,
+    parse_integer_kdl_value, parse_kdl, parse_nonempty_string_kdl_value, parse_string_kdl_value,
+    parse_supported_schema_version, parse_u16_kdl_value, parse_u32_kdl_value, set_parsed_field,
     ParseProblems,
 };
-use crate::types::{WheelScroll, HIGHEST_MAX_LOG_FILE_SIZE_IN_MB, LOWEST_MAX_LOG_FILE_SIZE_IN_MB};
+use crate::types::{
+    WheelScroll, HIGHEST_MAX_LOG_FILE_SIZE_IN_MB, LOWEST_MAX_LOG_FILE_SIZE_IN_MB, SCHEMA_VERSION,
+};
 
 /// The top-level node names. Each may appear at most once; an unknown name is
 /// matched against these for the `did you mean` hint.
@@ -94,8 +96,11 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
 /// The theme name is kept **out** of [`layer`](Self::layer): `layer.theme` is
 /// always `None`, and the name from the `theme` line is in
 /// [`theme_name`](Self::theme_name).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfigFile {
+    /// The schema version the `version` line declares, from 1 through
+    /// [`SCHEMA_VERSION`]: `version 1` gives `1`.
+    pub schema_version: u32,
     /// The settings this file overrides, to fold onto the built-in defaults.
     pub layer: PartialKoshiConfig,
     /// The name from the `theme "<name>"` line, trimmed of surrounding
@@ -108,9 +113,9 @@ pub struct AppConfigFile {
     pub parse_warnings: Vec<String>,
 }
 
-/// Parses the `koshi.kdl` text `config_source_text` into its override layer,
-/// the theme it names, and one warning per skipped field, skipped duplicate
-/// section, and unknown key.
+/// Parses the `koshi.kdl` text `config_source_text` into its schema version,
+/// its override layer, the theme it names, and one warning per skipped field,
+/// skipped duplicate section, and unknown key.
 ///
 /// # Errors
 /// Returns [`ConfigError::Parse`] when `config_source_text` is not valid KDL.
@@ -147,6 +152,7 @@ pub(crate) fn parse_app_config_from_document(
     {
         return Err(newer_version_error);
     }
+    let mut schema_version = None;
     let mut partial_koshi_config = PartialKoshiConfig::default();
     let mut theme_name = None;
     let mut parse_problems = ParseProblems::default();
@@ -173,13 +179,12 @@ pub(crate) fn parse_app_config_from_document(
             continue;
         }
         match config_section_name {
-            "version" => {
-                if let Some((version_error_span, version_error_detail)) =
-                    find_version_node_problem(config_node)
-                {
+            "version" => match parse_supported_schema_version(config_node, SCHEMA_VERSION) {
+                Ok(declared_schema_version) => schema_version = Some(declared_schema_version),
+                Err((version_error_span, version_error_detail)) => {
                     parse_problems.record_refusal(version_error_span, version_error_detail);
                 }
-            }
+            },
             // `theme` names which `themes/<name>.kdl` supplies the colors; the
             // colors themselves are never spelled here.
             "theme" => set_top_level_field(
@@ -319,10 +324,13 @@ pub(crate) fn parse_app_config_from_document(
     if !seen_config_section_names.contains("version") {
         parse_problems.record_refusal(config_document.span(), "file must declare `version`");
     }
+    let parse_warnings = parse_problems.resolve_file_problems(config_source_text)?;
     Ok(AppConfigFile {
+        schema_version: schema_version
+            .expect("a file with no refusal has one `version` line that parsed"),
         layer: partial_koshi_config,
         theme_name,
-        parse_warnings: parse_problems.resolve_file_problems(config_source_text)?,
+        parse_warnings,
     })
 }
 

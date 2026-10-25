@@ -22,7 +22,7 @@ use thiserror::Error;
 /// Each problem reads `line <L>, column <C>: <message>` and names no file. The
 /// caller names the file, such as `koshi.kdl not applied (<path>):
 /// <problems>`.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
     /// The config file is not valid KDL.
     #[error("{parse_error_detail}")]
@@ -61,7 +61,7 @@ impl ConfigError {
 /// `config_path` for the diagnostic header. The [`Diagnostic`] impl returns the
 /// inner error's source code and sub-diagnostics, each with its own span, and a
 /// rendered report points a caret at the failing line.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("config parse error in {config_path}")]
 pub struct ConfigParseDiagnostic {
     /// Path of the config file that failed to parse, for the header line.

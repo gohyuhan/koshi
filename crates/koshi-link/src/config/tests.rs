@@ -168,12 +168,15 @@ fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 1\n").expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Parsed {
-                app_config_layer: Box::new(PartialKoshiConfig::default()),
-                theme_name: None,
-                app_config_source_text: "version 1\n".to_string(),
+                app_config_file: Box::new(AppConfigFile {
+                    schema_version: 1,
+                    layer: PartialKoshiConfig::default(),
+                    theme_name: None,
+                    parse_warnings: Vec::new(),
+                }),
             },
             config_warnings: Vec::new(),
         }
@@ -184,7 +187,7 @@ fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
 fn loading_an_absent_app_file_is_absent_without_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     assert_eq!(
-        load_app_config_at(&test_directory.path().join("koshi.kdl")),
+        load_app_config_at(&test_directory.path().join("koshi.kdl")).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Absent,
             config_warnings: Vec::new(),
@@ -202,7 +205,7 @@ fn loading_an_app_file_that_cannot_be_read_keeps_the_read_error_with_a_warning()
     let read_error =
         fs::read_to_string(&config_file_path).expect_err("a directory reads as no string");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Unreadable {
                 read_error_text: read_error.to_string(),
@@ -221,10 +224,16 @@ fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 999\n").expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Refused {
-                app_config_source_text: "version 999\n".to_string(),
+                config_error: ConfigError::Validation {
+                    problem_messages: vec![
+                        "line 1, column 1: config schema version 999 is newer than this koshi \
+                         supports (2)"
+                            .to_string()
+                    ],
+                },
             },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): line 1, column 1: config schema version 999 is newer \
@@ -241,10 +250,16 @@ fn an_app_file_from_a_newer_koshi_is_refused_naming_only_its_version() {
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 3\nfrobnicate #true\n").expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Refused {
-                app_config_source_text: "version 3\nfrobnicate #true\n".to_string(),
+                config_error: ConfigError::Validation {
+                    problem_messages: vec![
+                        "line 1, column 1: config schema version 3 is newer than this koshi \
+                         supports (2)"
+                            .to_string()
+                    ],
+                },
             },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): line 1, column 1: config schema version 3 is newer \
@@ -262,10 +277,14 @@ fn an_empty_app_file_is_refused_with_a_warning() {
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "").expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Refused {
-                app_config_source_text: String::new(),
+                config_error: ConfigError::Validation {
+                    problem_messages: vec![
+                        "line 1, column 1: file must declare `version`".to_string()
+                    ],
+                },
             },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): line 1, column 1: file must declare `version`; using \
@@ -284,10 +303,19 @@ fn an_app_file_with_a_bad_update_value_is_refused_naming_every_problem() {
         "version 2\nfrobnicate #true\npane {\n}\nupdate { auto-check \"yes\" }\n";
     fs::write(&config_file_path, app_config_source_text).expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Refused {
-                app_config_source_text: app_config_source_text.to_string(),
+                config_error: ConfigError::Validation {
+                    problem_messages: vec![
+                        "line 2, column 1: ignored unknown key `frobnicate`; did you mean \
+                         `update`?"
+                            .to_string(),
+                        "line 5, column 10: invalid config key `update.auto-check`: expected a \
+                         boolean (#true or #false)"
+                            .to_string(),
+                    ],
+                },
             },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): line 2, column 1: ignored unknown key `frobnicate`; \
@@ -305,10 +333,13 @@ fn an_app_file_that_is_not_kdl_is_refused_naming_its_path_once() {
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 2\npane {\n").expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Refused {
-                app_config_source_text: "version 2\npane {\n".to_string(),
+                config_error: ConfigError::Parse {
+                    parse_error_detail: "line 2, column 6: No closing '}' for child block"
+                        .to_string(),
+                },
             },
             config_warnings: vec![format!(
                 "koshi.kdl not applied ({}): line 2, column 6: No closing '}}' for child block; \
@@ -331,12 +362,19 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
     )
     .expect("write");
     assert_eq!(
-        load_app_config_at(&config_file_path),
+        load_app_config_at(&config_file_path).0,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Parsed {
-                app_config_layer: Box::new(PartialKoshiConfig::default()),
-                theme_name: Some("midnight".to_string()),
-                app_config_source_text: "version 1\nfrobnicate 1\ntheme \"midnight\"\n".to_string(),
+                app_config_file: Box::new(AppConfigFile {
+                    schema_version: 1,
+                    layer: PartialKoshiConfig::default(),
+                    theme_name: Some("midnight".to_string()),
+                    parse_warnings: vec![
+                        "line 2, column 1: ignored unknown key `frobnicate`; did you mean \
+                         `update`?"
+                            .to_string()
+                    ],
+                }),
             },
             config_warnings: vec![format!(
                 "{}: line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
@@ -847,13 +885,13 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     let config_file_path = test_directory.path().join("koshi.kdl");
 
     fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").expect("write");
-    let loaded_app_config = load_app_config_at(&config_file_path);
+    let loaded_app_config = load_app_config_at(&config_file_path).0;
     assert_eq!(loaded_app_config.config_warnings, Vec::<String>::new());
     apply_beta_gate(loaded_app_config.into_app_config_layer());
     assert_eq!(mock_beta_entry_point(), 1);
 
     fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").expect("write");
-    let loaded_app_config = load_app_config_at(&config_file_path);
+    let loaded_app_config = load_app_config_at(&config_file_path).0;
     assert_eq!(loaded_app_config.config_warnings, Vec::<String>::new());
     apply_beta_gate(loaded_app_config.into_app_config_layer());
     assert_eq!(mock_beta_entry_point(), 0);
@@ -1148,8 +1186,214 @@ fn no_config_directory_reads_no_file_and_keeps_every_default() {
         vec!["no config directory found; using built-in defaults".to_string()]
     );
     assert_eq!(load_app_layer(None), None);
-    assert_eq!(load_profile_template(None, "work"), None);
     assert_eq!(find_shared_sessions_base_directory(None), None);
+}
+
+// --- Reading a profile ---
+
+/// The level, target and fields of every line `captured_logs` holds.
+fn list_captured_log_records(
+    captured_logs: &koshi_observability::logging::CapturedLogs,
+) -> Vec<serde_json::Value> {
+    captured_logs
+        .lines()
+        .iter()
+        .map(|log_line| {
+            let log_record: serde_json::Value =
+                serde_json::from_str(log_line).expect("a captured log line is JSON");
+            serde_json::json!({
+                "level": log_record["level"],
+                "target": log_record["target"],
+                "fields": log_record["fields"],
+            })
+        })
+        .collect()
+}
+
+/// A fresh config directory holding `profile/work.kdl` with
+/// `profile_source_bytes`. Returns the directory and the profile path.
+fn build_config_directory_with_work_profile(
+    profile_source_bytes: &[u8],
+) -> (tempfile::TempDir, PathBuf) {
+    let config_directory = tempfile::tempdir().expect("temp dir");
+    let profile_path = config_directory.path().join("profile").join("work.kdl");
+    fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("create profile/");
+    fs::write(&profile_path, profile_source_bytes).expect("write profile");
+    (config_directory, profile_path)
+}
+
+#[test]
+fn a_profile_name_that_is_no_plain_name_gives_no_template_and_logs_why() {
+    let config_directory = tempfile::tempdir().expect("temp dir");
+    let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
+
+    let profile_template =
+        resolve_profile_template(load_profile_file(config_directory.path(), "../secret", &[]));
+
+    assert_eq!(profile_template, None);
+    assert_eq!(
+        list_captured_log_records(&captured_logs),
+        vec![serde_json::json!({
+            "level": "WARN",
+            "target": "koshi_link::config",
+            "fields": {
+                "message": "profile name `../secret` must be a plain name; starting a single shell",
+            },
+        })]
+    );
+}
+
+#[test]
+fn an_absent_profile_gives_no_template_and_logs_its_path() {
+    let config_directory = tempfile::tempdir().expect("temp dir");
+    let profile_path = config_directory.path().join("profile").join("work.kdl");
+    let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
+
+    let profile_template =
+        resolve_profile_template(load_profile_file(config_directory.path(), "work", &[]));
+
+    assert_eq!(profile_template, None);
+    assert_eq!(
+        list_captured_log_records(&captured_logs),
+        vec![serde_json::json!({
+            "level": "WARN",
+            "target": "koshi_link::config",
+            "fields": {
+                "message": "profile `work` not found; starting a single shell",
+                "path": profile_path.display().to_string(),
+            },
+        })]
+    );
+}
+
+#[test]
+fn an_unreadable_profile_gives_no_template_and_logs_its_read_error() {
+    let (config_directory, profile_path) = build_config_directory_with_work_profile(&[0xff, 0xfe]);
+    let read_error = fs::read_to_string(&profile_path).expect_err("bytes that are not UTF-8");
+    let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
+
+    let profile_template =
+        resolve_profile_template(load_profile_file(config_directory.path(), "work", &[]));
+
+    assert_eq!(profile_template, None);
+    assert_eq!(
+        list_captured_log_records(&captured_logs),
+        vec![serde_json::json!({
+            "level": "WARN",
+            "target": "koshi_link::config",
+            "fields": {
+                "message": "profile `work` could not be read; starting a single shell",
+                "path": profile_path.display().to_string(),
+                "read_error": read_error.to_string(),
+            },
+        })]
+    );
+}
+
+#[test]
+fn a_profile_that_does_not_parse_gives_no_template_and_logs_every_problem() {
+    let (config_directory, profile_path) =
+        build_config_directory_with_work_profile(b"version 2\npane {");
+    let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
+
+    let profile_template =
+        resolve_profile_template(load_profile_file(config_directory.path(), "work", &[]));
+
+    assert_eq!(profile_template, None);
+    assert_eq!(
+        list_captured_log_records(&captured_logs),
+        vec![serde_json::json!({
+            "level": "WARN",
+            "target": "koshi_link::config",
+            "fields": {
+                "message": "profile `work` not applied; starting a single shell",
+                "path": profile_path.display().to_string(),
+                "profile_problems": "line 2, column 6: No closing '}' for child block",
+            },
+        })]
+    );
+}
+
+#[test]
+fn a_profile_this_process_already_parsed_is_read_from_that_parse_and_not_from_disk() {
+    let (config_directory, profile_path) = build_config_directory_with_work_profile(b"pane {");
+    let parsed_profile_text = "version 2\ntab {\n    pane\n}\n";
+    let parsed_config_files = [
+        ParsedConfigFile::parse(
+            &config_directory.path().join("koshi.kdl"),
+            "version 2\n".to_string(),
+        ),
+        ParsedConfigFile::parse(&profile_path, parsed_profile_text.to_string()),
+    ];
+
+    let loaded_profile = load_profile_file(config_directory.path(), "work", &parsed_config_files);
+
+    assert_eq!(loaded_profile.profile_name, "work");
+    let ProfileOutcome::Parsed { profile_template } = loaded_profile.profile_outcome else {
+        panic!("the parse held gives the template: {loaded_profile:?}");
+    };
+    assert_eq!(
+        profile_template,
+        parse_profile(&profile_path, parsed_profile_text).expect("the profile parses")
+    );
+}
+
+#[test]
+fn a_profile_parse_held_for_another_path_leaves_the_profile_read_from_disk() {
+    let profile_source_text = "version 2\ntab {\n    pane\n}\n";
+    let (config_directory, profile_path) =
+        build_config_directory_with_work_profile(profile_source_text.as_bytes());
+    let parsed_config_files = [ParsedConfigFile::parse(
+        &config_directory.path().join("profile").join("home.kdl"),
+        "pane {".to_string(),
+    )];
+
+    let loaded_profile = load_profile_file(config_directory.path(), "work", &parsed_config_files);
+
+    let ProfileOutcome::Parsed { profile_template } = loaded_profile.profile_outcome else {
+        panic!("the file on disk gives the template: {loaded_profile:?}");
+    };
+    assert_eq!(
+        profile_template,
+        parse_profile(&profile_path, profile_source_text).expect("the profile parses")
+    );
+}
+
+#[test]
+fn a_profile_name_that_is_no_plain_name_ignores_a_parse_held_at_its_joined_path() {
+    let config_directory = tempfile::tempdir().expect("temp dir");
+    let joined_profile_path = config_directory.path().join("profile").join("..kdl");
+    let parsed_config_files = [ParsedConfigFile::parse(
+        &joined_profile_path,
+        "version 2\ntab {\n    pane\n}\n".to_string(),
+    )];
+
+    let loaded_profile = load_profile_file(config_directory.path(), ".", &parsed_config_files);
+
+    assert_eq!(loaded_profile.profile_name, ".");
+    let ProfileOutcome::NotPlainName = loaded_profile.profile_outcome else {
+        panic!("`.` is no plain name: {loaded_profile:?}");
+    };
+}
+
+#[test]
+fn a_profile_that_parses_gives_its_template_and_logs_nothing() {
+    let profile_source_text = "version 2\ntab {\n    pane\n}\n";
+    let (config_directory, profile_path) =
+        build_config_directory_with_work_profile(profile_source_text.as_bytes());
+    let (_subscriber_guard, captured_logs) = koshi_observability::logging::with_test_writer();
+
+    let profile_template =
+        resolve_profile_template(load_profile_file(config_directory.path(), "work", &[]));
+
+    assert_eq!(
+        profile_template,
+        Some(parse_profile(&profile_path, profile_source_text).expect("the profile parses"))
+    );
+    assert_eq!(
+        list_captured_log_records(&captured_logs),
+        Vec::<serde_json::Value>::new()
+    );
 }
 
 #[cfg(unix)]
@@ -1332,9 +1576,16 @@ fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
         loaded_app_config,
         LoadedAppConfig {
             app_config_outcome: AppConfigOutcome::Parsed {
-                app_config_layer: Box::new(PartialKoshiConfig::default()),
-                theme_name: Some("midnight".to_string()),
-                app_config_source_text: app_config_text.to_string(),
+                app_config_file: Box::new(AppConfigFile {
+                    schema_version: 2,
+                    layer: PartialKoshiConfig::default(),
+                    theme_name: Some("midnight".to_string()),
+                    parse_warnings: vec![
+                        "line 3, column 1: ignored unknown key `frobnicate`; did you mean \
+                         `update`?"
+                            .to_string()
+                    ],
+                }),
             },
             config_warnings: vec![format!(
                 "{}: line 3, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
@@ -1345,6 +1596,52 @@ fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
     assert_eq!(
         parse_app_config_text(&app_config_path, app_config_text.to_string()),
         loaded_app_config
+    );
+}
+
+#[test]
+fn loading_koshi_kdl_for_a_migration_keeps_the_parse_of_the_text_it_read() {
+    let app_config_text = "version 1\nallow-beta-features #true\n";
+    let config_directory = build_config_directory_with_app_config(app_config_text);
+    let app_config_path = config_directory.path().join("koshi.kdl");
+
+    assert_eq!(
+        load_app_config_file_for_migration(Some(config_directory.path())),
+        (
+            load_app_config_file(Some(config_directory.path())),
+            Some(ParsedConfigFile::parse(
+                &app_config_path,
+                app_config_text.to_string()
+            ))
+        )
+    );
+    assert_eq!(
+        build_loaded_app_config(&ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string()
+        )),
+        load_app_config_file(Some(config_directory.path()))
+    );
+
+    let absent_config_directory = tempfile::tempdir().expect("temp dir");
+    assert_eq!(
+        load_app_config_file_for_migration(Some(absent_config_directory.path())),
+        (LoadedAppConfig::default(), None)
+    );
+
+    let unreadable_config_directory = tempfile::tempdir().expect("temp dir");
+    fs::create_dir(unreadable_config_directory.path().join("koshi.kdl")).expect("create dir");
+    assert_eq!(
+        load_app_config_file_for_migration(Some(unreadable_config_directory.path())),
+        (
+            load_app_config_file(Some(unreadable_config_directory.path())),
+            None
+        )
+    );
+
+    assert_eq!(
+        load_app_config_file_for_migration(None),
+        (load_app_config_file(None), None)
     );
 }
 
@@ -1366,13 +1663,15 @@ fn config_files_build_on_the_koshi_kdl_already_read_and_read_its_theme() {
     );
     let loaded_app_config = LoadedAppConfig {
         app_config_outcome: AppConfigOutcome::Parsed {
-            app_config_layer: Box::new(PartialKoshiConfig {
-                should_allow_other_users: Some(true),
-                ..PartialKoshiConfig::default()
+            app_config_file: Box::new(AppConfigFile {
+                schema_version: 2,
+                layer: PartialKoshiConfig {
+                    should_allow_other_users: Some(true),
+                    ..PartialKoshiConfig::default()
+                },
+                theme_name: Some("passed".to_string()),
+                parse_warnings: Vec::new(),
             }),
-            theme_name: Some("passed".to_string()),
-            app_config_source_text: "version 2\ntheme \"passed\"\nallow-other-users #true\n"
-                .to_string(),
         },
         config_warnings: vec!["koshi.kdl: line 3, column 1: a warning of the read".to_string()],
     };

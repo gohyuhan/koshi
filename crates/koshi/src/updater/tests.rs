@@ -31,6 +31,7 @@ use std::io::Write;
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread::JoinHandle;
 
+use koshi_config::error::ConfigError;
 use koshi_ipc::endpoint::{compute_socket_address, is_update_restarting_servers, EndpointFile};
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
@@ -4523,7 +4524,13 @@ fn a_koshi_kdl_that_was_not_read_gives_the_default_update_config() {
 fn a_koshi_kdl_that_does_not_parse_turns_the_automatic_check_off() {
     assert_eq!(
         resolve_update_config(&AppConfigOutcome::Refused {
-            app_config_source_text: "version 999\n".to_string(),
+            config_error: ConfigError::Validation {
+                problem_messages: vec![
+                    "line 1, column 1: config schema version 999 is newer than this koshi \
+                     supports (2)"
+                        .to_string()
+                ],
+            },
         }),
         UpdateConfig {
             should_auto_check_for_updates: false,

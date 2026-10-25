@@ -1,11 +1,14 @@
-//! Tests for [`parse_kdl`], its [`ConfigParseDiagnostic`] error, the shared
-//! field-value readers, and the unknown-key suggestion.
+//! Tests for [`parse_kdl`], its [`ConfigParseDiagnostic`] error, the
+//! [`ParsedConfigFile`] readers, the shared field-value readers, and the
+//! unknown-key suggestion.
 
 use super::*;
 
 use miette::Diagnostic;
 
+use crate::app_config::parse_app_config;
 use crate::error::ConfigError;
+use crate::profile::parse_profile;
 use crate::types::SCHEMA_VERSION;
 
 /// Parse a single-node `kdl_text` and hand back that one node, so a reader can be
@@ -24,6 +27,41 @@ fn valid_kdl_parses_to_document() {
         .map(|kdl_node| kdl_node.name().value())
         .collect();
     assert_eq!(node_names, vec!["pane"]);
+}
+
+#[test]
+fn a_parsed_config_file_gives_what_parsing_its_text_gives() {
+    let config_path = Path::new("profile/work.kdl");
+    for config_source_text in [
+        "version 2\n",
+        "version 2\nfrobnicate 1\n",
+        "frobnicate 1\n",
+        "version 2\npane {",
+        "version 2\ntab { pane }\n",
+        "version 2\ntab { pane { size 30 } }\n",
+    ] {
+        let parsed_config_file =
+            ParsedConfigFile::parse(config_path, config_source_text.to_string());
+
+        assert_eq!(parsed_config_file.get_config_path(), config_path);
+        assert_eq!(parsed_config_file.get_source_text(), config_source_text);
+        assert_eq!(
+            parsed_config_file.parse_app_config(),
+            parse_app_config(config_path, config_source_text),
+            "{config_source_text:?}"
+        );
+        assert_eq!(
+            parsed_config_file.parse_profile().map_err(|profile_error| (
+                profile_error.to_string(),
+                profile_error.list_problem_messages()
+            )),
+            parse_profile(config_path, config_source_text).map_err(|profile_error| (
+                profile_error.to_string(),
+                profile_error.list_problem_messages()
+            )),
+            "{config_source_text:?}"
+        );
+    }
 }
 
 #[test]
@@ -764,8 +802,7 @@ fn get_check_error_detail(config_source_text: &str) -> String {
 fn get_migration_version_error_detail(config_source_text: &str) -> String {
     match crate::migration::migrate_config(
         crate::migration::ConfigFileKind::App,
-        Path::new("koshi.kdl"),
-        config_source_text,
+        &ParsedConfigFile::parse(Path::new("koshi.kdl"), config_source_text.to_string()),
     ) {
         Err(crate::migration::MigrationError::Version {
             version_error_detail,
