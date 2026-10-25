@@ -18,7 +18,10 @@ use koshi_core::{
 };
 use koshi_layout::{
     mode::LayoutMode,
-    solver::{solve_layout_with_mode, solve_layout_with_sizing, LayoutSolve, PaneSizing},
+    solver::{
+        resize_delta_conversion::convert_resize_deltas_to_apply_after_preferred,
+        solve_layout_with_mode, solve_layout_with_sizing, LayoutSolve, PaneSizing,
+    },
     tree::LayoutNode,
 };
 use koshi_pane::registry::PaneRegistry;
@@ -672,6 +675,48 @@ impl Session {
     #[must_use]
     pub fn get_pane_sizing(&self) -> PaneSizing {
         self.pane_sizing
+    }
+
+    /// Rewrite the resize deltas of every tab's tree with
+    /// [`convert_resize_deltas_to_apply_after_preferred`]. After the rewrite,
+    /// each pane solves to the size it had under the solve that applied each
+    /// resize delta before the `preferred` targets. The tabs are not solved
+    /// again.
+    ///
+    /// A tab an attached client views is rewritten at
+    /// [`Session::get_tab_size`]. A tab no attached client views is rewritten
+    /// at the smallest pane area, per axis, of every attached client. A tab
+    /// whose viewers all report a starving pane area, and every tab of a
+    /// session with no attached client, keeps its values.
+    ///
+    /// An `80x24` client viewing tab 1 and a `100x30` client viewing tab 2 →
+    /// tab 1 at `80x22`, tab 2 at `100x28`, and a third tab at `80x22`.
+    pub fn convert_resize_deltas_to_apply_after_preferred(&mut self, pane_sizing: PaneSizing) {
+        let attached_pane_area = self
+            .clients
+            .list_attached_clients()
+            .filter_map(Client::get_pane_area)
+            .reduce(Size::compute_minimum_axes);
+        let tab_ids: Vec<TabId> = self.tabs.keys().copied().collect();
+        for tab_id in tab_ids {
+            let is_tab_viewed = self
+                .clients
+                .list_attached_clients()
+                .any(|client| client.get_active_tab_id() == tab_id);
+            let tab_size = if is_tab_viewed {
+                self.get_tab_size(tab_id)
+            } else {
+                attached_pane_area
+            };
+            let (Some(tab_size), Some(tab)) = (tab_size, self.tabs.get_mut(&tab_id)) else {
+                continue;
+            };
+            convert_resize_deltas_to_apply_after_preferred(
+                &mut tab.layout,
+                Rect::from_size_at_origin(tab_size),
+                pane_sizing,
+            );
+        }
     }
 
     /// Set the pane sizing to `pane_sizing` and solve every tab again with

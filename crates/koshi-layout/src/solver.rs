@@ -17,11 +17,14 @@
 //! Along a split axis, children claim cells in constraint order: `Fixed`
 //! sizes first, then `Percent` of the axis, then the remainder is shared by
 //! the flexible children (`Flex`, and `Minimum`/`Preferred`, which flex around
-//! their floor/target) in proportion to their weights. User resizes apply
-//! next as exact cell deltas, and the sizes are repaired to sum to the axis;
-//! then preferred targets are honored within whatever slack flexible
-//! siblings can give, and finally every child is clamped up to its floor
-//! whenever the floors fit at all.
+//! their floor/target) in proportion to their weights, and the sizes are
+//! repaired to sum to the axis. Preferred targets are honored next, within
+//! whatever slack flexible siblings can give. User resizes then apply as
+//! exact cell deltas, and the sizes are repaired to sum to the axis again.
+//! Finally every child is clamped up to its floor whenever the floors fit at
+//! all. A user resize moves a pane off its preferred target: a
+//! `Preferred(30)` pane over 100 columns with a resize delta of `+10` solves
+//! to 40 columns.
 //!
 //! Cells that integer division leaves over go to the *trailing* children, one
 //! each: a 101-column 50/50 split solves to 50 and 51. When no flexible child
@@ -483,6 +486,86 @@ pub(crate) fn compute_directional_child_rects(
     pane_sizing: PaneSizing,
 ) -> Vec<Rect> {
     let is_horizontal_split = split.direction == SplitDirection::Horizontal;
+    let gap_cell_count = pane_sizing.gap_cell_count;
+    let kept_children = list_kept_children(split, split_rect, pane_sizing);
+    let child_cell_counts = distribute_axis_cells(
+        &kept_children.kept_weights,
+        &kept_children.kept_floors,
+        kept_children.shared_cell_count,
+    );
+
+    // Rects are laid in child order; suppressed children sit at their
+    // position with zero area.
+    let mut child_rects = Vec::with_capacity(split.children.len());
+    let mut axis_offset: u16 = 0;
+    let mut kept_child_index = 0;
+    for &is_kept in &kept_children.is_child_kept {
+        if !is_kept {
+            child_rects.push(Rect::build_empty_at_origin());
+            continue;
+        }
+        let child_cell_count = child_cell_counts[kept_child_index];
+        kept_child_index += 1;
+        let child_rect = if is_horizontal_split {
+            Rect::from_origin_and_size(
+                Point {
+                    column: split_rect.origin.column.saturating_add(axis_offset),
+                    row: split_rect.origin.row,
+                },
+                Size {
+                    column_count: child_cell_count,
+                    row_count: split_rect.size.row_count,
+                },
+            )
+        } else {
+            Rect::from_origin_and_size(
+                Point {
+                    column: split_rect.origin.column,
+                    row: split_rect.origin.row.saturating_add(axis_offset),
+                },
+                Size {
+                    column_count: split_rect.size.column_count,
+                    row_count: child_cell_count,
+                },
+            )
+        };
+        child_rects.push(child_rect);
+        axis_offset = axis_offset
+            .saturating_add(child_cell_count)
+            .saturating_add(gap_cell_count);
+    }
+    child_rects
+}
+
+/// The children of a directional split that keep a rect inside its split
+/// rect, as [`list_kept_children`] decides them.
+struct KeptChildren {
+    /// One flag per child, in child order: `true` when the child keeps a rect.
+    is_child_kept: Vec<bool>,
+    /// The weight of each kept child, in child order. A child without a
+    /// weight has the default share.
+    kept_weights: Vec<SizeWeight>,
+    /// The floor of each kept child along the split axis, in child order.
+    kept_floors: Vec<u16>,
+    /// The cells along the split axis the kept children share: the axis
+    /// minus one `gap_cell_count` between each pair of kept children.
+    shared_cell_count: u16,
+}
+
+/// Decide which children of `split` keep a rect inside `split_rect`.
+///
+/// A child whose cross-axis minimum exceeds the rect is dropped on its own.
+/// Along the split axis, children are kept in order while the running sum of
+/// their floors, plus one `pane_sizing.gap_cell_count` before each kept child
+/// after the first, fits the axis. The first child that does not fit and
+/// every child after it are dropped. The kept floors always fit in
+/// `shared_cell_count`.
+fn list_kept_children(
+    split: &SplitNode,
+    split_rect: Rect,
+    pane_sizing: PaneSizing,
+) -> KeptChildren {
+    let is_horizontal_split = split.direction == SplitDirection::Horizontal;
     let (available_cell_count, available_cross_axis_cell_count) = split_axis_and_cross_cell_counts(
         split_rect.size.column_count,
         split_rect.size.row_count,
@@ -490,10 +573,6 @@ pub(crate) fn compute_directional_child_rects(
     );
     let gap_cell_count = pane_sizing.gap_cell_count;
 
-    // Decide who fits: per-child cross-axis check, then trailing suppression
-    // along the split axis. The kept children's weights and floors are
-    // collected in the same pass, in child order. A child without a weight
-    // takes the default share.
     let mut is_child_kept = vec![false; split.children.len()];
     let mut kept_weights: Vec<SizeWeight> = Vec::with_capacity(split.children.len());
     let mut kept_floors: Vec<u16> = Vec::with_capacity(split.children.len());
@@ -531,53 +610,13 @@ pub(crate) fn compute_directional_child_rects(
         }
     }
 
-    // The gaps between kept children come off the axis before any child is
-    // sized. Distribute over the kept children only, then lay rects in child
-    // order; suppressed children sit at their position with zero area.
     let gap_cell_total = gap_cell_count.saturating_mul(kept_weights.len().saturating_sub(1) as u16);
-    let available_for_children = available_cell_count.saturating_sub(gap_cell_total);
-    let child_cell_counts =
-        distribute_axis_cells(&kept_weights, &kept_floors, available_for_children);
-
-    let mut child_rects = Vec::with_capacity(split.children.len());
-    let mut axis_offset: u16 = 0;
-    let mut kept_child_index = 0;
-    for &is_kept in &is_child_kept {
-        if !is_kept {
-            child_rects.push(Rect::build_empty_at_origin());
-            continue;
-        }
-        let child_cell_count = child_cell_counts[kept_child_index];
-        kept_child_index += 1;
-        let child_rect = if is_horizontal_split {
-            Rect::from_origin_and_size(
-                Point {
-                    column: split_rect.origin.column.saturating_add(axis_offset),
-                    row: split_rect.origin.row,
-                },
-                Size {
-                    column_count: child_cell_count,
-                    row_count: split_rect.size.row_count,
-                },
-            )
-        } else {
-            Rect::from_origin_and_size(
-                Point {
-                    column: split_rect.origin.column,
-                    row: split_rect.origin.row.saturating_add(axis_offset),
-                },
-                Size {
-                    column_count: split_rect.size.column_count,
-                    row_count: child_cell_count,
-                },
-            )
-        };
-        child_rects.push(child_rect);
-        axis_offset = axis_offset
-            .saturating_add(child_cell_count)
-            .saturating_add(gap_cell_count);
+    KeptChildren {
+        is_child_kept,
+        kept_weights,
+        kept_floors,
+        shared_cell_count: available_cell_count.saturating_sub(gap_cell_total),
     }
-    child_rects
 }
 
 /// The rectangle each child of a stacked split receives inside `split_rect`, in
@@ -683,6 +722,14 @@ fn emit_stack_header(
 
 /// Split `available_cell_count` cells among children according to their weights.
 ///
+/// The passes run in this order: each child's share
+/// ([`compute_share_cell_counts`]), the sum repaired to
+/// `available_cell_count`, the `preferred` targets
+/// ([`apply_preferred_cell_counts`]), each child's `resize_delta`
+/// ([`apply_resize_deltas`]), and the floors ([`clamp_cell_counts_to_floors`]).
+/// A `Preferred(30)` child beside a flexible one over 100 cells with resize
+/// deltas `+10` and `-10` solves to 40 and 60.
+///
 /// The returned sizes sum to exactly `available_cell_count`. When the floors fit,
 /// every child also ends at or above its floor.
 fn distribute_axis_cells(
@@ -690,6 +737,25 @@ fn distribute_axis_cells(
     floors: &[u16],
     available_cell_count: u16,
 ) -> Vec<u16> {
+    let mut child_cell_counts = compute_share_cell_counts(weights, available_cell_count);
+    repair_cell_count_sum(&mut child_cell_counts, available_cell_count);
+    apply_preferred_cell_counts(&mut child_cell_counts, weights, floors);
+    apply_resize_deltas(&mut child_cell_counts, weights, available_cell_count);
+    clamp_cell_counts_to_floors(
+        &mut child_cell_counts,
+        weights,
+        floors,
+        available_cell_count,
+    );
+    child_cell_counts
+}
+
+/// Each child's share of `available_cell_count` before any target, resize
+/// delta or floor: `Fixed` sizes first, in child order, then `Percent` shares
+/// of the whole axis, then the flexible children share the rest by weight.
+/// The shares sum to `available_cell_count` when a flexible child with a
+/// weight above `0` exists, and can fall short of it otherwise.
+fn compute_share_cell_counts(weights: &[SizeWeight], available_cell_count: u16) -> Vec<u16> {
     let mut child_cell_counts = vec![0u16; weights.len()];
     let mut remaining_cell_count = available_cell_count;
 
@@ -753,25 +819,24 @@ fn distribute_axis_cells(
             child_cell_counts[child_index] += 1;
         }
     }
+    child_cell_counts
+}
 
-    // User resizes: exact cell offsets on top of the distribution, each
-    // result clamped to `0..=available`.
+/// Add each child's `resize_delta` to its cell count, clamp each result to
+/// `0..=available_cell_count`, then repair the sum to `available_cell_count`
+/// ([`repair_cell_count_sum`]).
+fn apply_resize_deltas(
+    child_cell_counts: &mut [u16],
+    weights: &[SizeWeight],
+    available_cell_count: u16,
+) {
     for (child_index, weight) in weights.iter().enumerate() {
         let adjusted_cell_count =
             i64::from(child_cell_counts[child_index]) + i64::from(weight.resize_delta);
         child_cell_counts[child_index] =
             adjusted_cell_count.clamp(0, i64::from(available_cell_count)) as u16;
     }
-
-    repair_cell_count_sum(&mut child_cell_counts, available_cell_count);
-    apply_preferred_cell_counts(&mut child_cell_counts, weights, floors);
-    clamp_cell_counts_to_floors(
-        &mut child_cell_counts,
-        weights,
-        floors,
-        available_cell_count,
-    );
-    child_cell_counts
+    repair_cell_count_sum(child_cell_counts, available_cell_count);
 }
 
 /// `true` when this weight may give up or take cells during adjustment.
@@ -944,6 +1009,8 @@ fn repair_cell_count_sum(child_cell_counts: &mut [u16], available_cell_count: u1
         }
     }
 }
+
+pub mod resize_delta_conversion;
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -695,6 +695,7 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
         resumed_event_receiver,
         None,
         decoded_resume_body,
+        read_resume_header.resume_format,
         build_carried_pty_sizes(&read_resume_header),
         HashMap::new(),
     );

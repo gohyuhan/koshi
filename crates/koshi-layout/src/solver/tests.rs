@@ -20,6 +20,37 @@ pub(crate) fn build_pane_sizing(gap_cell_count: u16) -> PaneSizing {
     }
 }
 
+/// Any weight a split slot can hold over an axis of up to 120 cells, with a
+/// `resize_delta` in `-130..=130`.
+pub(crate) fn build_size_weight_strategy() -> impl proptest::strategy::Strategy<Value = SizeWeight>
+{
+    use proptest::prelude::*;
+
+    let primary_constraint_strategy = prop_oneof![
+        (1u32..=3).prop_map(SizeConstraint::Flex),
+        (1u8..=100).prop_map(SizeConstraint::Percent),
+        (1u16..=120).prop_map(SizeConstraint::Fixed),
+        (1u16..=60).prop_map(SizeConstraint::Minimum),
+        (1u16..=120).prop_map(SizeConstraint::Preferred),
+    ];
+    (
+        primary_constraint_strategy,
+        proptest::option::of(1u16..=40),
+        proptest::option::of(1u16..=120),
+        -130i32..=130,
+    )
+        .prop_map(
+            |(primary_constraint, minimum_cell_count, preferred_cell_count, resize_delta)| {
+                SizeWeight {
+                    primary_constraint,
+                    minimum_cell_count,
+                    preferred_cell_count,
+                    resize_delta,
+                }
+            },
+        )
+}
+
 /// Wrap a pane ID in a leaf node.
 fn build_leaf_node(pane_id: PaneId) -> LayoutNode {
     LayoutNode::Pane(pane_id)
@@ -567,6 +598,45 @@ fn preferred_target_without_flexible_donors_stays_unmet() {
         .collect();
     assert_eq!(column_widths, [20, 20, 60]);
     assert_tiles_exactly(&layout_result, layout_area);
+}
+
+#[test]
+fn a_resize_delta_moves_a_pane_off_its_preferred_size() {
+    // 100 columns: the `Preferred(30)` pane's share of 50 is cut to 30, and the
+    // flexible pane takes 70. A resize delta of `+10` grows it to 40, and one of
+    // `-10` shrinks it to 20.
+    let (preferred_pane_id, flex_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_area = build_cell_rect(0, 0, 100, 24);
+    for (resize_delta, expected_column_widths) in [(0, [30, 70]), (10, [40, 60]), (-10, [20, 80])] {
+        let layout_tree = build_split_node_with_weights(
+            SplitDirection::Horizontal,
+            vec![
+                (
+                    preferred_pane_id,
+                    SizeWeight {
+                        resize_delta,
+                        ..SizeWeight::from_primary_constraint(SizeConstraint::Preferred(30))
+                    },
+                ),
+                (
+                    flex_pane_id,
+                    SizeWeight {
+                        resize_delta: -resize_delta,
+                        ..SizeWeight::default()
+                    },
+                ),
+            ],
+        );
+
+        let layout_result = solve_layout(&layout_tree, layout_area);
+        let column_widths: Vec<u16> = layout_result
+            .pane_rects
+            .iter()
+            .map(|(_, pane_layout)| pane_layout.size.column_count)
+            .collect();
+        assert_eq!(column_widths, expected_column_widths);
+        assert_tiles_exactly(&layout_result, layout_area);
+    }
 }
 
 #[test]

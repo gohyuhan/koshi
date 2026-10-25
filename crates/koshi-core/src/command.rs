@@ -270,7 +270,7 @@ pub struct ResizePaneArgs {
     ///
     /// The border moves at most this many cells on screen and stops where
     /// the pane giving up the cells reaches its minimum size, or where the
-    /// layout holds it, such as beside a pane at its `preferred` size. A
+    /// layout holds it, such as toward a pane hidden for lack of room. A
     /// border that cannot move one cell is rejected with
     /// [`RejectReason::MinimumSize`] at a minimum size and
     /// [`RejectReason::InvalidState`] when held. In an `80`-column tab split

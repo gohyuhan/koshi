@@ -795,6 +795,7 @@ fn build_from_carried_state(
                     runtime_event_receiver,
                     app_config,
                     resume_body,
+                    resume_header.resume_format,
                     pty_size_by_pane_id,
                     exit_status_by_pane_id,
                 ),
@@ -2279,6 +2280,7 @@ fn resume_session_readers(
         session_server.into_inbox_receiver(),
         app_config_layer,
         resume_body,
+        resume_header.resume_format,
         build_carried_pty_sizes(resume_header),
         HashMap::new(),
     )

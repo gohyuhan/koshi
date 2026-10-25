@@ -51,10 +51,7 @@ pub enum ResizeError {
     /// offset moves the `direction` border of `pane_id` one cell on screen.
     /// `is_pane_growing` is `true` for a grow and `false` for a shrink.
     ///
-    /// Three layouts hold a border:
-    /// - a child of the split keeps its `preferred` size: a pane at
-    ///   `preferred 20` beside a wider flexible pane keeps its 20 columns,
-    ///   whichever side grows;
+    /// Two layouts hold a border:
     /// - the receiving side's share plus its offset is below its floor, and
     ///   a third child gives the cells that lift it to that floor: each
     ///   offset cell goes from the donor to that third child until the donor
@@ -81,18 +78,28 @@ pub enum ResizeError {
 /// moves the enclosing split's border. Splits below a collapsed stack
 /// member are skipped. `tab_rect` is the rect the tree solves into.
 ///
-/// The move adds one cell of resize offset at a time to the receiving
-/// sibling and takes one from the donating sibling, then solves the split
-/// again and measures how far the border moved from where it started. Only
-/// the added counts at which the receiver's or the donor's offset lies
-/// between minus and plus the split's axis length are solved, at most four
-/// times that length; the solve at any other count equals the solve at the
-/// count before it. The offsets stop when the border moved the whole
-/// magnitude of `resize_cell_delta`, when the donor's solved size holds no
-/// cell above its floor, or after the last of those counts. The resized tree
-/// keeps only the offset that the last on-screen cell of the move needed. One
-/// offset cell can move the border by no cell when a floor holds the
+/// The move adds a count of resize offset cells to the receiving sibling and
+/// takes as many from the donating sibling, then solves the split again and
+/// measures how far the border moved from where it started. The candidate
+/// counts are those at which the receiver's or the donor's offset lies
+/// between minus and plus the split's axis length, at most four times that
+/// length; the solve at any other count equals the solve at the count before
+/// it. While the donor holds a cell above its floor, one more added cell
+/// moves the border by no cell or by one cell in the asked direction. Once
+/// the donor holds no cell above its floor, it holds none at any larger
+/// count. One offset cell moves the border by no cell when a floor holds the
 /// receiver up; the next offset cell then moves it.
+///
+/// The move stops at the first candidate at which the border moved the whole
+/// magnitude of `resize_cell_delta` or the donor's solved size holds no cell
+/// above its floor, else at the last candidate. The resized tree keeps the
+/// smallest added count that moves the border as far as that stop. The split
+/// is solved at the candidate the magnitude names, then at the last
+/// candidate when the border has not stopped, then at the middle of the
+/// range left until one candidate remains: a one-cell move solves the split
+/// twice, a border no candidate moves three times, and `100` asked of a
+/// 200-column split of two equal panes, whose donor holds `96` spare cells,
+/// nine times.
 ///
 /// `pane_sizing.minimum_size` is the per-pane content floor the donor's spare
 /// is measured against, and the donor's solved size excludes the
@@ -208,8 +215,7 @@ pub fn resize_layout_with_sizing(
     // `-axis_cell_count..=axis_cell_count`. The receiver's offset crosses
     // that range at the added counts in `receiving_offset_window`, the
     // donor's at those in `donating_offset_window`. Every other added count
-    // solves like the count before it and is skipped. The two windows are
-    // walked in ascending order, each count once.
+    // solves like the count before it and is no candidate.
     let axis_cell_count = i64::from(if is_horizontal_split {
         split_rect.size.column_count
     } else {
@@ -225,36 +231,93 @@ pub fn resize_layout_with_sizing(
         } else {
             (donating_offset_window, receiving_offset_window)
         };
-    let added_cell_counts = first_offset_window.clone().chain(
-        second_offset_window
-            .filter(|added_cell_count| !first_offset_window.contains(added_cell_count)),
-    );
+    // Candidate number `n`, counted from 1, is the `n`th count of the first
+    // window, then of the second window's counts past the first window's end.
+    let first_window_length = (first_offset_window.end() - first_offset_window.start() + 1).max(0);
+    let second_window_start = (*second_offset_window.start()).max(first_offset_window.end() + 1);
+    let second_window_length = (second_offset_window.end() - second_window_start + 1).max(0);
+    let candidate_count = first_window_length + second_window_length;
+    let get_added_cell_count = |candidate_number: i64| -> i64 {
+        if candidate_number <= first_window_length {
+            first_offset_window.start() + candidate_number - 1
+        } else {
+            second_window_start + candidate_number - first_window_length - 1
+        }
+    };
     let (starting_border_cell, starting_spare_cell_count) = measure_border(split_node);
+    let mut measure_candidate = |candidate_number: i64| -> BorderMeasure {
+        set_added_cell_count(split_node, get_added_cell_count(candidate_number));
+        let (border_cell, spare_cell_count) = measure_border(split_node);
+        let moved_cell_count = if is_border_moving_forward {
+            border_cell - starting_border_cell
+        } else {
+            starting_border_cell - border_cell
+        };
+        BorderMeasure {
+            moved_cell_count,
+            spare_cell_count,
+        }
+    };
 
-    let mut best_moved_cell_count: u16 = 0;
-    let mut best_added_cell_count: i64 = 0;
-    if requested_cell_count > 0 && starting_spare_cell_count > 0 {
-        for added_cell_count in added_cell_counts {
-            set_added_cell_count(split_node, added_cell_count);
-            let (border_cell, spare_cell_count) = measure_border(split_node);
-            let moved_cell_count = if is_border_moving_forward {
-                border_cell - starting_border_cell
+    // The move stops at the first candidate whose border moved the whole
+    // request or whose donor holds no spare cell, else at the last candidate.
+    // The border moves at most one cell per candidate, so candidate `n`
+    // moved it at most `n` cells.
+    let requested_moved_cell_count = i32::from(requested_cell_count);
+    let is_move_stopped = |border_measure: BorderMeasure| {
+        border_measure.moved_cell_count >= requested_moved_cell_count
+            || border_measure.spare_cell_count == 0
+    };
+    let mut moved_cell_count: u16 = 0;
+    let mut kept_added_cell_count: i64 = 0;
+    if requested_cell_count > 0 && starting_spare_cell_count > 0 && candidate_count > 0 {
+        let probed_candidate_number = i64::from(requested_cell_count).min(candidate_count);
+        let probed_measure = measure_candidate(probed_candidate_number);
+        let (stopping_candidate_number, stopping_measure) = if is_move_stopped(probed_measure) {
+            if probed_measure.spare_cell_count > 0 {
+                (probed_candidate_number, probed_measure)
             } else {
-                starting_border_cell - border_cell
-            };
-            if moved_cell_count > i32::from(best_moved_cell_count)
-                && moved_cell_count <= i32::from(requested_cell_count)
-            {
-                best_moved_cell_count = moved_cell_count as u16;
-                best_added_cell_count = added_cell_count;
+                find_first_candidate(
+                    1,
+                    probed_candidate_number,
+                    probed_measure,
+                    &mut measure_candidate,
+                    is_move_stopped,
+                )
             }
-            if moved_cell_count >= i32::from(requested_cell_count) || spare_cell_count == 0 {
-                break;
+        } else if probed_candidate_number == candidate_count {
+            (probed_candidate_number, probed_measure)
+        } else {
+            let last_measure = measure_candidate(candidate_count);
+            if is_move_stopped(last_measure) {
+                find_first_candidate(
+                    probed_candidate_number + 1,
+                    candidate_count,
+                    last_measure,
+                    &mut measure_candidate,
+                    is_move_stopped,
+                )
+            } else {
+                (candidate_count, last_measure)
             }
+        };
+        let stopping_moved_cell_count = stopping_measure.moved_cell_count;
+        if stopping_moved_cell_count > 0 {
+            let (first_candidate_number, _) = find_first_candidate(
+                i64::from(stopping_moved_cell_count),
+                stopping_candidate_number,
+                stopping_measure,
+                &mut measure_candidate,
+                |border_measure: BorderMeasure| {
+                    border_measure.moved_cell_count >= stopping_moved_cell_count
+                },
+            );
+            moved_cell_count = stopping_moved_cell_count as u16;
+            kept_added_cell_count = get_added_cell_count(first_candidate_number);
         }
     }
 
-    if requested_cell_count > 0 && best_moved_cell_count == 0 {
+    if requested_cell_count > 0 && moved_cell_count == 0 {
         return Err(if starting_spare_cell_count == 0 {
             ResizeError::DonorAtMinimumSize {
                 pane_id,
@@ -269,8 +332,46 @@ pub fn resize_layout_with_sizing(
             }
         });
     }
-    set_added_cell_count(split_node, best_added_cell_count);
-    Ok((updated_layout_tree, best_moved_cell_count))
+    set_added_cell_count(split_node, kept_added_cell_count);
+    Ok((updated_layout_tree, moved_cell_count))
+}
+
+/// Where the border of one resize stands at one candidate added count.
+#[derive(Clone, Copy)]
+struct BorderMeasure {
+    /// Cells the border moved from where it started, in the direction the
+    /// resize asks for.
+    moved_cell_count: i32,
+    /// Cells the donor's solved size holds above its floor.
+    spare_cell_count: u16,
+}
+
+/// The smallest candidate number in
+/// `lowest_candidate_number..=highest_candidate_number` whose measure
+/// satisfies `is_found`, with that measure. `highest_measure` is the measure
+/// of `highest_candidate_number`, and it satisfies `is_found`. Every
+/// candidate after the first one that satisfies `is_found` satisfies it too.
+/// Each step measures the middle candidate and keeps the half that holds the
+/// first match: a range of 200 candidates takes 8 measures.
+fn find_first_candidate(
+    mut lowest_candidate_number: i64,
+    mut highest_candidate_number: i64,
+    mut highest_measure: BorderMeasure,
+    measure_candidate: &mut impl FnMut(i64) -> BorderMeasure,
+    is_found: impl Fn(BorderMeasure) -> bool,
+) -> (i64, BorderMeasure) {
+    while lowest_candidate_number < highest_candidate_number {
+        let middle_candidate_number =
+            lowest_candidate_number + (highest_candidate_number - lowest_candidate_number) / 2;
+        let middle_measure = measure_candidate(middle_candidate_number);
+        if is_found(middle_measure) {
+            highest_candidate_number = middle_candidate_number;
+            highest_measure = middle_measure;
+        } else {
+            lowest_candidate_number = middle_candidate_number + 1;
+        }
+    }
+    (highest_candidate_number, highest_measure)
 }
 
 /// The deepest ancestor split of direction `split_direction`, above any collapsed

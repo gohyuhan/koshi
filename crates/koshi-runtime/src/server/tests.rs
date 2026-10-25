@@ -3374,6 +3374,7 @@ fn resume_carried_server(
         inbox_receiver,
         None,
         body,
+        RESUME_FORMAT,
         pty_size_by_pane_id,
         HashMap::new(),
     )

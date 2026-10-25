@@ -57,7 +57,7 @@ of a `tab`, is a problem of its own.
 | `size 40` / `size "60%"` | A fixed size: 1–65535 cells, or 1–100 percent of the split. | ≥ 0.1.0 |
 | `weight 2` | A relative share of the leftover space, 1–4294967295. | ≥ 0.1.0 |
 | `min 10` | Never shrink below this many cells, 1–65535. | ≥ 0.1.0 |
-| `preferred 30` | The size to aim for when there is room, 1–65535 cells. | ≥ 0.1.0 |
+| `preferred 30` | The size to aim for when there is room, 1–65535 cells. A resize moves the pane off it. | ≥ 0.1.0 |
 
 ## Stacks
 

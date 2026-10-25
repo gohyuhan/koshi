@@ -58,6 +58,12 @@ pub const RESUME_FORMAT_MIN: u32 = koshi_core::compat::RESUME_FORMAT.minimum_ver
 /// Formats 1 through 3 use the previous header shape.
 const OLDEST_FORMAT_WITH_CURRENT_HEADER: u32 = 4;
 
+/// The newest resume-file format whose layout trees hold resize deltas laid
+/// out by the solve that applies each resize delta before the `preferred`
+/// targets. A body of this format or older has its trees rewritten when the
+/// server restores it ([`crate::server::Server::resume`]).
+pub const NEWEST_FORMAT_WITH_RESIZE_DELTAS_BEFORE_PREFERRED: u32 = 4;
+
 /// The line a pane shows when the session came back but that pane's screen
 /// did not: the program in it keeps running on a blank screen.
 pub const SCREEN_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] This pane's screen could not be restored after the restart. The program in it is still running.\r\n";

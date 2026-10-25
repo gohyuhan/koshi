@@ -657,11 +657,11 @@ size or hidden for lack of room. A shrink is refused as `<pane> cannot shrink
 from the left here; it has no room to give`. A border that the layout holds in
 place is refused as `invalid in the current state`, with `<pane> cannot grow
 left here; the layout holds this border in place`. The layout holds a border in
-three cases: a pane in the same split keeps the `preferred` size a profile
-gives it; the pane that takes the cells holds its minimum size with cells a
+two cases: the pane that takes the cells holds its minimum size with cells a
 third pane lends it; or the pane that takes the cells is hidden for lack of
-room. In an 80-column tab whose left pane has `preferred 20`, the border
-between the two panes stays at column 20.
+room. A resize moves a pane off the `preferred` size a profile gives it: in an
+80-column tab whose left pane has `preferred 20`, `resize-pane --direction
+right --size 5` on the left pane moves the border from column 20 to column 25.
 
 On a floating pane, `--client` names the client whose view keeps the edge
 opposite the moved border in place. With no `--client`, the issuing client
