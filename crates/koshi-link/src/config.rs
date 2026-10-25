@@ -173,8 +173,9 @@ fn load_app_config_at(app_config_path: &Path) -> LoadedAppConfig {
 /// field-partial skip, prefixed with `app_config_path`. Text that does not
 /// parse (bad syntax, unknown version, bad `update`) gives
 /// [`AppConfigOutcome::Refused`] and the one warning
-/// `koshi.kdl not applied (<path>): <parse error>; using defaults`. Both
-/// outcomes keep `app_config_source_text`.
+/// `koshi.kdl not applied (<path>): <problems>; using defaults`, where
+/// `<problems>` is every problem of the file in file order, joined by `; `.
+/// Both outcomes keep `app_config_source_text`.
 #[must_use]
 pub fn parse_app_config_text(
     app_config_path: &Path,
@@ -544,7 +545,9 @@ fn format_config_read_warning(config_path: &Path, read_error: &io::Error) -> Str
 /// Returns `None`, which leaves koshi's built-in colors in place, when
 /// `theme_name` is [`DEFAULT_THEME_NAME`], is not a plain file name, or names a
 /// file that is absent, unreadable, or fails to parse. Every one of those but
-/// the first is recorded in `config_warnings`.
+/// the first is recorded in `config_warnings`. A file that fails to parse
+/// gives one warning that names every problem of the file in file order,
+/// joined by `; `.
 fn load_theme_config(
     config_directory: &Path,
     theme_name: &str,

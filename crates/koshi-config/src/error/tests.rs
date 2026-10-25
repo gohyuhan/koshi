@@ -96,20 +96,55 @@ fn a_parse_error_reads_as_its_detail_and_names_no_file() {
 }
 
 #[test]
-fn build_validation_error_names_the_line_and_column_where_the_span_starts() {
+fn a_validation_error_reads_as_every_problem_joined_and_lists_each_one() {
+    let validation_error = ConfigError::Validation {
+        problem_messages: vec![
+            "line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?"
+                .to_string(),
+            "line 5, column 10: invalid config key `update.auto-check`: expected a boolean \
+             (#true or #false)"
+                .to_string(),
+        ],
+    };
+    assert_eq!(
+        validation_error.to_string(),
+        "line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?; line 5, \
+         column 10: invalid config key `update.auto-check`: expected a boolean (#true or #false)"
+    );
+    assert_eq!(
+        validation_error.list_problem_messages(),
+        [
+            "line 2, column 1: ignored unknown key `frobnicate`; did you mean `update`?",
+            "line 5, column 10: invalid config key `update.auto-check`: expected a boolean \
+             (#true or #false)",
+        ]
+    );
+}
+
+#[test]
+fn a_parse_error_lists_its_one_detail() {
+    let parse_error = ConfigError::Parse {
+        parse_error_detail: "line 1, column 6: unexpected token".to_string(),
+    };
+    assert_eq!(
+        parse_error.list_problem_messages(),
+        ["line 1, column 6: unexpected token"]
+    );
+}
+
+#[test]
+fn format_problem_at_line_and_column_names_where_the_span_starts() {
     let config_source_text = "version 2\nupdate {\n    auto-check \"yes\"\n}";
     let auto_check_byte_offset = config_source_text
         .find("auto-check")
         .expect("the text holds the node");
-    let validation_error = build_validation_error(
-        config_source_text,
-        SourceSpan::from((auto_check_byte_offset, "auto-check \"yes\"".len())),
-        "invalid config key `update.auto-check`: expected a boolean (#true or #false)",
-    );
     assert_eq!(
-        validation_error.to_string(),
-        "line 3, column 5: invalid config key `update.auto-check`: expected a boolean (#true or \
-         #false)"
+        format_problem_at_line_and_column(
+            config_source_text,
+            SourceSpan::from((auto_check_byte_offset, "auto-check \"yes\"".len())),
+            "bad value",
+        ),
+        "line 3, column 5: bad value"
     );
 }
 

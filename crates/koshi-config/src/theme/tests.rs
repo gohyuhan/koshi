@@ -165,6 +165,23 @@ fn a_version_with_children_is_rejected() {
 }
 
 #[test]
+fn a_refused_theme_lists_every_problem_in_file_order() {
+    assert_eq!(
+        parse_theme(
+            Path::new("themes/midnight.kdl"),
+            "version 0\ncolors {\n    accent \"#fff\"\n}\nversion 2\n",
+        )
+        .expect_err("version 0 and a second version refuse the theme")
+        .list_problem_messages(),
+        [
+            "line 1, column 1: config schema version must be at least 1",
+            "line 3, column 5: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
+            "line 5, column 1: `version` is declared more than once",
+        ]
+    );
+}
+
+#[test]
 fn a_syntax_error_is_a_parse_error() {
     let config_error = parse_theme(Path::new("themes/midnight.kdl"), "colors { accent \"#fff\"")
         .expect_err("unclosed block");

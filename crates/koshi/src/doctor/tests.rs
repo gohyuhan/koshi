@@ -110,7 +110,7 @@ fn config_fails_on_a_file_that_does_not_validate() {
         DoctorOutcome {
             verdict: Verdict::Fail,
             reason: format!(
-                "invalid config version in {}: line 1, column 1: file must declare `version`",
+                "invalid config file {}: line 1, column 1: file must declare `version`",
                 config_directory.join("koshi.kdl").display()
             ),
             help: Some("run koshi config check to see each file".to_string()),
