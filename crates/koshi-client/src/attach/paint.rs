@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::frame::{
-    FrameGraphicsProtocol, FrameImageAction, FrameImageDimension, FrameImageDisplay,
-    FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
+    FrameFloatingPane, FrameGraphicsProtocol, FrameImageAction, FrameImageDimension,
+    FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
     FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
     MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
@@ -46,7 +46,7 @@ use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::placement::{PanePlacementPreview, PanePlacementSource, PanePlacementTabSnapshot};
 use koshi_layout::solver::PaneSizing;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPaneSlot, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
+    ClientSnapshot, FloatingPane, FloatingPaneSlot, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
     PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, RenderSnapshot,
     ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
@@ -63,9 +63,10 @@ pub(crate) mod tests;
 /// renderer draws, with every image placement marked unavailable and its
 /// placement preview built anew (`build_placement_preview`).
 ///
-/// The session name, every tab's name, every tab-bar entry's name and every
-/// pane title are filtered by [`sanitize_reported_text`]. A frame naming its
-/// session `"dev\u{7}"` reads back naming it `"dev"`.
+/// The session name, every tab's name, every tab-bar entry's name, every pane
+/// title and every minimized floating pane's title are filtered by
+/// [`sanitize_reported_text`]. A frame naming its session `"dev\u{7}"` reads
+/// back naming it `"dev"`.
 #[must_use]
 pub fn build_render_snapshot(received_painted_frame: &ReceivedPaintedFrame) -> RenderSnapshot {
     let placement_preview = received_painted_frame
@@ -109,7 +110,23 @@ fn build_render_snapshot_with_images(
                     is_pinned: frame_floating_pane_slot.is_pinned,
                 })
                 .collect(),
-            floating_pane_ids: painted_frame.session_snapshot.floating_pane_ids.clone(),
+            floating_panes: painted_frame
+                .session_snapshot
+                .floating_panes
+                .iter()
+                .map(|frame_floating_pane| match frame_floating_pane {
+                    FrameFloatingPane::Shown { pane_id } => {
+                        FloatingPane::Shown { pane_id: *pane_id }
+                    }
+                    FrameFloatingPane::Minimized {
+                        pane_id,
+                        pane_title,
+                    } => FloatingPane::Minimized {
+                        pane_id: *pane_id,
+                        pane_title: pane_title.as_deref().map(sanitize_reported_text),
+                    },
+                })
+                .collect(),
         },
         pane_snapshots: painted_frame
             .pane_snapshots

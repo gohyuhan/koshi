@@ -32,9 +32,9 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, FloatingPaneSlot, LinkStatus, MousePane, PaneSlot,
-    PlacementSnapshot, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
-    TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, FloatingPane, FloatingPaneSlot, LinkStatus, MousePane,
+    PaneSlot, PlacementSnapshot, PlacementTabSnapshot, Reconnecting, RenderSnapshot,
+    SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_test_support::fixtures::build_cell_rect;
 
@@ -152,7 +152,7 @@ pub(crate) fn build_mouse_frame(
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -1104,7 +1104,7 @@ fn a_tick_aimed_at_a_pane_the_frame_carries_no_content_for_decides_nothing() {
 // ============================================================================
 
 /// A `mouse_kind` event at `position`, with `modifier_flags` held.
-fn build_mouse_event(
+pub(crate) fn build_mouse_event(
     mouse_kind: MouseKind,
     position: Point,
     modifier_flags: BindingModifierFlags,
@@ -5038,8 +5038,10 @@ pub(crate) fn add_floating_mouse_pane(
 ) {
     mouse_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(floating_mouse_pane.pane_id);
+        .floating_panes
+        .push(FloatingPane::Shown {
+            pane_id: floating_mouse_pane.pane_id,
+        });
     mouse_frame
         .session_snapshot
         .floating_pane_slots
@@ -6893,19 +6895,17 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
 
     assert_eq!(
         press_titlebar(&unpinned_mouse_frame, 39, 0),
-        vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-            SetPanePinnedArgs {
+        vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+            TogglePanePinnedArgs {
                 pane_id: Some(floating_pane_id),
-                is_pinned: true,
             }
         )))]
     );
     assert_eq!(
         press_titlebar(&pinned_mouse_frame, 38, 1),
-        vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-            SetPanePinnedArgs {
+        vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+            TogglePanePinnedArgs {
                 pane_id: Some(floating_pane_id),
-                is_pinned: false,
             }
         )))]
     );
@@ -7838,10 +7838,9 @@ fn a_locked_viewer_moves_and_pins_a_floating_pane_the_same_way() {
     );
     assert_eq!(
         pin_actions,
-        vec![MouseAction::Command(Box::new(Command::SetPanePinned(
-            SetPanePinnedArgs {
+        vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
+            TogglePanePinnedArgs {
                 pane_id: Some(floating_pane_id),
-                is_pinned: true,
             }
         )))]
     );
@@ -9036,8 +9035,10 @@ fn a_frame_that_floats_a_dragged_tiled_pane_keeps_the_drag_from_where_the_frame_
         .retain(|pane_slot| pane_slot.pane_id == lower_pane_id);
     floating_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(upper_pane_id);
+        .floating_panes
+        .push(FloatingPane::Shown {
+            pane_id: upper_pane_id,
+        });
     floating_frame
         .session_snapshot
         .floating_pane_slots

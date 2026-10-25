@@ -892,6 +892,29 @@ impl Server {
         }
     }
 
+    /// Mark the view changed of every subscriber whose client is attached to
+    /// the session that holds the floating pane `pane_id`, whether the client
+    /// shows the pane or minimized it. A pane that floats in no session marks
+    /// nothing.
+    pub(crate) fn mark_views_listing_floating_pane(&mut self, pane_id: PaneId) {
+        let Some(session) = self
+            .session_by_id
+            .values()
+            .find(|session| session.floating_set.has_pane(pane_id))
+        else {
+            return;
+        };
+        for frame_subscription in &mut self.subscriptions {
+            if session
+                .clients
+                .get_client_by_id(frame_subscription.client_id)
+                .is_some()
+            {
+                frame_subscription.frame_pace.mark_view_changed();
+            }
+        }
+    }
+
     /// Let the next frame of every subscriber that views `client_id` go
     /// without waiting for its pace ([`FramePace::allow_next_frame_now`]).
     /// Called for the client's own key, paste and mouse events.

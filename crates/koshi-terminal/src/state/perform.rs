@@ -939,8 +939,11 @@ impl vte::Perform for TerminalState {
             // filtered by `sanitize_reported_text`.
             Ok("0" | "1" | "2") if osc_parameters.len() > 1 => {
                 let title = osc_parameters[1..].join(&b';');
-                let title = String::from_utf8_lossy(&title);
-                self.title = Some(sanitize_reported_text(&title));
+                let title = Some(sanitize_reported_text(&String::from_utf8_lossy(&title)));
+                if self.title != title {
+                    self.title = title;
+                    self.is_title_changed = true;
+                }
             }
             // OSC 7 — the shell's working directory as a `file://host/path`
             // URI. An unparseable URI leaves the last working directory unchanged.
@@ -949,7 +952,11 @@ impl vte::Perform for TerminalState {
                 if let Some(reported_working_directory) =
                     parse_osc7_working_directory(&working_directory_uri)
                 {
-                    self.reported_working_directory = Some(reported_working_directory);
+                    if self.reported_working_directory.as_ref() != Some(&reported_working_directory)
+                    {
+                        self.reported_working_directory = Some(reported_working_directory);
+                        self.is_working_directory_changed = true;
+                    }
                 }
             }
             // Any other OSC command is ignored.

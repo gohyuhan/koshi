@@ -211,6 +211,7 @@ fn resolve_core_action(
                 is_minimized: false,
             })
         }
+        "toggle-minimize-all-floating-panes" => Command::ToggleAllFloatingPanesMinimized,
 
         // --- Tabs ---
         "new-tab" => Command::NewTab(NewTabArgs::default()),

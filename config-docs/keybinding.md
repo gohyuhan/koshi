@@ -91,8 +91,9 @@ went before.
 
 A `mode` block holds the bindings for one built-in keymap — `"normal"`,
 `"locked"`, `"pane-placement"`, `"pane-move-choice"`, `"floating-pane-move"`,
-or `"dock-undock"`. Normal and locked are base modes. The other four are local
-modes. Each one takes priority over the base mode while it is open.
+`"dock-undock"`, or `"floating-pane-tray"`. Normal and locked are base modes.
+The other five are local modes. Each one takes priority over the base mode
+while it is open.
 
 A block for any other mode name, such as `mode "resize"`, binds nothing. The
 rest of the file still applies, and `koshi keys conflicts` warns that the mode
@@ -138,6 +139,7 @@ mode "normal" {
     bind "<leader>p u" "core:begin-dock-undock"
     bind "<leader>p <Tab>" "core:focus-next-floating-pane"       // repeats: the prefix stays open
     bind "<leader>p <S-Tab>" "core:focus-previous-floating-pane"
+    bind "<leader>p w" "core:toggle-floating-pane-tray"
     bind "<leader>p x" "core:close-pane-tree"
     bind "<leader>p <Left>" "core:focus-pane-left"              // repeats: the prefix stays open
     bind "<leader>p <Down>" "core:focus-pane-down"
@@ -217,6 +219,18 @@ mode "dock-undock" {
     bind "<S-Tab>" "core:select-previous-placement-tab"
     bind "<CR>" "core:confirm-dock-undock"
     bind "<Esc>" "core:cancel-dock-undock"
+}
+
+mode "floating-pane-tray" {
+    // The floating pane tray owns these keys while it is open.
+    bind "<Left>" "core:select-tray-tile-left"
+    bind "<Down>" "core:select-tray-tile-down"
+    bind "<Up>" "core:select-tray-tile-up"
+    bind "<Right>" "core:select-tray-tile-right"
+    bind "<CR>" "core:toggle-selected-tray-tile"
+    bind "a" "core:toggle-minimize-all-floating-panes"
+    bind "<Esc>" "core:close-floating-pane-tray"
+    bind "<leader>p w" "core:toggle-floating-pane-tray"
 }
 ```
 
@@ -304,8 +318,9 @@ The effective `pane-placement` map must keep one live
 `core:cancel-pane-placement` binding. Removing Escape without binding that
 action to another key rejects the keymap. The same rule holds for
 `core:cancel-pane-move-choice` in `pane-move-choice`,
-`core:cancel-floating-pane-move` in `floating-pane-move`, and
-`core:cancel-dock-undock` in `dock-undock`.
+`core:cancel-floating-pane-move` in `floating-pane-move`,
+`core:cancel-dock-undock` in `dock-undock`, and
+`core:close-floating-pane-tray` in `floating-pane-tray`.
 
 `<leader>p m` opens the mode, then `<Right>` selects a destination instead of
 running `core:focus-pane-right`. A normal-mode binding for `<leader>p
@@ -415,6 +430,62 @@ undock or a dock waits.
 The session refuses an undock, and changes nothing, when the pane is the only
 pane of the only tab, or when the session already holds 12 floating panes.
 
+## Floating pane tray
+
+The tabline shows the tray button `⧉` left of the mode tag while the session
+holds at least one floating pane. `<leader>p w`
+(`core:toggle-floating-pane-tray`) or a click on the button opens the tray under
+the button. The tray lists every floating pane of the session as a tile, in the
+order the panes became floating:
+
+- A tile shows its number, `1` to `12`, on its top border, and the pane's
+  title under it. A tile is 10 cells wide. A title of 8 cells or more shows
+  the characters that fit in its first 6 cells, then `…`: `logserver` reads
+  `logser…`. A pane with no title shows its number alone.
+- A lit tile is a pane that this client shows. A gray tile is a pane that
+  this client minimized.
+- The tray holds 12 slots in 2 rows of 6. A narrow terminal puts fewer slots
+  in each row.
+- The tray's top border shows the full title of the tile under the pointer,
+  else of the selected tile. A title too long for the border ends in `…`. Its
+  right end reads `minimize all` while this client shows a floating pane, and
+  `restore all` while it shows none. A tray of one slot per row has no room
+  for this label and leaves it out.
+
+While the tray is open, the tabline shows the tag `TRAY`. The
+`floating-pane-tray` keymap has priority over the normal or locked keymap, and
+the tray consumes every key it does not bind. The tray changes this client's
+screen only. Another client sees no change.
+
+- The arrow keys (`core:select-tray-tile-left`, `-down`, `-up`, `-right`)
+  select the next tile in that direction.
+- Enter (`core:toggle-selected-tray-tile`) minimizes the pane of a lit tile.
+  On a gray tile, it shows the pane on top and focuses it.
+- `a` (`core:toggle-minimize-all-floating-panes`) minimizes every floating
+  pane this client shows. When this client shows none, it shows every one, in
+  the order the panes became floating, and focuses the last one. A click on
+  `minimize all` or `restore all` does the same.
+- A click on a tile does what Enter does on that tile.
+- Escape (`core:close-floating-pane-tray`), `<leader>p w` and a click on the
+  button close the tray.
+- A click outside the tray closes the tray. The same click then acts as it
+  does with no tray open.
+
+The tray stays open after a tile changes, and it shows each change at once.
+It closes when the session holds no floating pane or the terminal has no room
+for it. A lock mode change, a mouse-select change, the loss of the terminal's
+focus, a lost link to the session and a session switch also close it.
+
+A minimize shrinks the pane into its tile in 160 ms. With the tray closed, it
+shrinks into the cell under the glyph `⧉`, on the top row of the pane area. A
+restore grows the pane out of the same tile or cell. With
+`reduced-motion #true`, the pane changes in one frame.
+
+Example: the session holds `htop`, `logs` and `notes`, and this client shows
+`htop` and `logs`. Tiles 1 and 2 are lit, and tile 3 is gray. Enter on tile 1
+minimizes `htop`, and tile 1 turns gray. `a` then minimizes `logs` too, and
+the label changes to `restore all`.
+
 ## Floating pane actions
 
 No default key runs these actions. Bind them in `normal` or `locked`:
@@ -429,6 +500,11 @@ No default key runs these actions. Bind them in `normal` or `locked`:
   shows. `core:restore-all-floating-panes` shows each floating pane this
   client minimized, in the order the panes became floating, and focuses the
   last one it shows.
+
+`core:toggle-minimize-all-floating-panes` has a default key only in the tray,
+`a`. Bound in `normal` or `locked`, it runs with the tray closed: it minimizes
+every floating pane this client shows, or shows every one when this client
+shows none. With no floating pane in the session, it does nothing.
 
 With no floating pane focused, `core:pin-pane`, `core:unpin-pane` and
 `core:minimize-pane` are refused with `no floating pane is focused`.

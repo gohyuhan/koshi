@@ -368,17 +368,19 @@ pub fn wait_for_processes_to_end(
 }
 
 /// End every process in `process_records` that still runs, and give back the
-/// records of the processes that ran when this was called.
+/// records of the processes that ran when this was called. A process that
+/// ends while an earlier one is ended is still given back. Example: for a
+/// shell that waits on two `sleep` jobs, listed after them, the shell exits
+/// once both jobs end, and all three records are given back.
 ///
-/// On Linux and macOS each running process gets `SIGHUP`, `SIGTERM` and
-/// `SIGCONT`, in that order. Once none of them runs, or `grace_duration` has
-/// passed, each one still running gets `SIGKILL`.
+/// On Linux and macOS the processes that run are read first. Each of them
+/// that still runs then gets `SIGHUP`, and after that `SIGTERM` and `SIGCONT`,
+/// in the order of `process_records`. Once none of them runs, or
+/// `grace_duration` has passed, each one still running gets `SIGKILL`.
 ///
 /// On Windows a handle is opened to every running process first. Then each
 /// one is ended by `TerminateProcess` with exit code `1`, in the order of
-/// `process_records`. A process that ends while an earlier one is ended, such
-/// as a member of a job that closes with it, is still given back.
-/// `grace_duration` is not used.
+/// `process_records`. `grace_duration` is not used.
 ///
 /// A record whose process id now carries another start time is skipped, and
 /// is not given back.
@@ -422,19 +424,21 @@ mod unix_signals {
 
     use super::{is_process_running, wait_for_processes_to_end, ProcessRecord};
 
-    /// Send `signal_number` to the process `process_record` names. `false`
-    /// when that process no longer runs, as [`is_process_running`] reads it,
-    /// and when `kill` fails.
-    fn send_signal(process_record: &ProcessRecord, signal_number: libc::c_int) -> bool {
+    /// Send `signal_number` to the process `process_record` names. Sends
+    /// nothing when that process no longer runs, as [`is_process_running`]
+    /// reads it, or when its id is not a positive `pid_t`.
+    fn send_signal(process_record: &ProcessRecord, signal_number: libc::c_int) {
         let Ok(unix_process_id) = libc::pid_t::try_from(process_record.process_id) else {
-            return false;
+            return;
         };
         if unix_process_id <= 0 || !is_process_running(process_record) {
-            return false;
+            return;
         }
         // SAFETY: `kill` takes a process id and a signal number, and reads no
         // memory of this process.
-        unsafe { libc::kill(unix_process_id, signal_number) == 0 }
+        unsafe {
+            libc::kill(unix_process_id, signal_number);
+        }
     }
 
     pub(super) fn stop_processes(
@@ -443,9 +447,12 @@ mod unix_signals {
     ) -> Vec<ProcessRecord> {
         let running_records: Vec<ProcessRecord> = process_records
             .iter()
-            .filter(|process_record| send_signal(process_record, libc::SIGHUP))
+            .filter(|process_record| is_process_running(process_record))
             .cloned()
             .collect();
+        for running_record in &running_records {
+            send_signal(running_record, libc::SIGHUP);
+        }
         for running_record in &running_records {
             send_signal(running_record, libc::SIGTERM);
             send_signal(running_record, libc::SIGCONT);

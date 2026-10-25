@@ -21,14 +21,15 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
-    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, PlacementHandleHover,
-    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
+    FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot,
+    PlacementHandleHover, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
+    TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
-    find_pane_content_rect, get_cursor_position, render_frame, resolve_hit_region, DrawnRows,
-    HitRegion, ImageRenderMode,
+    build_frame_geometry, find_pane_content_rect, get_cursor_position, render_frame,
+    resolve_hit_region, DrawnRows, HitRegion, ImageRenderMode,
 };
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style as CellStyle;
@@ -149,7 +150,7 @@ fn build_render_snapshot(
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -225,17 +226,19 @@ fn paint_render_snapshot(
     let viewport_area = build_viewport_area();
     let mut screen_buffer = Buffer::empty(viewport_area);
     render_frame(
-        render_snapshot,
-        committed_regions,
+        &build_frame_geometry(
+            render_snapshot,
+            committed_regions,
+            viewer_chrome,
+            viewport_area,
+        ),
         &Theme::default(),
         &KeymapHints::default(),
         None,
-        viewer_chrome,
         ImageRenderMode::Placeholder,
         &[],
         None,
         None,
-        viewport_area,
         DrawnRows::Every,
         &mut screen_buffer,
     );
@@ -354,7 +357,11 @@ fn every_cell_classifies_as_what_was_painted() {
                 HitRegion::PaneTitlebar { .. }
                 | HitRegion::PanePinToggle { .. }
                 | HitRegion::PaneMinimizeButton { .. }
-                | HitRegion::PaneCloseButton { .. } => {
+                | HitRegion::PaneCloseButton { .. }
+                | HitRegion::FloatingPaneTrayButton
+                | HitRegion::FloatingPaneTrayTile { .. }
+                | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTray => {
                     panic!(
                         "floating pane region at ({column_index}, {row_index}) in a frame with no floating pane"
                     );
@@ -543,6 +550,113 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
 }
 
 #[test]
+fn every_open_tray_cell_classifies_as_what_was_painted() {
+    let (mut render_snapshot, ..) = build_tiled_frame();
+    let htop_pane_id = PaneId::new();
+    // Pane-area (1, 0) is screen (1, 1): the float lies under the tray's left
+    // part.
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            htop_pane_id,
+            build_cell_rect(1, 0, 24, 8),
+            false,
+        ));
+    let mut htop_pane_snapshot =
+        build_pane_snapshot(htop_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
+    htop_pane_snapshot.pane_title = Some("htop".to_string());
+    render_snapshot.pane_snapshots.push(htop_pane_snapshot);
+    render_snapshot.session_snapshot.floating_panes = vec![
+        FloatingPane::Shown {
+            pane_id: htop_pane_id,
+        },
+        FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: Some("logs".to_string()),
+        },
+    ];
+    let viewer_chrome = ViewerChrome {
+        active_input_mode: Some(LockMode::FloatingPaneTray),
+        floating_pane_tray: Some(FloatingPaneTray {
+            selected_tile_index: 0,
+            hovered_tile_index: None,
+        }),
+        ..ViewerChrome::default()
+    };
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let frame_layout = mouse_frame.build_frame_layout();
+
+    // ` TRAY ` takes columns 54 to 59 and the button 51 to 53. Four slots per
+    // row fit the 54 columns left of the tray's right border: the tray is
+    // 47x11 at (7, 1), slot 0 at (9, 2) and slot 1 at (20, 2).
+    assert_eq!(get_row_text(&screen_buffer, 0, 51, 54), " ⧉ ");
+    for column_index in 51..54 {
+        assert_eq!(
+            resolve_hit_region(
+                frame_layout,
+                Point {
+                    column: column_index,
+                    row: 0
+                }
+            ),
+            HitRegion::FloatingPaneTrayButton
+        );
+    }
+    // The tray paints, row by row from (7, 1): the header with the selected
+    // tile's title and the label at columns 38 to 51, three rows of four
+    // slots, and the bottom border.
+    let empty_slot_rows = ["┌────────┐", "│        │", "└────────┘"];
+    let expected_tray_rows = vec![
+        format!("┌─ htop {} minimize all ─┐", "─".repeat(23)),
+        format!("│ ┌ 1 ─────┐ ┌ 2 ─────┐ {0} {0} │", empty_slot_rows[0]),
+        format!("│ │ htop   │ │ logs   │ {0} {0} │", empty_slot_rows[1]),
+        format!("│ └────────┘ └────────┘ {0} {0} │", empty_slot_rows[2]),
+        format!("│ {0} {0} {0} {0} │", empty_slot_rows[0]),
+        format!("│ {0} {0} {0} {0} │", empty_slot_rows[1]),
+        format!("│ {0} {0} {0} {0} │", empty_slot_rows[2]),
+        format!("│ {0} {0} {0} {0} │", empty_slot_rows[0]),
+        format!("│ {0} {0} {0} {0} │", empty_slot_rows[1]),
+        format!("│ {0} {0} {0} {0} │", empty_slot_rows[2]),
+        format!("└{}┘", "─".repeat(45)),
+    ];
+    let painted_tray_rows: Vec<String> = (1..12)
+        .map(|row_index| get_row_text(&screen_buffer, row_index, 7, 54))
+        .collect();
+    assert_eq!(painted_tray_rows, expected_tray_rows);
+
+    // Every cell of the tray hits the region painted there: tile 0's box at
+    // (9, 2) 10x3, tile 1's box at (20, 2) 10x3, the label's 14 cells on row
+    // 1, and the tray for every other cell, the empty slots included.
+    let tile_rects = [build_cell_rect(9, 2, 10, 3), build_cell_rect(20, 2, 10, 3)];
+    let label_rect = build_cell_rect(38, 1, 14, 1);
+    for row_index in 1..12 {
+        for column_index in 7..54 {
+            let screen_point = Point {
+                column: column_index,
+                row: row_index,
+            };
+            let expected_hit_region = if tile_rects[0].is_point_inside(screen_point) {
+                HitRegion::FloatingPaneTrayTile { tile_index: 0 }
+            } else if tile_rects[1].is_point_inside(screen_point) {
+                HitRegion::FloatingPaneTrayTile { tile_index: 1 }
+            } else if label_rect.is_point_inside(screen_point) {
+                HitRegion::FloatingPaneTrayToggleMinimizeAll
+            } else {
+                HitRegion::FloatingPaneTray
+            };
+            assert_eq!(
+                resolve_hit_region(frame_layout, screen_point),
+                expected_hit_region,
+                "({column_index}, {row_index})"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     let (mut render_snapshot, ..) = build_tiled_frame();
     let floating_pane_id = PaneId::new();
@@ -652,12 +766,12 @@ fn a_tab_ribbon_spells_the_tab_it_hits() {
 fn the_cursor_lands_in_the_focused_pane_content() {
     let (render_snapshot, left_pane_id, ..) = build_tiled_frame();
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
-    let cursor_position = get_cursor_position(
+    let cursor_position = get_cursor_position(&build_frame_geometry(
         &render_snapshot,
         &committed_regions,
         ViewerChrome::default(),
         build_viewport_area(),
-    )
+    ))
     .expect("the focused pane has a cursor");
     let mouse_frame =
         MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());

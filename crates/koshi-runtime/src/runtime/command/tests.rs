@@ -23,8 +23,9 @@ use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, FocusPaneArgs, FocusTabArgs,
     GridPosition, LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
     NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs,
-    ScrollPaneArgs, Selection, SelectionKind, TabTarget, TiledPlacementTarget, VisualCommand,
-    WriteToPaneArgs,
+    ScrollPaneArgs, Selection, SelectionKind, SetAllFloatingPanesMinimizedArgs,
+    SetPaneMinimizedArgs, SetPanePinnedArgs, TabTarget, TiledPlacementTarget,
+    TogglePaneMinimizedArgs, TogglePanePinnedArgs, VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::{GRACEFUL_TIMEOUT_DURATION, MAX_FLOATING_PANES_PER_SESSION};
 use koshi_core::geometry::{
@@ -504,13 +505,13 @@ fn build_command_matrix_server(client_origin: ClientOrigin) -> CommandMatrixFixt
 
 /// How many [`Command`] variants this build has. [`build_every_command`] lists one
 /// command of each.
-const COMMAND_VARIANT_COUNT: usize = 25;
+const COMMAND_VARIANT_COUNT: usize = 28;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
 /// id no runtime holds, `MoveFloatingPane` names the same pane id on every runtime, one
-/// no runtime holds, and `SetPanePinned` and `SetPaneMinimized` name no pane, so each
-/// resolves the same way on every runtime.
+/// no runtime holds, and `SetPanePinned`, `TogglePanePinned`, `SetPaneMinimized` and
+/// `TogglePaneMinimized` name no pane, so each resolves the same way on every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),
@@ -580,13 +581,16 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             pane_id: None,
             is_pinned: true,
         }),
+        Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
         Command::SetPaneMinimized(SetPaneMinimizedArgs {
             pane_id: None,
             is_minimized: true,
         }),
+        Command::TogglePaneMinimized(TogglePaneMinimizedArgs { pane_id: None }),
         Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
             is_minimized: true,
         }),
+        Command::ToggleAllFloatingPanesMinimized,
         Command::Quit,
         Command::Detach(DetachArgs { client_id: None }),
         Command::DetachAll,
@@ -621,8 +625,11 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::ScrollPane(_) => "ScrollPane",
         Command::MoveFloatingPane(_) => "MoveFloatingPane",
         Command::SetPanePinned(_) => "SetPanePinned",
+        Command::TogglePanePinned(_) => "TogglePanePinned",
         Command::SetPaneMinimized(_) => "SetPaneMinimized",
+        Command::TogglePaneMinimized(_) => "TogglePaneMinimized",
         Command::SetAllFloatingPanesMinimized(_) => "SetAllFloatingPanesMinimized",
+        Command::ToggleAllFloatingPanesMinimized => "ToggleAllFloatingPanesMinimized",
         Command::Quit => "Quit",
         Command::Detach(_) => "Detach",
         Command::DetachAll => "DetachAll",
@@ -1035,12 +1042,13 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
         }
     }
 
-    // The commands that reach their handler on this fixture. The seven missing
+    // The commands that reach their handler on this fixture. The nine missing
     // commands are refused by the fixture or by command admission, identically
     // on both sides: a resize has no border to move in a single-pane tab, a move
-    // has no neighbor, a floating move names no pane the runtime holds, a pin
-    // and a minimize find no focused floating pane, a write has no running
-    // child, and the switch has no connected viewer to receive the move.
+    // has no neighbor, a floating move names no pane the runtime holds, a pin,
+    // a pin toggle, a minimize and a minimize toggle find no focused floating
+    // pane, a write has no running child, and the switch has no connected
+    // viewer to receive the move.
     assert_eq!(
         applied_command_names,
         vec![
@@ -1059,6 +1067,7 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             "PlacePane",
             "ScrollPane",
             "SetAllFloatingPanesMinimized",
+            "ToggleAllFloatingPanesMinimized",
             "Quit",
             "Detach",
             "DetachAll",
@@ -24444,6 +24453,346 @@ fn a_minimize_of_a_pane_the_client_does_not_show_or_a_restore_of_a_shown_pane_ch
     assert_eq!(serialize_session_records(&runtime), session_records_before);
 }
 
+/// Dispatch `command` from the key binding of `client_id`, and return the
+/// command id with the result.
+fn dispatch_key_binding_command(
+    runtime: &mut Server,
+    client_id: ClientId,
+    command: Command,
+) -> (CommandId, CommandResult) {
+    let command_envelope =
+        build_command_envelope(CommandSource::from_key_binding(client_id), command);
+    let command_id = command_envelope.command_id;
+    (command_id, runtime.dispatch(command_envelope))
+}
+
+#[test]
+fn two_minimize_toggles_sent_before_a_frame_minimize_the_pane_then_restore_it() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let toggle_command = Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+        pane_id: Some(floating_pane_id),
+    });
+
+    // Both toggles run with no frame between them, as two quick clicks on one
+    // lit tile do.
+    let (first_command_id, first_command_result) =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, toggle_command.clone());
+    let (second_command_id, second_command_result) =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, toggle_command);
+
+    assert_eq!(
+        first_command_result,
+        CommandResult::Ok {
+            command_id: first_command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(floating_pane_id)
+                ),
+            ],
+        }
+    );
+    assert_eq!(
+        second_command_result,
+        CommandResult::Ok {
+            command_id: second_command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, floating_pane_id, false),
+                build_pane_focused(alice_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+            ],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_floating_pane_view(floating_pane_id),
+        Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW)
+    );
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(floating_pane_id)
+    );
+}
+
+#[test]
+fn a_minimize_toggle_naming_no_pane_takes_the_focused_floating_pane_and_refuses_a_tiled_pane() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::TogglePaneMinimized(TogglePaneMinimizedArgs { pane_id: None }),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(floating_pane_id)
+                ),
+            ],
+        }
+    );
+
+    let session_records_before = serialize_session_records(&runtime);
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+            pane_id: Some(tiled_pane_id),
+        }),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{tiled_pane_id} is tiled; only a floating pane minimizes"
+            )),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).list_shown_floating_pane_ids(),
+        &[] as &[PaneId]
+    );
+}
+
+#[test]
+fn a_minimize_all_toggle_minimizes_while_one_pane_shows_and_restores_while_none_shows() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let first_floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let second_floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (_, minimize_result) = dispatch_set_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(first_floating_pane_id),
+        true,
+    );
+    assert_eq!(
+        get_command_outcome(&minimize_result),
+        Ok(vec!["PaneMinimizedChanged"])
+    );
+
+    // alice shows the second pane only: the toggle minimizes it.
+    let (first_command_id, first_command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::ToggleAllFloatingPanesMinimized,
+    );
+    // alice shows no pane: the toggle restores both, in the order they became
+    // floating, and the second takes the input.
+    let (second_command_id, second_command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::ToggleAllFloatingPanesMinimized,
+    );
+
+    assert_eq!(
+        first_command_result,
+        CommandResult::Ok {
+            command_id: first_command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, second_floating_pane_id, true),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(second_floating_pane_id)
+                ),
+            ],
+        }
+    );
+    assert_eq!(
+        second_command_result,
+        CommandResult::Ok {
+            command_id: second_command_id,
+            emitted_events: vec![
+                build_pane_minimized_changed(alice_client_id, first_floating_pane_id, false),
+                build_pane_minimized_changed(alice_client_id, second_floating_pane_id, false),
+                build_pane_focused(
+                    alice_client_id,
+                    None,
+                    second_floating_pane_id,
+                    Some(tiled_pane_id)
+                ),
+            ],
+        }
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id).list_shown_floating_pane_ids(),
+        &[first_floating_pane_id, second_floating_pane_id]
+    );
+}
+
+#[test]
+fn a_minimize_all_toggle_in_a_session_with_no_floating_pane_changes_nothing() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::ToggleAllFloatingPanesMinimized,
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn two_pin_toggles_sent_before_a_frame_pin_the_pane_then_unpin_it_at_its_pinned_cell() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let toggle_command = Command::TogglePanePinned(TogglePanePinnedArgs {
+        pane_id: Some(floating_pane_id),
+    });
+
+    let (first_command_id, first_command_result) =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, toggle_command.clone());
+    assert_eq!(
+        first_command_result,
+        CommandResult::Ok {
+            command_id: first_command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
+    );
+
+    let (second_command_id, second_command_result) =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, toggle_command);
+    assert_eq!(
+        second_command_result,
+        CommandResult::Ok {
+            command_id: second_command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: false,
+            })],
+        }
+    );
+    assert_eq!(
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            .position,
+        FloatingPanePosition::Moved(Point { column: 16, row: 4 })
+    );
+}
+
+#[test]
+fn every_view_toggle_is_refused_from_the_command_line() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    for command in [
+        Command::TogglePanePinned(TogglePanePinnedArgs {
+            pane_id: Some(floating_pane_id),
+        }),
+        Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+            pane_id: Some(floating_pane_id),
+        }),
+        Command::ToggleAllFloatingPanesMinimized,
+    ] {
+        let command_result = runtime.dispatch(build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), Some(alice_client_id)),
+            command.clone(),
+        ));
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Err((
+                RejectReason::Unauthorized,
+                Some("command cannot be issued from the CLI")
+            )),
+            "{command:?}"
+        );
+    }
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
 #[test]
 fn restoring_a_floating_pane_another_client_created_shows_it_and_takes_the_input() {
     let FloatingCommandFixture {
@@ -26606,6 +26955,12 @@ fn a_client_that_cannot_draw_floating_panes_is_refused_every_command_that_shows_
             pane_help.as_str(),
         ),
         (
+            Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+                pane_id: Some(floating_pane_id),
+            }),
+            pane_help.as_str(),
+        ),
+        (
             Command::FocusPane(FocusPaneArgs {
                 focus_target: FocusTarget::NextFloatingPane,
                 client_id: None,
@@ -26625,6 +26980,7 @@ fn a_client_that_cannot_draw_floating_panes_is_refused_every_command_that_shows_
             }),
             session_help,
         ),
+        (Command::ToggleAllFloatingPanesMinimized, session_help),
     ] {
         assert_eq!(
             get_command_outcome(&runtime.dispatch(build_command_envelope(

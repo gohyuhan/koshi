@@ -305,17 +305,45 @@ impl Server {
                 .resolve_move_floating_pane_target(command_args, command_source, session)
                 .map(drop),
             Command::SetPanePinned(command_args) => self
-                .resolve_pane_pin_target(command_args, command_source, session)
+                .resolve_pane_pin_target(
+                    command_args.pane_id,
+                    ViewFlagChange::Set(command_args.is_pinned),
+                    command_source,
+                    session,
+                )
+                .map(drop),
+            Command::TogglePanePinned(command_args) => self
+                .resolve_pane_pin_target(
+                    command_args.pane_id,
+                    ViewFlagChange::Toggle,
+                    command_source,
+                    session,
+                )
                 .map(drop),
             Command::SetPaneMinimized(command_args) => self
-                .resolve_pane_minimize_target(command_args, command_source, session)
+                .resolve_pane_minimize_target(
+                    command_args.pane_id,
+                    ViewFlagChange::Set(command_args.is_minimized),
+                    command_source,
+                    session,
+                )
                 .map(drop),
-            Command::SetAllFloatingPanesMinimized(_) => Self::resolve_view_client(
-                command_source.get_target_client_id(),
-                command_source,
-                Self::require_session(session)?,
-            )
-            .map(drop),
+            Command::TogglePaneMinimized(command_args) => self
+                .resolve_pane_minimize_target(
+                    command_args.pane_id,
+                    ViewFlagChange::Toggle,
+                    command_source,
+                    session,
+                )
+                .map(drop),
+            Command::SetAllFloatingPanesMinimized(_) | Command::ToggleAllFloatingPanesMinimized => {
+                Self::resolve_view_client(
+                    command_source.get_target_client_id(),
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop)
+            }
             Command::WriteToPane(command_args) => self
                 .resolve_pane_target(
                     command_args.pane_id,
@@ -815,10 +843,13 @@ impl Server {
         Ok(floating_pane_view_target)
     }
 
-    /// Resolve a [`Command::SetPanePinned`]: the pane and the acting client
+    /// Resolve a [`Command::SetPanePinned`] or a [`Command::TogglePanePinned`]
+    /// of `pane_id`: the pane and the acting client
     /// ([`Self::resolve_floating_pane_view_target`]), and the change the
-    /// command makes to that client's view of the pane. Shared by validation
-    /// and [`Self::handle_set_pane_pinned`].
+    /// command makes to that client's view of the pane. `pin_change` asks for
+    /// a pin with `Set(true)`, an unpin with `Set(false)`, and with `Toggle`
+    /// an unpin of a pane the client pinned, else a pin. Shared by validation
+    /// and [`Self::handle_pane_pin_change`].
     ///
     /// `None` when the view already has the asked state: a pin of a pane the
     /// client pinned, or an unpin of a pane it did not pin. An unpin of a
@@ -834,16 +865,13 @@ impl Server {
     /// pin`, changing nothing.
     pub(super) fn resolve_pane_pin_target(
         &self,
-        command_args: &SetPanePinnedArgs,
+        pane_id: Option<PaneId>,
+        pin_change: ViewFlagChange,
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<Option<(FloatingPaneViewTarget, PanePinChange)>, Rejection> {
-        let floating_pane_view_target = self.resolve_floating_pane_view_target(
-            command_args.pane_id,
-            command_source,
-            session,
-            "pins",
-        )?;
+        let floating_pane_view_target =
+            self.resolve_floating_pane_view_target(pane_id, command_source, session, "pins")?;
         let pane_id = floating_pane_view_target.pane_id;
         let pane_session = self
             .session_by_id
@@ -851,7 +879,9 @@ impl Server {
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
         let client = Self::require_client(pane_session, floating_pane_view_target.client_id)?;
         let client_position = Self::require_floating_pane_view(client, pane_id)?.position;
-        let pane_pin_change = match (command_args.is_pinned, client_position) {
+        let is_pinned =
+            pin_change.is_flag_on_after(matches!(client_position, FloatingPanePosition::Pinned(_)));
+        let pane_pin_change = match (is_pinned, client_position) {
             (true, FloatingPanePosition::Pinned(_))
             | (false, FloatingPanePosition::Default | FloatingPanePosition::Moved(_)) => {
                 return Ok(None);
@@ -875,9 +905,13 @@ impl Server {
         Ok(Some((floating_pane_view_target, pane_pin_change)))
     }
 
-    /// Resolve a [`Command::SetPaneMinimized`]: the pane and the acting client
-    /// ([`Self::resolve_floating_pane_view_target`]). Shared by validation and
-    /// [`Self::handle_set_pane_minimized`].
+    /// Resolve a [`Command::SetPaneMinimized`] or a
+    /// [`Command::TogglePaneMinimized`] of `pane_id`: the pane and the acting
+    /// client ([`Self::resolve_floating_pane_view_target`]), and `true` for a
+    /// minimize or `false` for a restore. `minimize_change` asks for a
+    /// minimize with `Set(true)`, a restore with `Set(false)`, and with
+    /// `Toggle` a restore of a pane the client minimized, else a minimize.
+    /// Shared by validation and [`Self::handle_pane_minimize_change`].
     ///
     /// `None` when the view already has the asked state: a minimize of a pane
     /// the acting client does not show ([`Client::is_floating_pane_shown`]),
@@ -888,16 +922,13 @@ impl Server {
     /// [`RejectReason::InvalidState`] `<pane> cannot be drawn on this client`.
     pub(super) fn resolve_pane_minimize_target(
         &self,
-        command_args: &SetPaneMinimizedArgs,
+        pane_id: Option<PaneId>,
+        minimize_change: ViewFlagChange,
         command_source: &CommandSource,
         session: Option<&Session>,
-    ) -> Result<Option<FloatingPaneViewTarget>, Rejection> {
-        let floating_pane_view_target = self.resolve_floating_pane_view_target(
-            command_args.pane_id,
-            command_source,
-            session,
-            "minimizes",
-        )?;
+    ) -> Result<Option<(FloatingPaneViewTarget, bool)>, Rejection> {
+        let floating_pane_view_target =
+            self.resolve_floating_pane_view_target(pane_id, command_source, session, "minimizes")?;
         let pane_session = self
             .session_by_id
             .get(&floating_pane_view_target.session_id)
@@ -905,7 +936,8 @@ impl Server {
         let client = Self::require_client(pane_session, floating_pane_view_target.client_id)?;
         let is_floating_pane_shown =
             client.is_floating_pane_shown(floating_pane_view_target.pane_id);
-        let is_view_in_asked_state = if command_args.is_minimized {
+        let is_minimized = minimize_change.is_flag_on_after(!is_floating_pane_shown);
+        let is_view_in_asked_state = if is_minimized {
             !is_floating_pane_shown
         } else {
             is_floating_pane_shown
@@ -913,7 +945,7 @@ impl Server {
         if is_view_in_asked_state {
             return Ok(None);
         }
-        if !command_args.is_minimized {
+        if !is_minimized {
             Self::require_client_drawing_floating_panes(
                 pane_session,
                 client,
@@ -923,7 +955,7 @@ impl Server {
                 ),
             )?;
         }
-        Ok(Some(floating_pane_view_target))
+        Ok(Some((floating_pane_view_target, is_minimized)))
     }
 
     /// The client a command names in its own `client` argument, resolved by

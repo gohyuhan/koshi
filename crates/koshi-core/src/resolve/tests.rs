@@ -35,7 +35,7 @@ const CLI_ONLY: [&str; 12] = [
 ];
 
 /// The viewer-local actions: each resolves to [`DispatchPlan::ClientAction`].
-const CLIENT_ACTIONS: [&str; 30] = [
+const CLIENT_ACTIONS: [&str; 37] = [
     "begin-pane-placement",
     "begin-dock-undock",
     "select-pane-target-left",
@@ -66,6 +66,13 @@ const CLIENT_ACTIONS: [&str; 30] = [
     "select-previous-floating-pane",
     "confirm-floating-pane-move",
     "cancel-floating-pane-move",
+    "toggle-floating-pane-tray",
+    "close-floating-pane-tray",
+    "select-tray-tile-left",
+    "select-tray-tile-down",
+    "select-tray-tile-up",
+    "select-tray-tile-right",
+    "toggle-selected-tray-tile",
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this
@@ -299,6 +306,10 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
                 is_minimized: false,
             }),
         ),
+        (
+            "toggle-minimize-all-floating-panes",
+            Command::ToggleAllFloatingPanesMinimized,
+        ),
         ("new-tab", Command::NewTab(NewTabArgs::default())),
         ("close-tab", Command::CloseTab(CloseTabArgs::default())),
         (
@@ -452,8 +463,13 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::SetPanePinned(_) => Some(CommandKind::SetPanePinned),
         Command::SetPaneMinimized(_) => Some(CommandKind::SetPaneMinimized),
         Command::SetAllFloatingPanesMinimized(_) => Some(CommandKind::SetAllFloatingPanesMinimized),
+        Command::ToggleAllFloatingPanesMinimized => {
+            Some(CommandKind::ToggleAllFloatingPanesMinimized)
+        }
         Command::Quit => Some(CommandKind::Quit),
-        Command::Visual(_)
+        Command::TogglePanePinned(_)
+        | Command::TogglePaneMinimized(_)
+        | Command::Visual(_)
         | Command::Detach(_)
         | Command::DetachAll
         | Command::SwitchSession(_) => None,

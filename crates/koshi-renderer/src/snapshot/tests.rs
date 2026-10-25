@@ -2,8 +2,9 @@
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
 //! cloning shares every row by reference (no cell copy), confirm equality, and
 //! check the mouse-frame projection, the borrowed layout views, the selection
-//! row lookup, the pane slots of a layout solve, and the tab a placement
-//! preview shows for a tiled and a floating source.
+//! row lookup, the pane slots of a layout solve, the tab a placement
+//! preview shows for a tiled and a floating source, and the comparison of two
+//! frames' floating pane visibility.
 
 use super::*;
 
@@ -75,7 +76,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
             is_active: true,
         }],
         floating_pane_slots: Vec::new(),
-        floating_pane_ids: Vec::new(),
+        floating_panes: Vec::new(),
     };
 
     let pane_snapshot = PaneSnapshot {
@@ -613,6 +614,7 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             is_pane_placement_visible: false,
             placement_source_pane_id: None,
             floating_pane_move_draft: None,
+            floating_pane_tray: None,
         }
     );
 }
@@ -1031,4 +1033,87 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
         floating_placement_snapshot.find_displayed_tab_snapshot(),
         Some(&build_placement_tab_snapshot(destination_tab_snapshot))
     );
+}
+
+#[test]
+fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_minimized_in_both() {
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let build_session_snapshot = |floating_panes: Vec<FloatingPane>| SessionSnapshot {
+        floating_panes,
+        ..build_render_snapshot_fixture(build_render_snapshot_fixture_grid()).session_snapshot
+    };
+    let build_minimized_floating_pane =
+        |pane_id: PaneId, pane_title: &str| FloatingPane::Minimized {
+            pane_id,
+            pane_title: Some(pane_title.to_string()),
+        };
+    let session_snapshot = build_session_snapshot(vec![
+        FloatingPane::Shown {
+            pane_id: first_pane_id,
+        },
+        build_minimized_floating_pane(second_pane_id, "htop"),
+    ]);
+
+    assert!(
+        session_snapshot.has_same_floating_pane_visibility(&build_session_snapshot(vec![
+            FloatingPane::Shown {
+                pane_id: first_pane_id,
+            },
+            build_minimized_floating_pane(second_pane_id, "logs"),
+        ]))
+    );
+    for (changed_case, other_floating_panes) in [
+        (
+            "the second pane restored",
+            vec![
+                FloatingPane::Shown {
+                    pane_id: first_pane_id,
+                },
+                FloatingPane::Shown {
+                    pane_id: second_pane_id,
+                },
+            ],
+        ),
+        (
+            "the first pane minimized",
+            vec![
+                build_minimized_floating_pane(first_pane_id, "vim"),
+                build_minimized_floating_pane(second_pane_id, "htop"),
+            ],
+        ),
+        (
+            "the second pane closed",
+            vec![FloatingPane::Shown {
+                pane_id: first_pane_id,
+            }],
+        ),
+        (
+            "the panes listed in the other order",
+            vec![
+                build_minimized_floating_pane(second_pane_id, "htop"),
+                FloatingPane::Shown {
+                    pane_id: first_pane_id,
+                },
+            ],
+        ),
+        (
+            "a third pane added",
+            vec![
+                FloatingPane::Shown {
+                    pane_id: first_pane_id,
+                },
+                build_minimized_floating_pane(second_pane_id, "htop"),
+                FloatingPane::Shown {
+                    pane_id: PaneId::new(),
+                },
+            ],
+        ),
+    ] {
+        assert!(
+            !session_snapshot
+                .has_same_floating_pane_visibility(&build_session_snapshot(other_floating_panes)),
+            "{changed_case}"
+        );
+    }
 }

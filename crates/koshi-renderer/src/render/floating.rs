@@ -11,8 +11,7 @@ use koshi_core::geometry::{Rect, Size};
 
 use crate::floating_pane_chrome::compute_floating_pane_titlebar;
 use crate::snapshot::{
-    CommittedRegions, FloatingPaneSlot, FrameLayout, PlacementHandleHover, RenderSnapshot,
-    ViewerChrome,
+    CommittedRegions, FloatingPaneSlot, PlacementHandleHover, RenderSnapshot, ViewerChrome,
 };
 use crate::theme::Theme;
 
@@ -69,13 +68,8 @@ pub(crate) fn list_placed_floating_panes(
 ) -> Vec<PlacedFloatingPane> {
     let pane_area = compute_pane_area(committed_regions, viewport_area);
     let pane_area_origin = get_area_origin(pane_area);
-    let frame_layout = FrameLayout {
-        session_snapshot: &render_snapshot.session_snapshot,
-        client_snapshot: &render_snapshot.client_snapshot,
-        viewer_chrome,
-        committed_regions: Some(committed_regions),
-    };
-    frame_layout
+    render_snapshot
+        .build_painted_frame_layout(viewer_chrome, committed_regions)
         .list_drawn_floating_pane_slots()
         .map(|floating_pane_slot| {
             let content_area = place_cell_rect(floating_pane_slot.content_rect, pane_area_origin);
@@ -92,13 +86,8 @@ pub(crate) fn list_placed_floating_panes(
 /// Draw one placed floating pane over every cell drawn before it, in this
 /// order:
 ///
-/// 1. Blanks every cell of its outer area. On each row of the outer area, it
-///    also blanks the glyph that starts left of the outer area and reaches
-///    into it. The row is read from its first column, and each glyph covers
-///    the number of columns that [`compute_symbol_display_width`] gives its
-///    symbol, 1 at least. Example: `世` at column `5` beside a box that starts
-///    at column `6` becomes a blank at column `5` with the style `世` had, and
-///    `U+17D8` at column `5` stays.
+/// 1. Blanks its outer area and the glyph that reaches into it from the left
+///    ([`clear_overlay_area`]).
 /// 2. Draws its border ring in the style [`compute_pane_border_style`] gives
 ///    it, with the placement hover style while
 ///    `viewer_chrome.placement_handle_hover` is
@@ -146,20 +135,7 @@ pub(super) fn draw_floating_pane(
         viewer_chrome,
         theme,
     );
-    clear_drawn_rows(outer_area, drawn_rows, screen_buffer);
-    for row_index in drawn_rows.list_rows_between(outer_area.top(), outer_area.bottom()) {
-        let mut column_index = screen_buffer.area.left();
-        while column_index < outer_area.x {
-            let Some(glyph_cell) = screen_buffer.cell_mut((column_index, row_index)) else {
-                break;
-            };
-            let glyph_width = compute_symbol_display_width(glyph_cell.symbol()).max(1);
-            if column_index.saturating_add(glyph_width) > outer_area.x {
-                glyph_cell.set_symbol(" ");
-            }
-            column_index = column_index.saturating_add(glyph_width);
-        }
-    }
+    clear_overlay_area(outer_area, drawn_rows, screen_buffer);
     draw_pane_border(outer_area, border_style, drawn_rows, screen_buffer);
 
     let pane_snapshot = render_snapshot.find_pane_snapshot(floating_pane_slot.pane_id);
@@ -211,6 +187,34 @@ pub(super) fn draw_floating_pane(
     }
     if drawn_rows.is_row_drawn(outer_area.bottom().saturating_sub(1)) {
         draw_pane_scroll_position(pane_snapshot, outer_area, border_style, screen_buffer);
+    }
+}
+
+/// Blank every cell of `overlay_area` on each row `drawn_rows` draws, and the
+/// glyph that starts left of `overlay_area` and reaches into it. The row is
+/// read from its first column, and each glyph covers the number of columns
+/// that [`compute_symbol_display_width`] gives its symbol, 1 at least.
+/// Example: `世` at column `5` beside an area that starts at column `6`
+/// becomes a blank at column `5` with the style `世` had, and `U+17D8` at
+/// column `5` stays.
+pub(super) fn clear_overlay_area(
+    overlay_area: RatatuiRect,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
+    clear_drawn_rows(overlay_area, drawn_rows, screen_buffer);
+    for row_index in drawn_rows.list_rows_between(overlay_area.top(), overlay_area.bottom()) {
+        let mut column_index = screen_buffer.area.left();
+        while column_index < overlay_area.x {
+            let Some(glyph_cell) = screen_buffer.cell_mut((column_index, row_index)) else {
+                break;
+            };
+            let glyph_width = compute_symbol_display_width(glyph_cell.symbol()).max(1);
+            if column_index.saturating_add(glyph_width) > overlay_area.x {
+                glyph_cell.set_symbol(" ");
+            }
+            column_index = column_index.saturating_add(glyph_width);
+        }
     }
 }
 

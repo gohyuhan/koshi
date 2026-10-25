@@ -45,6 +45,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
+use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
 use crate::hit_test::compute_tiled_pane_top_border;
 use crate::images::{
     compute_floating_pane_image_placeholder_rects, compute_image_placeholder_rects,
@@ -61,10 +62,12 @@ use crate::theme::Theme;
 const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
 
 mod floating;
+mod floating_pane_tray;
 mod placement;
 
 use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
+use floating_pane_tray::draw_floating_pane_tray;
 use placement::draw_pane_placement_presentation;
 
 /// The rows of the buffer that one [`render_frame`] call draws.
@@ -105,7 +108,93 @@ impl<'rows> DrawnRows<'rows> {
     }
 }
 
-/// Paint `render_snapshot` into `screen_buffer` over `viewport_area`.
+/// Where one paint places its surfaces: the frame `render_snapshot` drawn over
+/// `viewport_area` with `committed_regions` and `viewer_chrome`, solved once
+/// by [`build_frame_geometry`]. [`render_frame`], [`get_cursor_position`],
+/// [`list_changed_screen_rows`], [`build_image_paints`](crate::build_image_paints)
+/// and [`build_image_cell_snapshot`](crate::build_image_cell_snapshot) read the
+/// frame and its placements from it.
+#[derive(Debug)]
+pub struct FrameGeometry<'a> {
+    /// The frame being painted.
+    pub(crate) render_snapshot: &'a RenderSnapshot,
+    /// The region solve that places the tabline, the statusline and the pane
+    /// area.
+    pub(crate) committed_regions: &'a CommittedRegions,
+    /// The viewer's own chrome, painted with the frame.
+    pub(crate) viewer_chrome: ViewerChrome,
+    /// The buffer area the frame is painted over.
+    pub(crate) viewport_area: RatatuiRect,
+    /// The active tab's `tab_size` centered in the pane area
+    /// ([`compute_content_rect`]): the cells the tiled layout covers.
+    pub(crate) effective_layout_rect: RatatuiRect,
+    /// The floating panes this viewer draws, back to front
+    /// ([`list_placed_floating_panes`]).
+    pub(crate) placed_floating_panes: Vec<PlacedFloatingPane>,
+    /// The viewer's open floating pane tray
+    /// ([`find_drawn_floating_pane_tray_layout`]). `None` while the tray is
+    /// closed or the frame has no room for it.
+    pub(crate) floating_pane_tray_layout: Option<FloatingPaneTrayLayout>,
+}
+
+impl<'a> FrameGeometry<'a> {
+    /// The frame being painted.
+    #[must_use]
+    pub fn get_render_snapshot(&self) -> &'a RenderSnapshot {
+        self.render_snapshot
+    }
+
+    /// The region solve that places the tabline, the statusline and the pane
+    /// area.
+    #[must_use]
+    pub fn get_committed_regions(&self) -> &'a CommittedRegions {
+        self.committed_regions
+    }
+
+    /// The buffer cell where the tiled layout's `(0, 0)` cell lands: the
+    /// top-left cell of `effective_layout_rect`.
+    pub(crate) fn get_layout_origin(&self) -> Point {
+        get_area_origin(self.effective_layout_rect)
+    }
+}
+
+/// Solve where `render_snapshot` places its surfaces when it is painted over
+/// `viewport_area` with `committed_regions` and `viewer_chrome`: the centered
+/// tiled layout, the floating panes this viewer draws, and the open floating
+/// pane tray. Each is solved once.
+#[must_use]
+pub fn build_frame_geometry<'a>(
+    render_snapshot: &'a RenderSnapshot,
+    committed_regions: &'a CommittedRegions,
+    viewer_chrome: ViewerChrome,
+    viewport_area: RatatuiRect,
+) -> FrameGeometry<'a> {
+    FrameGeometry {
+        render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        viewport_area,
+        effective_layout_rect: compute_content_rect(
+            compute_pane_area(committed_regions, viewport_area),
+            render_snapshot
+                .session_snapshot
+                .active_tab_snapshot
+                .tab_size,
+        ),
+        placed_floating_panes: list_placed_floating_panes(
+            render_snapshot,
+            committed_regions,
+            viewer_chrome,
+            viewport_area,
+        ),
+        floating_pane_tray_layout: find_drawn_floating_pane_tray_layout(
+            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+        ),
+    }
+}
+
+/// Paint `frame_geometry`'s `render_snapshot` into `screen_buffer` over its
+/// `viewport_area`.
 ///
 /// It does nothing for a zero-size area. When the active tab has no room for any
 /// pane (`is_every_pane_suppressed`), it blanks `viewport_area`, draws a centered too-small
@@ -135,29 +224,33 @@ impl<'rows> DrawnRows<'rows> {
 ///    `true`, only the placement source pane is drawn, and only while the
 ///    active tab holds no slot of it. None is drawn while every pane of the
 ///    active tab is suppressed.
-/// 9. Draws the tabline in the first committed region, over that margin.
-/// 10. Draws the statusline in the second committed region, over that margin.
-/// 11. Gives each cell of `viewport_area` whose symbol ratatui measures at
+/// 9. Draws the viewer's open floating pane tray over every cell drawn before
+///    it, at `frame_geometry`'s `floating_pane_tray_layout`, while
+///    `viewer_chrome.floating_pane_tray` is `Some` and the tray fits.
+/// 10. Draws the tabline in the first committed region, over that margin. While
+///     the session holds a floating pane, it shows the tray button ` ⧉ `.
+/// 11. Draws the statusline in the second committed region, over that margin.
+/// 12. Gives each cell of `viewport_area` whose symbol ratatui measures at
 ///     another width than [`compute_text_display_width`] gives it that width as
 ///     its forced width. Example: a cell that holds `U+17D8` takes 1 column, not
 ///     the 3 that ratatui measures.
 ///
-/// `theme`, `keymap_hints`, `pending_key_sequence`, and `viewer_chrome` come
-/// from the viewer: the colors it paints koshi's chrome in, the statusline data
-/// for the mode it is in, the multi-chord sequence it has open, and the pane its
-/// pointer is over together with where its tab strip is scrolled and whether it
-/// is dialing the session again.
-/// The attached client passes the same [`CommittedRegions`] and
-/// `viewer_chrome` to this function and to [`get_cursor_position`]. For
-/// example, a left region of 20 columns on a `120x40` viewport leaves the pane
-/// rectangle at `x = 20`.
+/// `theme`, `keymap_hints` and `pending_key_sequence` come from the viewer:
+/// the colors it paints koshi's chrome in, the statusline data for the mode it
+/// is in, and the multi-chord sequence it has open. The `viewer_chrome` of
+/// `frame_geometry` holds the pane its pointer is over, where its tab strip is
+/// scrolled and whether it is dialing the session again.
+/// The attached client passes the same `frame_geometry` to this function and
+/// to [`get_cursor_position`]. For example, a left region of 20 columns on a
+/// `120x40` viewport leaves the pane rectangle at `x = 20`.
 ///
 /// `image_render_mode` `Placeholder` writes `terminal image unavailable` into visible
 /// image rectangles: a four-column image at `(12, 6)` shows `term` across its
 /// first four cells. `Native` keeps the pane cells beneath image pixels. In
 /// `Native` mode, an image shows the unavailable-image text while its record
 /// is missing or `unavailable_image_keys` names its placement. A `Native`
-/// image that a floating pane drawn above its pane covers shows no text.
+/// image that a floating pane drawn above its pane covers shows no text. The
+/// open tray covers the text of every image under it.
 ///
 /// `placement_presentation` tints visible affected panes and paints messages
 /// inside visible pane content outside stack headers. Collapsed stack headers
@@ -167,7 +260,7 @@ impl<'rows> DrawnRows<'rows> {
 ///
 /// `drawn_rows` [`DrawnRows::Every`] runs every step above over every row.
 /// [`DrawnRows::Listed`] leaves each listed row as `Every` would, and runs
-/// each step that writes whole rows (steps 1, 3, 7, 8's cells and 11) only
+/// each step that writes whole rows (steps 1, 3, 7, 8's cells, 9 and 12) only
 /// over the listed rows. A box, strip or bar that covers no listed row is
 /// not drawn. Example: rows `[10]` of a frame whose one pane prints on row
 /// 10 redraws the 200 cells of row 10, and the pane's border cells on that
@@ -179,20 +272,21 @@ impl<'rows> DrawnRows<'rows> {
 /// `render_snapshot.session_snapshot.active_tab_snapshot.tab_id`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
+    frame_geometry: &FrameGeometry<'_>,
     theme: &Theme,
     keymap_hints: &KeymapHints,
     pending_key_sequence: Option<&KeySequence>,
-    viewer_chrome: ViewerChrome,
     image_render_mode: ImageRenderMode,
     unavailable_image_keys: &[ImagePlacementKey],
     placement_presentation: Option<&PanePlacementPresentation>,
     placement_target: Option<&TiledPlacementTarget>,
-    viewport_area: RatatuiRect,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
+    let render_snapshot = frame_geometry.render_snapshot;
+    let committed_regions = frame_geometry.committed_regions;
+    let viewer_chrome = frame_geometry.viewer_chrome;
+    let viewport_area = frame_geometry.viewport_area;
     if viewport_area.width == 0 || viewport_area.height == 0 {
         return;
     }
@@ -221,25 +315,13 @@ pub fn render_frame(
         return;
     }
 
-    // Center the solved layout inside this client's viewport. The layout was
-    // solved for the tab's effective (smallest-client) size: a larger client
-    // has margin. `effective_layout_rect` is that effective-sized rect centered
-    // in the pane area left by the committed regions, and `layout_origin` shifts each
-    // effective-space layout rect into it.
-    let effective_layout_rect = compute_content_rect(
-        compute_pane_area(committed_regions, viewport_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .tab_size,
-    );
-    let layout_origin = get_area_origin(effective_layout_rect);
-    let placed_floating_panes = list_placed_floating_panes(
-        render_snapshot,
-        committed_regions,
-        viewer_chrome,
-        viewport_area,
-    );
+    // The layout was solved for the tab's effective (smallest-client) size: a
+    // larger client has margin. `effective_layout_rect` is that effective-sized
+    // rect centered in the pane area left by the committed regions, and
+    // `layout_origin` shifts each effective-space layout rect into it.
+    let effective_layout_rect = frame_geometry.effective_layout_rect;
+    let layout_origin = frame_geometry.get_layout_origin();
+    let placed_floating_panes = &frame_geometry.placed_floating_panes;
 
     draw_panes(
         render_snapshot,
@@ -259,10 +341,7 @@ pub fn render_frame(
         screen_buffer,
     );
     let placeholder_rects = compute_image_placeholder_rects(
-        render_snapshot,
-        committed_regions,
-        &placed_floating_panes,
-        viewport_area,
+        frame_geometry,
         image_render_mode,
         unavailable_image_keys,
         placement_presentation,
@@ -319,6 +398,21 @@ pub fn render_frame(
         draw_image_placeholders(&floating_pane_placeholder_rects, screen_buffer);
     }
 
+    // The viewer's open floating pane tray draws over the floating panes.
+    if let (Some(floating_pane_tray), Some(tray_layout)) = (
+        viewer_chrome.floating_pane_tray,
+        &frame_geometry.floating_pane_tray_layout,
+    ) {
+        draw_floating_pane_tray(
+            render_snapshot,
+            tray_layout,
+            floating_pane_tray,
+            theme,
+            drawn_rows,
+            screen_buffer,
+        );
+    }
+
     // The tabline draws from the same tab-row facts hit-testing reads.
     if let Some(tabline_rect) = find_region_area(committed_regions, 0, viewport_area)
         .filter(|tabline_rect| drawn_rows.is_area_drawn(*tabline_rect))
@@ -348,7 +442,7 @@ pub fn render_frame(
 }
 
 /// The buffer rows that differ between the frame [`render_frame`] draws from
-/// `previous_render_snapshot` and the one it draws from `next_render_snapshot`,
+/// `previous_render_snapshot` and the one it draws from `next_frame_geometry`,
 /// when every other input of the two calls is equal: in ascending order, none
 /// repeated. `None` when the two snapshots differ in anything a frame draws
 /// other than pane rows.
@@ -368,18 +462,16 @@ pub fn render_frame(
 #[must_use]
 pub fn list_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
-    next_render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    viewer_chrome: ViewerChrome,
-    viewport_area: RatatuiRect,
+    next_frame_geometry: &FrameGeometry<'_>,
 ) -> Option<Vec<u16>> {
+    let viewport_area = next_frame_geometry.viewport_area;
     let RenderSnapshot {
         is_recovery_notice_visible,
         session_snapshot,
         pane_snapshots,
         client_snapshot,
         placement_preview: _,
-    } = next_render_snapshot;
+    } = next_frame_geometry.render_snapshot;
     if previous_render_snapshot.is_recovery_notice_visible != *is_recovery_notice_visible
         || previous_render_snapshot.session_snapshot != *session_snapshot
         || previous_render_snapshot.client_snapshot != *client_snapshot
@@ -387,14 +479,7 @@ pub fn list_changed_screen_rows(
     {
         return None;
     }
-    let layout_origin =
-        compute_layout_origin(next_render_snapshot, committed_regions, viewport_area);
-    let placed_floating_panes = list_placed_floating_panes(
-        next_render_snapshot,
-        committed_regions,
-        viewer_chrome,
-        viewport_area,
-    );
+    let layout_origin = next_frame_geometry.get_layout_origin();
     let mut changed_screen_rows = Vec::new();
     for (previous_pane_snapshot, next_pane_snapshot) in previous_render_snapshot
         .pane_snapshots
@@ -416,7 +501,8 @@ pub fn list_changed_screen_rows(
             .find_visible_pane_slot(pane_id)
             .and_then(|pane_slot| pane_slot.content_rect)
             .map(|content_rect| place_cell_rect(content_rect, layout_origin));
-        let floating_content_area = placed_floating_panes
+        let floating_content_area = next_frame_geometry
+            .placed_floating_panes
             .iter()
             .find(|placed_floating_pane| placed_floating_pane.floating_pane_slot.pane_id == pane_id)
             .map(|placed_floating_pane| placed_floating_pane.visible_content_area);
@@ -517,14 +603,13 @@ fn clear_drawn_rows(
 /// `None` when no cursor should show this frame.
 ///
 /// Companion to [`render_frame`]: the buffer carries no cursor, so the caller
-/// reads this alongside the paint — passing the same `viewport_area`,
-/// committed regions and `viewer_chrome` — and places the terminal's cursor at
-/// the returned [`Position`] (or hides it on `None`). The position is the
-/// focused pane's cursor cell — its row and column within the pane's content
-/// area, clamped to that content area's last cell — in the same absolute
-/// buffer coordinates the panes are drawn in. A tiled pane's content area takes
-/// the letterbox offset `render_frame` centers the layout with; a floating
-/// pane's takes none.
+/// reads this alongside the paint — passing the same `frame_geometry` — and
+/// places the terminal's cursor at the returned [`Position`] (or hides it on
+/// `None`). The position is the focused pane's cursor cell — its row and
+/// column within the pane's content area, clamped to that content area's last
+/// cell — in the same absolute buffer coordinates the panes are drawn in. A
+/// tiled pane's content area takes the letterbox offset `render_frame` centers
+/// the layout with; a floating pane's takes none.
 ///
 /// Returns `None` when the client has no focused pane; that pane is neither a
 /// floating pane this viewer draws nor a placed slot of the active tab; it has
@@ -532,26 +617,18 @@ fn clear_drawn_rows(
 /// hidden, a collapsed stack member, or a slot of two or fewer columns or rows,
 /// whose content rect holds no cells); it has no terminal grid this frame; its
 /// view is scrolled back into history; the application has hidden its cursor;
-/// the cursor cell of a floating pane lies outside the pane area; or a floating
-/// pane drawn above the focused pane covers the cursor cell.
+/// the cursor cell of a floating pane lies outside the pane area; a floating
+/// pane drawn above the focused pane covers the cursor cell; or the viewer's
+/// open floating pane tray covers it.
 ///
 /// A `120x40` viewport with a 20-column left region places the same pane cursor
 /// 20 columns farther right than a whole-area layout. A focused floating pane
 /// whose content starts at `(10, 3)` in a pane area at `(0, 1)` puts a cursor
 /// at row `2`, column `5` at `(15, 6)`.
-pub fn get_cursor_position(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    viewer_chrome: ViewerChrome,
-    viewport_area: RatatuiRect,
-) -> Option<Position> {
+pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Position> {
+    let render_snapshot = frame_geometry.render_snapshot;
     let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id?;
-    let placed_floating_panes = list_placed_floating_panes(
-        render_snapshot,
-        committed_regions,
-        viewer_chrome,
-        viewport_area,
-    );
+    let placed_floating_panes = &frame_geometry.placed_floating_panes;
 
     // The content area the cursor sits in, the part of it that is drawn, and
     // the floating panes drawn above it.
@@ -579,10 +656,8 @@ pub fn get_cursor_position(
                 // `content_rect` is in tab-layout space; `place_cell_rect`
                 // shifts it by the same letterbox offset `render_frame`
                 // centers with.
-                let placed_content_rect = place_cell_rect(
-                    pane_slot.content_rect?,
-                    compute_layout_origin(render_snapshot, committed_regions, viewport_area),
-                );
+                let placed_content_rect =
+                    place_cell_rect(pane_slot.content_rect?, frame_geometry.get_layout_origin());
                 (
                     placed_content_rect,
                     placed_content_rect,
@@ -615,6 +690,11 @@ pub fn get_cursor_position(
         || covering_floating_panes
             .iter()
             .any(|placed_floating_pane| placed_floating_pane.outer_area.contains(cursor_position))
+        || frame_geometry
+            .floating_pane_tray_layout
+            .is_some_and(|tray_layout| {
+                place_screen_rect(tray_layout.tray_rect).contains(cursor_position)
+            })
     {
         return None;
     }
@@ -1320,6 +1400,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::PaneMoveChoice => Some("MOVE"),
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
         LockMode::DockUndock => Some("DOCK"),
+        LockMode::FloatingPaneTray => Some("TRAY"),
     }
 }
 
@@ -1358,6 +1439,12 @@ pub(crate) fn place_cell_rect(cell_rect: Rect, layout_origin: Point) -> RatatuiR
     }
 }
 
+/// `screen_rect` as a ratatui area, both in screen cells: [`place_cell_rect`]
+/// at origin `(0, 0)`.
+pub(crate) fn place_screen_rect(screen_rect: Rect) -> RatatuiRect {
+    place_cell_rect(screen_rect, Point { column: 0, row: 0 })
+}
+
 /// Each visible tiled pane of the active tab that has a content rect and a pane
 /// snapshot, in pane slot order: its snapshot, and its content rect placed at
 /// `layout_origin` by [`place_cell_rect`]. A hidden pane, a pane with no
@@ -1390,23 +1477,6 @@ pub(crate) fn find_region_area(
         .region_rects
         .get(region_index)
         .map(|&region_rect| place_cell_rect(region_rect, get_area_origin(viewport_area)))
-}
-
-/// The buffer cell where the active tab's solved layout starts: the top-left of
-/// the layout's `tab_size` centered in the pane area that
-/// `committed_regions` leave inside `viewport_area`.
-pub(crate) fn compute_layout_origin(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    viewport_area: RatatuiRect,
-) -> Point {
-    get_area_origin(compute_content_rect(
-        compute_pane_area(committed_regions, viewport_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .tab_size,
-    ))
 }
 
 /// Return the pane rectangle left by the committed regions in frame coordinates.
@@ -1463,17 +1533,21 @@ fn count_span_cells(span: &Span<'_>) -> usize {
 /// the columns left, and the next span is drawn from the column where that one
 /// stopped.
 ///
+/// Returns the column after the last cell drawn: `start_column` when nothing
+/// is drawn, a `row_index` outside the buffer's rows included.
+///
 /// Example: `U+17D8` then `x` in 2 columns puts `U+17D8` at `start_column` and
-/// `x` in the column after it. `漢x` in 1 column draws nothing.
+/// `x` in the column after it, and returns `start_column + 2`. `漢x` in 1
+/// column draws nothing and returns `start_column`.
 pub(crate) fn set_line_clipped(
     screen_buffer: &mut Buffer,
     start_column: u16,
     row_index: u16,
     line: &Line<'_>,
     maximum_width: u16,
-) {
+) -> u16 {
     if row_index < screen_buffer.area.top() || row_index >= screen_buffer.area.bottom() {
-        return;
+        return start_column;
     }
     let end_column = screen_buffer
         .area
@@ -1501,6 +1575,7 @@ pub(crate) fn set_line_clipped(
             column_index = next_column_index;
         }
     }
+    column_index
 }
 
 /// The centered rect of the effective (solved) size within the pane area.
@@ -1600,7 +1675,10 @@ use style::*;
 use tabline::draw_tabline;
 // The statusline fills its row with the same bar background as the tabline.
 pub(crate) use style::compute_bar_style;
-pub(crate) use tabline::solve_tabline_layout;
+pub(crate) use tabline::{
+    compute_right_block_start_column, find_floating_pane_tray_button_column, solve_tabline_layout,
+    FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;

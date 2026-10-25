@@ -1101,8 +1101,8 @@ fn build_cells_floating_pane_size(column_count: u16, row_count: u16) -> Floating
 ///   placement, then the `20x6` pane, which it pinned at `(70, 2)`;
 /// - the minimizing client (`80x24`) moved the `60%` pane to `(2, 1)`, then
 ///   minimized it, and never showed the `20x6` pane;
-/// - the starving client reported no room to draw a pane, and shows the `60%`
-///   pane.
+/// - the starving client reported no room to draw a pane, and holds both
+///   panes minimized.
 ///
 /// Returns the session and its tab.
 fn build_floating_pane_session() -> (Session, TabId) {
@@ -1179,12 +1179,6 @@ fn build_floating_pane_session() -> (Session, TabId) {
     ));
     assert!(minimizing_client.minimize_floating_pane(build_percent_floating_pane_id()));
 
-    let starving_client = session
-        .clients
-        .get_client_mut_by_id(build_starving_client_id())
-        .expect("the starving client is attached");
-    assert!(starving_client.focus_floating_pane(build_percent_floating_pane_id()));
-
     (session, tab_id)
 }
 
@@ -1218,7 +1212,7 @@ fn build_expected_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
                 FloatingPaneClientView {
                     client_id: build_starving_client_id(),
                     position: FloatingPanePosition::Default,
-                    visibility: FloatingPaneVisibility::NoFloatingViewport,
+                    visibility: FloatingPaneVisibility::Minimized,
                 },
             ],
         },

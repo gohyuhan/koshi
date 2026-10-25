@@ -9,10 +9,11 @@
 //! (answers to DA/DSR/DECRQM: escape sequences the child sends to ask "what
 //! terminal are you" / "what's your status" / "is this mode on") back into
 //! the pane's PTY, and marks the view changed of every subscriber whose
-//! client shows the pane. Shell-integration events are published in marker
-//! order, and the `OSC 52` clipboard copies the engine read go to the clients
-//! that focus the pane. Bytes for a pane with no engine are dropped without
-//! touching any state.
+//! client shows the pane, and of every client of a floating pane's session
+//! when the pane's display title changes. Shell-integration events are
+//! published in marker order, and the `OSC 52` clipboard copies the engine
+//! read go to the clients that focus the pane. Bytes for a pane with no engine
+//! are dropped without touching any state.
 
 use std::time::Instant;
 
@@ -23,6 +24,7 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::graphics::GraphicsError;
 use koshi_terminal::state::ShellIntegrationFact;
 
+use crate::runtime::snapshot::is_pane_title_input_changed;
 use crate::server::Server;
 
 #[derive(Clone, Copy)]
@@ -32,6 +34,8 @@ struct TerminalAdvanceStateBefore {
     active_screen: koshi_terminal::state::Screen,
     graphics_event_count: usize,
     dropped_graphics_error_count: usize,
+    title_change_count: u64,
+    working_directory_change_count: u64,
 }
 
 impl TerminalAdvanceStateBefore {
@@ -43,6 +47,8 @@ impl TerminalAdvanceStateBefore {
             active_screen: terminal_engine.get_terminal_state().get_active_screen(),
             graphics_event_count: terminal_engine.list_graphics_events().count(),
             dropped_graphics_error_count: terminal_engine.get_dropped_graphics_error_count(),
+            title_change_count: terminal_engine.get_title_change_count(),
+            working_directory_change_count: terminal_engine.get_working_directory_change_count(),
         }
     }
 }
@@ -90,6 +96,13 @@ impl Server {
     /// ([`TerminalEngine::take_clipboard_copies`]) goes, in order, to every
     /// client whose focused pane is `pane_id`, on this machine and on other
     /// machines alike, as an `OSC 52` host write.
+    ///
+    /// A chunk that changes an input of a floating pane's display title
+    /// (`is_pane_title_input_changed`) also marks the view changed of every
+    /// subscriber whose client is attached to the pane's session
+    /// (`mark_views_listing_floating_pane`), also a client that minimized the
+    /// pane. Example: `cd /tmp` in a floating shell that one client minimized
+    /// gives that client a frame with the new title `/tmp`.
     pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8]) {
         let terminal_cell_size = self.session_by_id.values().find_map(|session| {
             if let Some(tab) = session.find_tab_by_pane_id(pane_id) {
@@ -155,7 +168,9 @@ impl Server {
     /// `reply_bytes` back into the pane, clear the pane's selections when the
     /// active screen changed, re-anchor held views when the scrollback gained
     /// or lost lines, publish `shell_integration_facts` as events, send its
-    /// clipboard copies, and mark the views showing the pane changed.
+    /// clipboard copies, mark the views changed of every client of the
+    /// session when an input of a floating pane's title changed, and mark the
+    /// views showing the pane changed.
     fn finish_terminal_advance(
         &mut self,
         pane_id: PaneId,
@@ -189,6 +204,14 @@ impl Server {
             - terminal_advance_state_before.pushed_line_count)
             as usize;
         let active_screen_after = terminal_engine.get_terminal_state().get_active_screen();
+        let is_title_input_changed = is_pane_title_input_changed(
+            terminal_engine.get_terminal_state(),
+            terminal_advance_state_before.active_screen,
+            terminal_advance_state_before.title_change_count
+                != terminal_engine.get_title_change_count(),
+            terminal_advance_state_before.working_directory_change_count
+                != terminal_engine.get_working_directory_change_count(),
+        );
 
         if !reply_bytes.is_empty() {
             if let Err(write_error) = self
@@ -238,6 +261,9 @@ impl Server {
         }
         if !clipboard_copies.is_empty() {
             self.copy_pane_clipboard_to_clients(pane_id, &clipboard_copies);
+        }
+        if is_title_input_changed {
+            self.mark_views_listing_floating_pane(pane_id);
         }
         self.mark_views_showing_pane(pane_id);
     }

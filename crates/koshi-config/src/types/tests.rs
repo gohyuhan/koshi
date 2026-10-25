@@ -99,6 +99,7 @@ fn default_server_and_client_configs_match_expected_settings() {
         vec![
             &ModeName::from_text("dock-undock"),
             &ModeName::from_text("floating-pane-move"),
+            &ModeName::from_text("floating-pane-tray"),
             &ModeName::from_text("locked"),
             &ModeName::from_text("normal"),
             &ModeName::from_text("pane-move-choice"),
@@ -431,6 +432,7 @@ fn the_default_modes_remove_no_sequences() {
         "pane-move-choice",
         "floating-pane-move",
         "dock-undock",
+        "floating-pane-tray",
     ] {
         assert_eq!(
             default_mode_bindings_by_name[&ModeName::from_text(mode_name)].removed_key_sequences,
@@ -502,7 +504,7 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
         build_default_mode_bindings(Leader::Modifiers(BindingModifierFlags::SHIFT));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 27);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 28);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
             [&build_single_chord_sequence(BindingModifierFlags::SHIFT, 'q')],
@@ -559,12 +561,12 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys:
-    // the table holds all 27 normal-mode bindings.
+    // the table holds all 28 normal-mode bindings.
     let fullscreen_key_chord = build_character_chord(BindingModifierFlags::ALT, 'f');
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 27);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 28);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(fullscreen_key_chord)],
         build_bound_action("toggle-pane-fullscreen")
@@ -730,6 +732,12 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
                 focus_target: FocusTarget::PreviousFloatingPane,
                 client_id: None,
             })),
+        ),
+        build_expected_client_binding(
+            "normal",
+            "<C-p> w",
+            "toggle-floating-pane-tray",
+            ClientActionKind::ToggleFloatingPaneTray,
         ),
         build_expected_binding(
             "normal",
@@ -1078,6 +1086,54 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "cancel-dock-undock",
             ClientActionKind::CancelDockUndock,
         ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<Left>",
+            "select-tray-tile-left",
+            ClientActionKind::SelectTrayTile(Direction::Left),
+        ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<Down>",
+            "select-tray-tile-down",
+            ClientActionKind::SelectTrayTile(Direction::Down),
+        ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<Up>",
+            "select-tray-tile-up",
+            ClientActionKind::SelectTrayTile(Direction::Up),
+        ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<Right>",
+            "select-tray-tile-right",
+            ClientActionKind::SelectTrayTile(Direction::Right),
+        ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<CR>",
+            "toggle-selected-tray-tile",
+            ClientActionKind::ToggleSelectedTrayTile,
+        ),
+        build_expected_binding(
+            "floating-pane-tray",
+            "a",
+            "toggle-minimize-all-floating-panes",
+            Ok(Command::ToggleAllFloatingPanesMinimized),
+        ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<Esc>",
+            "close-floating-pane-tray",
+            ClientActionKind::CloseFloatingPaneTray,
+        ),
+        build_expected_client_binding(
+            "floating-pane-tray",
+            "<C-p> w",
+            "toggle-floating-pane-tray",
+            ClientActionKind::ToggleFloatingPaneTray,
+        ),
         build_expected_binding(
             "normal",
             "<C-g>",
@@ -1184,6 +1240,7 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
             "pane-move-choice",
             "floating-pane-move",
             "dock-undock",
+            "floating-pane-tray",
         ]
         .contains(&mode_name.get_name())
         {

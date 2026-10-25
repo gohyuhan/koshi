@@ -6,6 +6,7 @@
 //! to the region drawn under it.
 
 pub mod floating_pane_chrome;
+pub mod floating_pane_tray;
 pub mod hit_test;
 pub mod images;
 pub mod placement;
@@ -25,6 +26,7 @@ pub use images::{
     MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT, TERMINAL_IMAGE_UNAVAILABLE,
 };
 pub use render::{
-    compute_content_rect, compute_pane_area, get_cursor_position, get_cursor_style,
-    is_placement_target_pane, list_changed_screen_rows, render_frame, DrawnRows,
+    build_frame_geometry, compute_content_rect, compute_pane_area, get_cursor_position,
+    get_cursor_style, is_placement_target_pane, list_changed_screen_rows, render_frame, DrawnRows,
+    FrameGeometry,
 };

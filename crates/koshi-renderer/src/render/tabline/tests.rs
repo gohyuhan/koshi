@@ -1,19 +1,20 @@
 //! Tests for the tabline solve and paint: which blocks anchor the two edges,
-//! which tabs fit the middle window, where the scroll arrows land, and the exact
-//! cells and styles `draw_tabline` writes — including tab widths measured by
-//! display width for wide (CJK), emoji, and combining-mark titles.
+//! which tabs fit the middle window, where the scroll arrows land, the floating
+//! pane tray button and its one-cell glyph, and the exact cells and styles
+//! `draw_tabline` writes — including tab widths measured by display width for
+//! wide (CJK), emoji, and combining-mark titles.
 
 use super::*;
 
-use crate::render::tests::compute_version_badge_column_count;
+use crate::render::tests::{compute_version_badge_column_count, format_rendered_cells};
 use crate::snapshot::{LinkStatus, Reconnecting, ViewerChrome};
 
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, SessionId, TabId};
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use crate::snapshot::{ClientSnapshot, SessionSnapshot, TabMetadata, TabSnapshot};
+use crate::snapshot::{ClientSnapshot, FloatingPane, SessionSnapshot, TabMetadata, TabSnapshot};
 
 /// Build a tabline-only snapshot. `tab_names_and_activity` are `(name, active)`.
 /// It carries no
@@ -58,7 +59,7 @@ fn build_tabline_frame(
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -117,28 +118,15 @@ fn build_tabline_area(column_count: u16) -> RatatuiRect {
     }
 }
 
-/// Everything `draw_tabline` paints from `tabline_test_frame`.
+/// Everything `draw_tabline` paints from `tabline_test_frame`: the tab-row
+/// facts of its frame ([`FrameLayout::get_tabline_inputs`]).
+///
+/// [`FrameLayout::get_tabline_inputs`]: crate::snapshot::FrameLayout::get_tabline_inputs
 fn build_tabline_inputs(tabline_test_frame: &TablineTestFrame) -> TablineInputs<'_> {
-    TablineInputs {
-        session_name: &tabline_test_frame
-            .render_snapshot
-            .session_snapshot
-            .session_name,
-        tabs_metadata: &tabline_test_frame
-            .render_snapshot
-            .session_snapshot
-            .tabs_metadata,
-        lock_mode: tabline_test_frame.render_snapshot.client_snapshot.lock_mode,
-        is_mouse_selection_enabled: tabline_test_frame
-            .render_snapshot
-            .client_snapshot
-            .is_mouse_selection_enabled,
-        reconnecting: match tabline_test_frame.viewer_chrome.link_status {
-            LinkStatus::Redialing(reconnecting) => Some(reconnecting),
-            LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
-        },
-        tabline_offset: tabline_test_frame.viewer_chrome.tabline_offset,
-    }
+    tabline_test_frame
+        .render_snapshot
+        .build_frame_layout(tabline_test_frame.viewer_chrome)
+        .get_tabline_inputs()
 }
 
 /// Paint the tabline into a fresh one-row buffer of `column_count` cells.
@@ -160,13 +148,7 @@ fn solve_tabline_layout(
     tabline_test_frame: &TablineTestFrame,
     tabline_area: RatatuiRect,
 ) -> TablineLayout {
-    super::solve_tabline_layout(
-        tabline_test_frame
-            .render_snapshot
-            .build_frame_layout(tabline_test_frame.viewer_chrome)
-            .get_tabline_inputs(),
-        tabline_area,
-    )
+    super::solve_tabline_layout(build_tabline_inputs(tabline_test_frame), tabline_area)
 }
 
 /// The symbol at `column_index` of the single rendered row.
@@ -1395,4 +1377,97 @@ fn the_session_block_reports_its_own_width_even_with_no_room_for_it() {
     assert_eq!(session_block.session_name_text, " s ");
     assert_eq!(session_block.version_badge_text, None);
     assert_eq!(session_block.cell_count, 3);
+}
+
+#[test]
+fn the_tray_button_glyph_takes_one_cell_also_where_ambiguous_characters_take_two() {
+    use unicode_width::UnicodeWidthStr;
+
+    assert_eq!(
+        get_text_width(FLOATING_PANE_TRAY_BUTTON_TEXT),
+        FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT
+    );
+    assert_eq!(UnicodeWidthStr::width("⧉"), 1);
+    assert_eq!(UnicodeWidthStr::width_cjk("⧉"), 1);
+}
+
+#[test]
+fn a_session_with_a_floating_pane_puts_the_tray_button_left_of_the_mode_tag_and_ends_the_tabs_there(
+) {
+    let mut tabline_test_frame = build_tabline_frame(
+        "s",
+        &[("one", true), ("two", false)],
+        None,
+        LockMode::Normal,
+        false,
+    );
+    // ` s ` and the version badge take columns 0 to 2 + badge; tabs ` #1  one `
+    // and ` #2  two ` take 9 columns each, one apart.
+    let badge_column_count = compute_version_badge_column_count();
+    let tabline_column_count = 31 + badge_column_count;
+    let tabline_area = build_tabline_area(tabline_column_count);
+    let tabline_layout_without_float = solve_tabline_layout(&tabline_test_frame, tabline_area);
+    tabline_test_frame
+        .render_snapshot
+        .session_snapshot
+        .floating_panes
+        .push(FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: None,
+        });
+
+    let tabline_layout_with_float = solve_tabline_layout(&tabline_test_frame, tabline_area);
+
+    // ` BASE ` takes the last 6 columns, from 25 + badge. Both tabs fit before
+    // it. The button takes the 3 columns before ` BASE `, the second tab no
+    // longer fits, and the strip scrolls with a right arrow before the button.
+    let right_block_start_column = 25 + badge_column_count;
+    assert_eq!(
+        tabline_layout_without_float.right_block_start_column,
+        right_block_start_column
+    );
+    assert_eq!(
+        tabline_layout_without_float.floating_pane_tray_button_column,
+        None
+    );
+    assert_eq!(
+        tabline_layout_without_float.tab_strip_end_column,
+        right_block_start_column
+    );
+    assert_eq!(
+        tabline_layout_without_float.visible_tab_spans,
+        vec![
+            build_visible_tab_span(0, 4 + badge_column_count, 9),
+            build_visible_tab_span(1, 14 + badge_column_count, 9),
+        ]
+    );
+    assert_eq!(
+        tabline_layout_with_float.right_block_start_column,
+        right_block_start_column
+    );
+    assert_eq!(
+        tabline_layout_with_float.floating_pane_tray_button_column,
+        Some(22 + badge_column_count)
+    );
+    assert_eq!(
+        tabline_layout_with_float.tab_strip_end_column,
+        22 + badge_column_count
+    );
+    assert_eq!(
+        tabline_layout_with_float.visible_tab_spans,
+        vec![build_visible_tab_span(0, 5 + badge_column_count, 9)]
+    );
+    assert_eq!(tabline_layout_with_float.left_scroll_arrow_column, None);
+    assert_eq!(
+        tabline_layout_with_float.right_scroll_arrow_column,
+        Some(21 + badge_column_count)
+    );
+    assert_eq!(
+        format_rendered_cells(
+            &render_tabline(&tabline_test_frame, tabline_column_count),
+            0,
+            22 + badge_column_count..tabline_column_count
+        ),
+        " ⧉  BASE "
+    );
 }

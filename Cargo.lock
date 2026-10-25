@@ -1319,6 +1319,7 @@ dependencies = [
  "koshi-terminal",
  "koshi-test-support",
  "ratatui",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

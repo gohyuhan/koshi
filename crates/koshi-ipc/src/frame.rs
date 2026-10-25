@@ -97,8 +97,38 @@ pub struct FrameSession {
     /// pane area narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FrameFloatingPaneSlot>,
     /// Every floating pane of the session, in the order the panes became
-    /// floating, whether or not the viewing client shows it.
-    pub floating_pane_ids: Vec<PaneId>,
+    /// floating, shown or minimized for the viewing client.
+    pub floating_panes: Vec<FrameFloatingPane>,
+}
+
+/// One floating pane of the session, shown or minimized for the viewing
+/// client. The frame carries each pane's title once: in the pane's
+/// [`FramePane`] while the client shows the pane, and here while the client
+/// minimized it.
+///
+/// A shown pane travels as `{"Shown": {"pane_id": …}}`, and a minimized pane
+/// titled `htop` as `{"Minimized": {"pane_id": …, "pane_title": "htop"}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameFloatingPane {
+    /// The viewing client shows the pane. The frame holds the pane's slot in
+    /// [`floating_pane_slots`](FrameSession::floating_pane_slots) and its
+    /// [`FramePane`], which holds its title. A client that loses its floating
+    /// viewport has every pane it shows minimized by the session in the same
+    /// change.
+    Shown {
+        /// The floating pane.
+        pane_id: PaneId,
+    },
+    /// The viewing client minimized the pane. The frame holds no slot and no
+    /// [`FramePane`] of it.
+    Minimized {
+        /// The floating pane.
+        pane_id: PaneId,
+        /// The pane's resolved display title, by the rule of
+        /// [`FramePane::pane_title`]. `None` when the pane has reported
+        /// neither a working directory nor a title.
+        pane_title: Option<String>,
+    },
 }
 
 /// The active tab, with its layout already solved into placed pane slots.

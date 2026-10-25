@@ -1944,6 +1944,48 @@ fn a_split_title_report_is_carried_whole() {
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), ' ');
 }
 
+/// Each chunk adds `1` to the title change count when it names another title
+/// or clears one, and `1` to the working directory change count when it names
+/// another directory. A chunk that repeats the current value, or that sends an
+/// OSC 7 that does not parse, adds `0`.
+#[test]
+fn a_chunk_counts_one_title_or_directory_change_only_when_the_value_changes() {
+    let mut engine = build_test_terminal_engine();
+    let chunk_change_counts: [(&[u8], (u64, u64)); 9] = [
+        (b"\x1b]2;htop\x07", (1, 0)),
+        (b"\x1b]2;htop\x07", (1, 0)),
+        (b"\x1b]0;vim\x07\x1b]2;less\x07", (2, 0)),
+        (b"\x1b]7;file://host/home/user/project\x07", (2, 1)),
+        (b"\x1b]7;file://host/home/user/project\x07", (2, 1)),
+        (b"\x1b]7;http://host/home/user\x07", (2, 1)),
+        (b"\x1b]7;file://host/home/user\x07", (2, 2)),
+        (b"\x1bc", (3, 2)),
+        (b"\x1bc", (3, 2)),
+    ];
+
+    for (chunk_bytes, expected_change_counts) in chunk_change_counts {
+        let _ = engine.process_pty_output(chunk_bytes);
+
+        assert_eq!(
+            (
+                engine.get_title_change_count(),
+                engine.get_working_directory_change_count()
+            ),
+            expected_change_counts,
+            "{chunk_bytes:?}"
+        );
+    }
+    assert_eq!(engine.get_terminal_state().get_title(), None);
+    assert_eq!(
+        engine
+            .get_terminal_state()
+            .get_current_working_directory()
+            .map(|reported_working_directory| reported_working_directory
+                .get_working_directory_path()),
+        Some(Path::new("/home/user"))
+    );
+}
+
 /// A CSI cut in half is carried whole: its final byte completes the sequence
 /// in the next parser instead of printing as text.
 #[test]

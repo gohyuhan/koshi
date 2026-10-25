@@ -54,7 +54,7 @@ fn build_test_percent_floating_pane_id() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(6))
 }
 
-/// The client viewing the tab with no floating viewport.
+/// The second client viewing the tab.
 fn build_test_second_client_id() -> ClientId {
     ClientId::from_uuid(build_test_uuid_with_suffix(7))
 }
@@ -77,8 +77,8 @@ fn build_cells_dimension(cell_count: u16) -> FloatingPaneDimension {
 /// Two floating panes whose views carry every visibility and every position:
 /// the `60%` pane drawn on top for the first client at the default placement
 /// and minimized for the second client, pinned; the `30`-column pane drawn at
-/// the back for the first client, moved, and shown with no floating viewport
-/// for the second client.
+/// the back for the first client, moved, and minimized for the second client
+/// at the default placement.
 fn build_populated_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
     vec![
         FloatingPaneLayout {
@@ -129,7 +129,7 @@ fn build_populated_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
                 FloatingPaneClientView {
                     client_id: build_test_second_client_id(),
                     position: FloatingPanePosition::Default,
-                    visibility: FloatingPaneVisibility::NoFloatingViewport,
+                    visibility: FloatingPaneVisibility::Minimized,
                 },
             ],
         },
@@ -326,7 +326,7 @@ fn build_populated_layout_json() -> serde_json::Value {
                     {
                         "client_id": "00000000-0000-0000-0000-000000000007",
                         "position": "Default",
-                        "visibility": "NoFloatingViewport"
+                        "visibility": "Minimized"
                     }
                 ]
             }
@@ -689,7 +689,7 @@ fn a_floating_pane_visibility_this_build_does_not_have_is_refused() {
         decoded_client_view_result
             .expect_err("a visibility this build does not have is refused")
             .to_string(),
-        "unknown variant `Hidden`, expected one of `Drawn`, `Minimized`, `NoFloatingViewport` at line 1 column 94"
+        "unknown variant `Hidden`, expected `Drawn` or `Minimized` at line 1 column 94"
     );
 }
 

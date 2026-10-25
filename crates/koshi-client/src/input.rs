@@ -29,8 +29,8 @@
 //! the `<C-p>` breadcrumb and the chords that continue it.
 //!
 //! **Viewer-local modes run here too.** Pane placement mode, the move
-//! chooser, floating pane move mode, and dock/undock mode each own the
-//! keyboard while they are on and the viewer is linked.
+//! chooser, floating pane move mode, dock/undock mode, and the floating pane
+//! tray each own the keyboard while they are on and the viewer is linked.
 //! `Client::apply_client_action` runs one of their actions: it changes the
 //! mode, or returns the session command that the mode sends.
 
@@ -55,7 +55,7 @@ use koshi_layout::placement::{
     find_stack_target_pane_id, is_same_tab_placement_noop as is_layout_placement_noop,
     InsertionSpan, PlacementDestinations, PlacementTarget,
 };
-use koshi_renderer::snapshot::{MouseFrame, PlacementSnapshot, TabSnapshot};
+use koshi_renderer::snapshot::{FloatingPane, MouseFrame, PlacementSnapshot, TabSnapshot};
 
 use crate::{
     is_focused_pane_floating, Client, DockUndockMode, FloatingPaneMoveSelection, LinkStatus,
@@ -64,7 +64,7 @@ use crate::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The read times of this terminal's input events, shared by its input thread
 /// and the attach loop under one lock.
@@ -193,9 +193,9 @@ impl Client {
 
     /// Return the keymap mode that currently owns this viewer's keyboard.
     ///
-    /// Dock/undock mode, pane placement mode, the move chooser, and floating
-    /// pane move mode are local submodes layered over the stored normal or
-    /// locked mode
+    /// The floating pane tray, dock/undock mode, pane placement mode, the move
+    /// chooser, and floating pane move mode are local submodes layered over the
+    /// stored normal or locked mode
     /// ([`find_viewer_local_input_mode`](Self::find_viewer_local_input_mode)).
     /// Entering one changes key resolution only; it does not change the
     /// session lock state. A submode owns the keyboard only while the viewer
@@ -210,13 +210,17 @@ impl Client {
             .unwrap_or(self.lock_mode)
     }
 
-    /// Return the local submode on: `DockUndock` while dock/undock mode is on,
-    /// also while its pane placement mode is active, `PanePlacement` while
-    /// pane placement mode is active, `PaneMoveChoice` while the move chooser
-    /// is on, and `FloatingPaneMove` while floating pane move mode is on.
-    /// `None` when no submode is on.
+    /// Return the local submode on: `FloatingPaneTray` while the floating pane
+    /// tray is open, `DockUndock` while dock/undock mode is on, also while its
+    /// pane placement mode is active, `PanePlacement` while pane placement
+    /// mode is active, `PaneMoveChoice` while the move chooser is on, and
+    /// `FloatingPaneMove` while floating pane move mode is on. `None` when no
+    /// submode is on.
     #[must_use]
     pub(crate) fn find_viewer_local_input_mode(&self) -> Option<LockMode> {
+        if self.floating_pane_tray.is_some() {
+            return Some(LockMode::FloatingPaneTray);
+        }
         if self.dock_undock_mode.is_some() {
             return Some(LockMode::DockUndock);
         }
@@ -232,8 +236,8 @@ impl Client {
 
     /// Set the stored base input mode and clear an open sequence, an
     /// unconfirmed placement interaction, the move chooser, floating pane move
-    /// mode that waits for no move, and dock/undock mode that waits for no
-    /// undock or dock.
+    /// mode that waits for no move, dock/undock mode that waits for no undock
+    /// or dock, and the floating pane tray.
     ///
     /// Called both when this viewer's own `core:lock` fires and when the
     /// session reports a mode change aimed at this viewer (`koshi lock
@@ -246,6 +250,7 @@ impl Client {
             }
             self.close_pane_move_mode();
             self.close_dock_undock_mode();
+            self.close_floating_pane_tray();
             self.lock_mode = lock_mode;
             self.pending_key_sequence = None;
         }
@@ -282,13 +287,15 @@ impl Client {
 
     /// End what a loss of the outer terminal's focus ends: a grab-handle
     /// drag, pane placement mode that waits for no placement, the move
-    /// chooser, floating pane move mode that waits for no move, and
-    /// dock/undock mode that waits for no undock or dock. Sends nothing.
+    /// chooser, floating pane move mode that waits for no move, dock/undock
+    /// mode that waits for no undock or dock, and the floating pane tray.
+    /// Sends nothing.
     pub(crate) fn handle_outer_terminal_focus_lost(&mut self) {
         self.cancel_floating_pane_move_drag();
         self.cancel_placement_mode();
         self.close_pane_move_mode();
         self.close_dock_undock_mode();
+        self.close_floating_pane_tray();
     }
 
     /// Whether dock/undock mode waits for the session's answer to the undock
@@ -398,11 +405,24 @@ impl Client {
     /// frame, `None`, this viewer draws no floating pane. Returns the command
     /// or the placement confirmation the attachment sends next, or
     /// [`PlacementInputAction::Consumed`] when the action sends neither.
+    ///
+    /// An action that is not a floating pane tray action closes the tray
+    /// first ([`close_floating_pane_tray`](Self::close_floating_pane_tray)).
     pub(crate) fn apply_client_action(
         &mut self,
         client_action_kind: ClientActionKind,
         mouse_frame: Option<&MouseFrame>,
     ) -> PlacementInputAction {
+        let is_floating_pane_tray_action = matches!(
+            client_action_kind,
+            ClientActionKind::ToggleFloatingPaneTray
+                | ClientActionKind::CloseFloatingPaneTray
+                | ClientActionKind::SelectTrayTile(_)
+                | ClientActionKind::ToggleSelectedTrayTile
+        );
+        if !is_floating_pane_tray_action {
+            self.close_floating_pane_tray();
+        }
         match client_action_kind {
             ClientActionKind::BeginPanePlacement => self.begin_pane_move(mouse_frame),
             ClientActionKind::BeginTiledPanePlacement => {
@@ -461,6 +481,19 @@ impl Client {
                 self.close_dock_undock_mode();
                 PlacementInputAction::Consumed
             }
+            ClientActionKind::ToggleFloatingPaneTray => {
+                self.toggle_floating_pane_tray(mouse_frame);
+                PlacementInputAction::Consumed
+            }
+            ClientActionKind::CloseFloatingPaneTray => {
+                self.close_floating_pane_tray();
+                PlacementInputAction::Consumed
+            }
+            ClientActionKind::SelectTrayTile(direction) => {
+                self.select_tray_tile(direction, mouse_frame);
+                PlacementInputAction::Consumed
+            }
+            ClientActionKind::ToggleSelectedTrayTile => self.toggle_selected_tray_tile(mouse_frame),
         }
     }
 
@@ -506,8 +539,7 @@ impl Client {
         };
         if !mouse_frame
             .session_snapshot
-            .floating_pane_ids
-            .contains(&selected_pane_id)
+            .is_floating_pane(selected_pane_id)
         {
             self.dock_undock_mode = Some(DockUndockMode {
                 tiled_pane_selection: Some(TiledPaneSelection {
@@ -806,9 +838,9 @@ impl Client {
             .collect();
         let movable_pane_ids: Vec<PaneId> = mouse_frame
             .session_snapshot
-            .floating_pane_ids
+            .floating_panes
             .iter()
-            .copied()
+            .map(FloatingPane::get_pane_id)
             .filter(|pane_id| movable_slot_pane_ids.contains(pane_id))
             .collect();
         let movable_pane_count = movable_pane_ids.len();

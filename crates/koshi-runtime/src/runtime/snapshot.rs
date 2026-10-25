@@ -28,7 +28,7 @@ use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::FloatingPanePosition;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView,
+    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
     ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans,
     SessionSnapshot, TabMetadata, TabSnapshot,
 };
@@ -36,7 +36,7 @@ use koshi_session::client::Client;
 use koshi_session::session::state::Session;
 use koshi_terminal::scrollback::Scrollback;
 use koshi_terminal::selection::order_selection_positions;
-use koshi_terminal::state::Screen;
+use koshi_terminal::state::{Screen, TerminalState};
 
 use crate::server::Server;
 
@@ -54,10 +54,13 @@ impl Server {
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) is
     /// solved at `0x0`: every pane is suppressed and the frame carries
     /// `is_every_pane_suppressed`. `session_snapshot.floating_pane_slots`
-    /// holds the floating panes the client shows, placed for it, and
-    /// `pane_snapshots` holds one entry per tiled slot, then one per floating
-    /// pane slot, then one per pane of the client's placement preview that
-    /// neither lists
+    /// holds the floating panes the client shows, placed for it.
+    /// `session_snapshot.floating_panes` lists every floating pane of the
+    /// session, in the order the panes became floating: `Shown` while the
+    /// client shows it, and `Minimized` with its title while the client
+    /// minimized it. `pane_snapshots` holds one entry per tiled slot, then one
+    /// per floating pane slot, then one per pane of the client's placement
+    /// preview that neither lists
     /// (`ClientPlacementPreview::list_preview_pane_ids`).
     /// `placement_preview` is the client's preview while it names a target in
     /// this session, else `None`.
@@ -99,7 +102,24 @@ impl Server {
             active_tab_snapshot,
             tabs_metadata,
             floating_pane_slots: list_floating_pane_slots(session, client),
-            floating_pane_ids: session.floating_set.list_pane_ids(),
+            floating_panes: session
+                .floating_set
+                .list_pane_ids()
+                .into_iter()
+                .map(|pane_id| {
+                    if client.is_floating_pane_shown(pane_id) {
+                        return FloatingPane::Shown { pane_id };
+                    }
+                    FloatingPane::Minimized {
+                        pane_id,
+                        pane_title: self.terminal_engine_by_pane_id.get(&pane_id).and_then(
+                            |terminal_engine| {
+                                resolve_pane_title(terminal_engine.get_terminal_state())
+                            },
+                        ),
+                    }
+                })
+                .collect(),
         };
 
         let client_placement_preview = self.placement_preview_by_client_id.get(&client_id).filter(
@@ -198,21 +218,9 @@ impl Server {
             .iter()
             .map(ImagePlacementSnapshot::from_placement)
             .collect();
-        // On the alternate screen the pane's name is the app's OSC 0/1/2 title.
-        // On the primary screen it is the shell's OSC 7 working directory,
-        // `~`-shortened, falling back to the OSC title when none was reported.
-        let pane_title = match terminal_state.get_active_screen() {
-            Screen::Alternate => terminal_state.get_title().map(str::to_owned),
-            Screen::Primary => terminal_state
-                .get_current_working_directory()
-                .map(|reported_working_directory| {
-                    format_display_path(reported_working_directory.get_working_directory_path())
-                })
-                .or_else(|| terminal_state.get_title().map(str::to_owned)),
-        };
         PaneSnapshot {
             pane_id,
-            pane_title,
+            pane_title: resolve_pane_title(terminal_state),
             cursor_snapshot: CursorSnapshot {
                 row_index,
                 column_index,
@@ -290,6 +298,57 @@ fn build_client_snapshot(client: &Client) -> ClientSnapshot {
             .get_last_applied_floating_pane_move_command_id(),
         last_applied_placement_command_id: client.get_last_applied_placement_command_id(),
         is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
+    }
+}
+
+/// The display title of the pane whose terminal is `terminal_state`. On the
+/// alternate screen it is the app's OSC 0/1/2 title. On the primary screen it
+/// is the shell's OSC 7 working directory ([`format_display_path`]), else the
+/// OSC title. `None` when the pane reported neither.
+///
+/// A shell in `/home/user/project` with home `/home/user` gives
+/// `~/project`, and `htop` on the alternate screen titled `htop` gives `htop`.
+fn resolve_pane_title(terminal_state: &TerminalState) -> Option<String> {
+    match terminal_state.get_active_screen() {
+        Screen::Alternate => terminal_state.get_title().map(str::to_owned),
+        Screen::Primary => terminal_state
+            .get_current_working_directory()
+            .map(|reported_working_directory| {
+                format_display_path(reported_working_directory.get_working_directory_path())
+            })
+            .or_else(|| terminal_state.get_title().map(str::to_owned)),
+    }
+}
+
+/// Whether [`resolve_pane_title`] can give `terminal_state` another title than
+/// it gave before one terminal advance. The advance started on
+/// `active_screen_before`, changed the OSC 0/1/2 title when
+/// `is_title_changed`, and changed the OSC 7 working directory when
+/// `is_working_directory_changed`.
+///
+/// - A change of the active screen counts.
+/// - On the alternate screen, a title change counts.
+/// - On the primary screen, a working directory change counts, and a title
+///   change counts while the pane reports no working directory.
+///
+/// A shell in `/home/user/project` that sets its title to `make` gives
+/// `false`, and `cd /tmp` gives `true`.
+pub(crate) fn is_pane_title_input_changed(
+    terminal_state: &TerminalState,
+    active_screen_before: Screen,
+    is_title_changed: bool,
+    is_working_directory_changed: bool,
+) -> bool {
+    let active_screen = terminal_state.get_active_screen();
+    if active_screen != active_screen_before {
+        return true;
+    }
+    match active_screen {
+        Screen::Alternate => is_title_changed,
+        Screen::Primary => {
+            is_working_directory_changed
+                || (is_title_changed && terminal_state.get_current_working_directory().is_none())
+        }
     }
 }
 

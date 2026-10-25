@@ -477,12 +477,12 @@ fn build_source_image_pixel_map(
     viewer_chrome: ViewerChrome,
 ) -> BTreeMap<(u16, u16), [u8; 4]> {
     let mut image_pixel_by_position = BTreeMap::new();
-    for image_paint in build_image_paints(
+    for image_paint in build_image_paints(&build_frame_geometry(
         render_snapshot,
         &build_committed_regions(viewport_size),
         viewer_chrome,
         Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
-    ) {
+    )) {
         for target_row_offset in 0..image_paint.target_area.height {
             for target_column_offset in 0..image_paint.target_area.width {
                 let source_pixel_row = image_paint.source_rect.pixel_y
@@ -1049,12 +1049,12 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             })
             .collect::<Vec<_>>();
         assert!(
-            build_image_paints(
+            build_image_paints(&build_frame_geometry(
                 &render_snapshots[0],
                 &build_committed_regions(TEST_VIEWPORT_SIZE),
                 ViewerChrome::default(),
                 Rect::new(0, 0, 80, 24)
-            )
+            ))
             .len()
                 >= 2,
             "source {image_protocol:?} must retain both image portions in the first frame"
@@ -1096,7 +1096,7 @@ fn a_native_paint_snapshots_only_the_cells_under_its_images() {
         render_snapshot.client_snapshot.active_tab_id,
         &render_snapshot,
     );
-    let image_target_areas = build_image_paints(
+    let image_target_areas = build_image_paints(&build_frame_geometry(
         &render_snapshot,
         &committed_regions,
         frame_paint.chrome,
@@ -1106,7 +1106,7 @@ fn a_native_paint_snapshots_only_the_cells_under_its_images() {
             TEST_VIEWPORT_SIZE.column_count,
             TEST_VIEWPORT_SIZE.row_count,
         ),
-    )
+    ))
     .iter()
     .map(|image_paint| image_paint.target_area)
     .collect::<Vec<_>>();
@@ -1418,17 +1418,19 @@ fn assert_partial_native_frame_write_recovers(
     let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
     let render_area = Rect::new(0, 0, 80, 24);
-    let image_paint_commands = build_image_paints(
+    let image_paint_commands = build_image_paints(&build_frame_geometry(
         &render_snapshot,
         &committed_regions,
         ViewerChrome::default(),
         render_area,
-    );
+    ));
     let image_cell_snapshot = build_image_cell_snapshot(
-        &render_snapshot,
-        &committed_regions,
-        ViewerChrome::default(),
-        render_area,
+        &build_frame_geometry(
+            &render_snapshot,
+            &committed_regions,
+            ViewerChrome::default(),
+            render_area,
+        ),
         render_area,
     )
     .map(Arc::new);
@@ -3862,21 +3864,23 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
     };
 
     koshi_renderer::render_frame(
-        &displayed_render_snapshot,
-        &committed_regions,
+        &build_frame_geometry(
+            &displayed_render_snapshot,
+            &committed_regions,
+            ViewerChrome {
+                is_pane_placement_visible: true,
+                placement_source_pane_id: Some(source_pane_id),
+                ..ViewerChrome::default()
+            },
+            viewport_area,
+        ),
         &theme,
         &koshi_renderer::snapshot::KeymapHints::default(),
         None,
-        ViewerChrome {
-            is_pane_placement_visible: true,
-            placement_source_pane_id: Some(source_pane_id),
-            ..ViewerChrome::default()
-        },
         ImageRenderMode::Placeholder,
         &[],
         Some(&placement_presentation),
         Some(&placement_target),
-        viewport_area,
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -4589,7 +4593,10 @@ impl ListedRowPaintCheck {
         let drawn_rows = previous_frame_inputs
             .filter(|_| !is_screen_cleared)
             .and_then(|previous_frame_inputs| {
-                previous_frame_inputs.list_changed_screen_rows(frame_inputs)
+                previous_frame_inputs.list_changed_screen_rows(
+                    frame_inputs,
+                    &build_frame_inputs_geometry(frame_inputs),
+                )
             });
         if drawn_rows.is_some() {
             self.listed_frame_count += 1;
@@ -4603,24 +4610,18 @@ impl ListedRowPaintCheck {
             frame_inputs.terminal_size.column_count,
             frame_inputs.terminal_size.row_count,
         );
-        let cursor_position = get_cursor_position(
-            &frame_inputs.render_snapshot,
-            &frame_inputs.committed_regions,
-            frame_inputs.viewer_chrome,
-            render_area,
-        );
+        let frame_geometry = build_frame_inputs_geometry(frame_inputs);
+        let cursor_position = get_cursor_position(&frame_geometry);
         self.every_row_paint_driver
             .draw_frame(
                 frame_inputs.terminal_size,
                 None,
                 |frame_buffer, drawn_rows| {
                     SnapshotWidget {
-                        render_snapshot: &frame_inputs.render_snapshot,
+                        frame_geometry: &frame_geometry,
                         theme: &frame_inputs.theme,
                         keymap_hints: &frame_inputs.keymap_hints,
                         pending_key_sequence: frame_inputs.pending_key_sequence.as_ref(),
-                        viewer_chrome: frame_inputs.viewer_chrome,
-                        committed_regions: &frame_inputs.committed_regions,
                         image_mode: frame_inputs.image_mode,
                         unavailable_image_placement_keys: &frame_inputs
                             .unavailable_image_placement_keys,
@@ -4644,6 +4645,22 @@ impl ListedRowPaintCheck {
         );
         drawn_rows
     }
+}
+
+/// The geometry of the frame drawn from `frame_inputs`, over its whole
+/// terminal size.
+fn build_frame_inputs_geometry(frame_inputs: &FrameInputs) -> FrameGeometry<'_> {
+    build_frame_geometry(
+        &frame_inputs.render_snapshot,
+        &frame_inputs.committed_regions,
+        frame_inputs.viewer_chrome,
+        Rect::new(
+            0,
+            0,
+            frame_inputs.terminal_size.column_count,
+            frame_inputs.terminal_size.row_count,
+        ),
+    )
 }
 
 /// Bytes that print `line_count` seeded lines, each of 1 to 30 pieces and
@@ -5026,19 +5043,28 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
     ];
 
     assert_eq!(
-        frame_inputs.list_changed_screen_rows(&frame_inputs.clone()),
+        frame_inputs.list_changed_screen_rows(
+            &frame_inputs.clone(),
+            &build_frame_inputs_geometry(&frame_inputs)
+        ),
         Some(Vec::new())
     );
     for (change_name, apply_change) in changes {
         let mut changed_frame_inputs = frame_inputs.clone();
         apply_change(&mut changed_frame_inputs);
         assert_eq!(
-            frame_inputs.list_changed_screen_rows(&changed_frame_inputs),
+            frame_inputs.list_changed_screen_rows(
+                &changed_frame_inputs,
+                &build_frame_inputs_geometry(&changed_frame_inputs)
+            ),
             None,
             "{change_name} in the next frame"
         );
         assert_eq!(
-            changed_frame_inputs.list_changed_screen_rows(&frame_inputs),
+            changed_frame_inputs.list_changed_screen_rows(
+                &frame_inputs,
+                &build_frame_inputs_geometry(&frame_inputs)
+            ),
             None,
             "{change_name} in the shown frame"
         );

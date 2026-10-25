@@ -28,6 +28,7 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::style::{Color, Style};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
+use crate::runtime::bus::WriterHandoff;
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::render_schedule::tests::{
     mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
@@ -310,8 +311,27 @@ fn an_escape_sequence_split_across_two_chunks_decodes_once() {
     assert_eq!(grid_cell.get_style(), red);
 }
 
-#[test]
-fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
+/// The pane ids and client ids of [`build_floating_pane_viewers_server`].
+struct FloatingPaneViewers {
+    db_pane_id: PaneId,
+    floating_pane_id: PaneId,
+    db_client_id: ClientId,
+    web_client_id: ClientId,
+}
+
+/// A runtime of one session with tabs `db` and `web`, one tiled pane each,
+/// and one `20x20` floating pane. Client `db` views tab `db` and holds the
+/// floating pane minimized. Client `web` views tab `web` and shows the
+/// floating pane. Both subscribe at 60 frames a second, and each one's first
+/// frame went at `first_frame_time`. Returns the runtime, the ids, and the
+/// delivery queues of `db` and `web`.
+fn build_floating_pane_viewers_server(
+    first_frame_time: Instant,
+) -> (
+    Server,
+    FloatingPaneViewers,
+    [(DeliveryReceiver, Arc<WriterHandoff>); 2],
+) {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let (db_tab_id, web_tab_id) = (TabId::new(), TabId::new());
     let db_pane_id = insert_test_terminal_engine(&mut runtime);
@@ -367,10 +387,32 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
         .expect("web is attached")
         .focus_floating_pane(floating_pane_id));
     runtime.session_by_id.insert(session.session_id, session);
-    let _db_deliveries = runtime.subscribe(db_client_id, 60);
-    let _web_deliveries = runtime.subscribe(web_client_id, 60);
-    let first_frame_time = Instant::now();
+    let db_deliveries = runtime.subscribe(db_client_id, 60);
+    let web_deliveries = runtime.subscribe(web_client_id, 60);
     runtime.push_due_frames(first_frame_time);
+    (
+        runtime,
+        FloatingPaneViewers {
+            db_pane_id,
+            floating_pane_id,
+            db_client_id,
+            web_client_id,
+        },
+        [db_deliveries, web_deliveries],
+    )
+}
+
+#[test]
+fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
+    let first_frame_time = Instant::now();
+    let (mut runtime, floating_pane_viewers, _delivery_queues) =
+        build_floating_pane_viewers_server(first_frame_time);
+    let FloatingPaneViewers {
+        db_pane_id,
+        floating_pane_id,
+        db_client_id,
+        web_client_id,
+    } = floating_pane_viewers;
 
     runtime.handle_pty_output(db_pane_id, b"hi");
     assert_eq!(
@@ -404,6 +446,88 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
         mark_changed_views_then_compute_frame_wait(&mut runtime, web_client_id, second_frame_time),
         None
     );
+}
+
+#[test]
+fn a_change_of_a_floating_panes_title_marks_the_view_of_the_client_that_minimized_it() {
+    let first_frame_time = Instant::now();
+    let (mut runtime, floating_pane_viewers, _delivery_queues) =
+        build_floating_pane_viewers_server(first_frame_time);
+    let FloatingPaneViewers {
+        db_pane_id,
+        floating_pane_id,
+        db_client_id,
+        web_client_id,
+    } = floating_pane_viewers;
+    // `other` is attached to a second session, which holds no floating pane.
+    let other_tab_id = TabId::new();
+    let other_pane_id = insert_test_terminal_engine(&mut runtime);
+    let mut other_session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "other".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    other_session.tabs.insert(
+        other_tab_id,
+        build_tab(other_tab_id, "other", 0, LayoutNode::Pane(other_pane_id)),
+    );
+    let other_client = build_measured_client(
+        other_session.session_id,
+        other_tab_id,
+        SystemTime::UNIX_EPOCH,
+        8,
+        16,
+    );
+    let other_client_id = other_client.get_client_id();
+    attach_client_record(&mut other_session, other_client);
+    runtime
+        .session_by_id
+        .insert(other_session.session_id, other_session);
+    let _other_deliveries = runtime.subscribe(other_client_id, 60);
+    runtime.push_due_frames(first_frame_time);
+    // Each row: the pane, its output, and whether the view of `db`, which
+    // minimized the floating pane, changes. The floating pane starts on the
+    // primary screen with no title and no working directory.
+    let output_steps: [(PaneId, &[u8], bool); 10] = [
+        (floating_pane_id, b"\x1b]2;make\x07", true),
+        (floating_pane_id, b"\x1b]2;make\x07", false),
+        (
+            floating_pane_id,
+            b"\x1b]7;file://host/home/user/project\x07",
+            true,
+        ),
+        (floating_pane_id, b"\x1b]2;vim\x07", false),
+        (floating_pane_id, b"hi", false),
+        (floating_pane_id, b"\x1b[?1049h", true),
+        (floating_pane_id, b"\x1b]2;htop\x07", true),
+        (floating_pane_id, b"\x1b]7;file://host/tmp\x07", false),
+        (floating_pane_id, b"\x1b[?1049l", true),
+        (db_pane_id, b"\x1b]7;file://host/home/user\x07", true),
+    ];
+    let mut step_time = first_frame_time;
+
+    for (pane_id, output_bytes, is_db_view_changed) in output_steps {
+        step_time += DEFAULT_FRAME_INTERVAL_DURATION;
+        runtime.handle_pty_output(pane_id, output_bytes);
+
+        assert_eq!(
+            mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, step_time),
+            is_db_view_changed.then_some(Duration::ZERO),
+            "{output_bytes:?}"
+        );
+        assert_eq!(
+            mark_changed_views_then_compute_frame_wait(&mut runtime, web_client_id, step_time),
+            (pane_id == floating_pane_id).then_some(Duration::ZERO),
+            "{output_bytes:?}"
+        );
+        assert_eq!(
+            mark_changed_views_then_compute_frame_wait(&mut runtime, other_client_id, step_time),
+            None,
+            "{output_bytes:?}"
+        );
+        runtime.push_frames(step_time);
+    }
 }
 
 #[test]

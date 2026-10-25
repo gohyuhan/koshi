@@ -21,8 +21,8 @@ use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot, MousePane, PlacementPreview,
-    PlacementSnapshot,
+    ClientSnapshot, FloatingPane, FloatingPaneMoveDraft, FloatingPaneSlot, MousePane,
+    PlacementPreview, PlacementSnapshot,
 };
 
 use crate::mouse::tests::{
@@ -2123,7 +2123,7 @@ fn build_one_floating_pane_frame(
 
 /// A viewer that painted `mouse_frame`: it took the frame's view and dropped
 /// the gestures the frame ended, as the attach loop does.
-fn build_client_viewing(mouse_frame: &MouseFrame) -> Client {
+pub(crate) fn build_client_viewing(mouse_frame: &MouseFrame) -> Client {
     let mut client = build_test_client();
     client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(mouse_frame));
     client.drop_gestures_the_frame_ended(mouse_frame);
@@ -2132,7 +2132,9 @@ fn build_client_viewing(mouse_frame: &MouseFrame) -> Client {
 
 /// The command `placement_input_action` sends under this viewer's key
 /// binding (`SubmitCommand`), or `None` for any other action.
-fn find_submitted_command(placement_input_action: PlacementInputAction) -> Option<Command> {
+pub(crate) fn find_submitted_command(
+    placement_input_action: PlacementInputAction,
+) -> Option<Command> {
     match placement_input_action {
         PlacementInputAction::SubmitCommand { command, .. } => Some(command),
         PlacementInputAction::FocusPane { .. }
@@ -3310,8 +3312,11 @@ fn the_selection_passes_over_pinned_and_hidden_floating_panes() {
     // A minimized floating pane is listed but not drawn.
     mouse_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(PaneId::new());
+        .floating_panes
+        .push(FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: None,
+        });
     let mut client = build_client_viewing(&mouse_frame);
     client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame));
 
@@ -4217,8 +4222,10 @@ fn a_frame_that_floats_the_selected_tiled_pane_makes_it_the_dock_source_with_no_
         .retain(|pane_slot| pane_slot.pane_id == tiled_pane_id);
     floating_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(undocked_pane_id);
+        .floating_panes
+        .push(FloatingPane::Shown {
+            pane_id: undocked_pane_id,
+        });
     floating_frame
         .session_snapshot
         .floating_pane_slots

@@ -13,6 +13,7 @@ ratatui.workspace = true
 
 [dev-dependencies]
 koshi-test-support.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

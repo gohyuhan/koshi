@@ -20,7 +20,7 @@ use koshi_layout::placement::PlacementTabSizes;
 use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPaneSlot, GridView,
+    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
     ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementSnapshot, RenderSnapshot,
     ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
@@ -220,7 +220,7 @@ pub(crate) fn build_render_snapshot(
                 },
             ],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: vec![
             build_pane_snapshot(content_pane_id),
@@ -566,10 +566,22 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
         },
     ];
     let minimized_floating_pane_id = PaneId::new();
-    render_snapshot.session_snapshot.floating_pane_ids = vec![
-        upper_floating_pane_id,
-        minimized_floating_pane_id,
-        lower_floating_pane_id,
+    let untitled_minimized_floating_pane_id = PaneId::new();
+    render_snapshot.session_snapshot.floating_panes = vec![
+        FloatingPane::Shown {
+            pane_id: upper_floating_pane_id,
+        },
+        FloatingPane::Minimized {
+            pane_id: minimized_floating_pane_id,
+            pane_title: Some("htop".to_string()),
+        },
+        FloatingPane::Shown {
+            pane_id: lower_floating_pane_id,
+        },
+        FloatingPane::Minimized {
+            pane_id: untitled_minimized_floating_pane_id,
+            pane_title: None,
+        },
     ];
 
     let painted_frame = build_wire_frame(&render_snapshot);
@@ -592,11 +604,22 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
         ]
     );
     assert_eq!(
-        painted_frame.session_snapshot.floating_pane_ids,
+        painted_frame.session_snapshot.floating_panes,
         [
-            upper_floating_pane_id,
-            minimized_floating_pane_id,
-            lower_floating_pane_id
+            FrameFloatingPane::Shown {
+                pane_id: upper_floating_pane_id,
+            },
+            FrameFloatingPane::Minimized {
+                pane_id: minimized_floating_pane_id,
+                pane_title: Some("htop".to_string()),
+            },
+            FrameFloatingPane::Shown {
+                pane_id: lower_floating_pane_id,
+            },
+            FrameFloatingPane::Minimized {
+                pane_id: untitled_minimized_floating_pane_id,
+                pane_title: None,
+            },
         ]
     );
 }

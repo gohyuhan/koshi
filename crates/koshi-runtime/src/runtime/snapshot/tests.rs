@@ -1707,8 +1707,10 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
         Some(tiled_pane_id)
     );
     assert_eq!(
-        render_snapshot.session_snapshot.floating_pane_ids,
-        [floating_pane_id]
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Shown {
+            pane_id: floating_pane_id,
+        }]
     );
     assert_eq!(
         list_snapshot_pane_ids(&render_snapshot),
@@ -1717,7 +1719,7 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
 }
 
 #[test]
-fn floating_pane_ids_list_every_floating_pane_in_the_order_it_became_floating() {
+fn floating_panes_list_every_floating_pane_in_the_order_it_became_floating() {
     let mut server = build_test_runtime();
     let floating_pane_size = Size {
         column_count: 20,
@@ -1739,11 +1741,18 @@ fn floating_pane_ids_list_every_floating_pane_in_the_order_it_became_floating() 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
 
     assert_eq!(
-        render_snapshot.session_snapshot.floating_pane_ids,
+        render_snapshot.session_snapshot.floating_panes,
         [
-            first_floating_pane_id,
-            second_floating_pane_id,
-            third_floating_pane_id
+            FloatingPane::Shown {
+                pane_id: first_floating_pane_id,
+            },
+            FloatingPane::Minimized {
+                pane_id: second_floating_pane_id,
+                pane_title: None,
+            },
+            FloatingPane::Shown {
+                pane_id: third_floating_pane_id,
+            },
         ]
     );
     assert_eq!(
@@ -1773,16 +1782,52 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
 
     assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
     assert_eq!(
-        render_snapshot.session_snapshot.floating_pane_ids,
-        [floating_pane_id]
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Minimized {
+            pane_id: floating_pane_id,
+            pane_title: None,
+        }]
     );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
 }
 
 #[test]
+fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
+    let mut server = build_test_runtime();
+    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, floating_pane_id) =
+        build_session_with_floating_member(Size {
+            column_count: 72,
+            row_count: 22,
+        });
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(floating_pane_id));
+    assert!(client.minimize_floating_pane(floating_pane_id));
+    server.session_by_id.insert(session_id, session);
+    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
+        column_count: 70,
+        row_count: 18,
+    });
+    let _ = terminal_engine.process_pty_output(b"\x1b]2;htop\x07\x1b[?1049h");
+    server
+        .terminal_engine_by_pane_id
+        .insert(floating_pane_id, terminal_engine);
+
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Minimized {
+            pane_id: floating_pane_id,
+            pane_title: Some("htop".to_string()),
+        }]
+    );
+}
+
+#[test]
 fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
     let mut server = build_test_runtime();
-    let (session, session_id, _tab_id, tiled_pane_id, client_id, _floating_pane_id) =
+    let (session, session_id, _tab_id, tiled_pane_id, client_id, floating_pane_id) =
         build_session_with_floating_member(Size {
             column_count: 72,
             row_count: 22,
@@ -1793,6 +1838,13 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
 
     assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Minimized {
+            pane_id: floating_pane_id,
+            pane_title: None,
+        }]
+    );
 }
 
 #[test]

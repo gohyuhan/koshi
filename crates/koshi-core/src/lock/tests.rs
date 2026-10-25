@@ -21,7 +21,8 @@ fn all_lock_modes_list_each_mode_once_with_its_keymap_name() {
             "pane-placement",
             "pane-move-choice",
             "floating-pane-move",
-            "dock-undock"
+            "dock-undock",
+            "floating-pane-tray"
         ]
     );
 }
@@ -59,6 +60,7 @@ fn only_normal_and_locked_pass_unbound_input_to_the_pane() {
         (LockMode::PaneMoveChoice, false),
         (LockMode::FloatingPaneMove, false),
         (LockMode::DockUndock, false),
+        (LockMode::FloatingPaneTray, false),
     ];
     for (mode, expected_should_pass_unbound_input) in mode_expectations {
         assert_eq!(
@@ -76,6 +78,6 @@ fn decoding_the_keymap_name_is_refused() {
     assert_eq!(
         lock_mode_parse_error.to_string(),
         "unknown variant `locked`, expected one of `Normal`, `Locked`, `PanePlacement`, \
-         `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock` at line 1 column 8"
+         `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock`, `FloatingPaneTray` at line 1 column 8"
     );
 }

@@ -76,7 +76,9 @@ impl TerminalState {
         self.primary_keyboard_stack.clear_keyboard_flag_entries();
         self.alternate_keyboard_stack.clear_keyboard_flag_entries();
         self.tab_stops = build_default_tab_stops(column_count);
-        self.title = None;
+        if self.title.take().is_some() {
+            self.is_title_changed = true;
+        }
         self.shell_integration_state = ShellIntegrationState::default();
         self.reset_cluster();
     }

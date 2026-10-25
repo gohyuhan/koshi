@@ -92,9 +92,12 @@ pub struct Surface {
 ///   required. 4 read a message without them.
 /// - A frame carries `floating_pane_slots`: the floating panes its client
 ///   shows, back to front, each with its outer rect, content rect and pin
-///   state. It also carries `floating_pane_ids`: every floating pane of the
-///   session, in the order the panes became floating. Both fields are
-///   required, and 4 has neither.
+///   state. It also carries `floating_panes`: every floating pane of the
+///   session, in the order the panes became floating, each as
+///   `{"Shown": {"pane_id": …}}` while the client shows it, or as
+///   `{"Minimized": {"pane_id": …, "pane_title": …}}`, with its title or
+///   `null`, while the client minimized it. Both fields are required, and 4
+///   has neither.
 /// - A frame's client carries `last_applied_lock_command_id`: the last lock
 ///   command that the client's own connection sent and the session ran, or
 ///   `null`. It also carries `last_applied_floating_pane_move_command_id`: the
@@ -105,8 +108,9 @@ pub struct Surface {
 ///   `active_tab_focused_pane_id`:
 ///   the client's focused pane in its active tab, also while a floating pane
 ///   takes its input, or `null`. 4 has none of these fields.
-/// - The `MoveFloatingPane`, `SetPanePinned`, `SetPaneMinimized` and
-///   `SetAllFloatingPanesMinimized` commands, the `NextFloatingPane` and
+/// - The `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`,
+///   `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`
+///   and `ToggleAllFloatingPanesMinimized` commands, the `NextFloatingPane` and
 ///   `PreviousFloatingPane` focus targets, and the `FloatingPaneMoved`,
 ///   `PanePinChanged` and `PaneMinimizedChanged` events in a command result,
 ///   exist in 5 only.

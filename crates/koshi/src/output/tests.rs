@@ -476,6 +476,7 @@ fn every_lock_mode_prints_its_keymap_name_in_the_table_and_in_json() {
         (LockMode::PaneMoveChoice, "pane-move-choice"),
         (LockMode::FloatingPaneMove, "floating-pane-move"),
         (LockMode::DockUndock, "dock-undock"),
+        (LockMode::FloatingPaneTray, "floating-pane-tray"),
     ];
     assert_eq!(expected_mode_words.len(), LockMode::ALL.len());
 
@@ -2649,8 +2650,8 @@ fn build_test_cells_floating_pane_id() -> PaneId {
 /// Two floating panes whose views carry every visibility and every position:
 /// the `60%` pane drawn at the back by the fixture client at the default
 /// placement and minimized by the second client, which pinned it; the
-/// `30`-column pane drawn on top by the fixture client, moved, and shown with
-/// no floating viewport by the second client.
+/// `30`-column pane drawn on top by the fixture client, moved, and minimized
+/// by the second client at the default placement.
 fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
     let sixty_percent =
         FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("1 to 100"));
@@ -2707,7 +2708,7 @@ fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
                 FloatingPaneClientView {
                     client_id: build_test_second_layout_client_id(),
                     position: FloatingPanePosition::Default,
-                    visibility: FloatingPaneVisibility::NoFloatingViewport,
+                    visibility: FloatingPaneVisibility::Minimized,
                 },
             ],
         },
@@ -2742,7 +2743,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
       client client-00000000-0000-0000-0000-000000000007 minimized position pinned 20,5
     pane pane-00000000-0000-0000-0000-000000000008 asks 30x50% size 30x11
       client client-00000000-0000-0000-0000-000000000003 rect 2,1 30x11 layer 1 position moved 2,1
-      client client-00000000-0000-0000-0000-000000000007 no floating viewport position default
+      client client-00000000-0000-0000-0000-000000000007 minimized position default
   clients
     client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000008
 ";
@@ -2839,7 +2840,7 @@ fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
                         {
                             "client_id": "client-00000000-0000-0000-0000-000000000007",
                             "position": "default",
-                            "visibility": "no floating viewport"
+                            "visibility": "minimized"
                         }
                     ]
                 }
