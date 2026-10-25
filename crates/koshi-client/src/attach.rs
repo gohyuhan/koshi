@@ -2325,8 +2325,9 @@ pub fn attach_selected_session(
 /// [`CliError::InvalidArgs`] when a server reached for the first time comes
 /// with no fingerprint or a malformed one, when a saved server is given a
 /// fingerprint other than the one it holds, when it holds none, when it
-/// holds a name other than `save_as`, and when `KOSHI_REMOTE_SECRET` holds a
-/// secret no saved server holds.
+/// holds a name other than `save_as`, when
+/// [`remote_client::validate_saved_server_name`] refuses `save_as`, and when
+/// `KOSHI_REMOTE_SECRET` holds a secret no saved server holds.
 pub fn attach_remote_session(
     server: &str,
     certificate_fingerprint_text: Option<&str>,

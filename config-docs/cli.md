@@ -1294,15 +1294,28 @@ koshi: invalid arguments: a certificate fingerprint is sha256: followed by 64 lo
 fingerprint:
 ```
 
-A refused answer is never printed back. An address that is not `host:port`
-reads `koshi: invalid arguments: an address is host:port, such as
-laptop.local:7654`. A name or a fingerprint of 64 hex characters alone has the
-shape of a secret and is refused, at the questions and at `--save-as`:
+An answer, or a `--save-as` name, with the shape of a secret is never printed
+back. The shape of a secret is 64 lowercase hex characters, with or without
+spaces around them. Of the other refused answers, only two are printed back: a
+name with the `host:port` shape, and a name or an address that another saved
+server already answers to. An address that is not `host:port` is not printed
+back, and reads `koshi: invalid arguments: an address is host:port, such as
+laptop.local:7654`. A name or a fingerprint with the shape of a secret is
+refused, at the questions and at `--save-as`:
 
 ```text
 name: f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d
 koshi: invalid arguments: a saved name must not be 64 hex characters, the shape of a secret. Pick a plain name.
 name:
+```
+
+A secret given where a saved server is named, at `--remote` or as the `SERVER`
+of `koshi remote edit`, `forget` or `set-secret`, is refused when no saved
+server answers to it, and the refusal does not repeat it either. Spaces around
+the 64 hex characters do not change either refusal:
+
+```text
+koshi: invalid arguments: no saved server is named by the 64 hex characters given, the shape of a secret, and a secret is never given here; run `koshi remote list`
 ```
 
 A server that does not pass the check is named, and the last question is

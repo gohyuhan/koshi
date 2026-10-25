@@ -196,15 +196,6 @@ fn a_replaced_secret_names_the_address_it_belongs_to() {
     );
 }
 
-#[test]
-fn a_server_that_is_not_saved_is_refused_naming_the_listing_command() {
-    let validation_error = build_saved_server_not_found_error("work");
-    assert_eq!(
-        validation_error.to_string(),
-        "invalid arguments: no saved server is named work; run `koshi remote list`"
-    );
-}
-
 /// A store holding `saved_server_records`, in the order given.
 fn build_server_store(saved_server_records: Vec<SavedServer>) -> ServerStore {
     let mut server_store = ServerStore::new();
@@ -240,6 +231,25 @@ fn a_server_the_store_does_not_hold_is_refused_naming_the_listing_command() {
             .to_string(),
         "invalid arguments: no saved server is named desk; run `koshi remote list`"
     );
+}
+
+#[test]
+fn a_secret_the_store_does_not_hold_is_refused_without_repeating_it() {
+    let server_store = build_server_store(build_two_saved_server_records());
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
+
+    for secret_shaped_reference in [secret_text.clone(), format!("{secret_text}\n")] {
+        let refusal_text = find_saved_server(&server_store, &secret_shaped_reference)
+            .expect_err("nothing is saved under a secret")
+            .to_string();
+
+        assert_eq!(
+            refusal_text,
+            "invalid arguments: no saved server is named by the 64 hex characters given, the \
+             shape of a secret, and a secret is never given here; run `koshi remote list`"
+        );
+        assert!(!refusal_text.contains(&secret_text));
+    }
 }
 
 /// One word answering for two records — one saved server's chosen name, another

@@ -664,12 +664,9 @@ fn resolve_server_reference(
                 _ => Ok(ServerReference::Saved(saved_server.clone())),
             }
         }
-        SavedServerLookup::Ambiguous => Err(CliError::InvalidArgs {
-            detail: format!(
-                "{server_selector_text} is the name of one saved server and the address of another; \
-                 run `koshi remote list` and name the one you mean"
-            ),
-        }),
+        SavedServerLookup::Ambiguous => {
+            Err(build_ambiguous_saved_server_error(server_selector_text))
+        }
         SavedServerLookup::NotSaved if is_server_address(server_selector_text) => {
             let Some(certificate_fingerprint_text) = certificate_fingerprint_text else {
                 return Err(CliError::InvalidArgs {
@@ -687,12 +684,51 @@ fn resolve_server_reference(
                 )?,
             })
         }
-        SavedServerLookup::NotSaved => Err(CliError::InvalidArgs {
-            detail: format!(
-                "no saved server is named {server_selector_text}; run `koshi remote list`"
-            ),
-        }),
+        SavedServerLookup::NotSaved => {
+            Err(build_saved_server_not_found_error(server_selector_text))
+        }
     }
+}
+
+/// The refusal of `server_reference`, a word typed to name a saved server,
+/// that no saved server answers to. A word that is 64 lowercase hex
+/// characters once its surrounding whitespace is trimmed, the shape of a
+/// secret, is not repeated.
+///
+/// Example — `work` gives ``no saved server is named work; run `koshi remote
+/// list` ``.
+#[must_use]
+pub fn build_saved_server_not_found_error(server_reference: &str) -> CliError {
+    let detail = if is_secret_shaped(server_reference) {
+        "no saved server is named by the 64 hex characters given, the shape of a secret, and a \
+         secret is never given here; run `koshi remote list`"
+            .to_string()
+    } else {
+        format!("no saved server is named {server_reference}; run `koshi remote list`")
+    };
+    CliError::InvalidArgs { detail }
+}
+
+/// The refusal of `server_reference`, a word typed to name a saved server,
+/// that more than one saved server answers to. A word that is 64 lowercase
+/// hex characters once its surrounding whitespace is trimmed, the shape of a
+/// secret, is not repeated.
+///
+/// Example — `work` gives ``work is the name of one saved server and the
+/// address of another; run `koshi remote list` and name the one you mean``.
+#[must_use]
+pub fn build_ambiguous_saved_server_error(server_reference: &str) -> CliError {
+    let detail = if is_secret_shaped(server_reference) {
+        "the 64 hex characters given are the name of one saved server and the address of \
+         another; run `koshi remote list` and name the one you mean"
+            .to_string()
+    } else {
+        format!(
+            "{server_reference} is the name of one saved server and the address of another; run \
+             `koshi remote list` and name the one you mean"
+        )
+    };
+    CliError::InvalidArgs { detail }
 }
 
 /// Whether the selector has the `host:port` shape: a host before the last colon, and
@@ -721,11 +757,11 @@ pub fn is_server_address(server_selector_text: &str) -> bool {
         && port_text.parse::<u16>().is_ok()
 }
 
-/// Refuse a saved name that is empty, that is 64 lowercase hex characters,
-/// or that has the `host:port` shape.
+/// Refuse a saved name that is empty, that has the shape of a secret, or that
+/// has the `host:port` shape.
 ///
-/// A name of 64 lowercase hex characters has the shape of a secret, and its
-/// refusal does not repeat it.
+/// A name has the shape of a secret when it is 64 lowercase hex characters
+/// once its surrounding whitespace is trimmed. Its refusal does not repeat it.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] naming the shape, and for an empty name.
@@ -735,7 +771,7 @@ pub fn validate_saved_server_name(saved_server_name: &str) -> Result<(), CliErro
             detail: "a saved name must not be empty. Pick a plain name.".to_string(),
         });
     }
-    if is_32_byte_lowercase_hex(saved_server_name) {
+    if is_secret_shaped(saved_server_name) {
         return Err(CliError::InvalidArgs {
             detail: "a saved name must not be 64 hex characters, the shape of a secret. Pick a \
                      plain name."
@@ -757,9 +793,9 @@ pub fn validate_saved_server_name(saved_server_name: &str) -> Result<(), CliErro
 /// `certificate_fingerprint_text` names, typed as `sha256:` followed by them,
 /// the shape `koshi share grant` prints.
 ///
-/// A refusal never repeats `certificate_fingerprint_text`. The refusal of 64
-/// lowercase hex characters with no `sha256:` in front says that this is the
-/// shape of a secret.
+/// A refusal never repeats `certificate_fingerprint_text`. The refusal of a
+/// text that is 64 lowercase hex characters once its surrounding whitespace
+/// is trimmed says that this is the shape of a secret.
 ///
 /// Example — `sha256:` followed by 64 `a` characters gives the 64 `a`
 /// characters. 64 `a` characters alone, `SHA256:` followed by 64 `a`
@@ -779,7 +815,7 @@ pub fn parse_certificate_fingerprint(
     }
     let shape_sentence = "a certificate fingerprint is sha256: followed by 64 lowercase hex \
                           characters, as `koshi share grant` prints it on the machine that serves";
-    let refusal_detail = if is_32_byte_lowercase_hex(certificate_fingerprint_text) {
+    let refusal_detail = if is_secret_shaped(certificate_fingerprint_text) {
         format!(
             "{shape_sentence}. 64 hex characters alone is the shape of a secret, and a secret is \
              never given here"
@@ -805,18 +841,24 @@ fn is_32_byte_lowercase_hex(hex_text: &str) -> bool {
             .all(|hex_byte| matches!(hex_byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Refuse a saved name that cannot be given to the server at `server_address`.
+/// Whether `typed_text` has the shape of a secret: 64 lowercase hex
+/// characters once its surrounding whitespace is trimmed.
 ///
-/// Two names are refused: one [`validate_saved_server_name`] refuses, such as
-/// one with the `host:port` shape or the shape of a secret, and one another
-/// record already answers to ([`ServerStore::is_server_name_free`]). Reads the
-/// store.
+/// Example — 64 `a` characters, alone or with a space before them or a line
+/// break after them, are; 64 `A` characters and 64 `a` characters followed by
+/// ` b` are not.
+fn is_secret_shaped(typed_text: &str) -> bool {
+    is_32_byte_lowercase_hex(typed_text.trim())
+}
+
+/// Refuse a saved name that another saved server already answers to, by its
+/// own name or its own address ([`ServerStore::is_server_name_free`]). The
+/// server at `server_address` may keep a name it holds. Reads the store.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when [`validate_saved_server_name`] refuses the
-/// saved name, and when another address already holds it.
-fn validate_save_as(saved_server_name: &str, server_address: &str) -> Result<(), CliError> {
-    validate_saved_server_name(saved_server_name)?;
+/// [`CliError::InvalidArgs`] when another address already holds the saved
+/// name. [`CliError::IpcUnavailable`] when the store cannot be read.
+fn validate_save_as_is_free(saved_server_name: &str, server_address: &str) -> Result<(), CliError> {
     let (_, saved_server_store) = load_saved_server_store()?;
     if !saved_server_store.is_server_name_free(saved_server_name, server_address) {
         let owning_server_address = saved_server_store
@@ -1161,7 +1203,9 @@ fn validate_remote_server_answer(
 /// with that fingerprint under `save_as` once it admits the connection. A store
 /// that will not take that record fails the call.
 ///
-/// `save_as` is the name the server is saved under. A saved server that holds
+/// `save_as` is the name the server is saved under. A `save_as` that
+/// [`validate_saved_server_name`] refuses is refused first, whatever the
+/// server holds, and nothing is dialled. A saved server that holds
 /// no name takes it once it admits the connection, and the stamp of its
 /// last-used time goes into the same write. A store that will not take that
 /// name fails the call. A saved server that holds `save_as` already is dialled
@@ -1174,7 +1218,8 @@ fn validate_remote_server_answer(
 ///
 /// # Errors
 /// Whatever [`connect_remote_server`] reports. [`DialError::Refused`] carrying
-/// [`CliError::InvalidArgs`] when `save_as` differs from the name a saved
+/// [`CliError::InvalidArgs`] when [`validate_saved_server_name`] refuses
+/// `save_as`, when `save_as` differs from the name a saved
 /// server holds, when a saved server holds no fingerprint, when the name cannot be
 /// given to that address, when the saved server changed while the connection
 /// opened, and when no secret was given; carrying
@@ -1184,11 +1229,14 @@ pub fn connect_saved_server(
     save_as: Option<&str>,
     reply_timeout: Option<Duration>,
 ) -> Result<(RemoteLink, SavedServer), DialError> {
+    if let Some(save_as_name) = save_as {
+        validate_saved_server_name(save_as_name).map_err(DialError::Refused)?;
+    }
     match server_reference {
         ServerReference::Saved(saved_server_record) => {
             let server_name_to_give = match (save_as, saved_server_record.server_name.as_deref()) {
                 (Some(save_as_name), None) => {
-                    validate_save_as(save_as_name, &saved_server_record.server_address)
+                    validate_save_as_is_free(save_as_name, &saved_server_record.server_address)
                         .map_err(DialError::Refused)?;
                     Some(save_as_name)
                 }
@@ -1237,7 +1285,8 @@ pub fn connect_saved_server(
             certificate_fingerprint,
         } => {
             if let Some(save_as_name) = save_as {
-                validate_save_as(save_as_name, server_address).map_err(DialError::Refused)?;
+                validate_save_as_is_free(save_as_name, server_address)
+                    .map_err(DialError::Refused)?;
             }
             let connection_token =
                 resolve_server_connection_token(server_address).map_err(DialError::Refused)?;
