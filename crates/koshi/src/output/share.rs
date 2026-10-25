@@ -470,18 +470,18 @@ fn build_save_as_option(host_name: Option<&str>) -> String {
     let Some(host_name) = host_name else {
         return String::new();
     };
-    let starts_with_letter_or_digit =
+    let is_first_character_alphanumeric =
         host_name.starts_with(|first_character: char| first_character.is_ascii_alphanumeric());
     let has_only_host_name_characters = host_name.chars().all(|host_name_character| {
         host_name_character.is_ascii_alphanumeric()
             || matches!(host_name_character, '.' | '-' | '_')
     });
-    let names_loopback_host = host_name
+    let has_localhost_part = host_name
         .split('.')
         .any(|host_name_part| host_name_part.eq_ignore_ascii_case("localhost"));
-    if !starts_with_letter_or_digit
+    if !is_first_character_alphanumeric
         || !has_only_host_name_characters
-        || names_loopback_host
+        || has_localhost_part
         || koshi_link::remote_client::validate_saved_server_name(host_name).is_err()
     {
         return String::new();

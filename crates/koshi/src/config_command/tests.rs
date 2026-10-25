@@ -21,7 +21,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord};
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_layout::template::ProfileTemplate;
-use koshi_link::config::{parse_app_config_text, ProfileOutcome};
+use koshi_link::config::ProfileOutcome;
 use tempfile::TempDir;
 
 use super::*;
@@ -1221,8 +1221,11 @@ fn check_validates_the_koshi_kdl_text_read_at_start_and_not_the_text_on_disk() {
     let config_directory = TempDir::new().unwrap();
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "pane {}\n").unwrap();
-    let app_config_outcome =
-        parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+    let app_config_outcome = build_loaded_app_config(&ParsedConfigFile::parse(
+        &app_config_path,
+        "version 2\n".to_string(),
+    ))
+    .app_config_outcome;
 
     let report_text = check_config_directory(config_directory.path(), &app_config_outcome).unwrap();
 
@@ -1279,8 +1282,11 @@ fn check_rejects_a_koshi_kdl_that_is_no_regular_file_now_whatever_text_was_read_
     let config_directory = TempDir::new().unwrap();
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::create_dir(&app_config_path).unwrap();
-    let app_config_outcome =
-        parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+    let app_config_outcome = build_loaded_app_config(&ParsedConfigFile::parse(
+        &app_config_path,
+        "version 2\n".to_string(),
+    ))
+    .app_config_outcome;
 
     let config_error =
         check_config_directory(config_directory.path(), &app_config_outcome).unwrap_err();
@@ -2114,7 +2120,10 @@ fn a_service_starts_on_the_koshi_kdl_its_migration_left_and_reads_no_file_again(
 
     assert_eq!(
         startup_config.loaded_app_config,
-        parse_app_config_text(&app_config_path, app_config_text.to_string())
+        build_loaded_app_config(&ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string()
+        ))
     );
     assert_eq!(
         startup_config
@@ -2153,7 +2162,10 @@ fn a_service_whose_migration_failed_starts_on_the_koshi_kdl_it_read_and_reads_no
 
     assert_eq!(
         startup_config.loaded_app_config,
-        parse_app_config_text(&app_config_path, app_config_text.to_string())
+        build_loaded_app_config(&ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string()
+        ))
     );
     assert_eq!(
         startup_config
@@ -2181,7 +2193,10 @@ fn a_service_whose_failed_migration_left_no_koshi_kdl_reads_it_from_disk() {
 
     assert_eq!(
         startup_config.loaded_app_config,
-        parse_app_config_text(&app_config_path, app_config_text.to_string())
+        build_loaded_app_config(&ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string()
+        ))
     );
 }
 
@@ -2265,10 +2280,10 @@ fn a_seeded_session_start_that_migrates_opens_the_migrated_koshi_kdl_and_profile
     );
     assert_eq!(
         startup_config.loaded_app_config,
-        parse_app_config_text(
+        build_loaded_app_config(&ParsedConfigFile::parse(
             &app_config_path,
             "version 2\nallow-beta-features #true\n".to_string()
-        )
+        ))
     );
     let loaded_profile = startup_config
         .loaded_profile

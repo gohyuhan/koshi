@@ -2485,11 +2485,13 @@ fn attaching_searches_the_shared_directory_the_passed_koshi_kdl_names() {
         .expect("link the path to itself");
     let link_read_error =
         std::fs::read_dir(&shared_directory_link).expect_err("a link to itself cannot be listed");
-    let loaded_app_config = koshi_link::config::parse_app_config_text(
-        Path::new("koshi.kdl"),
-        format!(
-            "version 2\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
-            shared_directory_link.display()
+    let loaded_app_config = koshi_link::config::build_loaded_app_config(
+        &koshi_config::parser::ParsedConfigFile::parse(
+            Path::new("koshi.kdl"),
+            format!(
+                "version 2\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
+                shared_directory_link.display()
+            ),
         ),
     );
 
@@ -7954,7 +7956,7 @@ fn a_pointer_moving_along_a_top_border_repaints_only_when_the_handle_changes() {
     // The pane's top border is screen row 1, and its handle cells are columns
     // 1 to 3: the title, the title again, the handle, the handle again, and
     // the title.
-    let repainted_flags: Vec<bool> = [10, 20, 2, 3, 30]
+    let is_repainted_by_motion: Vec<bool> = [10, 20, 2, 3, 30]
         .into_iter()
         .map(|screen_column| {
             handle_mouse_event(
@@ -7971,7 +7973,7 @@ fn a_pointer_moving_along_a_top_border_repaints_only_when_the_handle_changes() {
         })
         .collect();
 
-    assert_eq!(repainted_flags, [true, false, true, false, true]);
+    assert_eq!(is_repainted_by_motion, [true, false, true, false, true]);
 }
 
 #[test]
