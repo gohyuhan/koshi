@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use koshi_config::app_config::AppConfigFile;
 use koshi_config::layer::PartialKoshiConfig;
+use koshi_config::parser::ParsedConfigFile;
 use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::{TokenRecord, TokenScope};
-use koshi_link::config::{load_app_config_file, parse_app_config_text};
+use koshi_link::config::{build_loaded_app_config, load_app_config_file};
 use koshi_link::router_client::RemoteAccessStatus;
 use tempfile::TempDir;
 
@@ -195,8 +196,11 @@ fn config_validates_the_koshi_kdl_text_read_at_start_and_not_the_text_on_disk() 
     let config_directory = build_config_directory(&doctor_context);
     let app_config_path = config_directory.join("koshi.kdl");
     fs::write(&app_config_path, "pane {}\n").unwrap();
-    doctor_context.app_config_outcome =
-        parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+    doctor_context.app_config_outcome = build_loaded_app_config(&ParsedConfigFile::parse(
+        &app_config_path,
+        "version 2\n".to_string(),
+    ))
+    .app_config_outcome;
 
     assert_eq!(
         check_config(&doctor_context),

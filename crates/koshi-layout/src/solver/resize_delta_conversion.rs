@@ -63,7 +63,7 @@ pub fn convert_resize_deltas_to_apply_after_preferred(
         let tab_rect = Rect::from_size_at_origin(tab_size);
         let mut converted_layout_tree = layout_tree.clone();
         convert_resize_deltas_at_rect(&mut converted_layout_tree, tab_rect, pane_sizing);
-        if does_solve_give_every_pane_its_carried_size(
+        if is_every_carried_pane_size_preserved(
             &converted_layout_tree,
             tab_rect,
             pty_size_by_pane_id,
@@ -153,7 +153,7 @@ fn measure_layout_size(
 /// `true` when the solve of `layout_tree` over `tab_rect` with `pane_sizing`
 /// shows content for exactly `measured_pane_count` panes, and each of them
 /// at exactly its size in `pty_size_by_pane_id`.
-fn does_solve_give_every_pane_its_carried_size(
+fn is_every_carried_pane_size_preserved(
     layout_tree: &LayoutNode,
     tab_rect: Rect,
     pty_size_by_pane_id: &HashMap<PaneId, PtySize>,

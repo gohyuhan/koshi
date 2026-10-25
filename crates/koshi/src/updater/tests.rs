@@ -4541,9 +4541,11 @@ fn a_koshi_kdl_that_does_not_parse_turns_the_automatic_check_off() {
 
 #[test]
 fn a_koshi_kdl_that_parsed_gives_its_update_section() {
-    let loaded_app_config = koshi_link::config::parse_app_config_text(
-        Path::new("koshi.kdl"),
-        "version 2\nupdate {\n    allow-prerelease #true\n}\n".to_string(),
+    let loaded_app_config = koshi_link::config::build_loaded_app_config(
+        &koshi_config::parser::ParsedConfigFile::parse(
+            Path::new("koshi.kdl"),
+            "version 2\nupdate {\n    allow-prerelease #true\n}\n".to_string(),
+        ),
     );
 
     assert_eq!(

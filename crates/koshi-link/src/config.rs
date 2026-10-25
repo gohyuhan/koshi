@@ -187,19 +187,6 @@ fn load_app_config_at(app_config_path: &Path) -> (LoadedAppConfig, Option<Parsed
     }
 }
 
-/// Parse `app_config_source_text`, the text of the `koshi.kdl` at
-/// `app_config_path`, as [`build_loaded_app_config`] states.
-#[must_use]
-pub fn parse_app_config_text(
-    app_config_path: &Path,
-    app_config_source_text: String,
-) -> LoadedAppConfig {
-    build_loaded_app_config(&ParsedConfigFile::parse(
-        app_config_path,
-        app_config_source_text,
-    ))
-}
-
 /// The [`LoadedAppConfig`] of `app_config_file`, a `koshi.kdl` read and
 /// parsed once. Reads the KDL document `app_config_file` holds and runs no
 /// KDL parse.

@@ -1594,7 +1594,10 @@ fn parsing_koshi_kdl_text_gives_what_reading_the_file_gives() {
         }
     );
     assert_eq!(
-        parse_app_config_text(&app_config_path, app_config_text.to_string()),
+        build_loaded_app_config(&ParsedConfigFile::parse(
+            &app_config_path,
+            app_config_text.to_string()
+        )),
         loaded_app_config
     );
 }
