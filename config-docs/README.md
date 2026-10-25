@@ -95,7 +95,9 @@ and marks the failed file as possibly changed.
   applies only to children of `horizontal` or `vertical` `` and the same
   message at `line 2, column 23`. Two `bogus` keys in the `pane` block of
   `koshi.kdl` give ``line 3, column 5: ignored unknown key `pane.bogus`; did
-  you mean `pane.gap`?`` and the same message at `line 4, column 5`.
+  you mean `pane.gap`?`` and the same message at `line 4, column 5`. A problem
+  that refuses the whole file names its line and column too: an empty
+  `koshi.kdl` gives ``line 1, column 1: file must declare `version` ``.
 - **Unknown keys name the nearest valid key.** `min-col 2` inside `pane`
   results in ``unknown key `pane.min-col`; did you mean `pane.min-cols`?``.
   `koshi config check` treats that typo as an error even though normal startup

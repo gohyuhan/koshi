@@ -13,40 +13,50 @@ use std::fmt::Display;
 use std::path::Path;
 
 use kdl::KdlError;
-use miette::{Diagnostic, SourceCode};
+use miette::{Diagnostic, SourceCode, SourceSpan};
 use thiserror::Error;
-
-use crate::types::SCHEMA_VERSION;
 
 /// A failure in config discovery, parsing, or validation. Config problems are
 /// recoverable: Koshi falls back to defaults and surfaces the issue to the user.
+///
+/// The text of each variant is its one problem and names no file. The caller
+/// names the file, such as `koshi.kdl not applied (<path>): <problem>`.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// The config file could not be parsed.
-    #[error("config parse error in {config_path}: {parse_error_detail}")]
+    /// The config file is not valid KDL.
+    #[error("{parse_error_detail}")]
     Parse {
-        /// The path of the config file that failed to parse.
-        config_path: String,
         /// The first KDL sub-diagnostic as `line <L>, column <C>: <message>`,
         /// or the KDL error's own message when it has none.
         parse_error_detail: String,
     },
     /// The config parsed but failed schema validation.
-    #[error("invalid config key `{config_key}`: {validation_detail}")]
+    #[error("{validation_error_detail}")]
     Validation {
-        /// The config key that failed validation.
-        config_key: String,
-        /// The plain-word reason the value is invalid.
-        validation_detail: String,
+        /// The problem as `line <L>, column <C>: <message>`, at the node or
+        /// value that failed, such as ``line 3, column 5: invalid config key
+        /// `update.auto-check`: expected a boolean (#true or #false)``.
+        validation_error_detail: String,
     },
 }
 
-/// Builds a [`ConfigError::Validation`] naming the config key that failed
-/// and the plain-word validation detail.
-pub(crate) fn build_validation_error(config_key: &str, validation_detail: &str) -> ConfigError {
+/// The [`ConfigError::Validation`] for `validation_message` at the start of
+/// `problem_span` in `config_source_text`.
+///
+/// Example — in `version 2\nversion 2`, the span of the second `version`
+/// node and the message ``` `version` is declared more than once ``` give
+/// ``line 2, column 1: `version` is declared more than once``.
+pub(crate) fn build_validation_error(
+    config_source_text: &str,
+    problem_span: SourceSpan,
+    validation_message: impl Display,
+) -> ConfigError {
     ConfigError::Validation {
-        config_key: config_key.to_string(),
-        validation_detail: validation_detail.to_string(),
+        validation_error_detail: format_problem_at_line_and_column(
+            config_source_text,
+            problem_span,
+            validation_message,
+        ),
     }
 }
 
@@ -78,24 +88,19 @@ impl ConfigParseDiagnostic {
     /// start of that sub-diagnostic's span, or the KDL error's own message
     /// ("Failed to parse KDL document") when it reported none.
     ///
-    /// Example — `version 1\npane {` in `koshi.kdl` gives `config parse error
-    /// in koshi.kdl: line 2, column 6: No closing '}' for child block`.
+    /// Example — `version 1\npane {` gives `line 2, column 6: No closing '}'
+    /// for child block`.
     #[must_use]
     pub fn build_config_error(&self) -> ConfigError {
         let parse_error_detail = match self.kdl_parse_error.diagnostics.first() {
-            Some(kdl_diagnostic) => {
-                let mut located_messages = format_problems_at_line_and_column(
-                    &self.kdl_parse_error.input,
-                    [(kdl_diagnostic.span.offset(), kdl_diagnostic)],
-                );
-                located_messages.remove(0)
-            }
+            Some(kdl_diagnostic) => format_problem_at_line_and_column(
+                &self.kdl_parse_error.input,
+                kdl_diagnostic.span,
+                kdl_diagnostic,
+            ),
             None => self.kdl_parse_error.to_string(),
         };
-        ConfigError::Parse {
-            config_path: self.config_path.clone(),
-            parse_error_detail,
-        }
+        ConfigError::Parse { parse_error_detail }
     }
 }
 
@@ -141,6 +146,22 @@ pub(crate) fn format_problems_at_line_and_column<ProblemMessage: Display>(
         ));
     }
     located_messages
+}
+
+/// `problem_message` as `line <L>, column <C>: <message>`, the line and column
+/// of the start of `problem_span` in `source_text`, counted as
+/// [`format_problems_at_line_and_column`] counts them.
+///
+/// Example — in `version 2\nupdate {\n    auto-check "yes"\n}`, the span of
+/// the `auto-check` node and the message `bad value` give `line 3, column 5:
+/// bad value`.
+pub(crate) fn format_problem_at_line_and_column(
+    source_text: &str,
+    problem_span: SourceSpan,
+    problem_message: impl Display,
+) -> String {
+    format_problems_at_line_and_column(source_text, [(problem_span.offset(), problem_message)])
+        .remove(0)
 }
 
 impl Diagnostic for ConfigParseDiagnostic {
@@ -189,21 +210,25 @@ pub enum ConfigVersionDiagnostic {
     },
 }
 
-/// Checks `declared_schema_version` against [`SCHEMA_VERSION`].
-/// Every version from 1 through [`SCHEMA_VERSION`] is accepted.
+/// Checks `declared_schema_version` against `supported_schema_version`, the
+/// newest schema the reader supports. Every version from 1 through
+/// `supported_schema_version` is accepted. The file parsers pass
+/// [`SCHEMA_VERSION`](crate::types::SCHEMA_VERSION), and migration passes the
+/// newest version of its schema registry.
 ///
 /// # Errors
 /// Returns a [`ConfigVersionDiagnostic`] when `declared_schema_version` is zero or newer than
-/// [`SCHEMA_VERSION`].
+/// `supported_schema_version`.
 pub fn validate_config_schema_version(
     declared_schema_version: u32,
+    supported_schema_version: u32,
 ) -> Result<(), ConfigVersionDiagnostic> {
     if declared_schema_version == 0 {
         Err(ConfigVersionDiagnostic::TooOld)
-    } else if declared_schema_version > SCHEMA_VERSION {
+    } else if declared_schema_version > supported_schema_version {
         Err(ConfigVersionDiagnostic::TooNew {
             declared_schema_version,
-            supported_schema_version: SCHEMA_VERSION,
+            supported_schema_version,
         })
     } else {
         Ok(())

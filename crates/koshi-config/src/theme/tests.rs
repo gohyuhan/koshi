@@ -25,14 +25,10 @@ fn build_unnamed_theme(colors: PartialColorPalette) -> PartialThemeConfig {
     }
 }
 
-/// The key and the detail of the validation error that parsing `theme_text`
-/// gives.
-fn parse_theme_validation_error(theme_text: &str) -> (String, String) {
+/// The text of the validation error that parsing `theme_text` gives.
+fn parse_theme_validation_error(theme_text: &str) -> String {
     match parse_theme(Path::new("themes/midnight.kdl"), theme_text) {
-        Err(ConfigError::Validation {
-            config_key,
-            validation_detail,
-        }) => (config_key, validation_detail),
+        Err(validation_error @ ConfigError::Validation { .. }) => validation_error.to_string(),
         other_parse_result => panic!("expected a validation error, got {other_parse_result:?}"),
     }
 }
@@ -41,10 +37,7 @@ fn parse_theme_validation_error(theme_text: &str) -> (String, String) {
 fn missing_version_is_a_validation_error() {
     assert_eq!(
         parse_theme_validation_error("colors {}"),
-        (
-            "version".to_string(),
-            "file must declare `version`".to_string()
-        )
+        "line 1, column 1: file must declare `version`"
     );
 }
 
@@ -156,11 +149,9 @@ fn a_bare_hex_without_a_hash_parses() {
 fn a_newer_schema_version_is_rejected() {
     assert_eq!(
         parse_theme_validation_error("version 999"),
-        (
-            "version".to_string(),
-            format!(
-                "config schema version 999 is newer than this koshi supports ({SCHEMA_VERSION})"
-            )
+        format!(
+            "line 1, column 1: config schema version 999 is newer than this koshi supports \
+             ({SCHEMA_VERSION})"
         )
     );
 }
@@ -169,10 +160,7 @@ fn a_newer_schema_version_is_rejected() {
 fn a_version_with_children_is_rejected() {
     assert_eq!(
         parse_theme_validation_error("version 1 {}"),
-        (
-            "version".to_string(),
-            "`version` takes no children".to_string()
-        )
+        "line 1, column 1: `version` takes no children"
     );
 }
 
@@ -181,14 +169,9 @@ fn a_syntax_error_is_a_parse_error() {
     let config_error = parse_theme(Path::new("themes/midnight.kdl"), "colors { accent \"#fff\"")
         .expect_err("unclosed block");
 
-    let ConfigError::Parse {
-        config_path,
-        parse_error_detail,
-    } = config_error
-    else {
+    let ConfigError::Parse { parse_error_detail } = config_error else {
         panic!("expected a parse error, got {config_error:?}");
     };
-    assert_eq!(config_path, "themes/midnight.kdl");
     assert_eq!(
         parse_error_detail,
         "line 1, column 8: No closing '}' for child block"
@@ -270,10 +253,7 @@ fn an_empty_colors_block_sets_no_role() {
 fn a_non_integer_version_is_a_validation_error() {
     assert_eq!(
         parse_theme_validation_error("version \"abc\""),
-        (
-            "version".to_string(),
-            "`version` must be an integer from 1 to 4294967295".to_string()
-        )
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -306,10 +286,7 @@ fn a_repeated_colors_block_warns_and_the_first_one_stands() {
 fn a_repeated_version_is_a_validation_error() {
     assert_eq!(
         parse_theme_validation_error("version 1\nversion 1"),
-        (
-            "version".to_string(),
-            "`version` is declared more than once".to_string()
-        )
+        "line 2, column 1: `version` is declared more than once"
     );
 }
 
@@ -317,10 +294,7 @@ fn a_repeated_version_is_a_validation_error() {
 fn version_zero_is_rejected() {
     assert_eq!(
         parse_theme_validation_error("version 0"),
-        (
-            "version".to_string(),
-            "config schema version must be at least 1".to_string()
-        )
+        "line 1, column 1: config schema version must be at least 1"
     );
 }
 
@@ -328,10 +302,7 @@ fn version_zero_is_rejected() {
 fn a_negative_version_is_rejected() {
     assert_eq!(
         parse_theme_validation_error("version -1"),
-        (
-            "version".to_string(),
-            "`version` must be an integer from 1 to 4294967295".to_string()
-        )
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -339,10 +310,7 @@ fn a_negative_version_is_rejected() {
 fn a_version_with_two_values_is_rejected() {
     assert_eq!(
         parse_theme_validation_error("version 1 2"),
-        (
-            "version".to_string(),
-            "`version` takes exactly one integer argument".to_string()
-        )
+        "line 1, column 1: `version` takes exactly one integer argument"
     );
 }
 

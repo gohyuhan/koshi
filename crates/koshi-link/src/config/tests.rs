@@ -220,8 +220,6 @@ fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "version 999\n").expect("write");
-    let parse_error =
-        parse_app_config(&config_file_path, "version 999\n").expect_err("version 999 is refused");
     assert_eq!(
         load_app_config_at(&config_file_path),
         LoadedAppConfig {
@@ -229,7 +227,8 @@ fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
                 app_config_source_text: "version 999\n".to_string(),
             },
             config_warnings: vec![format!(
-                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                "koshi.kdl not applied ({}): line 1, column 1: config schema version 999 is newer \
+                 than this koshi supports (2); using defaults",
                 config_file_path.display()
             )],
         }
@@ -242,8 +241,6 @@ fn an_empty_app_file_is_refused_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
     fs::write(&config_file_path, "").expect("write");
-    let parse_error =
-        parse_app_config(&config_file_path, "").expect_err("a missing version is refused");
     assert_eq!(
         load_app_config_at(&config_file_path),
         LoadedAppConfig {
@@ -251,7 +248,49 @@ fn an_empty_app_file_is_refused_with_a_warning() {
                 app_config_source_text: String::new(),
             },
             config_warnings: vec![format!(
-                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+                "koshi.kdl not applied ({}): line 1, column 1: file must declare `version`; using \
+                 defaults",
+                config_file_path.display()
+            )],
+        }
+    );
+}
+
+#[test]
+fn an_app_file_with_a_bad_update_value_is_refused_naming_its_line_and_column() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("koshi.kdl");
+    let app_config_source_text = "version 2\nupdate {\n    auto-check \"yes\"\n}\n";
+    fs::write(&config_file_path, app_config_source_text).expect("write");
+    assert_eq!(
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: app_config_source_text.to_string(),
+            },
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): line 3, column 5: invalid config key \
+                 `update.auto-check`: expected a boolean (#true or #false); using defaults",
+                config_file_path.display()
+            )],
+        }
+    );
+}
+
+#[test]
+fn an_app_file_that_is_not_kdl_is_refused_naming_its_path_once() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("koshi.kdl");
+    fs::write(&config_file_path, "version 2\npane {\n").expect("write");
+    assert_eq!(
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: "version 2\npane {\n".to_string(),
+            },
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): line 2, column 6: No closing '}}' for child block; \
+                 using defaults",
                 config_file_path.display()
             )],
         }
@@ -440,8 +479,6 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
 fn a_theme_file_with_an_unsupported_version_falls_back_to_the_default_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let theme_file_path = write_theme_file(test_directory.path(), "midnight", "version 999\n");
-    let parse_error =
-        parse_theme(&theme_file_path, "version 999\n").expect_err("version 999 is refused");
     let mut config_warnings = Vec::new();
     assert_eq!(
         load_theme_config(test_directory.path(), "midnight", &mut config_warnings),
@@ -450,7 +487,28 @@ fn a_theme_file_with_an_unsupported_version_falls_back_to_the_default_with_a_war
     assert_eq!(
         config_warnings,
         vec![format!(
-            "theme `midnight` not applied ({}): {parse_error}; using the default theme",
+            "theme `midnight` not applied ({}): line 1, column 1: config schema version 999 is \
+             newer than this koshi supports (2); using the default theme",
+            theme_file_path.display()
+        )]
+    );
+}
+
+#[test]
+fn a_theme_file_that_is_not_kdl_names_its_path_once_and_falls_back_to_the_default() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let theme_file_path =
+        write_theme_file(test_directory.path(), "midnight", "version 2\ncolors {\n");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "theme `midnight` not applied ({}): line 2, column 8: No closing '}}' for child \
+             block; using the default theme",
             theme_file_path.display()
         )]
     );
@@ -597,9 +655,9 @@ fn a_keybinding_file_that_is_not_kdl_warns_with_its_line_and_column() {
     assert_eq!(
         config_warnings,
         vec![format!(
-            "keybinding.kdl not applied ({path}): config parse error in {path}: line 2, \
-             column 15: No closing '}}' for child block; using defaults",
-            path = config_file_path.display()
+            "keybinding.kdl not applied ({}): line 2, column 15: No closing '}}' for child \
+             block; using defaults",
+            config_file_path.display()
         )]
     );
 }

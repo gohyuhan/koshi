@@ -6,6 +6,7 @@ use super::*;
 use miette::Diagnostic;
 
 use crate::error::ConfigError;
+use crate::types::SCHEMA_VERSION;
 
 /// Parse a single-node `kdl_text` and hand back that one node, so a reader can be
 /// exercised against a real `key value` field.
@@ -107,11 +108,7 @@ fn diagnostic_flattens_to_config_error() {
     let parse_diagnostic = parse_kdl(Path::new("bad.kdl"), malformed_config_text).unwrap_err();
 
     match ConfigError::from(parse_diagnostic) {
-        ConfigError::Parse {
-            config_path,
-            parse_error_detail,
-        } => {
-            assert_eq!(config_path, "bad.kdl");
+        ConfigError::Parse { parse_error_detail } => {
             assert_eq!(parse_error_detail, expected_parse_error_detail);
             assert_ne!(parse_error_detail, "Failed to parse KDL document");
         }
@@ -481,11 +478,7 @@ fn a_block_nested_past_the_limit_is_a_parse_error_not_a_stack_overflow() {
         .into();
 
     match config_error {
-        ConfigError::Parse {
-            config_path,
-            parse_error_detail,
-        } => {
-            assert_eq!(config_path, "koshi.kdl");
+        ConfigError::Parse { parse_error_detail } => {
             // Each `a {` is three characters: the refused `{` of level 25
             // is character 75 of line 1.
             let refused_brace_column_number = 3 * (MAX_BLOCK_DEPTH + 1);
@@ -686,35 +679,38 @@ fn a_version_node_that_is_wrong_as_a_whole_puts_the_caret_on_the_node() {
     );
 }
 
-/// The first problem `koshi.kdl` reports for `config_source_text`.
-fn get_first_app_validation_detail(config_source_text: &str) -> String {
+/// The first problem `koshi.kdl` reports for `config_source_text`, as the
+/// user reads it.
+fn get_first_app_problem_message(config_source_text: &str) -> String {
     match crate::app_config::parse_app_config(Path::new("koshi.kdl"), config_source_text) {
         Err(ConfigError::Validation {
-            validation_detail, ..
-        }) => validation_detail,
+            validation_error_detail,
+        }) => validation_error_detail,
         unexpected_app_config_error => {
             panic!("expected a validation error, got {unexpected_app_config_error:?}")
         }
     }
 }
 
-/// The first problem a theme file reports for `config_source_text`.
-fn get_first_theme_validation_detail(config_source_text: &str) -> String {
+/// The first problem a theme file reports for `config_source_text`, as the
+/// user reads it.
+fn get_first_theme_problem_message(config_source_text: &str) -> String {
     match crate::theme::parse_theme(Path::new("themes/midnight.kdl"), config_source_text) {
         Err(ConfigError::Validation {
-            validation_detail, ..
-        }) => validation_detail,
+            validation_error_detail,
+        }) => validation_error_detail,
         unexpected_theme_parse_error => {
             panic!("expected a validation error, got {unexpected_theme_parse_error:?}")
         }
     }
 }
 
-/// The first problem `keybinding.kdl` reports for `config_source_text`.
-fn get_first_keybinding_validation_detail(config_source_text: &str) -> String {
+/// The first problem `keybinding.kdl` reports for `config_source_text`, as
+/// the user reads it.
+fn get_first_keybinding_problem_message(config_source_text: &str) -> String {
     match crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), config_source_text) {
-        Err(crate::keybinding::KeybindingParseError::Invalid { diagnostics, .. }) => {
-            diagnostics[0].get_diagnostic_message().to_string()
+        Err(keybinding_parse_error @ crate::keybinding::KeybindingParseError::Invalid { .. }) => {
+            keybinding_parse_error.list_problem_messages().remove(0)
         }
         unexpected_keybinding_parse_error => {
             panic!("expected schema diagnostics, got {unexpected_keybinding_parse_error:?}")
@@ -722,12 +718,13 @@ fn get_first_keybinding_validation_detail(config_source_text: &str) -> String {
     }
 }
 
-/// The first problem a profile file reports for `config_source_text`.
-fn get_first_profile_validation_detail(config_source_text: &str) -> String {
+/// The first problem a profile file reports for `config_source_text`, as the
+/// user reads it. A `tab { pane }` line follows the text.
+fn get_first_profile_problem_message(config_source_text: &str) -> String {
     let profile_source_text = format!("{config_source_text}\ntab {{ pane }}");
     match crate::profile::parse_profile(Path::new("profile/dev.kdl"), &profile_source_text) {
-        Err(crate::profile::ProfileError::Invalid { diagnostics, .. }) => {
-            diagnostics[0].get_diagnostic_message().to_string()
+        Err(profile_error @ crate::profile::ProfileError::Invalid { .. }) => {
+            profile_error.list_problem_messages().remove(0)
         }
         unexpected_profile_parse_error => {
             panic!("expected schema diagnostics, got {unexpected_profile_parse_error:?}")
@@ -735,7 +732,8 @@ fn get_first_profile_validation_detail(config_source_text: &str) -> String {
     }
 }
 
-/// The problem migration reports for `config_source_text`.
+/// The problem migration reports for `config_source_text`, as the user reads
+/// it after the file path.
 fn get_migration_version_error_detail(config_source_text: &str) -> String {
     match crate::migration::validate_config(
         crate::migration::ConfigFileKind::App,
@@ -753,53 +751,72 @@ fn get_migration_version_error_detail(config_source_text: &str) -> String {
 }
 
 #[test]
-fn config_files_report_the_same_error_for_bad_version_fields() {
-    for (version_text, expected_version_error_detail) in [
-        ("version 1 {}", "`version` takes no children"),
+fn config_files_report_the_same_located_error_for_bad_version_fields() {
+    let newer_schema_version = SCHEMA_VERSION + 1;
+    for (version_text, expected_problem_message) in [
         (
-            "version 1 2",
-            "`version` takes exactly one integer argument",
+            "version 1 {}".to_string(),
+            "line 1, column 1: `version` takes no children".to_string(),
         ),
         (
-            "version schema=1",
-            "`version` takes exactly one integer argument",
+            "version 1 2".to_string(),
+            "line 1, column 1: `version` takes exactly one integer argument".to_string(),
         ),
         (
-            "version \"1\"",
-            "`version` must be an integer from 1 to 4294967295",
+            "version schema=1".to_string(),
+            "line 1, column 1: `version` takes exactly one integer argument".to_string(),
         ),
         (
-            "version -1",
-            "`version` must be an integer from 1 to 4294967295",
+            "version \"1\"".to_string(),
+            "line 1, column 9: `version` must be an integer from 1 to 4294967295".to_string(),
         ),
         (
-            "version 4294967296",
-            "`version` must be an integer from 1 to 4294967295",
+            "version -1".to_string(),
+            "line 1, column 9: `version` must be an integer from 1 to 4294967295".to_string(),
+        ),
+        (
+            "version 4294967296".to_string(),
+            "line 1, column 9: `version` must be an integer from 1 to 4294967295".to_string(),
+        ),
+        (
+            "version 0".to_string(),
+            "line 1, column 1: config schema version must be at least 1".to_string(),
+        ),
+        (
+            format!("version {newer_schema_version}"),
+            format!(
+                "line 1, column 1: config schema version {newer_schema_version} is newer than \
+                 this koshi supports ({SCHEMA_VERSION})"
+            ),
+        ),
+        (
+            format!("version {SCHEMA_VERSION}\n  version {SCHEMA_VERSION}"),
+            "line 2, column 3: `version` is declared more than once".to_string(),
         ),
     ] {
         assert_eq!(
-            get_first_app_validation_detail(version_text),
-            expected_version_error_detail,
+            get_first_app_problem_message(&version_text),
+            expected_problem_message,
             "koshi.kdl: {version_text}"
         );
         assert_eq!(
-            get_first_theme_validation_detail(version_text),
-            expected_version_error_detail,
+            get_first_theme_problem_message(&version_text),
+            expected_problem_message,
             "theme: {version_text}"
         );
         assert_eq!(
-            get_first_keybinding_validation_detail(version_text),
-            expected_version_error_detail,
+            get_first_keybinding_problem_message(&version_text),
+            expected_problem_message,
             "keybinding.kdl: {version_text}"
         );
         assert_eq!(
-            get_first_profile_validation_detail(version_text),
-            expected_version_error_detail,
+            get_first_profile_problem_message(&version_text),
+            expected_problem_message,
             "profile: {version_text}"
         );
         assert_eq!(
-            get_migration_version_error_detail(version_text),
-            expected_version_error_detail,
+            get_migration_version_error_detail(&version_text),
+            expected_problem_message,
             "migration: {version_text}"
         );
     }

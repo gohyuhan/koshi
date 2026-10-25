@@ -478,7 +478,10 @@ Self-update settings. Each installed koshi reads these from its own
 `koshi.kdl`. `koshi update` installs a newer release the way that koshi was
 installed: a Homebrew install runs `brew upgrade`, and a build from source
 downloads nothing. A bad value here drops the whole `koshi.kdl` for that
-launch.
+launch, and the log names the line and column of the value. `auto-check "yes"`
+on line 3 gives ``koshi.kdl not applied (<path>): line 3, column 5: invalid
+config key `update.auto-check`: expected a boolean (#true or #false); using
+defaults``.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

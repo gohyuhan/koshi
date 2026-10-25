@@ -26,23 +26,21 @@ fn parse_file(config_source_text: &str) -> AppConfigFile {
         .expect("valid config")
 }
 
-/// Asserts `validation_error` is [`ConfigError::Validation`] with exactly this
-/// `expected_config_key` and `expected_validation_detail`.
+/// Asserts `validation_error` is [`ConfigError::Validation`] whose text is
+/// exactly `expected_validation_error_detail`.
 #[track_caller]
-fn assert_validation(
-    validation_error: ConfigError,
-    expected_config_key: &str,
-    expected_validation_detail: &str,
-) {
+fn assert_validation(validation_error: ConfigError, expected_validation_error_detail: &str) {
     let ConfigError::Validation {
-        config_key: actual_config_key,
-        validation_detail: actual_validation_detail,
-    } = validation_error
+        validation_error_detail,
+    } = &validation_error
     else {
         panic!("expected a validation error, got {validation_error:?}");
     };
-    assert_eq!(actual_config_key, expected_config_key);
-    assert_eq!(actual_validation_detail, expected_validation_detail);
+    assert_eq!(validation_error_detail, expected_validation_error_detail);
+    assert_eq!(
+        validation_error.to_string(),
+        expected_validation_error_detail
+    );
 }
 
 fn add_config_version(config_source_text: &str) -> String {
@@ -69,7 +67,26 @@ fn version_only_source_sets_no_layer() {
 fn missing_version_is_a_validation_error() {
     let validation_error =
         parse_app_config(Path::new("koshi.kdl"), "pane {}").expect_err("version is required");
-    assert_validation(validation_error, "version", "file must declare `version`");
+    assert_validation(
+        validation_error,
+        "line 1, column 1: file must declare `version`",
+    );
+}
+
+#[test]
+fn a_missing_version_names_where_the_first_node_starts() {
+    let validation_error = parse_app_config(Path::new("koshi.kdl"), "// settings\n\npane {}")
+        .expect_err("version is required");
+    assert_validation(
+        validation_error,
+        "line 3, column 1: file must declare `version`",
+    );
+    let validation_error =
+        parse_app_config(Path::new("koshi.kdl"), "").expect_err("version is required");
+    assert_validation(
+        validation_error,
+        "line 1, column 1: file must declare `version`",
+    );
 }
 
 #[test]
@@ -528,8 +545,7 @@ fn a_non_boolean_allow_prerelease_is_a_validation_error() {
     .expect_err("integer is not a boolean");
     assert_validation(
         validation_error,
-        "allow-prerelease",
-        "expected a boolean (#true or #false)",
+        "line 2, column 5: invalid config key `update.allow-prerelease`: expected a boolean (#true or #false)",
     );
 }
 
@@ -583,13 +599,12 @@ fn unknown_field_inside_update_warns() {
 fn non_boolean_auto_check_is_a_validation_error() {
     let validation_error = parse_app_config(
         Path::new("koshi.kdl"),
-        "update {\n    auto-check \"yes\"\n}",
+        "version 2\nupdate {\n    auto-check \"yes\"\n}",
     )
     .expect_err("string is not a boolean");
     assert_validation(
         validation_error,
-        "auto-check",
-        "expected a boolean (#true or #false)",
+        "line 3, column 5: invalid config key `update.auto-check`: expected a boolean (#true or #false)",
     );
 }
 
@@ -602,8 +617,7 @@ fn non_integer_interval_is_a_validation_error() {
     .expect_err("boolean is not an integer");
     assert_validation(
         validation_error,
-        "check-interval-days",
-        "expected an integer",
+        "line 2, column 5: invalid config key `update.check-interval-days`: expected an integer",
     );
 }
 
@@ -616,8 +630,7 @@ fn negative_interval_is_a_validation_error() {
     .expect_err("negative does not fit u32");
     assert_validation(
         validation_error,
-        "check-interval-days",
-        "must be between 0 and 4294967295",
+        "line 2, column 5: invalid config key `update.check-interval-days`: must be between 0 and 4294967295",
     );
 }
 
@@ -630,8 +643,7 @@ fn extra_argument_on_a_field_is_a_validation_error() {
     .expect_err("two values is not one");
     assert_validation(
         validation_error,
-        "check-interval-days",
-        "expected exactly one value",
+        "line 2, column 5: invalid config key `update.check-interval-days`: expected exactly one value",
     );
 }
 
@@ -644,8 +656,7 @@ fn a_duplicate_update_section_is_a_validation_error() {
     .expect_err("two update sections");
     assert_validation(
         validation_error,
-        "update",
-        "`update` is declared more than once",
+        "line 4, column 1: `update` is declared more than once",
     );
 }
 
@@ -667,8 +678,7 @@ fn a_newer_schema_version_is_a_validation_error() {
         .expect_err("version newer than this build");
     assert_validation(
         validation_error,
-        "version",
-        "config schema version 999 is newer than this koshi supports (2)",
+        "line 1, column 1: config schema version 999 is newer than this koshi supports (2)",
     );
 }
 
@@ -683,8 +693,7 @@ fn a_duplicate_version_is_a_hard_error() {
     .expect_err("duplicate version rejected");
     assert_validation(
         validation_error,
-        "version",
-        "`version` is declared more than once",
+        "line 2, column 1: `version` is declared more than once",
     );
 }
 
@@ -692,7 +701,10 @@ fn a_duplicate_version_is_a_hard_error() {
 fn a_version_with_children_is_a_validation_error() {
     let validation_error = parse_app_config(Path::new("koshi.kdl"), "version 1 {}")
         .expect_err("version children rejected");
-    assert_validation(validation_error, "version", "`version` takes no children");
+    assert_validation(
+        validation_error,
+        "line 1, column 1: `version` takes no children",
+    );
 }
 
 #[test]
@@ -701,14 +713,9 @@ fn syntax_error_is_a_parse_error() {
     let config_parse_error =
         parse_app_config(Path::new("koshi.kdl"), invalid_config_text).expect_err("unclosed block");
 
-    let ConfigError::Parse {
-        config_path,
-        parse_error_detail,
-    } = config_parse_error
-    else {
+    let ConfigError::Parse { parse_error_detail } = config_parse_error else {
         panic!("expected a parse error, got {config_parse_error:?}");
     };
-    assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
         "line 1, column 8: No closing '}' for child block"
@@ -1408,8 +1415,7 @@ fn a_garbage_version_value_is_a_validation_error() {
         .expect_err("string is not a version integer");
     assert_validation(
         validation_error,
-        "version",
-        "`version` must be an integer from 1 to 4294967295",
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295",
     );
 }
 
@@ -1419,8 +1425,7 @@ fn a_negative_version_is_a_validation_error() {
         .expect_err("a negative version does not fit u32");
     assert_validation(
         validation_error,
-        "version",
-        "`version` must be an integer from 1 to 4294967295",
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295",
     );
 }
 
@@ -1508,8 +1513,7 @@ fn the_largest_u32_interval_is_accepted_and_one_past_it_is_a_validation_error() 
     .expect_err("one past u32 max");
     assert_validation(
         validation_error,
-        "check-interval-days",
-        "must be between 0 and 4294967295",
+        "line 2, column 5: invalid config key `update.check-interval-days`: must be between 0 and 4294967295",
     );
 }
 
@@ -1521,8 +1525,7 @@ fn the_first_unsupported_schema_version_is_rejected_at_the_boundary() {
         .expect_err("version 3 is newer than this build");
     assert_validation(
         validation_error,
-        "version",
-        "config schema version 3 is newer than this koshi supports (2)",
+        "line 1, column 1: config schema version 3 is newer than this koshi supports (2)",
     );
 }
 
@@ -1568,14 +1571,9 @@ fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
     let config_parse_error = parse_app_config(Path::new("koshi.kdl"), invalid_config_text)
         .expect_err("unterminated string");
 
-    let ConfigError::Parse {
-        config_path,
-        parse_error_detail,
-    } = config_parse_error
-    else {
+    let ConfigError::Parse { parse_error_detail } = config_parse_error else {
         panic!("expected a parse error, got {config_parse_error:?}");
     };
-    assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
         "line 2, column 10: Unexpected newline in single-line quoted string"
@@ -1626,8 +1624,7 @@ fn version_zero_is_a_validation_error() {
         .expect_err("schema versions start at one");
     assert_validation(
         validation_error,
-        "version",
-        "config schema version must be at least 1",
+        "line 1, column 1: config schema version must be at least 1",
     );
 }
 
@@ -1638,8 +1635,7 @@ fn a_version_with_a_named_property_is_a_validation_error() {
         .expect_err("a property is not a plain value");
     assert_validation(
         validation_error,
-        "version",
-        "`version` takes exactly one integer argument",
+        "line 1, column 1: `version` takes exactly one integer argument",
     );
 }
 
@@ -1717,7 +1713,10 @@ fn an_update_field_with_a_child_block_is_a_validation_error() {
         "update {\n    auto-check #true {\n    }\n}",
     )
     .expect_err("a field carries no block");
-    assert_validation(validation_error, "auto-check", "takes no children");
+    assert_validation(
+        validation_error,
+        "line 2, column 5: invalid config key `update.auto-check`: takes no children",
+    );
 }
 
 #[test]

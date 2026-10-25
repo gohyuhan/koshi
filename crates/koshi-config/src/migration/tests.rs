@@ -181,7 +181,7 @@ fn missing_version_is_rejected() {
         migration_error,
         MigrationError::Version {
             config_path: "themes/plain.kdl".to_string(),
-            version_error_detail: "file must declare `version`".to_string(),
+            version_error_detail: "line 1, column 1: file must declare `version`".to_string(),
         }
     );
 }
@@ -212,7 +212,7 @@ fn get_version_error_detail(config_source_text: &str) -> String {
 fn a_second_version_declaration_is_rejected() {
     assert_eq!(
         get_version_error_detail("version 1\nversion 1\n"),
-        "`version` is declared more than once"
+        "line 2, column 1: `version` is declared more than once"
     );
 }
 
@@ -220,7 +220,7 @@ fn a_second_version_declaration_is_rejected() {
 fn a_version_with_a_child_block_is_rejected() {
     assert_eq!(
         get_version_error_detail("version 1 {\n  extra 2\n}\n"),
-        "`version` takes no children"
+        "line 1, column 1: `version` takes no children"
     );
 }
 
@@ -228,7 +228,7 @@ fn a_version_with_a_child_block_is_rejected() {
 fn a_version_with_no_argument_is_rejected() {
     assert_eq!(
         get_version_error_detail("version\n"),
-        "`version` takes exactly one integer argument"
+        "line 1, column 1: `version` takes exactly one integer argument"
     );
 }
 
@@ -236,7 +236,7 @@ fn a_version_with_no_argument_is_rejected() {
 fn a_version_with_two_arguments_is_rejected() {
     assert_eq!(
         get_version_error_detail("version 1 2\n"),
-        "`version` takes exactly one integer argument"
+        "line 1, column 1: `version` takes exactly one integer argument"
     );
 }
 
@@ -244,7 +244,7 @@ fn a_version_with_two_arguments_is_rejected() {
 fn a_version_given_as_a_property_is_rejected() {
     assert_eq!(
         get_version_error_detail("version schema=1\n"),
-        "`version` takes exactly one integer argument"
+        "line 1, column 1: `version` takes exactly one integer argument"
     );
 }
 
@@ -252,7 +252,7 @@ fn a_version_given_as_a_property_is_rejected() {
 fn a_non_integer_version_is_rejected() {
     assert_eq!(
         get_version_error_detail("version \"1\"\n"),
-        "`version` must be an integer from 1 to 4294967295"
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -260,7 +260,7 @@ fn a_non_integer_version_is_rejected() {
 fn a_negative_version_is_rejected() {
     assert_eq!(
         get_version_error_detail("version -1\n"),
-        "`version` must be an integer from 1 to 4294967295"
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -268,7 +268,7 @@ fn a_negative_version_is_rejected() {
 fn a_version_above_the_u32_ceiling_is_rejected() {
     assert_eq!(
         get_version_error_detail("version 4294967296\n"),
-        "`version` must be an integer from 1 to 4294967295"
+        "line 1, column 9: `version` must be an integer from 1 to 4294967295"
     );
 }
 
@@ -281,7 +281,8 @@ fn version_zero_is_rejected() {
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "config schema version must be at least 1".to_string(),
+            version_error_detail: "line 1, column 1: config schema version must be at least 1"
+                .to_string(),
         }
     );
 }
@@ -417,11 +418,11 @@ fn missing_adjacent_step_stops_the_chain() {
 /// `required #true`.
 fn list_test_migration_schema_problems(
     _config_file_kind: ConfigFileKind,
-    config_path: &Path,
+    _config_path: &Path,
     config_source_text: &str,
     config_document: &KdlDocument,
 ) -> Vec<String> {
-    let schema_version = parse_schema_version_from_document(config_path, config_document)
+    let schema_version = parse_schema_version_from_document(config_document, u32::MAX)
         .expect("the caller read this version before listing problems");
     let mut schema_problems = Vec::new();
     if config_source_text.contains("bad-old-field") {
@@ -609,15 +610,55 @@ fn schema_version_newer_than_supported_is_rejected() {
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "config schema version 3 is newer than this koshi supports (2)"
-                .to_string(),
+            version_error_detail:
+                "line 1, column 1: config schema version 3 is newer than this koshi supports (2)"
+                    .to_string(),
         }
     );
 }
 
 #[test]
+fn a_version_newer_than_the_registry_reads_is_refused_at_its_node() {
+    let config_schemas = [
+        ConfigSchema {
+            schema_version: 1,
+            list_schema_problems: list_no_schema_problems,
+            migrate_to_next_schema: Some(migrate_to_schema_two),
+        },
+        ConfigSchema {
+            schema_version: 2,
+            list_schema_problems: list_no_schema_problems,
+            migrate_to_next_schema: Some(migrate_to_schema_three),
+        },
+        ConfigSchema {
+            schema_version: 3,
+            list_schema_problems: list_no_schema_problems,
+            migrate_to_next_schema: None,
+        },
+    ];
+
+    let migration_error = migrate_with_registry(
+        ConfigFileKind::App,
+        Path::new("koshi.kdl"),
+        "// settings\n  version 4\n",
+        &config_schemas,
+        3,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        migration_error.to_string(),
+        "invalid config version in koshi.kdl: line 2, column 3: config schema version 4 is \
+         newer than this koshi supports (3)"
+    );
+}
+
+#[test]
 fn an_empty_file_declares_no_version() {
-    assert_eq!(get_version_error_detail(""), "file must declare `version`");
+    assert_eq!(
+        get_version_error_detail(""),
+        "line 1, column 1: file must declare `version`"
+    );
 }
 
 #[test]
@@ -737,8 +778,9 @@ fn validation_names_a_newer_schema_version_against_the_running_schema() {
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "config schema version 3 is newer than this koshi supports (2)"
-                .to_string(),
+            version_error_detail:
+                "line 1, column 1: config schema version 3 is newer than this koshi supports (2)"
+                    .to_string(),
         }
     );
 }

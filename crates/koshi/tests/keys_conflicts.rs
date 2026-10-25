@@ -75,10 +75,7 @@ fn keys_conflicts_rejects_a_keybinding_file_that_is_not_kdl() {
         run_koshi_under_home(home_directory.path(), &["keys", "conflicts"]),
         build_ignored_file_answer(
             &keybinding_file_path,
-            &format!(
-                "config parse error in {}: line 2, column 15: No closing '}}' for child block",
-                keybinding_file_path.display()
-            )
+            "line 2, column 15: No closing '}' for child block"
         )
     );
 }

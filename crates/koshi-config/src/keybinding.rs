@@ -78,11 +78,10 @@ pub enum KeybindingParseError {
 impl KeybindingParseError {
     /// One message per problem, in the order of `diagnostics`. A syntax error
     /// gives the one [`ConfigError::Parse`](crate::error::ConfigError::Parse)
-    /// message, such as `config parse error in keybinding.kdl: line 2, column
-    /// 15: No closing '}' for child block`. A schema error gives each
-    /// diagnostic's message after the line and column its span starts at, such
-    /// as ``line 2, column 1: unknown key `unlock_alternative`; did you mean
-    /// `unlock-alternative`?``.
+    /// message, such as `line 2, column 15: No closing '}' for child block`.
+    /// A schema error gives each diagnostic's message after the line and column
+    /// its span starts at, such as ``line 2, column 1: unknown key
+    /// `unlock_alternative`; did you mean `unlock-alternative`?``.
     #[must_use]
     pub fn list_problem_messages(&self) -> Vec<String> {
         match self {

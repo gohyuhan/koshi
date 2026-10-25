@@ -16,6 +16,7 @@ use crate::error::{
     build_validation_error, format_problems_at_line_and_column, validate_config_schema_version,
     ConfigError, ConfigParseDiagnostic,
 };
+use crate::types::SCHEMA_VERSION;
 
 #[cfg(test)]
 mod tests;
@@ -305,8 +306,9 @@ pub(crate) fn parse_u32_kdl_value(field_node: &KdlNode) -> Result<u32, String> {
 }
 
 /// Reads the schema number a `version` node declares. Every config file that
-/// carries a `version` node reads it through this function: `koshi.kdl`, a
-/// theme, `keybinding.kdl`, a profile, and migration.
+/// carries a `version` node reads it through this function, by way of
+/// [`parse_supported_schema_version`]: `koshi.kdl`, a theme, `keybinding.kdl`,
+/// a profile, and migration.
 ///
 /// `version 3` gives `Ok(3)`.
 ///
@@ -347,36 +349,57 @@ pub(crate) fn parse_version_argument(
         ))
 }
 
-/// The first problem in `version_node`, with the span a caret points at, or
-/// `None` when the node declares a supported version.
+/// The schema number `version_node` declares, from 1 through
+/// `supported_schema_version`.
 ///
-/// Reads the node with [`parse_version_argument`], which gives its own span
-/// and reason, then checks the number with [`validate_config_schema_version`]:
-/// `version 0` and a version newer than this build give the whole node and the
-/// [`ConfigVersionDiagnostic`] message.
-///
-/// [`ConfigVersionDiagnostic`]: crate::error::ConfigVersionDiagnostic
-pub(crate) fn find_version_node_problem(version_node: &KdlNode) -> Option<(SourceSpan, String)> {
-    match parse_version_argument(version_node) {
-        Ok(declared_version) => validate_config_schema_version(declared_version)
-            .err()
-            .map(|version_diagnostic| (version_node.span(), version_diagnostic.to_string())),
-        Err((version_error_span, version_error_detail)) => {
-            Some((version_error_span, version_error_detail.to_string()))
-        }
-    }
-}
-
-/// Reads `version_node` with [`find_version_node_problem`].
+/// `version 2` with a `supported_schema_version` of 2 gives `Ok(2)`.
 ///
 /// # Errors
-/// Returns [`ConfigError::Validation`] with key `version` and the reason
-/// [`find_version_node_problem`] gives.
-pub(crate) fn validate_version_node(version_node: &KdlNode) -> Result<(), ConfigError> {
+/// Returns the span and the reason [`parse_version_argument`] gives for a node
+/// that holds no integer from 0 to 4294967295. Returns the whole node and the
+/// [`ConfigVersionDiagnostic`] message from [`validate_config_schema_version`]
+/// for `version 0` and for a version newer than `supported_schema_version`.
+///
+/// [`ConfigVersionDiagnostic`]: crate::error::ConfigVersionDiagnostic
+pub(crate) fn parse_supported_schema_version(
+    version_node: &KdlNode,
+    supported_schema_version: u32,
+) -> Result<u32, (SourceSpan, String)> {
+    let declared_schema_version = parse_version_argument(version_node).map_err(
+        |(version_error_span, version_error_detail)| {
+            (version_error_span, version_error_detail.to_string())
+        },
+    )?;
+    validate_config_schema_version(declared_schema_version, supported_schema_version)
+        .map_err(|version_diagnostic| (version_node.span(), version_diagnostic.to_string()))?;
+    Ok(declared_schema_version)
+}
+
+/// The first problem in `version_node`, with the span a caret points at, or
+/// `None` when the node declares a version from 1 through [`SCHEMA_VERSION`].
+/// The problem is the error [`parse_supported_schema_version`] gives.
+pub(crate) fn find_version_node_problem(version_node: &KdlNode) -> Option<(SourceSpan, String)> {
+    parse_supported_schema_version(version_node, SCHEMA_VERSION).err()
+}
+
+/// Reads `version_node`, a node of `config_source_text`, with
+/// [`find_version_node_problem`].
+///
+/// # Errors
+/// Returns the [`ConfigError::Validation`] that names the line and column of
+/// the span [`find_version_node_problem`] gives, and its reason: `version 0`
+/// on line 1 gives `line 1, column 1: config schema version must be at least
+/// 1`.
+pub(crate) fn validate_version_node(
+    version_node: &KdlNode,
+    config_source_text: &str,
+) -> Result<(), ConfigError> {
     match find_version_node_problem(version_node) {
-        Some((_, version_error_detail)) => {
-            Err(build_validation_error("version", &version_error_detail))
-        }
+        Some((version_error_span, version_error_detail)) => Err(build_validation_error(
+            config_source_text,
+            version_error_span,
+            version_error_detail,
+        )),
         None => Ok(()),
     }
 }
