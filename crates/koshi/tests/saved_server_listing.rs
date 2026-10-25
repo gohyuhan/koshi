@@ -5,7 +5,9 @@
 //! this machine: a server holding no certificate fingerprint is not dialled,
 //! and every dialled server is a loopback port the test holds: one that closes
 //! each connection it accepts, one that never accepts, or a TLS server that
-//! the test runs.
+//! the test runs. A saved name the previous build wrote with the shape of a
+//! secret is dropped when the store is opened, and its server is named by its
+//! address.
 
 mod common;
 
@@ -287,4 +289,127 @@ fn a_saved_server_file_the_previous_build_wrote_loads_lists_sha256_and_dials_unc
             Some(answering_server_certificate_fingerprint)
         )]
     );
+}
+
+#[test]
+fn a_secret_shaped_name_the_previous_build_saved_is_dropped_and_its_server_named_by_its_address() {
+    let secret_text = "f00d".repeat(16);
+    let saved_certificate_fingerprint = "0".repeat(64);
+    let home_directory = build_short_test_directory();
+    write_saved_server_store(home_directory.path(), Vec::new());
+    // Nothing listens on these addresses: a dial would end in a refusal of
+    // its own.
+    std::fs::write(
+        resolve_server_store_path(&resolve_data_directory_under_home(home_directory.path())),
+        format!(
+            r#"{{"store_format":2,"saved_servers":[{{"server_name":"{secret_text}","server_address":"127.0.0.1:1","connection_token":"test-secret","added_at":{{"secs_since_epoch":0,"nanos_since_epoch":0}},"last_used_at":null}},{{"server_name":" {secret_text}\n","server_address":"127.0.0.1:2","connection_token":"test-secret","certificate_fingerprint":"{saved_certificate_fingerprint}","added_at":{{"secs_since_epoch":0,"nanos_since_epoch":0}},"last_used_at":null}},{{"server_name":"work","server_address":"127.0.0.1:3","connection_token":"test-secret","certificate_fingerprint":"{saved_certificate_fingerprint}","added_at":{{"secs_since_epoch":0,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
+        ),
+    )
+    .expect("the saved-server file of the previous build is written");
+
+    let remote_list_output = build_koshi_command_under_home(home_directory.path())
+        .args(["remote", "list", "--format", "json"])
+        .output()
+        .expect("the koshi binary runs");
+
+    assert_eq!(String::from_utf8_lossy(&remote_list_output.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&remote_list_output.stdout),
+        format!(
+            r#"[
+  {{
+    "server_name": null,
+    "server_address": "127.0.0.1:1",
+    "certificate_fingerprint": null,
+    "last_used_at": null
+  }},
+  {{
+    "server_name": null,
+    "server_address": "127.0.0.1:2",
+    "certificate_fingerprint": "sha256:{saved_certificate_fingerprint}",
+    "last_used_at": null
+  }},
+  {{
+    "server_name": "work",
+    "server_address": "127.0.0.1:3",
+    "certificate_fingerprint": "sha256:{saved_certificate_fingerprint}",
+    "last_used_at": null
+  }}
+]
+"#
+        )
+    );
+    assert_eq!(
+        remote_list_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        list_saved_server_records(home_directory.path()),
+        vec![
+            (None, "127.0.0.1:1".to_string(), None),
+            (
+                None,
+                "127.0.0.1:2".to_string(),
+                Some(saved_certificate_fingerprint.clone())
+            ),
+            (
+                Some("work".to_string()),
+                "127.0.0.1:3".to_string(),
+                Some(saved_certificate_fingerprint.clone())
+            ),
+        ]
+    );
+
+    let secret_shaped_server_stderr = "koshi: invalid arguments: no saved server is named by \
+                                       the 64 hex characters given, the shape of a secret, and \
+                                       a secret is never given here; run `koshi remote list`\n";
+    let refused_argument_cases: [(Vec<&str>, Option<&str>, &str); 4] = [
+        (
+            vec!["attach", "--remote", "127.0.0.1:1"],
+            None,
+            "koshi: invalid arguments: 127.0.0.1:1 holds no certificate fingerprint, so it is \
+             not dialled; run `koshi remote edit 127.0.0.1:1` and give the fingerprint `koshi \
+             share grant` printed on that machine\n",
+        ),
+        (
+            vec!["attach", "--remote", "127.0.0.1:2"],
+            Some("another-secret"),
+            "koshi: invalid arguments: 127.0.0.1:2 holds a saved secret, and \
+             KOSHI_REMOTE_SECRET gives one that no saved server holds; run `koshi remote \
+             set-secret 127.0.0.1:2` to replace the saved secret with it, or unset \
+             KOSHI_REMOTE_SECRET to dial with the saved one\n",
+        ),
+        (
+            vec!["remote", "edit", &secret_text],
+            None,
+            secret_shaped_server_stderr,
+        ),
+        (
+            vec!["attach", "--remote", &secret_text],
+            None,
+            secret_shaped_server_stderr,
+        ),
+    ];
+    for (command_arguments, environment_secret, expected_stderr) in refused_argument_cases {
+        let mut koshi_command = build_koshi_command_under_home(home_directory.path());
+        koshi_command.args(&command_arguments);
+        if let Some(environment_secret) = environment_secret {
+            koshi_command.env("KOSHI_REMOTE_SECRET", environment_secret);
+        }
+
+        let refused_output = koshi_command.output().expect("the koshi binary runs");
+
+        let refused_stderr = String::from_utf8_lossy(&refused_output.stderr);
+        assert_eq!(refused_stderr, expected_stderr, "{command_arguments:?}");
+        assert!(
+            !refused_stderr.contains(&secret_text),
+            "{command_arguments:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&refused_output.stdout), "");
+        assert_eq!(
+            refused_output.status.code(),
+            Some(CliExitCode::UsageOrConfig.get_exit_code()),
+            "{command_arguments:?}"
+        );
+    }
 }

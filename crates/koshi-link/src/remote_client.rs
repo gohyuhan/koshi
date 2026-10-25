@@ -262,21 +262,61 @@ enum Reach {
 }
 
 /// The saved-server store and the path it came from, under the private data
-/// directory. A format 1 store is converted under its lock before it is
-/// read.
+/// directory, read under its lock.
+///
+/// A format 1 store is converted first. A saved name that is 64 lowercase hex
+/// characters once its surrounding whitespace is trimmed, the shape of a
+/// secret, is dropped, and the store is written back once.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the machine has no data directory or
-/// the store lock, migration, or read fails.
+/// the store lock, migration, read, or write-back fails.
 pub fn load_saved_server_store() -> Result<(PathBuf, ServerStore), CliError> {
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
     let store_lock_file = acquire_saved_server_store_lock(&private_data_directory)?;
-    migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
-    let saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
-        .map_err(build_saved_server_store_error)?;
+    let saved_server_store = load_locked_saved_server_store(&saved_server_store_path)?;
     drop(store_lock_file);
     Ok((saved_server_store_path, saved_server_store))
+}
+
+/// Read the saved-server store at `saved_server_store_path`, whose lock the
+/// caller holds.
+///
+/// A format 1 store is converted first. Then every saved name that is 64
+/// lowercase hex characters once its surrounding whitespace is trimmed, the
+/// shape of a secret, is dropped, and the store is written back once. The
+/// server keeps its address, its secret, its fingerprint and its times. A
+/// store holding no such name is not written.
+///
+/// Example — a saved server named with 64 `a` characters at
+/// `desk.local:7654` comes back with no name, and every message names it
+/// `desk.local:7654`.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] when the migration, the read, or the
+/// write-back fails.
+fn load_locked_saved_server_store(saved_server_store_path: &Path) -> Result<ServerStore, CliError> {
+    migrate_saved_server_file(saved_server_store_path).map_err(build_saved_server_store_error)?;
+    let mut saved_server_store = ServerStore::load_server_store_from_path(saved_server_store_path)
+        .map_err(build_saved_server_store_error)?;
+    let mut has_dropped_server_name = false;
+    for saved_server in &mut saved_server_store.saved_servers {
+        if saved_server
+            .server_name
+            .as_deref()
+            .is_some_and(is_secret_shaped)
+        {
+            saved_server.server_name = None;
+            has_dropped_server_name = true;
+        }
+    }
+    if has_dropped_server_name {
+        saved_server_store
+            .write_server_store_to_path(saved_server_store_path)
+            .map_err(build_saved_server_store_error)?;
+    }
+    Ok(saved_server_store)
 }
 
 /// The private data directory this machine keeps koshi's files in.
@@ -292,11 +332,12 @@ fn resolve_private_data_directory() -> Result<PathBuf, CliError> {
 /// Change the saved-server store, holding it against every other koshi from
 /// the read to the write.
 ///
-/// Takes the store's lock file, converts a format 1 store, reads it,
-/// hands it to `update_store`, and writes it back. The lock is released when
+/// Takes the store's lock file, reads the store as
+/// [`load_saved_server_store`] reads it, hands it to `update_store`, and writes
+/// it back. The lock is released when
 /// this returns, either way. An
-/// `update_store` that refuses stops the write, so the store on disk keeps
-/// what it held.
+/// `update_store` that refuses stops its write, so the store on disk keeps
+/// what the read left in it.
 ///
 /// The lock is taken again every 20 milliseconds for up to 5 seconds. A wait
 /// that runs out returns an error naming the other koshi, and writes nothing.
@@ -314,9 +355,7 @@ pub fn update_saved_server_store<UpdateOutcome>(
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
     let store_lock_file = acquire_saved_server_store_lock(&private_data_directory)?;
-    migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
-    let mut saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
-        .map_err(build_saved_server_store_error)?;
+    let mut saved_server_store = load_locked_saved_server_store(&saved_server_store_path)?;
     let store_update_outcome = update_store(&mut saved_server_store)?;
     saved_server_store
         .write_server_store_to_path(&saved_server_store_path)

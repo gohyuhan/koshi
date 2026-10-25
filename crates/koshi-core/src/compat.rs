@@ -262,7 +262,9 @@ pub const REMOTE_PROTOCOL: Surface = Surface {
 /// secret and the certificate fingerprint for each.
 ///
 /// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted when the
-/// dialling machine opens its saved-server store.
+/// dialling machine opens its saved-server store. At the same point, a saved
+/// name with the shape of a secret, 64 lowercase hex characters, which
+/// `v0.5.0` writes, is dropped, and the store stays at 2.
 pub const SAVED_SERVER_FORMAT: Surface = Surface {
     surface_name: "saved server file format",
     minimum_version: 1,

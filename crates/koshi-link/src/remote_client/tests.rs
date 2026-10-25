@@ -5,8 +5,9 @@
 //! server refuses, how a saved server with no name takes a name,
 //! which answer to a Hello reads as a refusal a repeat dial cannot change, what
 //! an open link makes of each frame a server can answer a listing with, what
-//! one sweep of the saved servers reports, and how the lock that guards a
-//! change to the saved-server store behaves.
+//! one sweep of the saved servers reports, how the lock that guards a
+//! change to the saved-server store behaves, and which saved names a store
+//! load drops.
 
 use std::io::Write;
 use std::net::TcpListener;
@@ -2218,4 +2219,129 @@ fn a_session_refusal_while_restarting_is_a_restarting_dial_and_every_other_refus
         panic!("expected a refused dial, got {refused_dial:?}");
     };
     assert_eq!(detail, "the token presented does not match this Koshi's");
+}
+
+/// The saved-server store bytes `v0.5.0` writes: three servers, the first
+/// named with `secret_text`, the second with `secret_text` between a space and
+/// a line break, and the third named `work`.
+fn build_previous_release_store_text(secret_text: &str) -> String {
+    let second_fingerprint = "ab".repeat(32);
+    let third_fingerprint = "cd".repeat(32);
+    format!(
+        r#"{{"store_format":2,"saved_servers":[{{"server_name":"{secret_text}","server_address":"desk.local:7654","connection_token":"first-secret","added_at":{{"secs_since_epoch":10,"nanos_since_epoch":0}},"last_used_at":null}},{{"server_name":" {secret_text}\n","server_address":"laptop.local:7654","connection_token":"second-secret","certificate_fingerprint":"{second_fingerprint}","added_at":{{"secs_since_epoch":20,"nanos_since_epoch":0}},"last_used_at":{{"secs_since_epoch":30,"nanos_since_epoch":0}}}},{{"server_name":"work","server_address":"work.local:7654","connection_token":"third-secret","certificate_fingerprint":"{third_fingerprint}","added_at":{{"secs_since_epoch":40,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
+    )
+}
+
+#[test]
+fn a_saved_name_with_the_shape_of_a_secret_is_dropped_on_load_and_written_back() {
+    let test_directory = tempfile::tempdir().expect("a temp directory");
+    let saved_server_store_path = test_directory.path().join("servers.json");
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
+    std::fs::write(
+        &saved_server_store_path,
+        build_previous_release_store_text(&secret_text),
+    )
+    .expect("the previous release's store is written");
+
+    let loaded_server_store =
+        load_locked_saved_server_store(&saved_server_store_path).expect("the store loads");
+
+    let expected_server_store = ServerStore {
+        saved_servers: vec![
+            SavedServer {
+                server_name: None,
+                server_address: "desk.local:7654".to_string(),
+                connection_token: ConnectionToken::from_secret("first-secret"),
+                certificate_fingerprint: None,
+                added_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+                last_used_at: None,
+            },
+            SavedServer {
+                server_name: None,
+                server_address: "laptop.local:7654".to_string(),
+                connection_token: ConnectionToken::from_secret("second-secret"),
+                certificate_fingerprint: Some("ab".repeat(32)),
+                added_at: SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+                last_used_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(30)),
+            },
+            SavedServer {
+                server_name: Some("work".to_string()),
+                server_address: "work.local:7654".to_string(),
+                connection_token: ConnectionToken::from_secret("third-secret"),
+                certificate_fingerprint: Some("cd".repeat(32)),
+                added_at: SystemTime::UNIX_EPOCH + Duration::from_secs(40),
+                last_used_at: None,
+            },
+        ],
+        ..ServerStore::new()
+    };
+    assert_eq!(loaded_server_store, expected_server_store);
+    let expected_store_path = test_directory.path().join("expected-servers.json");
+    expected_server_store
+        .write_server_store_to_path(&expected_store_path)
+        .expect("the expected store is written");
+    let written_store_bytes =
+        std::fs::read(&saved_server_store_path).expect("the store is read back");
+    assert_eq!(
+        written_store_bytes,
+        std::fs::read(&expected_store_path).expect("the expected store is read back")
+    );
+    assert!(!String::from_utf8_lossy(&written_store_bytes).contains(&secret_text));
+}
+
+#[test]
+fn a_store_holding_no_secret_shaped_name_is_loaded_without_being_written() {
+    let test_directory = tempfile::tempdir().expect("a temp directory");
+    let saved_server_store_path = test_directory.path().join("servers.json");
+    // Spaced unlike the bytes `write_server_store_to_path` writes.
+    let previous_release_store_text = r#"{ "store_format": 2, "saved_servers": [ { "server_name": "work", "server_address": "desk.local:7654", "connection_token": "first-secret", "added_at": { "secs_since_epoch": 10, "nanos_since_epoch": 0 }, "last_used_at": null } ] }"#;
+    std::fs::write(&saved_server_store_path, previous_release_store_text)
+        .expect("the previous release's store is written");
+
+    let loaded_server_store =
+        load_locked_saved_server_store(&saved_server_store_path).expect("the store loads");
+
+    assert_eq!(
+        loaded_server_store.saved_servers[0].server_name.as_deref(),
+        Some("work")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&saved_server_store_path).expect("the store is read back"),
+        previous_release_store_text
+    );
+}
+
+#[test]
+fn a_format_1_store_naming_a_server_with_a_secret_loads_with_the_name_dropped() {
+    let test_directory = tempfile::tempdir().expect("a temp directory");
+    let saved_server_store_path = test_directory.path().join("servers.json");
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
+    std::fs::write(
+        &saved_server_store_path,
+        format!(
+            r#"{{"format":1,"records":[{{"name":"{secret_text}","address":"desk.local:7654","secret":"old-secret","added_at":{{"secs_since_epoch":10,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
+        ),
+    )
+    .expect("the format 1 store is written");
+
+    let loaded_server_store =
+        load_locked_saved_server_store(&saved_server_store_path).expect("the store loads");
+
+    let expected_server_store = ServerStore {
+        saved_servers: vec![SavedServer {
+            server_name: None,
+            server_address: "desk.local:7654".to_string(),
+            connection_token: ConnectionToken::from_secret("old-secret"),
+            certificate_fingerprint: None,
+            added_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            last_used_at: None,
+        }],
+        ..ServerStore::new()
+    };
+    assert_eq!(loaded_server_store, expected_server_store);
+    assert_eq!(
+        ServerStore::load_server_store_from_path(&saved_server_store_path)
+            .expect("the store on disk reads"),
+        expected_server_store
+    );
 }
