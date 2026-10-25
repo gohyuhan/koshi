@@ -13,11 +13,15 @@
 //! to save what they typed anyway. Either way the saved server holds the
 //! fingerprint the user typed.
 //!
-//! A refused answer is never printed back: the reason names the shape the
-//! answer must have. The secret is read without being printed. A fingerprint
-//! is typed and offered as `sha256:` followed by 64 lowercase hex characters,
-//! and an answer of 64 hex characters alone, the shape of a secret, is
-//! refused at the name and the fingerprint questions.
+//! An answer with the shape of a secret, 64 lowercase hex characters once its
+//! surrounding whitespace is trimmed, is never printed back. Of the other
+//! refused answers, only two are printed back: a name with the `host:port`
+//! shape, and a name or an address that another saved server already answers
+//! to. The secret is read without being printed. A fingerprint is typed and
+//! offered as `sha256:` followed by 64 lowercase hex characters, and an answer
+//! with the shape of a secret is refused at the name and the fingerprint
+//! questions. A `SERVER` argument of that shape that matches no saved server,
+//! or more than one, is not printed back either.
 //!
 //! `forget` and `set-secret` open no connection. A server that is switched
 //! off is still forgotten, and still takes a fresh secret.
@@ -32,7 +36,8 @@ use crate::cli::RemoteCommand;
 use crate::{output, prompt};
 use koshi_link::error::CliError;
 use koshi_link::remote_client::{
-    self, is_server_address, load_saved_server_store, parse_certificate_fingerprint, prompt_line,
+    self, build_ambiguous_saved_server_error, build_saved_server_not_found_error,
+    is_server_address, load_saved_server_store, parse_certificate_fingerprint, prompt_line,
     prompt_secret, update_saved_server_store, validate_saved_server_name, DIAL_TIMEOUT_DURATION,
     REPLY_TIMEOUT_DURATION,
 };
@@ -61,7 +66,8 @@ enum ServerCheckOutcome {
 /// against every other koshi from that read to the write.
 ///
 /// A `SERVER` argument matching no saved server is [`CliError::InvalidArgs`]
-/// naming the command that lists what is saved.
+/// naming the command that lists what is saved, and that refusal does not
+/// repeat an argument with the shape of a secret.
 pub fn run_remote_command(command: &RemoteCommand) -> Result<(), CliError> {
     let (_, mut server_store) = load_saved_server_store()?;
     match command {
@@ -500,9 +506,9 @@ fn validate_saved_server_reference_is_available(
 /// The one saved server `server_reference` names.
 ///
 /// # Errors
-/// [`CliError::InvalidArgs`] when nothing is saved under that word, and a
-/// different [`CliError::InvalidArgs`] when more than one saved server answers to
-/// it.
+/// [`build_saved_server_not_found_error`] when nothing is saved under that
+/// word, and [`build_ambiguous_saved_server_error`] when more than one saved
+/// server answers to it.
 fn find_saved_server<'a>(
     server_store: &'a ServerStore,
     server_reference: &str,
@@ -510,18 +516,6 @@ fn find_saved_server<'a>(
     match server_store.find_saved_server(server_reference) {
         SavedServerLookup::Saved(saved_server) => Ok(saved_server),
         SavedServerLookup::NotSaved => Err(build_saved_server_not_found_error(server_reference)),
-        SavedServerLookup::Ambiguous => Err(CliError::InvalidArgs {
-            detail: format!(
-                "{server_reference} is the name of one saved server and the address of another; \
-                 run `koshi remote list` and name the one you mean"
-            ),
-        }),
-    }
-}
-
-/// A `SERVER` argument that matches neither a saved name nor a saved address.
-fn build_saved_server_not_found_error(server_reference: &str) -> CliError {
-    CliError::InvalidArgs {
-        detail: format!("no saved server is named {server_reference}; run `koshi remote list`"),
+        SavedServerLookup::Ambiguous => Err(build_ambiguous_saved_server_error(server_reference)),
     }
 }

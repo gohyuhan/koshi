@@ -6,6 +6,9 @@
 //! against a TLS server that the test runs on a loopback port, or against a
 //! loopback address that no test dials. A dial to a server this machine has
 //! not saved has `KOSHI_REMOTE_SECRET` set. No connection leaves this machine.
+//! A secret given at `--certificate-fingerprint`, at `--save-as`, at
+//! `--remote`, or as the server of a `koshi remote` verb is refused before any
+//! dial, and the refusal does not repeat it.
 //! A session argument that names a folder of this machine's shared directory
 //! is refused before any dial.
 
@@ -212,6 +215,96 @@ fn a_secret_at_the_fingerprint_or_save_as_flag_is_refused_before_any_dial_and_no
             "{command_arguments:?}"
         );
         assert_eq!(list_saved_server_records(home_directory.path()), Vec::new());
+    }
+}
+
+#[test]
+fn a_secret_where_a_saved_server_or_its_name_goes_is_refused_before_any_dial_and_not_printed() {
+    let secret_text = "f00d".repeat(16);
+    let padded_secret_text = format!(" {secret_text}");
+    // Nothing listens on this address: a dial would end in a refusal of its
+    // own.
+    let saved_server_address = "127.0.0.1:1".to_string();
+    let saved_certificate_fingerprint = "0".repeat(64);
+    let secret_shaped_name_stderr = "koshi: invalid arguments: a saved name must not be 64 hex \
+                                     characters, the shape of a secret. Pick a plain name.\n";
+    let secret_shaped_server_stderr = "koshi: invalid arguments: no saved server is named by \
+                                       the 64 hex characters given, the shape of a secret, and \
+                                       a secret is never given here; run `koshi remote list`\n";
+    let refused_argument_cases: [(Vec<&str>, &str); 7] = [
+        (
+            vec!["attach", "--remote", "work", "--save-as", &secret_text],
+            secret_shaped_name_stderr,
+        ),
+        (
+            vec![
+                "attach",
+                "--remote",
+                "work",
+                "--save-as",
+                &padded_secret_text,
+            ],
+            secret_shaped_name_stderr,
+        ),
+        (
+            vec!["attach", "--remote", &secret_text],
+            secret_shaped_server_stderr,
+        ),
+        (
+            vec!["list-sessions", "--remote", &padded_secret_text],
+            secret_shaped_server_stderr,
+        ),
+        (
+            vec!["remote", "edit", &secret_text],
+            secret_shaped_server_stderr,
+        ),
+        (
+            vec!["remote", "forget", &secret_text],
+            secret_shaped_server_stderr,
+        ),
+        (
+            vec!["remote", "set-secret", &secret_text],
+            secret_shaped_server_stderr,
+        ),
+    ];
+
+    for (command_arguments, expected_stderr) in refused_argument_cases {
+        let home_directory = build_short_test_directory();
+        write_saved_server_store(
+            home_directory.path(),
+            vec![build_saved_server(
+                "work",
+                saved_server_address.clone(),
+                Some(saved_certificate_fingerprint.clone()),
+            )],
+        );
+
+        let refused_output = build_koshi_command_under_home(home_directory.path())
+            .args(&command_arguments)
+            .output()
+            .expect("the koshi binary runs");
+
+        let refused_stderr = String::from_utf8_lossy(&refused_output.stderr);
+        assert_eq!(refused_stderr, expected_stderr, "{command_arguments:?}");
+        assert!(
+            !refused_stderr.contains(&secret_text),
+            "{command_arguments:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&refused_output.stdout), "");
+        assert_eq!(
+            refused_output.status.code(),
+            Some(CliExitCode::UsageOrConfig.get_exit_code()),
+            "{command_arguments:?}"
+        );
+        assert_eq!(
+            list_saved_server_records(home_directory.path()),
+            vec![(
+                Some("work".to_string()),
+                saved_server_address.clone(),
+                Some(saved_certificate_fingerprint.clone())
+            )],
+            "{command_arguments:?}"
+        );
     }
 }
 

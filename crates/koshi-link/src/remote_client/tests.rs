@@ -72,22 +72,37 @@ fn a_saved_name_shaped_like_an_address_is_refused() {
     );
 }
 
+/// The refusal of a saved name that has the shape of a secret.
+const SECRET_SHAPED_NAME_DETAIL: &str =
+    "a saved name must not be 64 hex characters, the shape of a secret. Pick a plain name.";
+
+/// The texts a pasted secret arrives as: the 64 lowercase hex characters
+/// alone, and with whitespace around them.
+fn build_secret_shaped_texts() -> [String; 3] {
+    let secret_text = ConnectionToken::generate().expose_secret().to_string();
+    [
+        secret_text.clone(),
+        format!(" {secret_text}"),
+        format!("\t{secret_text}\n"),
+    ]
+}
+
 #[test]
-fn a_saved_name_of_sixty_four_lowercase_hex_characters_is_refused_without_repeating_it() {
-    let secret_shaped_name = ConnectionToken::generate().expose_secret().to_string();
+fn a_saved_name_that_is_a_secret_once_trimmed_is_refused_without_repeating_it() {
+    for secret_shaped_name in build_secret_shaped_texts() {
+        let refusal = validate_saved_server_name(&secret_shaped_name)
+            .expect_err("a name with the shape of a secret is refused");
 
-    let refusal = validate_saved_server_name(&secret_shaped_name)
-        .expect_err("a name with the shape of a secret is refused");
-
-    let CliError::InvalidArgs { detail } = refusal else {
-        panic!("a name that cannot be saved is a bad argument, not a runtime failure");
-    };
-    assert_eq!(
-        detail,
-        "a saved name must not be 64 hex characters, the shape of a secret. Pick a plain name."
-    );
+        let CliError::InvalidArgs { detail } = refusal else {
+            panic!("a name that cannot be saved is a bad argument, not a runtime failure");
+        };
+        assert_eq!(detail, SECRET_SHAPED_NAME_DETAIL, "{secret_shaped_name:?}");
+        assert!(!detail.contains(secret_shaped_name.trim()));
+    }
     validate_saved_server_name(&"A".repeat(64)).expect("uppercase hex is not a secret's shape");
     validate_saved_server_name(&"a".repeat(63)).expect("63 characters is not a secret's shape");
+    validate_saved_server_name(&format!("{} b", "a".repeat(64)))
+        .expect("a secret and more text is not a secret's shape");
 }
 
 #[test]
@@ -477,6 +492,10 @@ fn a_fingerprint_is_sha256_followed_by_sixty_four_lowercase_hex_characters_and_n
             "0123456789abcdef".repeat(4),
             SECRET_SHAPED_FINGERPRINT_DETAIL,
         ),
+        (
+            format!(" {}\n", "a".repeat(64)),
+            SECRET_SHAPED_FINGERPRINT_DETAIL,
+        ),
     ];
     for (refused_fingerprint, expected_detail) in refused_fingerprint_cases {
         let Err(CliError::InvalidArgs { detail }) =
@@ -500,6 +519,51 @@ fn a_plain_word_nothing_is_saved_under_is_refused_rather_than_dialled() {
         detail,
         "no saved server is named work; run `koshi remote list`"
     );
+}
+
+#[test]
+fn a_secret_shaped_word_nothing_is_saved_under_is_refused_without_repeating_it() {
+    for secret_shaped_selector in build_secret_shaped_texts() {
+        for certificate_fingerprint_text in [None, Some(format!("sha256:{}", "ab".repeat(32)))] {
+            let refusal = resolve_server_reference(
+                SavedServerLookup::NotSaved,
+                &secret_shaped_selector,
+                certificate_fingerprint_text.as_deref(),
+            )
+            .expect_err("a secret names no saved server");
+
+            let CliError::InvalidArgs { detail } = refusal else {
+                panic!("a selector that names nothing is a bad argument, not a runtime failure");
+            };
+            assert_eq!(
+                detail,
+                "no saved server is named by the 64 hex characters given, the shape of a \
+                 secret, and a secret is never given here; run `koshi remote list`",
+                "{secret_shaped_selector:?}"
+            );
+            assert!(!detail.contains(secret_shaped_selector.trim()));
+        }
+    }
+}
+
+#[test]
+fn a_secret_shaped_word_more_than_one_saved_server_answers_to_is_refused_without_repeating_it() {
+    for secret_shaped_selector in build_secret_shaped_texts() {
+        let refusal =
+            resolve_server_reference(SavedServerLookup::Ambiguous, &secret_shaped_selector, None)
+                .expect_err("an ambiguous selector is refused");
+
+        let CliError::InvalidArgs { detail } = refusal else {
+            panic!("an ambiguous selector is a bad argument");
+        };
+        assert_eq!(
+            detail,
+            "the 64 hex characters given are the name of one saved server and the address of \
+             another; run `koshi remote list` and name the one you mean",
+            "{secret_shaped_selector:?}"
+        );
+        assert!(!detail.contains(secret_shaped_selector.trim()));
+    }
 }
 
 #[test]
@@ -528,6 +592,47 @@ fn naming_a_saved_server_that_holds_another_name_is_refused_before_any_dial() {
         "desk.local:7654 is already saved as work; run `koshi remote edit work` to rename it \
          to home"
     );
+}
+
+#[test]
+fn a_secret_given_as_the_saved_name_is_refused_before_any_branch_and_never_repeated() {
+    for secret_shaped_name in build_secret_shaped_texts() {
+        // An address nothing listens on: a dial there ends unreachable, so the
+        // exact refusal below proves no dial was made.
+        let unreachable_saved_server = SavedServer {
+            server_address: "127.0.0.1:1".to_string(),
+            ..build_saved_server()
+        };
+        let server_references = [
+            ServerReference::Saved(unreachable_saved_server.clone()),
+            ServerReference::Saved(SavedServer {
+                server_name: None,
+                ..unreachable_saved_server.clone()
+            }),
+            ServerReference::Saved(SavedServer {
+                server_name: Some(secret_shaped_name.clone()),
+                ..unreachable_saved_server
+            }),
+            ServerReference::New {
+                server_address: "127.0.0.1:1".to_string(),
+                certificate_fingerprint: "ab".repeat(32),
+            },
+        ];
+
+        for server_reference in server_references {
+            let refusal = connect_saved_server(&server_reference, Some(&secret_shaped_name), None)
+                .expect_err("a name with the shape of a secret is refused");
+
+            let DialError::Refused(CliError::InvalidArgs { detail }) = refusal else {
+                panic!("a name that cannot be given is a bad argument, not a runtime failure");
+            };
+            assert_eq!(
+                detail, SECRET_SHAPED_NAME_DETAIL,
+                "{server_reference:?} {secret_shaped_name:?}"
+            );
+            assert!(!detail.contains(secret_shaped_name.trim()));
+        }
+    }
 }
 
 /// A store holding the server `build_saved_server` builds, with no name, and
