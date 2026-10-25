@@ -1318,6 +1318,11 @@ the 64 hex characters do not change either refusal:
 koshi: invalid arguments: no saved server is named by the 64 hex characters given, the shape of a secret, and a secret is never given here; run `koshi remote list`
 ```
 
+A name with the shape of a secret that koshi 0.5.0 saved is dropped by the
+first command that opens the saved servers. The server stays saved: `koshi
+remote list` prints `-` for its name, and every message names it by its
+address.
+
 A server that does not pass the check is named, and the last question is
 whether to save what was typed anyway. A server saved that way holds the
 fingerprint that was typed:
