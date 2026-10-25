@@ -32,12 +32,16 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex, PoisonError};
 
+#[cfg(unix)]
 use koshi_config::app_config::parse_app_config;
+use koshi_config::app_config::AppConfigFile;
+use koshi_config::error::ConfigError;
 use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
 use koshi_config::layer::{
     merge_client, merge_server, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
-use koshi_config::profile::parse_profile;
+use koshi_config::parser::ParsedConfigFile;
+use koshi_config::profile::{parse_profile, ProfileError};
 use koshi_config::theme::parse_theme;
 use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME_NAME};
 use koshi_core::geometry::Direction;
@@ -85,19 +89,16 @@ pub enum AppConfigOutcome {
     },
     /// The text was read and does not parse.
     Refused {
-        /// The text read.
-        app_config_source_text: String,
+        /// Why [`ParsedConfigFile::parse_app_config`] refused the text: the
+        /// KDL error, or every problem of the file in file order.
+        config_error: ConfigError,
     },
     /// The text parsed.
     Parsed {
-        /// The settings the file overrides, to fold onto the built-in
-        /// defaults.
-        app_config_layer: Box<PartialKoshiConfig>,
-        /// The name from the `theme "<name>"` line. `None` when the file names
-        /// no theme.
-        theme_name: Option<String>,
-        /// The text read.
-        app_config_source_text: String,
+        /// What [`ParsedConfigFile::parse_app_config`] gave: the schema
+        /// version, the settings the file overrides, the theme name, and the
+        /// warnings, each without the file path.
+        app_config_file: Box<AppConfigFile>,
     },
 }
 
@@ -107,9 +108,7 @@ impl LoadedAppConfig {
     #[must_use]
     pub fn find_app_config_layer(&self) -> Option<&PartialKoshiConfig> {
         match &self.app_config_outcome {
-            AppConfigOutcome::Parsed {
-                app_config_layer, ..
-            } => Some(app_config_layer.as_ref()),
+            AppConfigOutcome::Parsed { app_config_file } => Some(&app_config_file.layer),
             AppConfigOutcome::Absent
             | AppConfigOutcome::Unreadable { .. }
             | AppConfigOutcome::Refused { .. } => None,
@@ -121,9 +120,7 @@ impl LoadedAppConfig {
     #[must_use]
     pub fn into_app_config_layer(self) -> Option<PartialKoshiConfig> {
         match self.app_config_outcome {
-            AppConfigOutcome::Parsed {
-                app_config_layer, ..
-            } => Some(*app_config_layer),
+            AppConfigOutcome::Parsed { app_config_file } => Some(app_config_file.layer),
             AppConfigOutcome::Absent
             | AppConfigOutcome::Unreadable { .. }
             | AppConfigOutcome::Refused { .. } => None,
@@ -135,53 +132,89 @@ impl LoadedAppConfig {
 /// gives [`AppConfigOutcome::Absent`] and no warning. A file that cannot be
 /// read gives [`AppConfigOutcome::Unreadable`] and the warning
 /// `could not read config file <path>: <read error>`. Text that is read is
-/// parsed as [`parse_app_config_text`] states. A `config_directory` of `None`
+/// parsed once and gives what [`build_loaded_app_config`] states. A
+/// `config_directory` of `None`
 /// reads nothing and gives [`AppConfigOutcome::Absent`] and the one warning
 /// `"no config directory found; using built-in defaults"`.
 #[must_use]
 pub fn load_app_config_file(config_directory: Option<&Path>) -> LoadedAppConfig {
+    load_app_config_file_for_migration(config_directory).0
+}
+
+/// [`load_app_config_file`], and the [`ParsedConfigFile`] the
+/// [`LoadedAppConfig`] was built from: the text read with its KDL document.
+/// The [`ParsedConfigFile`] is `None` when no text was read: no
+/// `config_directory`, and a file that is absent or cannot be read.
+#[must_use]
+pub fn load_app_config_file_for_migration(
+    config_directory: Option<&Path>,
+) -> (LoadedAppConfig, Option<ParsedConfigFile>) {
     match config_directory {
         Some(config_directory) => load_app_config_at(&config_directory.join("koshi.kdl")),
-        None => LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Absent,
-            config_warnings: vec!["no config directory found; using built-in defaults".to_string()],
-        },
+        None => (
+            LoadedAppConfig {
+                app_config_outcome: AppConfigOutcome::Absent,
+                config_warnings: vec![
+                    "no config directory found; using built-in defaults".to_string()
+                ],
+            },
+            None,
+        ),
     }
 }
 
 /// Read and parse the `koshi.kdl` at `app_config_path`, as
-/// [`load_app_config_file`] states for a file it finds.
-fn load_app_config_at(app_config_path: &Path) -> LoadedAppConfig {
+/// [`load_app_config_file_for_migration`] states for a file it finds.
+fn load_app_config_at(app_config_path: &Path) -> (LoadedAppConfig, Option<ParsedConfigFile>) {
     match read_config_file(app_config_path) {
         Ok(Some(app_config_source_text)) => {
-            parse_app_config_text(app_config_path, app_config_source_text)
+            let app_config_file = ParsedConfigFile::parse(app_config_path, app_config_source_text);
+            (
+                build_loaded_app_config(&app_config_file),
+                Some(app_config_file),
+            )
         }
-        Ok(None) => LoadedAppConfig::default(),
-        Err(read_error) => LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Unreadable {
-                read_error_text: read_error.to_string(),
+        Ok(None) => (LoadedAppConfig::default(), None),
+        Err(read_error) => (
+            LoadedAppConfig {
+                app_config_outcome: AppConfigOutcome::Unreadable {
+                    read_error_text: read_error.to_string(),
+                },
+                config_warnings: vec![format_config_read_warning(app_config_path, &read_error)],
             },
-            config_warnings: vec![format_config_read_warning(app_config_path, &read_error)],
-        },
+            None,
+        ),
     }
 }
 
 /// Parse `app_config_source_text`, the text of the `koshi.kdl` at
-/// `app_config_path`.
-///
-/// Text that parses gives [`AppConfigOutcome::Parsed`] and one warning per
-/// field-partial skip, prefixed with `app_config_path`. Text that does not
-/// parse (bad syntax, unknown version, bad `update`) gives
-/// [`AppConfigOutcome::Refused`] and the one warning
-/// `koshi.kdl not applied (<path>): <problems>; using defaults`, where
-/// `<problems>` is every problem of the file in file order, joined by `; `.
-/// Both outcomes keep `app_config_source_text`.
+/// `app_config_path`, as [`build_loaded_app_config`] states.
 #[must_use]
 pub fn parse_app_config_text(
     app_config_path: &Path,
     app_config_source_text: String,
 ) -> LoadedAppConfig {
-    match parse_app_config(app_config_path, &app_config_source_text) {
+    build_loaded_app_config(&ParsedConfigFile::parse(
+        app_config_path,
+        app_config_source_text,
+    ))
+}
+
+/// The [`LoadedAppConfig`] of `app_config_file`, a `koshi.kdl` read and
+/// parsed once. Reads the KDL document `app_config_file` holds and runs no
+/// KDL parse.
+///
+/// A file that parses gives [`AppConfigOutcome::Parsed`] and one warning per
+/// field-partial skip, prefixed with the file's path. A file that does not
+/// parse (bad syntax, unknown version, bad `update`) gives
+/// [`AppConfigOutcome::Refused`] and the one warning
+/// `koshi.kdl not applied (<path>): <problems>; using defaults`, where
+/// `<problems>` is every problem of the file in file order, joined by `; `.
+/// Both outcomes keep what [`ParsedConfigFile::parse_app_config`] gives.
+#[must_use]
+pub fn build_loaded_app_config(app_config_file: &ParsedConfigFile) -> LoadedAppConfig {
+    let app_config_path = app_config_file.get_config_path();
+    match app_config_file.parse_app_config() {
         Ok(app_config_file) => {
             let mut config_warnings = Vec::new();
             append_config_field_warnings(
@@ -191,22 +224,21 @@ pub fn parse_app_config_text(
             );
             LoadedAppConfig {
                 app_config_outcome: AppConfigOutcome::Parsed {
-                    app_config_layer: Box::new(app_config_file.layer),
-                    theme_name: app_config_file.theme_name,
-                    app_config_source_text,
+                    app_config_file: Box::new(app_config_file),
                 },
                 config_warnings,
             }
         }
-        Err(parse_error) => LoadedAppConfig {
-            app_config_outcome: AppConfigOutcome::Refused {
-                app_config_source_text,
-            },
-            config_warnings: vec![format!(
-                "koshi.kdl not applied ({}): {parse_error}; using defaults",
+        Err(config_error) => {
+            let config_warnings = vec![format!(
+                "koshi.kdl not applied ({}): {config_error}; using defaults",
                 app_config_path.display()
-            )],
-        },
+            )];
+            LoadedAppConfig {
+                app_config_outcome: AppConfigOutcome::Refused { config_error },
+                config_warnings,
+            }
+        }
     }
 }
 
@@ -229,11 +261,9 @@ pub fn load_config_files_on_app_config(
         mut config_warnings,
     } = loaded_app_config;
     let (app_config_layer, theme_name) = match app_config_outcome {
-        AppConfigOutcome::Parsed {
-            app_config_layer,
-            theme_name,
-            ..
-        } => (Some(*app_config_layer), theme_name),
+        AppConfigOutcome::Parsed { app_config_file } => {
+            (Some(app_config_file.layer), app_config_file.theme_name)
+        }
         AppConfigOutcome::Absent
         | AppConfigOutcome::Unreadable { .. }
         | AppConfigOutcome::Refused { .. } => (None, None),
@@ -269,7 +299,9 @@ pub fn load_config_files_on_app_config(
 #[must_use]
 pub fn load_app_layer(config_directory: Option<&Path>) -> Option<PartialKoshiConfig> {
     let config_directory = config_directory?;
-    load_app_config_at(&config_directory.join("koshi.kdl")).into_app_config_layer()
+    load_app_config_at(&config_directory.join("koshi.kdl"))
+        .0
+        .into_app_config_layer()
 }
 
 /// The tracing subscriber's settings for the process `log_file_owner` names:
@@ -367,6 +399,7 @@ pub fn load_server_config_file(app_config_path: &Path) -> ServerConfig {
     merge_server(
         ServerConfig::default(),
         load_app_config_at(app_config_path)
+            .0
             .into_app_config_layer()
             .into_iter()
             .collect(),
@@ -690,44 +723,167 @@ fn append_config_field_warnings(
     }
 }
 
-/// Read and parse `profile/<profile_name>.kdl` from `config_directory`. A
-/// `config_directory` of `None` returns `None`. A missing, unreadable, or
-/// invalid profile is logged and returns `None`; the caller then starts a
-/// single shell. The log line of an invalid profile names every problem with
-/// its line and column, joined by `; `. Profiles are all-or-nothing: any schema violation drops the
-/// whole file, and no pane of a broken profile starts.
+/// One read of `profile/<profile_name>.kdl`, as [`load_profile_file`] gives
+/// it.
+#[derive(Debug)]
+pub struct LoadedProfile {
+    /// The name `--profile` gave, such as `work`.
+    pub profile_name: String,
+    /// What the read found.
+    pub profile_outcome: ProfileOutcome,
+}
+
+/// What one read of a profile file found.
+#[derive(Debug)]
+pub enum ProfileOutcome {
+    /// The profile name is not a plain file name, such as `../secret`. No file
+    /// was read.
+    NotPlainName,
+    /// No file is at `profile_path`.
+    Absent {
+        /// The path read: `<config directory>/profile/<profile_name>.kdl`.
+        profile_path: PathBuf,
+    },
+    /// The file at `profile_path` exists and cannot be read, such as for a
+    /// permission error or for bytes that are not UTF-8.
+    Unreadable {
+        /// The path read.
+        profile_path: PathBuf,
+        /// The read error.
+        read_error: io::Error,
+    },
+    /// The text was read and does not parse. Profiles are all-or-nothing: any
+    /// schema violation refuses the whole file.
+    Refused {
+        /// The path read.
+        profile_path: PathBuf,
+        /// Why [`parse_profile`] refused the text.
+        profile_error: ProfileError,
+    },
+    /// The text parsed.
+    Parsed {
+        /// The tabs and panes the profile opens.
+        profile_template: ProfileTemplate,
+    },
+}
+
+/// Read and parse `profile/<profile_name>.kdl` from `config_directory`.
+/// Writes no log line: [`resolve_profile_template`] writes the line for a
+/// profile that gives no template.
+///
+/// A `profile_name` that is not a plain file name gives
+/// [`ProfileOutcome::NotPlainName`] and opens no file. When
+/// `parsed_config_files` holds the file at the profile's path, the profile is
+/// read from that parse, and the file is not read again. Every other profile
+/// is read from disk: a file that is absent gives [`ProfileOutcome::Absent`],
+/// and one that cannot be read gives [`ProfileOutcome::Unreadable`]. Text
+/// that parses gives [`ProfileOutcome::Parsed`], and text that does not gives
+/// [`ProfileOutcome::Refused`].
 #[must_use]
-pub fn load_profile_template(
-    config_directory: Option<&Path>,
+pub fn load_profile_file(
+    config_directory: &Path,
     profile_name: &str,
-) -> Option<ProfileTemplate> {
-    let config_directory = config_directory?;
+    parsed_config_files: &[ParsedConfigFile],
+) -> LoadedProfile {
     // A profile name is a single file stem under `profile/`. An absolute path,
     // a `..`, or an embedded separator is refused: `--profile ../secret` and
     // `--profile /etc/x` both stop here, before any file is opened.
-    if !is_plain_file_name(profile_name) {
-        tracing::warn!(
-            "profile name `{profile_name}` must be a plain name; starting a single shell"
-        );
-        return None;
-    }
-    let profile_path = config_directory
-        .join("profile")
-        .join(format!("{profile_name}.kdl"));
-    let config_source_text = match fs::read_to_string(&profile_path) {
-        Ok(config_source_text) => config_source_text,
-        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => {
-            tracing::warn!(path = %profile_path.display(), "profile `{profile_name}` not found; starting a single shell");
-            return None;
+    let profile_outcome = if is_plain_file_name(profile_name) {
+        let profile_path = config_directory
+            .join("profile")
+            .join(format!("{profile_name}.kdl"));
+        let parsed_profile_file = parsed_config_files
+            .iter()
+            .find(|parsed_config_file| parsed_config_file.get_config_path() == profile_path);
+        match parsed_profile_file {
+            Some(parsed_profile_file) => {
+                build_profile_outcome(profile_path, parsed_profile_file.parse_profile())
+            }
+            None => load_profile_outcome(profile_path),
         }
-        Err(read_error) => {
-            tracing::warn!(path = %profile_path.display(), %read_error, "profile `{profile_name}` could not be read; starting a single shell");
-            return None;
-        }
+    } else {
+        ProfileOutcome::NotPlainName
     };
-    match parse_profile(&profile_path, &config_source_text) {
-        Ok(profile_template) => Some(profile_template),
-        Err(profile_error) => {
+    LoadedProfile {
+        profile_name: profile_name.to_string(),
+        profile_outcome,
+    }
+}
+
+/// Read and parse the profile at `profile_path`, as [`load_profile_file`]
+/// states for a profile it reads from disk.
+fn load_profile_outcome(profile_path: PathBuf) -> ProfileOutcome {
+    match fs::read_to_string(&profile_path) {
+        Ok(profile_source_text) => {
+            let profile_parse_result = parse_profile(&profile_path, &profile_source_text);
+            build_profile_outcome(profile_path, profile_parse_result)
+        }
+        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => {
+            ProfileOutcome::Absent { profile_path }
+        }
+        Err(read_error) => ProfileOutcome::Unreadable {
+            profile_path,
+            read_error,
+        },
+    }
+}
+
+/// [`ProfileOutcome::Parsed`] for a template, and [`ProfileOutcome::Refused`]
+/// with `profile_path` for an error.
+fn build_profile_outcome(
+    profile_path: PathBuf,
+    profile_parse_result: Result<ProfileTemplate, ProfileError>,
+) -> ProfileOutcome {
+    match profile_parse_result {
+        Ok(profile_template) => ProfileOutcome::Parsed { profile_template },
+        Err(profile_error) => ProfileOutcome::Refused {
+            profile_path,
+            profile_error,
+        },
+    }
+}
+
+/// The template `loaded_profile` gives, or `None`, and the caller then starts
+/// a single shell. A profile that gives no template writes one warn line:
+///
+/// - [`ProfileOutcome::NotPlainName`]: ``profile name `<name>` must be a
+///   plain name; starting a single shell``.
+/// - [`ProfileOutcome::Absent`]: ``profile `<name>` not found; starting a
+///   single shell``, with the `path` field.
+/// - [`ProfileOutcome::Unreadable`]: ``profile `<name>` could not be read;
+///   starting a single shell``, with the `path` and `read_error` fields.
+/// - [`ProfileOutcome::Refused`]: ``profile `<name>` not applied; starting a
+///   single shell``, with the `path` field and the `profile_problems` field,
+///   which names every problem with its line and column, joined by `; `.
+#[must_use]
+pub fn resolve_profile_template(loaded_profile: LoadedProfile) -> Option<ProfileTemplate> {
+    let LoadedProfile {
+        profile_name,
+        profile_outcome,
+    } = loaded_profile;
+    match profile_outcome {
+        ProfileOutcome::Parsed { profile_template } => Some(profile_template),
+        ProfileOutcome::NotPlainName => {
+            tracing::warn!(
+                "profile name `{profile_name}` must be a plain name; starting a single shell"
+            );
+            None
+        }
+        ProfileOutcome::Absent { profile_path } => {
+            tracing::warn!(path = %profile_path.display(), "profile `{profile_name}` not found; starting a single shell");
+            None
+        }
+        ProfileOutcome::Unreadable {
+            profile_path,
+            read_error,
+        } => {
+            tracing::warn!(path = %profile_path.display(), %read_error, "profile `{profile_name}` could not be read; starting a single shell");
+            None
+        }
+        ProfileOutcome::Refused {
+            profile_path,
+            profile_error,
+        } => {
             let profile_problems = profile_error.list_problem_messages().join("; ");
             tracing::warn!(path = %profile_path.display(), %profile_problems, "profile `{profile_name}` not applied; starting a single shell");
             None

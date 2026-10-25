@@ -58,7 +58,27 @@ fn add_config_version(config_source_text: &str) -> String {
 #[test]
 fn version_only_source_sets_no_layer() {
     let app_config = parse_file("");
-    assert_eq!(app_config, AppConfigFile::default());
+    assert_eq!(
+        app_config,
+        AppConfigFile {
+            schema_version: 1,
+            layer: PartialKoshiConfig::default(),
+            theme_name: None,
+            parse_warnings: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn parse_records_the_schema_version_the_file_declares() {
+    for schema_version in 1..=SCHEMA_VERSION {
+        let app_config_file = parse_app_config(
+            Path::new("koshi.kdl"),
+            &format!("version {schema_version}\npane {{\n    gap 1\n}}\n"),
+        )
+        .unwrap();
+        assert_eq!(app_config_file.schema_version, schema_version);
+    }
 }
 
 #[test]

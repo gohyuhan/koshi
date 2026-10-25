@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::*;
+use crate::app_config::parse_app_config;
 
 fn list_no_schema_problems(
     _config_file_kind: ConfigFileKind,
@@ -21,6 +22,36 @@ fn list_schema_problems_never(
     _config_document: &KdlDocument,
 ) -> Vec<String> {
     panic!("the schema problems were listed")
+}
+
+/// [`migrate_config`] on `config_source_text`, the text of the file at
+/// `config_path`.
+fn migrate_config_text(
+    config_file_kind: ConfigFileKind,
+    config_path: &Path,
+    config_source_text: &str,
+) -> Result<MigratedConfig, MigrationError> {
+    migrate_config(
+        config_file_kind,
+        &ParsedConfigFile::parse(config_path, config_source_text.to_string()),
+    )
+}
+
+/// [`migrate_with_registry`] on `config_source_text`, the text of the file at
+/// `config_path`.
+fn migrate_text_with_registry(
+    config_file_kind: ConfigFileKind,
+    config_path: &Path,
+    config_source_text: &str,
+    config_schemas: &[ConfigSchema],
+    current_schema_version: u32,
+) -> Result<MigratedConfig, MigrationError> {
+    migrate_with_registry(
+        config_file_kind,
+        &ParsedConfigFile::parse(config_path, config_source_text.to_string()),
+        config_schemas,
+        current_schema_version,
+    )
 }
 
 fn migrate_to_schema_two(
@@ -54,7 +85,7 @@ fn a_file_on_the_current_schema_migrates_without_listing_its_problems() {
         },
     ];
 
-    let migrated_config = migrate_with_registry(
+    let migrated_config = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 2\nmade-up-key \"x\"\n",
@@ -68,8 +99,7 @@ fn a_file_on_the_current_schema_migrates_without_listing_its_problems() {
         MigratedConfig {
             source_schema_version: 2,
             target_schema_version: 2,
-            migrated_source: "version 2\nmade-up-key \"x\"\n".to_string(),
-            is_changed: false,
+            migrated_config_file: None,
         }
     );
 }
@@ -78,7 +108,7 @@ fn a_file_on_the_current_schema_migrates_without_listing_its_problems() {
 fn current_valid_file_stays_byte_for_byte_unchanged() {
     let config_source_text = "version 2\ncolors { accent \"#ffffff\" }\n";
 
-    let migrated_config = migrate_config(
+    let migrated_config = migrate_config_text(
         ConfigFileKind::Theme,
         Path::new("themes/plain.kdl"),
         config_source_text,
@@ -87,8 +117,7 @@ fn current_valid_file_stays_byte_for_byte_unchanged() {
 
     assert_eq!(migrated_config.source_schema_version, 2);
     assert_eq!(migrated_config.target_schema_version, 2);
-    assert!(!migrated_config.is_changed);
-    assert_eq!(migrated_config.migrated_source, config_source_text);
+    assert_eq!(migrated_config.migrated_config_file, None);
 }
 
 #[test]
@@ -127,12 +156,17 @@ fn production_migration_updates_each_config_file_kind() {
 
     for (config_file_kind, config_path, config_source_text, expected_source_text) in config_files {
         let migrated_config =
-            migrate_config(config_file_kind, config_path, config_source_text).unwrap();
+            migrate_config_text(config_file_kind, config_path, config_source_text).unwrap();
 
         assert_eq!(migrated_config.source_schema_version, 1);
         assert_eq!(migrated_config.target_schema_version, 2);
-        assert!(migrated_config.is_changed);
-        assert_eq!(migrated_config.migrated_source, expected_source_text);
+        assert_eq!(
+            migrated_config.migrated_config_file,
+            Some(ParsedConfigFile::parse(
+                config_path,
+                expected_source_text.to_string()
+            ))
+        );
     }
 }
 
@@ -151,11 +185,44 @@ fn an_older_valid_file_reports_that_it_needs_migration() {
 }
 
 #[test]
+fn validating_a_parsed_koshi_kdl_gives_what_validating_its_text_gives() {
+    // Not KDL, an empty file, each version problem, a version from a newer
+    // koshi, and for every version this build supports a clean file, a file
+    // with a warning, and a refused file with two problems.
+    let mut app_config_texts = vec![
+        "pane {\n".to_string(),
+        String::new(),
+        "frobnicate 1\nupdate { auto-check \"yes\" }\n".to_string(),
+        format!("version {SCHEMA_VERSION}\nversion {SCHEMA_VERSION}\n"),
+        "version \"two\"\n".to_string(),
+        "version 0\n".to_string(),
+        format!("version {}\nfrobnicate 1\n", SCHEMA_VERSION + 1),
+    ];
+    for schema_version in 1..=SCHEMA_VERSION {
+        app_config_texts.push(format!("version {schema_version}\n"));
+        app_config_texts.push(format!("version {schema_version}\nfrobnicate 1\n"));
+        app_config_texts.push(format!(
+            "version {schema_version}\nfrobnicate #true\nupdate {{ auto-check \"yes\" }}\n"
+        ));
+    }
+    let config_path = Path::new("koshi.kdl");
+
+    for app_config_text in app_config_texts {
+        let app_config_result = parse_app_config(config_path, &app_config_text);
+        assert_eq!(
+            validate_parsed_app_config(config_path, app_config_result.as_ref()),
+            validate_config(ConfigFileKind::App, config_path, &app_config_text),
+            "{app_config_text:?}"
+        );
+    }
+}
+
+#[test]
 fn schema_one_migration_changes_only_the_version_value() {
     let config_source_text =
         "// keep café\nversion 1 // keep this comment\ncolors { accent \"#ffffff\" }\n";
 
-    let migrated_config = migrate_config(
+    let migrated_config = migrate_config_text(
         ConfigFileKind::Theme,
         Path::new("themes/plain.kdl"),
         config_source_text,
@@ -163,8 +230,12 @@ fn schema_one_migration_changes_only_the_version_value() {
     .unwrap();
 
     assert_eq!(
-        migrated_config.migrated_source,
-        "// keep café\nversion 2 // keep this comment\ncolors { accent \"#ffffff\" }\n"
+        migrated_config.migrated_config_file,
+        Some(ParsedConfigFile::parse(
+            Path::new("themes/plain.kdl"),
+            "// keep café\nversion 2 // keep this comment\ncolors { accent \"#ffffff\" }\n"
+                .to_string()
+        ))
     );
 }
 
@@ -188,7 +259,7 @@ fn missing_version_is_rejected() {
 
 /// The `version` reason `migrate_config` stops on for `config_source_text`.
 fn get_version_error_detail(config_source_text: &str) -> String {
-    match migrate_config(
+    match migrate_config_text(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         config_source_text,
@@ -289,7 +360,7 @@ fn version_zero_is_rejected() {
 
 #[test]
 fn bad_kdl_is_rejected_before_migration() {
-    let migration_error = migrate_config(
+    let migration_error = migrate_config_text(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\npane {",
@@ -324,7 +395,7 @@ fn field_partial_warning_is_a_validation_error() {
 
 #[test]
 fn production_migration_keeps_a_field_partial_warning_in_the_migrated_file() {
-    let migrated_config = migrate_config(
+    let migrated_config = migrate_config_text(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\npane { min-col 2 }\n",
@@ -336,8 +407,10 @@ fn production_migration_keeps_a_field_partial_warning_in_the_migrated_file() {
         MigratedConfig {
             source_schema_version: 1,
             target_schema_version: 2,
-            migrated_source: "version 2\npane { min-col 2 }\n".to_string(),
-            is_changed: true,
+            migrated_config_file: Some(ParsedConfigFile::parse(
+                Path::new("koshi.kdl"),
+                "version 2\npane { min-col 2 }\n".to_string()
+            )),
         }
     );
 }
@@ -362,7 +435,7 @@ fn migration_runs_every_adjacent_step_in_order() {
         },
     ];
 
-    let migrated_config = migrate_with_registry(
+    let migrated_config = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\n",
@@ -373,10 +446,12 @@ fn migration_runs_every_adjacent_step_in_order() {
 
     assert_eq!(migrated_config.source_schema_version, 1);
     assert_eq!(migrated_config.target_schema_version, 3);
-    assert!(migrated_config.is_changed);
     assert_eq!(
-        migrated_config.migrated_source,
-        "version 3\nstep-one #true\nstep-two #true\n"
+        migrated_config.migrated_config_file,
+        Some(ParsedConfigFile::parse(
+            Path::new("koshi.kdl"),
+            "version 3\nstep-one #true\nstep-two #true\n".to_string()
+        ))
     );
 }
 
@@ -395,7 +470,7 @@ fn missing_adjacent_step_stops_the_chain() {
         },
     ];
 
-    let migration_error = migrate_with_registry(
+    let migration_error = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\n",
@@ -456,7 +531,7 @@ fn a_source_schema_problem_is_carried_through_migration() {
         },
     ];
 
-    let migrated_config = migrate_with_registry(
+    let migrated_config = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\nbad-old-field #true\n",
@@ -470,8 +545,10 @@ fn a_source_schema_problem_is_carried_through_migration() {
         MigratedConfig {
             source_schema_version: 1,
             target_schema_version: 2,
-            migrated_source: "version 2\nbad-old-field #true\nrequired #true\n".to_string(),
-            is_changed: true,
+            migrated_config_file: Some(ParsedConfigFile::parse(
+                Path::new("koshi.kdl"),
+                "version 2\nbad-old-field #true\nrequired #true\n".to_string()
+            )),
         }
     );
 }
@@ -491,7 +568,7 @@ fn a_step_that_adds_a_problem_to_a_source_with_one_stops_the_chain() {
         },
     ];
 
-    let migration_error = migrate_with_registry(
+    let migration_error = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\nbad-old-field #true\n",
@@ -524,7 +601,7 @@ fn bad_migrated_schema_stops_the_chain() {
         },
     ];
 
-    let migration_error = migrate_with_registry(
+    let migration_error = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\n",
@@ -550,7 +627,7 @@ fn a_registry_missing_a_supported_version_is_refused_before_any_work() {
         migrate_to_next_schema: None,
     }];
 
-    let migration_error = migrate_with_registry(
+    let migration_error = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 2\n",
@@ -582,7 +659,7 @@ fn a_step_landing_on_the_wrong_version_stops_the_chain() {
         },
     ];
 
-    let migration_error = migrate_with_registry(
+    let migration_error = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "version 1\n",
@@ -604,7 +681,8 @@ fn a_step_landing_on_the_wrong_version_stops_the_chain() {
 #[test]
 fn schema_version_newer_than_supported_is_rejected() {
     let migration_error =
-        migrate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 3\n").unwrap_err();
+        migrate_config_text(ConfigFileKind::App, Path::new("koshi.kdl"), "version 3\n")
+            .unwrap_err();
 
     assert_eq!(
         migration_error,
@@ -637,7 +715,7 @@ fn a_version_newer_than_the_registry_reads_is_refused_at_its_node() {
         },
     ];
 
-    let migration_error = migrate_with_registry(
+    let migration_error = migrate_text_with_registry(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         "// settings\n  version 4\n",

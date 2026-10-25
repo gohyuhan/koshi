@@ -4,6 +4,8 @@
 use std::fs;
 use std::time::Duration;
 
+use koshi_config::app_config::AppConfigFile;
+use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::{TokenRecord, TokenScope};
 use koshi_link::config::{load_app_config_file, parse_app_config_text};
@@ -195,6 +197,34 @@ fn config_validates_the_koshi_kdl_text_read_at_start_and_not_the_text_on_disk() 
     fs::write(&app_config_path, "pane {}\n").unwrap();
     doctor_context.app_config_outcome =
         parse_app_config_text(&app_config_path, "version 2\n".to_string()).app_config_outcome;
+
+    assert_eq!(
+        check_config(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: "1 config file validated".to_string(),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn config_validates_koshi_kdl_from_what_the_start_read_found_and_parses_no_text_again() {
+    // The start read found `version 2` with no problem. The text on disk is
+    // not KDL.
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let config_directory = build_config_directory(&doctor_context);
+    fs::write(config_directory.join("koshi.kdl"), "pane {\n").unwrap();
+    doctor_context.app_config_outcome = AppConfigOutcome::Parsed {
+        app_config_file: Box::new(AppConfigFile {
+            schema_version: 2,
+            layer: PartialKoshiConfig::default(),
+            theme_name: None,
+            parse_warnings: Vec::new(),
+        }),
+    };
 
     assert_eq!(
         check_config(&doctor_context),
