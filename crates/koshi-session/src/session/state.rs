@@ -2,7 +2,7 @@
 //! running session.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::SystemTime;
 
 use koshi_core::{
@@ -15,6 +15,7 @@ use koshi_core::{
         PixelCellSize, Rect, Size,
     },
     ids::{ClientId, PaneId, SessionId, TabId},
+    process::PtySize,
 };
 use koshi_layout::{
     mode::LayoutMode,
@@ -678,42 +679,23 @@ impl Session {
     }
 
     /// Rewrite the resize deltas of every tab's tree with
-    /// [`convert_resize_deltas_to_apply_after_preferred`]. After the rewrite,
-    /// each pane solves to the size it had under the solve that applied each
-    /// resize delta before the `preferred` targets. The tabs are not solved
-    /// again.
+    /// [`convert_resize_deltas_to_apply_after_preferred`], from the terminal
+    /// size each pane was last drawn at in `pty_size_by_pane_id`, whether or
+    /// not a client views the tab. The tabs are not solved again.
     ///
-    /// A tab an attached client views is rewritten at
-    /// [`Session::get_tab_size`]. A tab no attached client views is rewritten
-    /// at the smallest pane area, per axis, of every attached client. A tab
-    /// whose viewers all report a starving pane area, and every tab of a
-    /// session with no attached client, keeps its values.
-    ///
-    /// An `80x24` client viewing tab 1 and a `100x30` client viewing tab 2 →
-    /// tab 1 at `80x22`, tab 2 at `100x28`, and a third tab at `80x22`.
-    pub fn convert_resize_deltas_to_apply_after_preferred(&mut self, pane_sizing: PaneSizing) {
-        let attached_pane_area = self
-            .clients
-            .list_attached_clients()
-            .filter_map(Client::get_pane_area)
-            .reduce(Size::compute_minimum_axes);
-        let tab_ids: Vec<TabId> = self.tabs.keys().copied().collect();
-        for tab_id in tab_ids {
-            let is_tab_viewed = self
-                .clients
-                .list_attached_clients()
-                .any(|client| client.get_active_tab_id() == tab_id);
-            let tab_size = if is_tab_viewed {
-                self.get_tab_size(tab_id)
-            } else {
-                attached_pane_area
-            };
-            let (Some(tab_size), Some(tab)) = (tab_size, self.tabs.get_mut(&tab_id)) else {
-                continue;
-            };
+    /// A tab whose carried sizes give back the rect it was drawn at solves to
+    /// those sizes at that rect. In every other tab, the `resize_delta` of each
+    /// child with a `preferred` target moves onto that child's trailing-most
+    /// flexible sibling.
+    pub fn convert_resize_deltas_to_apply_after_preferred(
+        &mut self,
+        pty_size_by_pane_id: &HashMap<PaneId, PtySize>,
+        pane_sizing: PaneSizing,
+    ) {
+        for tab in self.tabs.values_mut() {
             convert_resize_deltas_to_apply_after_preferred(
                 &mut tab.layout,
-                Rect::from_size_at_origin(tab_size),
+                pty_size_by_pane_id,
                 pane_sizing,
             );
         }

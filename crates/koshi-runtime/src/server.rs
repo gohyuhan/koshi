@@ -391,9 +391,12 @@ impl Server {
     ///
     /// `source_resume_format` is the format the resume file was written in. A body of format
     /// [`NEWEST_FORMAT_WITH_RESIZE_DELTAS_BEFORE_PREFERRED`] or older has every carried session's
-    /// resize deltas rewritten with those pane sizes before the first solve
-    /// ([`Session::convert_resize_deltas_to_apply_after_preferred`]): each pane then solves to the
-    /// size the writing build solved it to.
+    /// resize deltas rewritten before the first solve, with those pane sizes and the terminal
+    /// sizes in `pty_size_by_pane_id`
+    /// ([`Session::convert_resize_deltas_to_apply_after_preferred`]). Each tab whose terminal
+    /// sizes give back the rect it was last drawn at solves to those sizes there, whether or not
+    /// a client views it. In every other tab, the resize delta of each child with a `preferred`
+    /// target moves onto that child's trailing-most flexible sibling.
     ///
     /// `pty_size_by_pane_id` names every pane whose child the backend drives, with the size its
     /// terminal holds. Two callers reach this: the new image after a successful swap passes the
@@ -448,7 +451,10 @@ impl Server {
         if source_resume_format <= NEWEST_FORMAT_WITH_RESIZE_DELTAS_BEFORE_PREFERRED {
             let pane_sizing = server.get_pane_sizing();
             for session in server.session_by_id.values_mut() {
-                session.convert_resize_deltas_to_apply_after_preferred(pane_sizing);
+                session.convert_resize_deltas_to_apply_after_preferred(
+                    &pty_size_by_pane_id,
+                    pane_sizing,
+                );
             }
         }
         let mut resume_events = server.update_every_session_pane_sizing();

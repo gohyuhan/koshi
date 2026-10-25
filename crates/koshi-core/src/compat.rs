@@ -308,7 +308,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// lifecycle and close policy. Format 5 layout trees hold resize deltas that
 /// the solve applies after the `preferred` targets, and formats 1 through 4
 /// hold resize deltas applied before them: a restored body of format 4 or
-/// older has its resize deltas rewritten, and each pane keeps its size.
+/// older has its resize deltas rewritten from the terminal sizes the header
+/// carries. A tab whose sizes give back the rect it was last drawn at keeps
+/// every pane's size. In every other tab, the resize delta of each child with
+/// a `preferred` target moves onto its trailing-most flexible sibling.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.
 ///
