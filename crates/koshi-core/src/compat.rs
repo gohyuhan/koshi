@@ -92,9 +92,9 @@ pub struct Surface {
 ///   required. 4 read a message without them.
 /// - A frame carries `floating_pane_slots`: the floating panes its client
 ///   shows, back to front, each with its outer rect, content rect and pin
-///   state. It also carries `floating_pane_ids`: every floating pane of the
-///   session, in the order the panes became floating. Both fields are
-///   required, and 4 has neither.
+///   state. It also carries `floating_panes`: every floating pane of the
+///   session, in the order the panes became floating, each with its id and
+///   its title or `null`. Both fields are required, and 4 has neither.
 /// - A frame's client carries `last_applied_lock_command_id`: the last lock
 ///   command that the client's own connection sent and the session ran, or
 ///   `null`. It also carries `last_applied_floating_pane_move_command_id`: the

@@ -75,7 +75,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
             is_active: true,
         }],
         floating_pane_slots: Vec::new(),
-        floating_pane_ids: Vec::new(),
+        floating_panes: Vec::new(),
     };
 
     let pane_snapshot = PaneSnapshot {
@@ -613,6 +613,7 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             is_pane_placement_visible: false,
             placement_source_pane_id: None,
             floating_pane_move_draft: None,
+            floating_pane_tray: None,
         }
     );
 }

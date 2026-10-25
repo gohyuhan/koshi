@@ -97,8 +97,21 @@ pub struct FrameSession {
     /// pane area narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FrameFloatingPaneSlot>,
     /// Every floating pane of the session, in the order the panes became
-    /// floating, whether or not the viewing client shows it.
-    pub floating_pane_ids: Vec<PaneId>,
+    /// floating, whether or not the viewing client shows it, each with its
+    /// title.
+    pub floating_panes: Vec<FrameFloatingPane>,
+}
+
+/// One floating pane of the session, shown or minimized for the viewing
+/// client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameFloatingPane {
+    /// The floating pane.
+    pub pane_id: PaneId,
+    /// The pane's resolved display title, by the rule of
+    /// [`FramePane::pane_title`]. `None` when the pane has reported neither a
+    /// working directory nor a title.
+    pub pane_title: Option<String>,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.

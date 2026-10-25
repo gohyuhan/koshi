@@ -444,8 +444,9 @@ pub struct ModeBindings {
 /// The built-in default binding table: the `normal`-mode set, the reserved
 /// unlock, quit, and mouse-select in `locked` mode, the placement actions in
 /// the `pane-placement` mode, the chooser actions in the `pane-move-choice`
-/// mode, the floating pane move actions in the `floating-pane-move` mode, and
-/// the dock target and dock actions in the `dock-undock` mode.
+/// mode, the floating pane move actions in the `floating-pane-move` mode, the
+/// dock target and dock actions in the `dock-undock` mode, and the tray actions
+/// in the `floating-pane-tray` mode.
 ///
 /// Sequences written with `<leader>` resolve against `leader`: rebinding the
 /// leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
@@ -463,11 +464,11 @@ pub struct ModeBindings {
 /// under the `<C-p>` prefix, resize under `<C-s>`, and tab lifecycle under
 /// `<C-t>`. Placement actions live in the `pane-placement` mode, the
 /// chooser's `t`, `f`, Enter and Esc in the `pane-move-choice` mode, the
-/// floating pane move keys in the `floating-pane-move` mode, and the dock
-/// keys in the `dock-undock` mode. An action choice with a fixed set of
-/// values is part of the action name (`new-pane-left`,
-/// `select-pane-target-left`). Any key here can be rebound from
-/// `keybinding.kdl`.
+/// floating pane move keys in the `floating-pane-move` mode, the dock keys in
+/// the `dock-undock` mode, and the tray keys in the `floating-pane-tray`
+/// mode. An action choice with a fixed set of values is part of the action
+/// name (`new-pane-left`, `select-pane-target-left`). Any key here can be
+/// rebound from `keybinding.kdl`.
 pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
     let parse_default_key_sequence = |key_sequence_text: &str| {
         parse_sequence(key_sequence_text, leader, u8::MAX)
@@ -542,6 +543,11 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         (
             parse_default_key_sequence("<leader>p <S-Tab>"),
             build_bound_action("focus-previous-floating-pane"),
+        ),
+        // `w` opens the floating pane tray under the tabline's tray button `⧉`.
+        (
+            parse_default_key_sequence("<leader>p w"),
+            build_bound_action("toggle-floating-pane-tray"),
         ),
         // The close key kills the pane's whole process group.
         (
@@ -780,6 +786,43 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     .into_iter()
     .collect();
 
+    let floating_pane_tray_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
+        (
+            parse_default_key_sequence("<Left>"),
+            build_bound_action("select-tray-tile-left"),
+        ),
+        (
+            parse_default_key_sequence("<Down>"),
+            build_bound_action("select-tray-tile-down"),
+        ),
+        (
+            parse_default_key_sequence("<Up>"),
+            build_bound_action("select-tray-tile-up"),
+        ),
+        (
+            parse_default_key_sequence("<Right>"),
+            build_bound_action("select-tray-tile-right"),
+        ),
+        (
+            parse_default_key_sequence("<CR>"),
+            build_bound_action("toggle-selected-tray-tile"),
+        ),
+        (
+            parse_default_key_sequence("a"),
+            build_bound_action("toggle-minimize-all-floating-panes"),
+        ),
+        (
+            parse_default_key_sequence("<Esc>"),
+            build_bound_action("close-floating-pane-tray"),
+        ),
+        (
+            parse_default_key_sequence("<leader>p w"),
+            build_bound_action("toggle-floating-pane-tray"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+
     BTreeMap::from([
         (
             ModeName::from_text(LockMode::Normal.get_keymap_name()),
@@ -820,6 +863,13 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             ModeName::from_text(LockMode::DockUndock.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: dock_undock_mode_bindings,
+                removed_key_sequences: BTreeSet::new(),
+            },
+        ),
+        (
+            ModeName::from_text(LockMode::FloatingPaneTray.get_keymap_name()),
+            ModeBindings {
+                bound_action_by_key_sequence: floating_pane_tray_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),

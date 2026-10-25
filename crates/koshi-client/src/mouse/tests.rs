@@ -32,9 +32,9 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, FloatingPaneSlot, LinkStatus, MousePane, PaneSlot,
-    PlacementSnapshot, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
-    TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, FloatingPane, FloatingPaneSlot, LinkStatus, MousePane,
+    PaneSlot, PlacementSnapshot, PlacementTabSnapshot, Reconnecting, RenderSnapshot,
+    SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_test_support::fixtures::build_cell_rect;
 
@@ -152,7 +152,7 @@ pub(crate) fn build_mouse_frame(
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -5038,8 +5038,12 @@ pub(crate) fn add_floating_mouse_pane(
 ) {
     mouse_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(floating_mouse_pane.pane_id);
+        .floating_panes
+        .push(FloatingPane {
+            pane_id: floating_mouse_pane.pane_id,
+            pane_title: None,
+            is_minimized: false,
+        });
     mouse_frame
         .session_snapshot
         .floating_pane_slots
@@ -9036,8 +9040,12 @@ fn a_frame_that_floats_a_dragged_tiled_pane_keeps_the_drag_from_where_the_frame_
         .retain(|pane_slot| pane_slot.pane_id == lower_pane_id);
     floating_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(upper_pane_id);
+        .floating_panes
+        .push(FloatingPane {
+            pane_id: upper_pane_id,
+            pane_title: None,
+            is_minimized: false,
+        });
     floating_frame
         .session_snapshot
         .floating_pane_slots

@@ -35,7 +35,7 @@ const CLI_ONLY: [&str; 12] = [
 ];
 
 /// The viewer-local actions: each resolves to [`DispatchPlan::ClientAction`].
-const CLIENT_ACTIONS: [&str; 30] = [
+const CLIENT_ACTIONS: [&str; 38] = [
     "begin-pane-placement",
     "begin-dock-undock",
     "select-pane-target-left",
@@ -66,6 +66,14 @@ const CLIENT_ACTIONS: [&str; 30] = [
     "select-previous-floating-pane",
     "confirm-floating-pane-move",
     "cancel-floating-pane-move",
+    "toggle-floating-pane-tray",
+    "close-floating-pane-tray",
+    "select-tray-tile-left",
+    "select-tray-tile-down",
+    "select-tray-tile-up",
+    "select-tray-tile-right",
+    "toggle-selected-tray-tile",
+    "toggle-minimize-all-floating-panes",
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this

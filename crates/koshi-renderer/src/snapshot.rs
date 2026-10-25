@@ -251,6 +251,21 @@ impl RenderSnapshot {
         }
     }
 
+    /// Borrow this frame as the client paints it: [`Self::build_frame_layout`]
+    /// with `committed_regions`, the region solve the paint places the
+    /// tabline, the statusline and the pane area with.
+    #[must_use]
+    pub fn build_painted_frame_layout<'a>(
+        &'a self,
+        viewer_chrome: ViewerChrome,
+        committed_regions: &'a CommittedRegions,
+    ) -> FrameLayout<'a> {
+        FrameLayout {
+            committed_regions: Some(committed_regions),
+            ..self.build_frame_layout(viewer_chrome)
+        }
+    }
+
     /// The content snapshot of the pane `pane_id` in this frame, or `None`
     /// when the frame carries no content for it.
     #[must_use]
@@ -362,7 +377,7 @@ pub enum Delivery {
 /// shows its placement handle and whether the pointer rests on that handle,
 /// which input mode owns the keymap, where
 /// the tab strip is scrolled, whether the viewer holds a link to its session,
-/// and where it draws a floating pane it is moving. While pane placement is
+/// where it draws a floating pane it is moving, and its floating pane tray. While pane placement is
 /// shown, including while a confirmation waits, the viewer clears the pointer
 /// and handle fields before hit-testing and painting, and the renderer ignores
 /// the pointer field: hovering `pane-123` leaves its border color unchanged.
@@ -404,6 +419,28 @@ pub struct ViewerChrome {
     /// the frame places it at. A pinned pane stays at the frame's cell. `None`
     /// while no move is under way.
     pub floating_pane_move_draft: Option<FloatingPaneMoveDraft>,
+    /// The viewer's open floating pane tray, drawn under the tabline's tray
+    /// button and hit-tested over the floating panes. `None` while the tray
+    /// is closed.
+    pub floating_pane_tray: Option<FloatingPaneTray>,
+}
+
+/// One viewer's open floating pane tray: the tile its keys act on, and the
+/// tile under its pointer.
+///
+/// A tile index counts the session's
+/// [`floating_panes`](SessionSnapshot::floating_panes) from `0`: tile `1`
+/// shows the second floating pane. The viewer keeps both indexes below the
+/// number of floating panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingPaneTray {
+    /// The tile that `core:toggle-selected-tray-tile` acts on, drawn with the
+    /// hover border.
+    pub selected_tile_index: usize,
+    /// The tile under the viewer's pointer, or `None` off every tile. The
+    /// tray's header shows this tile's title, and the selected tile's title
+    /// while it is `None`.
+    pub hovered_tile_index: Option<usize>,
 }
 
 /// The placement handle hover a viewer shows for `pointer_hover`, the handle or
@@ -419,11 +456,12 @@ pub struct ViewerChrome {
 ///   [`Linked`](LinkStatus::Linked), it is `None`.
 /// - A [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) or
 ///   [`TiledHandle`](PlacementHandleHover::TiledHandle) hover shows in
-///   `Normal`, `Locked` and `PaneMoveChoice`, and in `DockUndock` while
-///   `is_dock_undock_command_pending` is `false`.
+///   `Normal`, `Locked`, `PaneMoveChoice` and `FloatingPaneTray`, and in
+///   `DockUndock` while `is_dock_undock_command_pending` is `false`.
 /// - A [`FloatingHandle`](PlacementHandleHover::FloatingHandle) hover of an
-///   unpinned pane shows in `Normal`, `Locked`, `PaneMoveChoice` and
-///   `FloatingPaneMove` while `is_floating_pane_move_waiting` is `false`. In
+///   unpinned pane shows in `Normal`, `Locked`, `PaneMoveChoice`,
+///   `FloatingPaneMove` and `FloatingPaneTray` while
+///   `is_floating_pane_move_waiting` is `false`. In
 ///   `DockUndock`, a pinned or unpinned pane's hover shows while
 ///   `is_dock_undock_command_pending` and `is_floating_pane_move_waiting` are
 ///   both `false`.
@@ -447,7 +485,10 @@ pub fn find_shown_placement_handle_hover(
     let is_drag_started_by_press = match placement_handle_hover {
         PlacementHandleHover::TiledTopBorder { .. } | PlacementHandleHover::TiledHandle { .. } => {
             match active_input_mode {
-                LockMode::Normal | LockMode::Locked | LockMode::PaneMoveChoice => true,
+                LockMode::Normal
+                | LockMode::Locked
+                | LockMode::PaneMoveChoice
+                | LockMode::FloatingPaneTray => true,
                 LockMode::DockUndock => !is_dock_undock_command_pending,
                 LockMode::PanePlacement | LockMode::FloatingPaneMove => false,
             }
@@ -456,7 +497,8 @@ pub fn find_shown_placement_handle_hover(
             LockMode::Normal
             | LockMode::Locked
             | LockMode::PaneMoveChoice
-            | LockMode::FloatingPaneMove => !is_pinned && !is_floating_pane_move_waiting,
+            | LockMode::FloatingPaneMove
+            | LockMode::FloatingPaneTray => !is_pinned && !is_floating_pane_move_waiting,
             LockMode::DockUndock => {
                 !is_dock_undock_command_pending && !is_floating_pane_move_waiting
             }
@@ -572,7 +614,8 @@ pub struct FrameLayout<'a> {
     pub client_snapshot: &'a ClientSnapshot,
     /// The viewer's own chrome: the hovered pane, the marked placement handle,
     /// the input mode, the pane placement preview, the tab strip's scroll, the
-    /// reconnect state, and the floating pane move draft.
+    /// reconnect state, the floating pane move draft, and the floating pane
+    /// tray.
     pub viewer_chrome: ViewerChrome,
     /// The region solve committed with the painted frame. `None` leaves
     /// hit-testing on the built-in geometry: the pane area is the whole area,
@@ -586,7 +629,9 @@ impl<'a> FrameLayout<'a> {
     /// A frame named `work` with tabs `shell` and `logs` yields those names and
     /// their tab state, but it does not yield a pane slot or terminal grid.
     /// The lock mode is the viewer's `active_input_mode` when one is set, and
-    /// the client's `lock_mode` otherwise.
+    /// the client's `lock_mode` otherwise. The tray button shows while the
+    /// session holds a floating pane, highlighted while the viewer's tray is
+    /// open.
     #[must_use]
     pub(crate) fn get_tabline_inputs(&self) -> TablineInputs<'a> {
         TablineInputs {
@@ -602,6 +647,8 @@ impl<'a> FrameLayout<'a> {
                 LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
             },
             tabline_offset: self.viewer_chrome.tabline_offset,
+            has_floating_panes: !self.session_snapshot.floating_panes.is_empty(),
+            is_floating_pane_tray_open: self.viewer_chrome.floating_pane_tray.is_some(),
         }
     }
 
@@ -691,8 +738,9 @@ impl<'a> FrameLayout<'a> {
 /// with, and the few per-pane fields that say which line each pane's top row
 /// shows and where an event over it goes.
 ///
-/// It carries no cells, no cursor and no titles, so a viewer holding one
-/// between paints holds no pane's rows.
+/// It carries no cells, no cursor and no pane content titles, so a viewer
+/// holding one between paints holds no pane's rows. The session's floating
+/// pane list keeps its titles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseFrame {
     /// The session being viewed, including its solved active tab.
@@ -706,8 +754,8 @@ pub struct MouseFrame {
     pub committed_regions: CommittedRegions,
     /// The viewer chrome that was painted with this frame: the hovered pane,
     /// the marked placement handle, the tab strip's scroll, the input mode and
-    /// reconnect tags, the pane placement preview, and the floating pane move
-    /// draft.
+    /// reconnect tags, the pane placement preview, the floating pane move
+    /// draft, and the floating pane tray.
     pub viewer_chrome: ViewerChrome,
 }
 
@@ -805,9 +853,68 @@ pub struct SessionSnapshot {
     /// narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FloatingPaneSlot>,
     /// Every floating pane of the session, in the order the panes became
-    /// floating, whether or not the viewing client shows it. With floats `a`,
-    /// `b` and `c` made in that order and `b` minimized, it holds `[a, b, c]`.
-    pub floating_pane_ids: Vec<PaneId>,
+    /// floating, whether or not the viewing client shows it, each with its
+    /// title and whether the viewing client minimized it. With floats `a`,
+    /// `b` and `c` made in that order and `b` minimized, it lists `a`, `b`
+    /// and `c`, and only `b` has `is_minimized` set.
+    pub floating_panes: Vec<FloatingPane>,
+}
+
+impl SessionSnapshot {
+    /// The index of `pane_id` in the session's
+    /// [`floating_panes`](Self::floating_panes), or `None` when it is no
+    /// floating pane. With floating panes `htop` and `logs`, `logs` gives
+    /// `Some(1)`.
+    #[must_use]
+    pub fn find_floating_pane_index(&self, pane_id: PaneId) -> Option<usize> {
+        self.floating_panes
+            .iter()
+            .position(|floating_pane| floating_pane.pane_id == pane_id)
+    }
+
+    /// Whether `pane_id` is one of the session's
+    /// [`floating_panes`](Self::floating_panes), shown or minimized.
+    #[must_use]
+    pub fn is_floating_pane(&self, pane_id: PaneId) -> bool {
+        self.find_floating_pane_index(pane_id).is_some()
+    }
+
+    /// Whether `pane_id` is one of the session's
+    /// [`floating_panes`](Self::floating_panes) and the viewing client
+    /// minimized it.
+    #[must_use]
+    pub fn is_floating_pane_minimized(&self, pane_id: PaneId) -> bool {
+        self.floating_panes
+            .iter()
+            .any(|floating_pane| floating_pane.pane_id == pane_id && floating_pane.is_minimized)
+    }
+
+    /// Whether the viewing client minimized every one of the session's
+    /// [`floating_panes`](Self::floating_panes). `true` when the session
+    /// holds no floating pane.
+    #[must_use]
+    pub fn are_all_floating_panes_minimized(&self) -> bool {
+        self.floating_panes
+            .iter()
+            .all(|floating_pane| floating_pane.is_minimized)
+    }
+}
+
+/// One floating pane of the session, shown or minimized for the viewing
+/// client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingPane {
+    /// The floating pane.
+    pub pane_id: PaneId,
+    /// The pane's resolved display title, by the rule of
+    /// [`PaneSnapshot::pane_title`]. `None` when the pane has reported neither
+    /// a working directory nor a title.
+    pub pane_title: Option<String>,
+    /// Whether the viewing client minimized the pane. The session gives a
+    /// minimized pane no slot in
+    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots), and a
+    /// pane the client did not minimize a slot.
+    pub is_minimized: bool,
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its full

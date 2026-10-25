@@ -21,9 +21,10 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
-    GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot, PlacementHandleHover,
-    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
+    FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints, MouseFrame, PaneSlot, PaneSnapshot,
+    PlacementHandleHover, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
+    TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -149,7 +150,7 @@ fn build_render_snapshot(
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -354,7 +355,11 @@ fn every_cell_classifies_as_what_was_painted() {
                 HitRegion::PaneTitlebar { .. }
                 | HitRegion::PanePinToggle { .. }
                 | HitRegion::PaneMinimizeButton { .. }
-                | HitRegion::PaneCloseButton { .. } => {
+                | HitRegion::PaneCloseButton { .. }
+                | HitRegion::FloatingPaneTrayButton
+                | HitRegion::FloatingPaneTrayTile { .. }
+                | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTray => {
                     panic!(
                         "floating pane region at ({column_index}, {row_index}) in a frame with no floating pane"
                     );
@@ -540,6 +545,115 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
             pane_id: left_pane_id
         }
     );
+}
+
+#[test]
+fn every_open_tray_cell_classifies_as_what_was_painted() {
+    let (mut render_snapshot, ..) = build_tiled_frame();
+    let htop_pane_id = PaneId::new();
+    // Pane-area (1, 0) is screen (1, 1): the float lies under the tray's left
+    // part.
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(FloatingPaneSlot::from_outer_rect(
+            htop_pane_id,
+            build_cell_rect(1, 0, 24, 8),
+            false,
+        ));
+    let mut htop_pane_snapshot =
+        build_pane_snapshot(htop_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
+    htop_pane_snapshot.pane_title = Some("htop".to_string());
+    render_snapshot.pane_snapshots.push(htop_pane_snapshot);
+    render_snapshot.session_snapshot.floating_panes = vec![
+        FloatingPane {
+            pane_id: htop_pane_id,
+            pane_title: Some("htop".to_string()),
+            is_minimized: false,
+        },
+        FloatingPane {
+            pane_id: PaneId::new(),
+            pane_title: Some("logs".to_string()),
+            is_minimized: true,
+        },
+    ];
+    let viewer_chrome = ViewerChrome {
+        active_input_mode: Some(LockMode::FloatingPaneTray),
+        floating_pane_tray: Some(FloatingPaneTray {
+            selected_tile_index: 0,
+            hovered_tile_index: None,
+        }),
+        ..ViewerChrome::default()
+    };
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let frame_layout = mouse_frame.build_frame_layout();
+
+    // ` TRAY ` takes columns 54 to 59 and the button 51 to 53. Five slots per
+    // row fit the 54 columns left of the tray's right border: the tray is
+    // 48x11 at (6, 1), slot 0 at (8, 2) and slot 1 at (17, 2).
+    assert_eq!(get_row_text(&screen_buffer, 0, 51, 54), " ⧉ ");
+    for column_index in 51..54 {
+        assert_eq!(
+            resolve_hit_region(
+                frame_layout,
+                Point {
+                    column: column_index,
+                    row: 0
+                }
+            ),
+            HitRegion::FloatingPaneTrayButton
+        );
+    }
+    let tile_symbols_by_index: [Vec<String>; 2] = [" 1  htop ", " 2  logs "].map(|tile_text| {
+        tile_text
+            .chars()
+            .map(String::from)
+            .chain(BORDER_GLYPHS.map(String::from))
+            .collect()
+    });
+    let tray_symbols: Vec<String> = " htop "
+        .chars()
+        .map(String::from)
+        .chain(BORDER_GLYPHS.map(String::from))
+        .collect();
+    let mut region_cell_counts = [0_u32; 4];
+    for row_index in 1..12 {
+        for column_index in 6..54 {
+            let screen_point = Point {
+                column: column_index,
+                row: row_index,
+            };
+            let painted_symbol = screen_buffer[(column_index, row_index)]
+                .symbol()
+                .to_string();
+            let (region_index, painted_symbols) =
+                match resolve_hit_region(frame_layout, screen_point) {
+                    HitRegion::FloatingPaneTrayTile { tile_index } => {
+                        (tile_index, tile_symbols_by_index[tile_index].clone())
+                    }
+                    HitRegion::FloatingPaneTrayToggleMinimizeAll => {
+                        (2, " minimize all ".chars().map(String::from).collect())
+                    }
+                    HitRegion::FloatingPaneTray => (3, tray_symbols.clone()),
+                    unexpected_region => {
+                        panic!(
+                            "({column_index}, {row_index}) in the tray hit {unexpected_region:?}"
+                        )
+                    }
+                };
+            assert!(
+                painted_symbols.contains(&painted_symbol),
+                "({column_index}, {row_index}) painted {painted_symbol:?} for region {region_index}"
+            );
+            region_cell_counts[region_index] += 1;
+        }
+    }
+
+    // Two 8x3 tiles, the 14-cell label, and the rest of the 48x11 tray.
+    assert_eq!(region_cell_counts, [24, 24, 14, 48 * 11 - 2 * 24 - 14]);
+    assert_eq!(get_row_text(&screen_buffer, 3, 8, 25), "│ htop │ │ logs │");
 }
 
 #[test]

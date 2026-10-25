@@ -18,13 +18,13 @@ use std::fmt;
 use std::str::FromStr;
 
 /// The maximum length of an [`ActionName`], from the grammar
-/// `^[a-z][a-z0-9-]{0,30}$` (1 leading letter + up to 30 trailing chars).
-const MAX_ACTION_NAME_CHARACTER_COUNT: usize = 31;
+/// `^[a-z][a-z0-9-]{0,39}$` (1 leading letter + up to 39 trailing chars).
+const MAX_ACTION_NAME_CHARACTER_COUNT: usize = 40;
 
 /// Why a string is not a valid [`ActionName`].
 ///
-/// Names follow `^[a-z][a-z0-9-]{0,30}$`: a lowercase-letter start, then up to
-/// thirty more lowercase letters, digits, or hyphens. The display name shown to
+/// Names follow `^[a-z][a-z0-9-]{0,39}$`: a lowercase-letter start, then up to
+/// thirty-nine more lowercase letters, digits, or hyphens. The display name shown to
 /// users is free-form and lives separately in [`ActionMetadata`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionNameError {
@@ -333,14 +333,27 @@ pub enum ClientActionKind {
     /// insertion beside a pane or a whole stack, and the stack of that pane or
     /// that stack.
     TogglePanePlacementStack,
+    /// Open the floating pane tray when it is closed, and close it when it is
+    /// open.
+    ToggleFloatingPaneTray,
+    /// Close the floating pane tray and return to the base input mode.
+    CloseFloatingPaneTray,
+    /// Select the tray tile one step in `direction` inside the tile grid.
+    SelectTrayTile(Direction),
+    /// Minimize the selected tray tile's floating pane when the viewer shows
+    /// it, and restore it when the viewer minimized it.
+    ToggleSelectedTrayTile,
+    /// Minimize every floating pane the viewer shows when it shows at least
+    /// one, and restore every floating pane when it shows none.
+    ToggleMinimizeAllFloatingPanes,
 }
 
 /// Where an action's key sorts among the keys of its modifier group in the
 /// hint bar: `Essential` keys first, then `Navigation`, then `Other`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HintTier {
-    /// Confirms or cancels a mode, creates or closes a pane or tab, or locks
-    /// or unlocks the client.
+    /// Confirms, cancels or closes a mode, creates or closes a pane or tab, or
+    /// locks or unlocks the client.
     Essential,
     /// Moves, selects, resizes or splits in one direction, or steps to the
     /// next or previous tab or floating pane.
@@ -435,7 +448,9 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// The `begin-pane-placement` action starts the viewer-local pane placement
 /// mode, or the pane move chooser while the viewer draws a floating pane it
 /// did not pin. The placement, chooser and floating pane move actions select
-/// and confirm viewer-local targets; the other command-backed actions use values their NAME bakes into the command
+/// and confirm viewer-local targets. The floating pane tray actions open,
+/// close and drive the viewer's tray.
+/// The other command-backed actions use values their NAME bakes into the command
 /// the resolver builds — `lock`/`unlock` both build `SetLockMode`; the
 /// `new-pane-*`, `focus-pane-*`, and `resize-pane-*` families each build their
 /// family's command with the named direction; `focus-next-floating-pane` and
@@ -455,16 +470,17 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// Each direction family carries one hint label: `new-pane-*` reads
 /// `Split Pane`, `resize-pane-*` `Resize Pane`, `select-pane-target-*`
 /// `Select Pane Target`, `select-pane-insertion-*` `Select Pane Insertion`,
-/// `move-floating-pane-*` `Move Floating Pane`, `focus-pane-*` `Focus Pane`,
-/// and `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`. Every other action
-/// has none.
+/// `move-floating-pane-*` `Move Floating Pane`, `select-tray-tile-*`
+/// `Select Tray Tile`, `focus-pane-*` `Focus Pane`, and
+/// `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`. Every other action has
+/// none.
 ///
 /// Every `confirm-*` and `cancel-*` action, `new-pane`, `close-pane`,
-/// `close-pane-tree`, `new-tab`, `close-tab`, `lock` and `unlock` are
-/// [`HintTier::Essential`]. The direction families, `next-tab`,
-/// `previous-tab`, and the next and previous floating pane and placement tab
-/// actions are [`HintTier::Navigation`]. Every other action is
-/// [`HintTier::Other`].
+/// `close-pane-tree`, `new-tab`, `close-tab`, `lock`, `unlock` and
+/// `close-floating-pane-tray` are [`HintTier::Essential`]. The direction
+/// families, `next-tab`, `previous-tab`, and the next and previous floating
+/// pane and placement tab actions are [`HintTier::Navigation`]. Every other
+/// action is [`HintTier::Other`].
 #[must_use]
 pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
     use ActionHandlerReference::{CoreClient, CoreCommand};
@@ -818,6 +834,70 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::CancelFloatingPaneMove),
         ),
         build_core_action_seed(
+            "toggle-floating-pane-tray",
+            "Toggle Floating Pane Tray",
+            "Open the floating pane tray under the tabline's tray button, or close it when it is open",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ToggleFloatingPaneTray),
+        ),
+        build_core_action_seed(
+            "close-floating-pane-tray",
+            "Close Floating Pane Tray",
+            "Close the floating pane tray and return to the base input mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CloseFloatingPaneTray),
+        ),
+        build_core_action_seed(
+            "select-tray-tile-left",
+            "Select Tray Tile Left",
+            "Select the tile to the left in the floating pane tray",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectTrayTile(Direction::Left)),
+        ),
+        build_core_action_seed(
+            "select-tray-tile-down",
+            "Select Tray Tile Down",
+            "Select the tile below in the floating pane tray",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectTrayTile(Direction::Down)),
+        ),
+        build_core_action_seed(
+            "select-tray-tile-up",
+            "Select Tray Tile Up",
+            "Select the tile above in the floating pane tray",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectTrayTile(Direction::Up)),
+        ),
+        build_core_action_seed(
+            "select-tray-tile-right",
+            "Select Tray Tile Right",
+            "Select the tile to the right in the floating pane tray",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectTrayTile(Direction::Right)),
+        ),
+        build_core_action_seed(
+            "toggle-selected-tray-tile",
+            "Toggle Selected Tray Tile",
+            "Minimize or restore the selected tile's floating pane on this client's screen",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ToggleSelectedTrayTile),
+        ),
+        build_core_action_seed(
+            "toggle-minimize-all-floating-panes",
+            "Toggle Minimize All Floating Panes",
+            "Minimize every floating pane this client shows, or restore every one when it shows none",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ToggleMinimizeAllFloatingPanes),
+        ),
+        build_core_action_seed(
             "move-pane",
             "Move Pane",
             "Swap a pane with its visible neighbor in one direction and commit the swap at once",
@@ -1149,6 +1229,10 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             | "move-floating-pane-down"
             | "move-floating-pane-up"
             | "move-floating-pane-right" => Some("Move Floating Pane"),
+            "select-tray-tile-left"
+            | "select-tray-tile-down"
+            | "select-tray-tile-up"
+            | "select-tray-tile-right" => Some("Select Tray Tile"),
             "focus-pane-left" | "focus-pane-down" | "focus-pane-up" | "focus-pane-right" => {
                 Some("Focus Pane")
             }
@@ -1157,8 +1241,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         };
         let is_direction_family_member = action_metadata.hint_label.is_some();
         action_metadata.hint_tier = match action_name {
-            "new-pane" | "close-pane" | "close-pane-tree" | "new-tab" | "close-tab" | "lock"
-            | "unlock" => HintTier::Essential,
+            "new-pane"
+            | "close-pane"
+            | "close-pane-tree"
+            | "new-tab"
+            | "close-tab"
+            | "lock"
+            | "unlock"
+            | "close-floating-pane-tray" => HintTier::Essential,
             _ if action_name.starts_with("confirm-") || action_name.starts_with("cancel-") => {
                 HintTier::Essential
             }

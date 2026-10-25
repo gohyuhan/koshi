@@ -76,9 +76,15 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 },
                 is_pinned: true,
             }],
-            floating_pane_ids: vec![
-                PaneId::from_uuid(Uuid::from_u128(6)),
-                PaneId::from_uuid(Uuid::from_u128(5)),
+            floating_panes: vec![
+                FrameFloatingPane {
+                    pane_id: PaneId::from_uuid(Uuid::from_u128(6)),
+                    pane_title: Some("htop".to_string()),
+                },
+                FrameFloatingPane {
+                    pane_id: PaneId::from_uuid(Uuid::from_u128(5)),
+                    pane_title: None,
+                },
             ],
         },
         pane_snapshots: vec![FramePane {
@@ -156,7 +162,7 @@ fn recovery_notice_reads_from_painted_frame_and_absent_field_means_hidden() {
 #[test]
 fn a_frame_without_its_floating_pane_lists_is_refused() {
     let encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
-    for field_name in ["floating_pane_slots", "floating_pane_ids"] {
+    for field_name in ["floating_pane_slots", "floating_panes"] {
         let mut frame_json_without_field = encoded_json.clone();
         frame_json_without_field["session_snapshot"]
             .as_object_mut()
@@ -186,10 +192,10 @@ fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
         json!(Uuid::from_u128(4).to_string())
     );
     assert_eq!(
-        encoded_json["session_snapshot"]["floating_pane_ids"],
+        encoded_json["session_snapshot"]["floating_panes"],
         json!([
-            Uuid::from_u128(6).to_string(),
-            Uuid::from_u128(5).to_string()
+            { "pane_id": Uuid::from_u128(6).to_string(), "pane_title": "htop" },
+            { "pane_id": Uuid::from_u128(5).to_string(), "pane_title": null }
         ])
     );
 
@@ -413,9 +419,15 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     },
                     "is_pinned": true
                 }],
-                "floating_pane_ids": [
-                    "00000000-0000-0000-0000-000000000006",
-                    "00000000-0000-0000-0000-000000000005"
+                "floating_panes": [
+                    {
+                        "pane_id": "00000000-0000-0000-0000-000000000006",
+                        "pane_title": "htop"
+                    },
+                    {
+                        "pane_id": "00000000-0000-0000-0000-000000000005",
+                        "pane_title": null
+                    }
                 ]
             },
             "pane_snapshots": [{

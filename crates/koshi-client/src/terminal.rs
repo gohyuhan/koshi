@@ -232,10 +232,11 @@ pub(crate) fn build_placement_render_snapshot(
     placement_render_snapshot
 }
 
-/// Build the frame shown while a committed placement or a floated pane
+/// Build the frame shown while a committed placement or a floating pane
 /// slides: `render_snapshot` with `animated_tab_snapshot`, when `Some`, as its
 /// active tab, and with each of `animated_floating_pane_slots` in place of the
-/// floating pane slot that names the same pane.
+/// floating pane slot that names the same pane. A slot whose pane has no
+/// floating pane slot joins after every floating pane slot, on top.
 pub(crate) fn build_committed_placement_render_snapshot(
     render_snapshot: &RenderSnapshot,
     animated_tab_snapshot: Option<TabSnapshot>,
@@ -259,6 +260,21 @@ pub(crate) fn build_committed_placement_render_snapshot(
                 });
         if let Some(animated_floating_pane_slot) = animated_floating_pane_slot {
             *floating_pane_slot = *animated_floating_pane_slot;
+        }
+    }
+    for animated_floating_pane_slot in animated_floating_pane_slots {
+        let is_slot_listed = render_snapshot
+            .session_snapshot
+            .floating_pane_slots
+            .iter()
+            .any(|floating_pane_slot| {
+                floating_pane_slot.pane_id == animated_floating_pane_slot.pane_id
+            });
+        if !is_slot_listed {
+            committed_placement_render_snapshot
+                .session_snapshot
+                .floating_pane_slots
+                .push(*animated_floating_pane_slot);
         }
     }
     committed_placement_render_snapshot

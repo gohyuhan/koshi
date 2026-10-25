@@ -364,7 +364,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
                 },
             ],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -508,10 +508,22 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
             is_pinned: true,
         },
     ];
-    expected_render_snapshot.session_snapshot.floating_pane_ids = vec![
-        upper_floating_pane_id,
-        PaneId::new(),
-        lower_floating_pane_id,
+    expected_render_snapshot.session_snapshot.floating_panes = vec![
+        FloatingPane {
+            pane_id: upper_floating_pane_id,
+            pane_title: Some("logs".to_string()),
+            is_minimized: false,
+        },
+        FloatingPane {
+            pane_id: PaneId::new(),
+            pane_title: Some("htop".to_string()),
+            is_minimized: true,
+        },
+        FloatingPane {
+            pane_id: lower_floating_pane_id,
+            pane_title: None,
+            is_minimized: false,
+        },
     ];
     assert_eq!(
         build_received_render_snapshot(&expected_render_snapshot),

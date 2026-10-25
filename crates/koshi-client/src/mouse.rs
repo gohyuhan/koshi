@@ -431,6 +431,7 @@ impl Client {
                 }),
                 (_, _, None) => None,
             },
+            floating_pane_tray: self.floating_pane_tray,
         }
     }
 
@@ -488,32 +489,33 @@ impl Client {
             return Some(PlacementInputAction::Consumed);
         }
         let frame_layout = mouse_frame.build_frame_layout();
-        let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
         if !self.is_placement_mode_active() {
-            if mouse_input
-                .modifier_flags
-                .has_all_modifiers(BindingModifierFlags::SHIFT)
+            if mouse_input.mouse_kind != MouseKind::Press(MouseButton::Left)
+                || mouse_input
+                    .modifier_flags
+                    .has_all_modifiers(BindingModifierFlags::SHIFT)
             {
                 return None;
             }
-            if let (MouseKind::Press(MouseButton::Left), HitRegion::PlacementHandle { pane_id }) =
-                (mouse_input.mouse_kind, hit_region)
+            let HitRegion::PlacementHandle { pane_id } =
+                resolve_hit_region(frame_layout, mouse_input.position)
+            else {
+                return None;
+            };
+            if frame_layout
+                .find_drawn_floating_pane_slot(pane_id)
+                .is_some()
             {
-                if frame_layout
-                    .find_drawn_floating_pane_slot(pane_id)
-                    .is_some()
-                {
-                    return None;
-                }
-                let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
-                if !self.begin_mouse_placement_mode(pane_id, active_tab_id) {
-                    return Some(PlacementInputAction::Consumed);
-                }
-                self.begin_placement_drag(mouse_input.position, false);
-                return Some(PlacementInputAction::FocusPane { pane_id });
+                return None;
             }
-            return None;
+            let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+            if !self.begin_mouse_placement_mode(pane_id, active_tab_id) {
+                return Some(PlacementInputAction::Consumed);
+            }
+            self.begin_placement_drag(mouse_input.position, false);
+            return Some(PlacementInputAction::FocusPane { pane_id });
         }
+        let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
         self.update_placement_hovers(mouse_frame, mouse_input, hit_region, current_time);
         let placement_action = match mouse_input.mouse_kind {
             MouseKind::Press(MouseButton::Left) => match hit_region {
@@ -548,6 +550,10 @@ impl Client {
                 | HitRegion::Tabline
                 | HitRegion::TablineScrollLeft
                 | HitRegion::TablineScrollRight
+                | HitRegion::FloatingPaneTrayButton
+                | HitRegion::FloatingPaneTrayTile { .. }
+                | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTray
                 | HitRegion::Statusline
                 | HitRegion::None => PlacementInputAction::Consumed,
             },
@@ -706,10 +712,7 @@ impl Client {
                 }
                 let is_tiled_pane_dragged = mouse_input.position
                     != floating_pane_handle_drag.press_position
-                    && !mouse_frame
-                        .session_snapshot
-                        .floating_pane_ids
-                        .contains(&pane_id);
+                    && !mouse_frame.session_snapshot.is_floating_pane(pane_id);
                 if !is_tiled_pane_dragged || self.is_dock_undock_command_pending() {
                     return PlacementInputAction::Consumed;
                 }
@@ -815,10 +818,7 @@ impl Client {
                 }
             }
         };
-        let is_pane_floating = mouse_frame
-            .session_snapshot
-            .floating_pane_ids
-            .contains(&pane_id);
+        let is_pane_floating = mouse_frame.session_snapshot.is_floating_pane(pane_id);
         if is_pane_floating && self.sent_floating_pane_move.is_some() {
             return;
         }
@@ -1008,7 +1008,8 @@ impl Client {
     /// floating pane's grab-handle drag moves that pane in this viewer's own
     /// view, a tab-strip drag scrolls the strip, a content drag highlights, and
     /// anything else is the program's. A **left press** acts on the region it
-    /// landed on — a tab focuses that tab, a scroll arrow steps the strip one tab, a
+    /// landed on — a tab focuses that tab, a scroll arrow steps the strip one tab, the
+    /// floating pane tray button opens the tray, a
     /// stack header focuses that pane, pane content focuses the pane or begins
     /// a highlight, a border begins a resize, the bare tab strip begins a
     /// peek-drag. On a floating pane, a press on the grab handle begins a move,
@@ -1640,7 +1641,15 @@ impl Client {
                 }
                 Vec::new()
             }
-            HitRegion::Statusline | HitRegion::None => Vec::new(),
+            HitRegion::FloatingPaneTrayButton => {
+                self.open_floating_pane_tray(Some(mouse_frame));
+                Vec::new()
+            }
+            HitRegion::FloatingPaneTrayTile { .. }
+            | HitRegion::FloatingPaneTrayToggleMinimizeAll
+            | HitRegion::FloatingPaneTray
+            | HitRegion::Statusline
+            | HitRegion::None => Vec::new(),
         }
     }
 
@@ -2640,12 +2649,13 @@ fn build_focus_pane_action(client_id: ClientId, pane_id: PaneId) -> MouseAction 
     })))
 }
 
-/// Whether `hit_region` is on the tab strip: the tabline row, a tab, or a
-/// scroll arrow.
+/// Whether `hit_region` is on the tab strip: the tabline row, the floating
+/// pane tray button, a tab, or a scroll arrow.
 fn is_tab_strip_region(hit_region: HitRegion) -> bool {
     matches!(
         hit_region,
         HitRegion::Tabline
+            | HitRegion::FloatingPaneTrayButton
             | HitRegion::Tab { .. }
             | HitRegion::TablineScrollLeft
             | HitRegion::TablineScrollRight

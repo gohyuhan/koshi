@@ -6,6 +6,7 @@
 //! to the region drawn under it.
 
 pub mod floating_pane_chrome;
+pub mod floating_pane_tray;
 pub mod hit_test;
 pub mod images;
 pub mod placement;

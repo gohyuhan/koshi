@@ -45,6 +45,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
+use crate::floating_pane_tray::find_drawn_floating_pane_tray_layout;
 use crate::hit_test::compute_tiled_pane_top_border;
 use crate::images::{
     compute_floating_pane_image_placeholder_rects, compute_image_placeholder_rects,
@@ -61,10 +62,12 @@ use crate::theme::Theme;
 const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
 
 mod floating;
+mod floating_pane_tray;
 mod placement;
 
 use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
+use floating_pane_tray::draw_floating_pane_tray;
 use placement::draw_pane_placement_presentation;
 
 /// The rows of the buffer that one [`render_frame`] call draws.
@@ -135,9 +138,13 @@ impl<'rows> DrawnRows<'rows> {
 ///    `true`, only the placement source pane is drawn, and only while the
 ///    active tab holds no slot of it. None is drawn while every pane of the
 ///    active tab is suppressed.
-/// 9. Draws the tabline in the first committed region, over that margin.
-/// 10. Draws the statusline in the second committed region, over that margin.
-/// 11. Gives each cell of `viewport_area` whose symbol ratatui measures at
+/// 9. Draws the viewer's open floating pane tray over every cell drawn before
+///    it, while `viewer_chrome.floating_pane_tray` is `Some` and the tray fits
+///    ([`find_drawn_floating_pane_tray_layout`]).
+/// 10. Draws the tabline in the first committed region, over that margin. While
+///     the session holds a floating pane, it shows the tray button ` ⧉ `.
+/// 11. Draws the statusline in the second committed region, over that margin.
+/// 12. Gives each cell of `viewport_area` whose symbol ratatui measures at
 ///     another width than [`compute_text_display_width`] gives it that width as
 ///     its forced width. Example: a cell that holds `U+17D8` takes 1 column, not
 ///     the 3 that ratatui measures.
@@ -157,7 +164,8 @@ impl<'rows> DrawnRows<'rows> {
 /// first four cells. `Native` keeps the pane cells beneath image pixels. In
 /// `Native` mode, an image shows the unavailable-image text while its record
 /// is missing or `unavailable_image_keys` names its placement. A `Native`
-/// image that a floating pane drawn above its pane covers shows no text.
+/// image that a floating pane drawn above its pane covers shows no text. The
+/// open tray covers the text of every image under it.
 ///
 /// `placement_presentation` tints visible affected panes and paints messages
 /// inside visible pane content outside stack headers. Collapsed stack headers
@@ -167,7 +175,7 @@ impl<'rows> DrawnRows<'rows> {
 ///
 /// `drawn_rows` [`DrawnRows::Every`] runs every step above over every row.
 /// [`DrawnRows::Listed`] leaves each listed row as `Every` would, and runs
-/// each step that writes whole rows (steps 1, 3, 7, 8's cells and 11) only
+/// each step that writes whole rows (steps 1, 3, 7, 8's cells, 9 and 12) only
 /// over the listed rows. A box, strip or bar that covers no listed row is
 /// not drawn. Example: rows `[10]` of a frame whose one pane prints on row
 /// 10 redraws the 200 cells of row 10, and the pane's border cells on that
@@ -317,6 +325,23 @@ pub fn render_frame(
             unavailable_image_keys,
         );
         draw_image_placeholders(&floating_pane_placeholder_rects, screen_buffer);
+    }
+
+    // The viewer's open floating pane tray draws over the floating panes.
+    if let (Some(floating_pane_tray), Some(tray_layout)) = (
+        viewer_chrome.floating_pane_tray,
+        find_drawn_floating_pane_tray_layout(
+            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+        ),
+    ) {
+        draw_floating_pane_tray(
+            render_snapshot,
+            &tray_layout,
+            floating_pane_tray,
+            theme,
+            drawn_rows,
+            screen_buffer,
+        );
     }
 
     // The tabline draws from the same tab-row facts hit-testing reads.
@@ -532,8 +557,9 @@ fn clear_drawn_rows(
 /// hidden, a collapsed stack member, or a slot of two or fewer columns or rows,
 /// whose content rect holds no cells); it has no terminal grid this frame; its
 /// view is scrolled back into history; the application has hidden its cursor;
-/// the cursor cell of a floating pane lies outside the pane area; or a floating
-/// pane drawn above the focused pane covers the cursor cell.
+/// the cursor cell of a floating pane lies outside the pane area; a floating
+/// pane drawn above the focused pane covers the cursor cell; or the viewer's
+/// open floating pane tray covers it.
 ///
 /// A `120x40` viewport with a 20-column left region places the same pane cursor
 /// 20 columns farther right than a whole-area layout. A focused floating pane
@@ -615,6 +641,15 @@ pub fn get_cursor_position(
         || covering_floating_panes
             .iter()
             .any(|placed_floating_pane| placed_floating_pane.outer_area.contains(cursor_position))
+        || find_drawn_floating_pane_tray_layout(
+            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+        )
+        .is_some_and(|tray_layout| {
+            tray_layout.tray_rect.is_point_inside(Point {
+                column: cursor_position.x,
+                row: cursor_position.y,
+            })
+        })
     {
         return None;
     }
@@ -1320,6 +1355,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::PaneMoveChoice => Some("MOVE"),
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
         LockMode::DockUndock => Some("DOCK"),
+        LockMode::FloatingPaneTray => Some("TRAY"),
     }
 }
 
@@ -1356,6 +1392,12 @@ pub(crate) fn place_cell_rect(cell_rect: Rect, layout_origin: Point) -> RatatuiR
         width: cell_rect.size.column_count,
         height: cell_rect.size.row_count,
     }
+}
+
+/// `screen_rect` as a ratatui area, both in screen cells: [`place_cell_rect`]
+/// at origin `(0, 0)`.
+pub(crate) fn place_screen_rect(screen_rect: Rect) -> RatatuiRect {
+    place_cell_rect(screen_rect, Point { column: 0, row: 0 })
 }
 
 /// Each visible tiled pane of the active tab that has a content rect and a pane
@@ -1600,7 +1642,10 @@ use style::*;
 use tabline::draw_tabline;
 // The statusline fills its row with the same bar background as the tabline.
 pub(crate) use style::compute_bar_style;
-pub(crate) use tabline::solve_tabline_layout;
+pub(crate) use tabline::{
+    compute_right_block_start_column, find_floating_pane_tray_button_column, solve_tabline_layout,
+    FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;

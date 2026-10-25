@@ -14,6 +14,8 @@
 //! - The **tabline** (top row) and the **statusline** (bottom row) are koshi-owned
 //!   chrome painted last, over whatever lies beneath, so a click on those rows
 //!   is chrome, not the pane under it.
+//! - The viewer's open **floating pane tray** comes next. It is drawn over the
+//!   floating panes, so a click on it is the tray, not the pane under it.
 //! - **Floating panes** come next, the top of this viewer's draw order first.
 //!   They live in cells of the pane rectangle left by the committed region
 //!   solve, with no letterbox offset, so a float drawn in the letterbox margin
@@ -32,9 +34,10 @@ use koshi_core::ids::{PaneId, TabId};
 use ratatui::layout::Rect as RatatuiRect;
 
 use crate::floating_pane_chrome::compute_floating_pane_titlebar;
+use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
 use crate::render::{
     compute_content_rect, compute_pane_area, find_region_area, is_placement_handle_shown,
-    solve_tabline_layout,
+    solve_tabline_layout, FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
 };
 use crate::snapshot::{FloatingPaneSlot, FrameLayout};
 
@@ -104,8 +107,24 @@ pub enum HitRegion {
     /// The right scroll arrow, shown when tabs are hidden off the right of a
     /// scrolled tab strip; clicking it steps the strip one tab toward the end.
     TablineScrollRight,
-    /// The tabline row, off any tab ribbon or arrow (session name, gap, or mode
-    /// tag).
+    /// The tabline's floating pane tray button ` ⧉ `; clicking it opens or
+    /// closes the viewer's tray.
+    FloatingPaneTrayButton,
+    /// A slot of the viewer's open floating pane tray that shows a floating
+    /// pane; clicking it minimizes or restores that pane.
+    FloatingPaneTrayTile {
+        /// The tile's index, the pane's index in the session's
+        /// [`floating_panes`](crate::snapshot::SessionSnapshot::floating_panes).
+        tile_index: usize,
+    },
+    /// The tray header's ` minimize all ` or ` restore all ` label; clicking
+    /// it runs `core:toggle-minimize-all-floating-panes`.
+    FloatingPaneTrayToggleMinimizeAll,
+    /// A cell of the viewer's open floating pane tray off every tile and the
+    /// header label: its border, its title, a blank cell or an empty slot.
+    FloatingPaneTray,
+    /// The tabline row, off any tab ribbon, arrow or tray button (session
+    /// name, gap, or mode tag).
     Tabline,
     /// The keybinding statusline on the bottom row.
     Statusline,
@@ -118,9 +137,11 @@ pub enum HitRegion {
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
 /// pane content beneath it: the committed tabline and statusline regions are
-/// tested first, then this viewer's drawn floating panes from the top of the
-/// draw order down, then the tiled layer. The tiled layout is centered inside
-/// the committed pane rectangle with a letterbox margin that hits nothing.
+/// tested first, then the viewer's open floating pane tray
+/// ([`find_drawn_floating_pane_tray_layout`]), then this viewer's drawn
+/// floating panes from the top of the draw order down, then the tiled layer.
+/// The tiled layout is centered inside the committed pane rectangle with a
+/// letterbox margin that hits nothing.
 #[must_use]
 pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion {
     let viewport_area = compute_viewport_area(frame_layout);
@@ -144,6 +165,13 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
     if let Some(statusline_rect) = compute_statusline_area(frame_layout, viewport_area) {
         if is_screen_point_inside(statusline_rect, screen_point) {
             return HitRegion::Statusline;
+        }
+    }
+
+    // The open tray draws over the floating panes.
+    if let Some(tray_layout) = find_drawn_floating_pane_tray_layout(frame_layout) {
+        if tray_layout.tray_rect.is_point_inside(screen_point) {
+            return classify_floating_pane_tray_region(frame_layout, &tray_layout, screen_point);
         }
     }
 
@@ -266,6 +294,33 @@ fn classify_floating_pane_region(
     }
 }
 
+/// Classify `screen_point`, a cell inside `tray_layout`'s tray rect: the slot
+/// of a floating pane, then the header label, then
+/// [`FloatingPaneTray`](HitRegion::FloatingPaneTray) for every other cell.
+///
+/// With two floating panes in a tray whose slot `1` is at `(28, 2)`, `(30, 3)`
+/// gives `FloatingPaneTrayTile { tile_index: 1 }`, and a cell of slot `2`
+/// gives `FloatingPaneTray`.
+fn classify_floating_pane_tray_region(
+    frame_layout: FrameLayout<'_>,
+    tray_layout: &FloatingPaneTrayLayout,
+    screen_point: Point,
+) -> HitRegion {
+    let tile_count = frame_layout.session_snapshot.floating_panes.len();
+    for (tile_index, slot_rect) in tray_layout.slot_rects.iter().take(tile_count).enumerate() {
+        if slot_rect.is_point_inside(screen_point) {
+            return HitRegion::FloatingPaneTrayTile { tile_index };
+        }
+    }
+    if tray_layout
+        .toggle_minimize_all_rect
+        .is_some_and(|label_rect| label_rect.is_point_inside(screen_point))
+    {
+        return HitRegion::FloatingPaneTrayToggleMinimizeAll;
+    }
+    HitRegion::FloatingPaneTray
+}
+
 /// `screen_point` counted from the top-left cell of `frame_pane_area`, or
 /// `None` when it lies left of or above that cell. A pane area at `(0, 1)`
 /// turns screen `(30, 14)` into `(30, 13)`, and screen `(30, 0)` into `None`.
@@ -342,14 +397,24 @@ pub fn compute_tiled_pane_top_border(outer_rect: Rect) -> TiledPaneTopBorder {
     }
 }
 
-/// Classify a cell on the tabline row at `column`: a scroll arrow, the tab
-/// whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off all of them.
+/// Classify a cell on the tabline row at `column`: the tray button, a scroll
+/// arrow, the tab whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off
+/// all of them.
 fn classify_tabline_region(
     frame_layout: FrameLayout<'_>,
     tabline_rect: RatatuiRect,
     screen_column: u16,
 ) -> HitRegion {
     let tabline_geometry = solve_tabline_layout(frame_layout.get_tabline_inputs(), tabline_rect);
+    if tabline_geometry
+        .floating_pane_tray_button_column
+        .is_some_and(|button_column| {
+            screen_column >= button_column
+                && screen_column < button_column + FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT
+        })
+    {
+        return HitRegion::FloatingPaneTrayButton;
+    }
     if tabline_geometry.left_scroll_arrow_column == Some(screen_column) {
         return HitRegion::TablineScrollLeft;
     }
@@ -498,7 +563,10 @@ pub(crate) fn compute_viewport_area(frame_layout: FrameLayout<'_>) -> RatatuiRec
 
 /// The tabline rectangle, using the committed solve when this is a painted
 /// client frame and the built-in top row for a server layout view.
-fn compute_tabline_area(frame_layout: FrameLayout<'_>, viewport_area: RatatuiRect) -> RatatuiRect {
+pub(crate) fn compute_tabline_area(
+    frame_layout: FrameLayout<'_>,
+    viewport_area: RatatuiRect,
+) -> RatatuiRect {
     match frame_layout.committed_regions {
         Some(committed_regions) => {
             find_region_area(committed_regions, 0, viewport_area).unwrap_or(RatatuiRect {

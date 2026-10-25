@@ -47,8 +47,8 @@ pub(crate) struct StatuslineInputs<'a> {
 /// The tabline facts needed to solve its geometry and paint it.
 ///
 /// This value excludes colors and pane data. A session named `work` with tabs
-/// `shell` and `logs` carries those names, their active markers, and the mode
-/// values, but no pane slot or terminal grid.
+/// `shell` and `logs` carries those names, their active markers, the mode
+/// values and the tray button state, but no pane slot or terminal grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TablineInputs<'a> {
     /// The session display name shown in the left block.
@@ -63,6 +63,12 @@ pub(crate) struct TablineInputs<'a> {
     pub(crate) reconnecting: Option<Reconnecting>,
     /// The first tab index the viewer is peeking at, if one is set.
     pub(crate) tabline_offset: Option<usize>,
+    /// Whether the session holds a floating pane: the tabline draws the tray
+    /// button ` ⧉ ` left of the mode tag.
+    pub(crate) has_floating_panes: bool,
+    /// Whether the viewer's floating pane tray is open: the tray button draws
+    /// in reverse video.
+    pub(crate) is_floating_pane_tray_open: bool,
 }
 
 #[cfg(test)]

@@ -59,8 +59,9 @@ use koshi_input::keyboard::decode_key_event;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{
-    FrameClient, FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction, FrameImageDisplay,
-    FrameImageRecordHeader, FrameImageTransfer, FrameSession, FrameSlot, FrameTab, PaintedFrame,
+    FrameClient, FrameFloatingPane, FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction,
+    FrameImageDisplay, FrameImageRecordHeader, FrameImageTransfer, FrameSession, FrameSlot,
+    FrameTab, PaintedFrame,
 };
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult, ProcessImageId,
@@ -77,10 +78,10 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot,
-    GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot, PlacementHandleHover,
-    PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
-    TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
+    FloatingPaneSlot, GridView, ImagePlacementSnapshot, MousePane, PaneSlot, PaneSnapshot,
+    PlacementHandleHover, PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata,
+    SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 use koshi_terminal::graphics::{
@@ -253,7 +254,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             },
             tab_snapshots: Vec::new(),
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: FrameClient {
@@ -2640,7 +2641,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -3474,8 +3475,12 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
     for (floating_pane_id, column) in [(back_floating_pane_id, 0), (front_floating_pane_id, 40)] {
         mouse_frame
             .session_snapshot
-            .floating_pane_ids
-            .push(floating_pane_id);
+            .floating_panes
+            .push(FloatingPane {
+                pane_id: floating_pane_id,
+                pane_title: None,
+                is_minimized: false,
+            });
         mouse_frame
             .session_snapshot
             .floating_pane_slots
@@ -5717,7 +5722,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -13465,7 +13470,10 @@ fn build_undocked_pane_frames(
         content_rect: floating_pane_slot.content_rect,
         is_pinned: false,
     }];
-    undocked_frame.session_snapshot.floating_pane_ids = vec![undocked_pane_id];
+    undocked_frame.session_snapshot.floating_panes = vec![FrameFloatingPane {
+        pane_id: undocked_pane_id,
+        pane_title: None,
+    }];
     (initial_frame, undocked_frame)
 }
 
@@ -13506,7 +13514,7 @@ fn an_undocked_pane_slides_from_its_tiled_box_to_its_floating_box() {
         .commit_pending_snapshot(&mut client, started_at)
         .expect("the undocked frame paints");
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         vec![FloatingPaneSlot::from_outer_rect(
             undocked_pane_id,
             Rect::from_origin_and_size(
@@ -13538,7 +13546,7 @@ fn an_undocked_pane_slides_from_its_tiled_box_to_its_floating_box() {
         .refresh_at(&mut client, Some(active_tab_id), halfway_time)
         .expect("the slide repaints without a session frame");
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         vec![FloatingPaneSlot::from_outer_rect(
             undocked_pane_id,
             Rect::from_origin_and_size(
@@ -13557,7 +13565,7 @@ fn an_undocked_pane_slides_from_its_tiled_box_to_its_floating_box() {
     screen
         .refresh_at(&mut client, Some(active_tab_id), end_time)
         .expect("the slide's last repaint draws the floating box");
-    assert_eq!(screen.shown_undock_floating_pane_slots, Vec::new());
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
     assert_eq!(
         screen.compute_next_placement_animation_wakeup_at(
             end_time,
@@ -13589,7 +13597,7 @@ fn reduced_motion_draws_an_undocked_pane_at_its_floating_box_at_once() {
         .commit_pending_snapshot(&mut client, started_at)
         .expect("the undocked frame paints");
 
-    assert_eq!(screen.shown_undock_floating_pane_slots, Vec::new());
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
     assert_eq!(
         screen.compute_next_placement_animation_wakeup_at(
             started_at,
@@ -13646,7 +13654,7 @@ fn a_frame_that_floats_one_pane_and_drops_another_slides_only_the_floated_pane()
         .expect("the frame that floats one pane paints");
 
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         vec![slide_start_slot],
         "the left pane leaves the tab without a floating slot, so only the floated pane slides"
     );
@@ -13699,10 +13707,13 @@ fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
             is_pinned: false,
         },
     );
-    undocked_frame
-        .session_snapshot
-        .floating_pane_ids
-        .insert(0, left_pane_id);
+    undocked_frame.session_snapshot.floating_panes.insert(
+        0,
+        FrameFloatingPane {
+            pane_id: left_pane_id,
+            pane_title: None,
+        },
+    );
     screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
         initial_frame,
     )));
@@ -13722,7 +13733,7 @@ fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
         row_count: 20,
     };
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         vec![
             FloatingPaneSlot::from_outer_rect(
                 left_pane_id,
@@ -13759,7 +13770,7 @@ fn a_paint_retry_keeps_one_slide_per_floated_pane() {
         .expect("the pending frame paints on the next attempt");
 
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         vec![FloatingPaneSlot::from_outer_rect(
             undocked_pane_id,
             Rect::from_origin_and_size(
@@ -13837,7 +13848,7 @@ fn an_undock_slide_with_no_tab_slide_keeps_the_screen_waking() {
         .refresh_at(&mut client, Some(landing_tab_id), halfway_time)
         .expect("the slide repaints without a session frame");
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         vec![FloatingPaneSlot::from_outer_rect(
             undocked_pane_id,
             Rect::from_origin_and_size(
@@ -13968,7 +13979,7 @@ fn a_connection_reset_ends_running_undock_slides() {
         .refresh_at(&mut client, Some(active_tab_id), halfway_time)
         .expect("the screen repaints the floating box");
 
-    assert_eq!(screen.shown_undock_floating_pane_slots, Vec::new());
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
 }
 
 #[test]
@@ -13995,7 +14006,7 @@ fn a_placement_preview_ends_running_undock_slides() {
         .expect("the placement preview paints");
 
     assert_eq!(
-        screen.shown_undock_floating_pane_slots,
+        screen.shown_animated_floating_pane_slots,
         Vec::new(),
         "the preview draws the floated pane at its floating box"
     );
@@ -14323,4 +14334,318 @@ fn a_restart_hold_counts_each_key_of_a_read() {
     assert!(input_hold.hold_input(HeldInput::Keyboard(build_key_inputs_for_text("a"))));
     assert_eq!(input_hold.held_input_count, MAX_HELD_INPUT_COUNT);
     assert_eq!(input_hold.held_inputs.len(), MAX_HELD_INPUT_COUNT);
+}
+
+/// Two frames of an `80x24` session whose one floating pane
+/// `floating_pane_id` is titled `htop`, over one tab with no pane. In the
+/// first, the client shows the pane at `(16, 4)` `48x13` with its content and
+/// one image. In the second, the client minimized it.
+fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, RenderSnapshot) {
+    let mut minimized_frame = build_test_painted_frame();
+    minimized_frame.session_snapshot.floating_panes = vec![FrameFloatingPane {
+        pane_id: floating_pane_id,
+        pane_title: Some(String::from("htop")),
+    }];
+    let mut shown_frame = minimized_frame.clone();
+    let floating_pane_slot = FloatingPaneSlot::from_outer_rect(
+        floating_pane_id,
+        Rect::from_origin_and_size(
+            Point { column: 16, row: 4 },
+            Size {
+                column_count: 48,
+                row_count: 13,
+            },
+        ),
+        false,
+    );
+    shown_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
+        pane_id: floating_pane_id,
+        outer_rect: floating_pane_slot.outer_rect,
+        content_rect: floating_pane_slot.content_rect,
+        is_pinned: false,
+    }];
+    let mut shown_snapshot = build_render_snapshot(&build_received_painted_frame(shown_frame));
+    shown_snapshot.pane_snapshots.push(PaneSnapshot {
+        pane_title: Some(String::from("htop")),
+        image_placement_snapshots: build_native_image_snapshot().pane_snapshots[0]
+            .image_placement_snapshots
+            .clone(),
+        ..PaneSnapshot::from_empty_pane(floating_pane_id)
+    });
+    let minimized_snapshot = build_render_snapshot(&build_received_painted_frame(minimized_frame));
+    (shown_snapshot, minimized_snapshot)
+}
+
+/// Paint `render_snapshot` on `screen` for `client` at `current_time`.
+fn commit_test_snapshot(
+    client: &mut Client,
+    screen: &mut Screen<TestBackend>,
+    render_snapshot: &RenderSnapshot,
+    current_time: Instant,
+) -> MouseFrame {
+    screen.pending_snapshot = Some(render_snapshot.clone());
+    screen
+        .commit_pending_snapshot(client, current_time)
+        .expect("the frame paints")
+}
+
+/// The floating pane slot of `pane_id` in the box `(column, row)`
+/// `column_count x row_count`, unpinned.
+fn build_unpinned_floating_pane_slot(
+    pane_id: PaneId,
+    column: u16,
+    row: u16,
+    column_count: u16,
+    row_count: u16,
+) -> FloatingPaneSlot {
+    FloatingPaneSlot::from_outer_rect(
+        pane_id,
+        Rect::from_origin_and_size(
+            Point { column, row },
+            Size {
+                column_count,
+                row_count,
+            },
+        ),
+        false,
+    )
+}
+
+#[test]
+fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let floating_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+
+    let minimized_mouse_frame =
+        commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            16,
+            4,
+            48,
+            13
+        )],
+        "the slide starts at the box the pane was drawn in"
+    );
+    assert_eq!(
+        minimized_mouse_frame.session_snapshot.floating_pane_slots,
+        Vec::new(),
+        "mouse input is placed against the frame with the pane minimized"
+    );
+    let displayed_snapshot = build_displayed_render_snapshot(
+        &minimized_snapshot,
+        None,
+        None,
+        &screen.shown_animated_floating_pane_slots,
+        &screen.floating_pane_minimize_animations,
+    )
+    .expect("the slide changes the painted frame");
+    assert_eq!(
+        displayed_snapshot.session_snapshot.floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            16,
+            4,
+            48,
+            13
+        )],
+        "the painted frame draws the sliding pane on top"
+    );
+    assert_eq!(
+        displayed_snapshot.find_pane_snapshot(floating_pane_id),
+        Some(&PaneSnapshot {
+            pane_title: Some(String::from("htop")),
+            ..PaneSnapshot::from_empty_pane(floating_pane_id)
+        }),
+        "the slide draws the pane's last content without its image"
+    );
+
+    // 80 ms into 160 ms the ease-out has covered 0.875 of the way to the
+    // pane-area cell (72, 0) under the button glyph at screen (72, 0).
+    let halfway_time = started_at + Duration::from_millis(80);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            halfway_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        Some(FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND)
+    );
+    let active_tab_id = minimized_snapshot.client_snapshot.active_tab_id;
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), halfway_time)
+        .expect("the slide repaints without a session frame");
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            65,
+            1,
+            7,
+            3
+        )]
+    );
+
+    let end_time = started_at + PLACEMENT_ANIMATION_DURATION;
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), end_time)
+        .expect("the slide's last repaint draws no pane");
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
+    assert_eq!(screen.floating_pane_minimize_animations.len(), 0);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            end_time,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_minimized_pane_slides_into_its_tile_while_the_tray_is_open() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let floating_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let started_at = Instant::now();
+    let shown_mouse_frame =
+        commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+    client.apply_client_action(
+        ClientActionKind::ToggleFloatingPaneTray,
+        Some(&shown_mouse_frame),
+    );
+    commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+    let active_tab_id = minimized_snapshot.client_snapshot.active_tab_id;
+
+    screen
+        .refresh_at(
+            &mut client,
+            Some(active_tab_id),
+            started_at + Duration::from_millis(80),
+        )
+        .expect("the slide repaints without a session frame");
+
+    // Tile 0 sits at screen (19, 2), pane-area (19, 1) 8x3.
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            19,
+            1,
+            13,
+            4
+        )]
+    );
+}
+
+#[test]
+fn a_restored_pane_slides_out_of_the_cell_under_the_closed_trays_button() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let floating_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            72,
+            0,
+            1,
+            1
+        )]
+    );
+    screen
+        .refresh_at(
+            &mut client,
+            Some(shown_snapshot.client_snapshot.active_tab_id),
+            started_at + Duration::from_millis(80),
+        )
+        .expect("the slide repaints without a session frame");
+
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            23,
+            4,
+            42,
+            12
+        )]
+    );
+}
+
+#[test]
+fn a_restore_during_a_minimize_slides_back_from_where_the_minimize_reached() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let floating_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+    commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+
+    let restored_at = started_at + Duration::from_millis(80);
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, restored_at);
+
+    assert_eq!(screen.floating_pane_minimize_animations.len(), 0);
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_unpinned_floating_pane_slot(
+            floating_pane_id,
+            65,
+            1,
+            7,
+            3
+        )]
+    );
+}
+
+#[test]
+fn reduced_motion_minimizes_and_restores_a_pane_in_one_frame() {
+    let mut client = build_test_client();
+    client.client_config.should_reduce_motion = true;
+    let mut screen = build_test_screen();
+    let floating_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+
+    commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
+    assert_eq!(screen.floating_pane_minimize_animations.len(), 0);
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(
+            started_at,
+            FRAME_INTERVAL_DURATION_AT_60_FRAMES_PER_SECOND
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_closed_floating_pane_starts_no_slide() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let floating_pane_id = PaneId::new();
+    let (shown_snapshot, mut closed_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    closed_snapshot.session_snapshot.floating_panes.clear();
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+
+    commit_test_snapshot(&mut client, &mut screen, &closed_snapshot, started_at);
+
+    assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
+    assert_eq!(screen.floating_pane_minimize_animations.len(), 0);
 }

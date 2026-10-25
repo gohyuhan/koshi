@@ -1,5 +1,6 @@
-//! The tab bar: the session block on the left, the mode tag on the right, and
-//! between them the tabs that fit the row with their scroll arrows.
+//! The tab bar: the session block on the left, the mode tag on the right, the
+//! floating pane tray button left of the mode tag, and between them the tabs
+//! that fit the row with their scroll arrows.
 
 use ratatui::widgets::{Clear, Widget};
 
@@ -16,7 +17,9 @@ mod tests;
 ///
 /// The whole row is filled with the theme's bar background (black by default).
 /// The session name with the `[v…]` version badge sits on the left and the mode
-/// tag on the right, painted as colored text over that fill. Only the tab list
+/// tag on the right, painted as colored text over that fill. While the session
+/// holds a floating pane, the tray button ` ⧉ ` sits left of the mode tag in
+/// the mode tag's style, in reverse video while the viewer's tray is open. Only the tab list
 /// between them carries block backgrounds — each tab is a two-block ribbon on
 /// its own stop of the theme's chrome ramp (light-purple → light-blue by
 /// default). A tab that does not fit is dropped whole, and a `◀` or `▶` marks
@@ -53,13 +56,28 @@ pub(super) fn draw_tabline(
         tabline_area.right() - tabline_layout.right_block_start_column,
     );
 
+    if let Some(floating_pane_tray_button_column) = tabline_layout.floating_pane_tray_button_column
+    {
+        let mut button_style = compute_mode_style(theme);
+        if tabline_inputs.is_floating_pane_tray_open {
+            button_style = button_style.add_modifier(Modifier::REVERSED);
+        }
+        set_line_clipped(
+            screen_buffer,
+            floating_pane_tray_button_column,
+            tabline_area.y,
+            &Line::from(Span::styled(FLOATING_PANE_TRAY_BUTTON_TEXT, button_style)),
+            FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
+        );
+    }
+
     // Left block: the session name and version badge, measured with the same
     // `session_block_room` the solve used.
     let session_line = build_session_line(
         tabline_inputs.session_name,
         theme,
         tabline_layout
-            .right_block_start_column
+            .tab_strip_end_column
             .saturating_sub(tabline_area.x),
     );
     set_line_clipped(
@@ -111,8 +129,17 @@ pub(super) fn draw_tabline(
 /// The one-cell width a tabline scroll arrow reserves and occupies.
 pub(crate) const TABLINE_ARROW_WIDTH: u16 = 1;
 
+/// The tabline's floating pane tray button: the glyph `⧉` with a space each
+/// side. `⧉` (`U+29C9`) is one cell wide, also where East Asian ambiguous
+/// characters take two.
+pub(crate) const FLOATING_PANE_TRAY_BUTTON_TEXT: &str = " ⧉ ";
+
+/// The cells [`FLOATING_PANE_TRAY_BUTTON_TEXT`] takes.
+pub(crate) const FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT: u16 = 3;
+
 /// The tabline's solved geometry for one frame: where the two anchored blocks
-/// sit, the windowed run of visible tabs, and the scroll arrows framing it.
+/// and the tray button sit, the windowed run of visible tabs, and the scroll
+/// arrows framing it.
 ///
 /// [`draw_tabline`] paints from it, and [`crate::resolve_hit_region()`] maps a click to a
 /// tab or arrow with it. Both read the same solve.
@@ -121,6 +148,13 @@ pub(crate) struct TablineLayout {
     pub session_block_width: u16,
     /// The column where the right block, the mode tag, starts.
     pub right_block_start_column: u16,
+    /// The column where the tray button ` ⧉ ` starts, three cells left of the
+    /// mode tag. `None` while the session holds no floating pane, or when the
+    /// row leaves fewer than three cells left of the mode tag.
+    pub floating_pane_tray_button_column: Option<u16>,
+    /// The column where the session block and the tab strip end: the tray
+    /// button's column, or the mode tag's column with no tray button.
+    pub tab_strip_end_column: u16,
     /// The metadata index the visible window starts at. When no tab fits, it
     /// is still the index the window starts from.
     pub first_visible_tab_index: usize,
@@ -145,9 +179,11 @@ pub(crate) struct VisibleTabSpan {
 /// Solve the tabline's block widths, its windowed run of tabs, and its scroll
 /// arrows for `tabline_area`.
 ///
-/// The right block anchors the right edge and the session block the left. If
-/// every tab fits in the gap between them, all are shown from index 0 with no
-/// arrows. Otherwise the strip scrolls, a one-cell arrow is reserved on each
+/// The right block anchors the right edge and the session block the left.
+/// While `tabline_inputs.has_floating_panes` is `true`, the tray button takes
+/// the three cells left of the right block when the row has them, and the gap
+/// ends at the button. If every tab fits in the gap, all are shown from index 0
+/// with no arrows. Otherwise the strip scrolls, a one-cell arrow is reserved on each
 /// side and drawn on whichever side still hides tabs, and the window starts at:
 ///
 /// - the client's
@@ -164,12 +200,14 @@ pub(crate) fn solve_tabline_layout(
     tabline_inputs: TablineInputs<'_>,
     tabline_area: RatatuiRect,
 ) -> TablineLayout {
-    let right_block_width = get_text_width(&format_right_block_text(tabline_inputs));
-    let right_block_start_column = tabline_area
-        .right()
-        .saturating_sub(right_block_width)
-        .max(tabline_area.x);
-    let session_block_room = right_block_start_column.saturating_sub(tabline_area.x);
+    let right_block_start_column = compute_right_block_start_column(tabline_inputs, tabline_area);
+    let floating_pane_tray_button_column = find_floating_pane_tray_button_column(
+        tabline_inputs,
+        tabline_area,
+        right_block_start_column,
+    );
+    let tab_strip_end_column = floating_pane_tray_button_column.unwrap_or(right_block_start_column);
+    let session_block_room = tab_strip_end_column.saturating_sub(tabline_area.x);
     let session_block = build_session_block(tabline_inputs.session_name, session_block_room);
     let session_block_width = session_block.cell_count.min(session_block_room);
     let tab_strip_start_column = tabline_area
@@ -181,12 +219,14 @@ pub(crate) fn solve_tabline_layout(
     let create_empty_layout = || TablineLayout {
         session_block_width,
         right_block_start_column,
+        floating_pane_tray_button_column,
+        tab_strip_end_column,
         first_visible_tab_index: 0,
         visible_tab_spans: Vec::new(),
         left_scroll_arrow_column: None,
         right_scroll_arrow_column: None,
     };
-    if tab_count == 0 || tab_strip_start_column >= right_block_start_column {
+    if tab_count == 0 || tab_strip_start_column >= tab_strip_end_column {
         return create_empty_layout();
     }
 
@@ -203,12 +243,14 @@ pub(crate) fn solve_tabline_layout(
         &tab_column_counts,
         0,
         tab_strip_start_column,
-        right_block_start_column,
+        tab_strip_end_column,
     );
     if unscrolled_visible_tab_spans.len() == tab_count {
         return TablineLayout {
             session_block_width,
             right_block_start_column,
+            floating_pane_tray_button_column,
+            tab_strip_end_column,
             first_visible_tab_index: 0,
             visible_tab_spans: unscrolled_visible_tab_spans,
             left_scroll_arrow_column: None,
@@ -219,7 +261,7 @@ pub(crate) fn solve_tabline_layout(
     // Scrolled: reserve one arrow cell on each side. A reserved cell that
     // draws no arrow (nothing hidden that side) stays a one-cell gap.
     let visible_tabs_start_column = tab_strip_start_column.saturating_add(TABLINE_ARROW_WIDTH);
-    let visible_tabs_end_column = right_block_start_column.saturating_sub(TABLINE_ARROW_WIDTH);
+    let visible_tabs_end_column = tab_strip_end_column.saturating_sub(TABLINE_ARROW_WIDTH);
     if visible_tabs_start_column >= visible_tabs_end_column {
         return create_empty_layout();
     }
@@ -247,12 +289,14 @@ pub(crate) fn solve_tabline_layout(
     );
     let after_window_tab_index = first_visible_tab_index + visible_tab_spans.len();
     let left_scroll_arrow_column = (first_visible_tab_index > 0).then_some(tab_strip_start_column);
-    let right_scroll_arrow_column = (after_window_tab_index < tab_count)
-        .then_some(right_block_start_column - TABLINE_ARROW_WIDTH);
+    let right_scroll_arrow_column =
+        (after_window_tab_index < tab_count).then_some(tab_strip_end_column - TABLINE_ARROW_WIDTH);
 
     TablineLayout {
         session_block_width,
         right_block_start_column,
+        floating_pane_tray_button_column,
+        tab_strip_end_column,
         first_visible_tab_index,
         visible_tab_spans,
         left_scroll_arrow_column,
@@ -319,6 +363,35 @@ fn find_first_visible_tab_index(
     first_visible_tab_index
 }
 
+/// The column where the right block starts on the row `tabline_area`: the
+/// row's end minus the width of [`format_right_block_text`], and the row's
+/// first column at least. An `80`-column row ending in ` BASE ` gives `74`.
+pub(crate) fn compute_right_block_start_column(
+    tabline_inputs: TablineInputs<'_>,
+    tabline_area: RatatuiRect,
+) -> u16 {
+    let right_block_width = get_text_width(&format_right_block_text(tabline_inputs));
+    tabline_area
+        .right()
+        .saturating_sub(right_block_width)
+        .max(tabline_area.x)
+}
+
+/// The column where the tray button ` ⧉ ` starts: the three cells left of
+/// `right_block_start_column`. `None` while `tabline_inputs.has_floating_panes`
+/// is `false`, and when fewer than three cells of `tabline_area` lie left of
+/// `right_block_start_column`. A right block at column `74` gives `71`.
+pub(crate) fn find_floating_pane_tray_button_column(
+    tabline_inputs: TablineInputs<'_>,
+    tabline_area: RatatuiRect,
+    right_block_start_column: u16,
+) -> Option<u16> {
+    let is_button_drawn = tabline_inputs.has_floating_panes
+        && right_block_start_column.saturating_sub(tabline_area.x)
+            >= FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT;
+    is_button_drawn.then(|| right_block_start_column - FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT)
+}
+
 /// The tabline's right-anchored block text: the tag [`build_mode_tags`] composes,
 /// with a space each side. A plain client gives ` BASE `; one that is locked,
 /// selecting, and dialing the session again gives
@@ -356,8 +429,9 @@ pub(crate) fn format_version_badge_text() -> String {
 /// side, then the `[v…] ` badge from [`format_version_badge_text`]. Session `my-session`
 /// gives ` my-session ` followed by that badge.
 ///
-/// `session_block_room` is the cells the block has before the right-anchored
-/// mode tag. When both parts do not fit in `session_block_room`, the badge is
+/// `session_block_room` is the cells the block has before the tray button, or
+/// before the right-anchored mode tag with no tray button. When both parts do
+/// not fit in `session_block_room`, the badge is
 /// dropped whole: a 16-cell row
 /// ending in the 6-cell ` BASE ` tag shows ` s ` alone, never a badge cut off
 /// part-way. The returned width is not clipped to `session_block_room`; a name
@@ -396,8 +470,8 @@ struct SessionBlock {
 }
 
 /// The left-anchored block, colored for drawing. `session_block_room` is the
-/// cells before the mode tag, as in [`build_session_block`], and decides
-/// whether the badge is there.
+/// cells before the tray button or the mode tag, as in
+/// [`build_session_block`], and decides whether the badge is there.
 fn build_session_line(session_name: &str, theme: &Theme, session_block_room: u16) -> Line<'static> {
     let session_block = build_session_block(session_name, session_block_room);
     let session_name_span = Span::styled(

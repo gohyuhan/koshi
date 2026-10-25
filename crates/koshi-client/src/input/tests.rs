@@ -21,8 +21,8 @@ use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPaneMoveDraft, FloatingPaneSlot, MousePane, PlacementPreview,
-    PlacementSnapshot,
+    ClientSnapshot, FloatingPane, FloatingPaneMoveDraft, FloatingPaneSlot, MousePane,
+    PlacementPreview, PlacementSnapshot,
 };
 
 use crate::mouse::tests::{
@@ -3310,8 +3310,12 @@ fn the_selection_passes_over_pinned_and_hidden_floating_panes() {
     // A minimized floating pane is listed but not drawn.
     mouse_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(PaneId::new());
+        .floating_panes
+        .push(FloatingPane {
+            pane_id: PaneId::new(),
+            pane_title: None,
+            is_minimized: true,
+        });
     let mut client = build_client_viewing(&mouse_frame);
     client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame));
 
@@ -4217,8 +4221,12 @@ fn a_frame_that_floats_the_selected_tiled_pane_makes_it_the_dock_source_with_no_
         .retain(|pane_slot| pane_slot.pane_id == tiled_pane_id);
     floating_frame
         .session_snapshot
-        .floating_pane_ids
-        .push(undocked_pane_id);
+        .floating_panes
+        .push(FloatingPane {
+            pane_id: undocked_pane_id,
+            pane_title: None,
+            is_minimized: false,
+        });
     floating_frame
         .session_snapshot
         .floating_pane_slots

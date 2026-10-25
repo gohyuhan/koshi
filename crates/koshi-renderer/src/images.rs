@@ -19,8 +19,10 @@ use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
 use koshi_terminal::style::Style as CellStyle;
 
+use crate::floating_pane_tray::find_drawn_floating_pane_tray_layout;
 use crate::render::{
-    compute_layout_origin, list_placed_floating_panes, list_visible_tiled_panes, PlacedFloatingPane,
+    compute_layout_origin, list_placed_floating_panes, list_visible_tiled_panes, place_screen_rect,
+    PlacedFloatingPane,
 };
 use crate::snapshot::{
     CommittedRegions, ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot,
@@ -343,7 +345,8 @@ impl ImagePaint {
 /// An image is anchored at its pane's content area and cut to the cells of it
 /// that are drawn: a tiled pane's content rect, or a floating pane's content
 /// rect inside the pane area. An image whose cut rectangle meets the outer
-/// rect of a floating pane drawn above its pane is left out.
+/// rect of a floating pane drawn above its pane, or the viewer's open floating
+/// pane tray ([`find_drawn_floating_pane_tray_layout`]), is left out.
 ///
 /// A placement at `(row: 1, column: 2)` with `column_count: 4` and `row_count: 3` in a
 /// pane whose content starts at `(10, 5)` targets `(12, 6)` through
@@ -403,6 +406,13 @@ pub fn build_image_paints(
         );
     }
 
+    if let Some(tray_layout) = find_drawn_floating_pane_tray_layout(
+        render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+    ) {
+        let tray_area = place_screen_rect(tray_layout.tray_rect);
+        image_paints
+            .retain(|image_paint| tray_area.intersection(image_paint.target_area).is_empty());
+    }
     image_paints.sort_by_key(|image_paint| {
         (
             image_paint.z_index,

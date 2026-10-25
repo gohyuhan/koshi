@@ -15,8 +15,9 @@
 //!   action becomes unbound.
 //! - **A fatal finding** — the locked-mode unlock escape is shadowed, missing,
 //!   or typeable, or the `pane-placement`, `pane-move-choice`,
-//!   `floating-pane-move` or `dock-undock` mode has no live cancellation
-//!   binding — refuses the keymap outright ([`KeymapVerdict::Reject`]).
+//!   `floating-pane-move`, `dock-undock` or `floating-pane-tray` mode has no
+//!   live cancellation binding — refuses the keymap outright
+//!   ([`KeymapVerdict::Reject`]).
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
 //! when the resolver accepts it as written AND a keypress can reach it. It
@@ -180,8 +181,9 @@ pub enum ConflictDiagnostic {
     /// `cancel_action_reference`, so the mode, once open, has no keyboard
     /// cancellation. Checked for `pane-placement` (`core:cancel-pane-placement`),
     /// `pane-move-choice` (`core:cancel-pane-move-choice`),
-    /// `floating-pane-move` (`core:cancel-floating-pane-move`) and
-    /// `dock-undock` (`core:cancel-dock-undock`).
+    /// `floating-pane-move` (`core:cancel-floating-pane-move`),
+    /// `dock-undock` (`core:cancel-dock-undock`) and `floating-pane-tray`
+    /// (`core:close-floating-pane-tray`).
     ModeCancelBindingMissing {
         /// The viewer-local mode with no cancellation key.
         mode_name: ModeName,
@@ -837,11 +839,12 @@ fn validate_reserved_unlock_binding(
 
 /// The viewer-local modes that own the keyboard until cancelled, each with
 /// the action that cancels it.
-const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 4] = [
+const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 5] = [
     (LockMode::PanePlacement, "cancel-pane-placement"),
     (LockMode::PaneMoveChoice, "cancel-pane-move-choice"),
     (LockMode::FloatingPaneMove, "cancel-floating-pane-move"),
     (LockMode::DockUndock, "cancel-dock-undock"),
+    (LockMode::FloatingPaneTray, "close-floating-pane-tray"),
 ];
 
 /// Push one [`ConflictDiagnostic::ModeCancelBindingMissing`] for each mode in

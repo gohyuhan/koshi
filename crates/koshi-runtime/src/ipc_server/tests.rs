@@ -203,7 +203,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             },
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,

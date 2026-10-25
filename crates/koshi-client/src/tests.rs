@@ -29,7 +29,7 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, PaneSlot, PlacementPreview, PlacementSnapshot,
+    list_pane_slots, ClientSnapshot, FloatingPane, PaneSlot, PlacementPreview, PlacementSnapshot,
     PlacementSource, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
     TabMetadata, TabSnapshot,
 };
@@ -1478,7 +1478,7 @@ fn build_render_snapshot(
             },
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -2282,7 +2282,11 @@ fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
     let tiled_pane_id = PaneId::new();
     let floating_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(ClientId::new(), LockMode::Normal, false);
-    render_snapshot.session_snapshot.floating_pane_ids = vec![floating_pane_id];
+    render_snapshot.session_snapshot.floating_panes = vec![FloatingPane {
+        pane_id: floating_pane_id,
+        pane_title: None,
+        is_minimized: true,
+    }];
     for (focused_pane_id, expected_is_focused_pane_floating) in [
         (Some(floating_pane_id), true),
         (Some(tiled_pane_id), false),
@@ -2352,6 +2356,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Split Pane",
             "Split Pane",
             "Split Pane",
+            "Toggle Floating Pane Tray",
             "Toggle Pane Fullscreen",
         ]
         .map(|hint_label| (hint_label.to_string(), false))

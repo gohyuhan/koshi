@@ -46,7 +46,7 @@ use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::placement::{PanePlacementPreview, PanePlacementSource, PanePlacementTabSnapshot};
 use koshi_layout::solver::PaneSizing;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPaneSlot, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
+    ClientSnapshot, FloatingPane, FloatingPaneSlot, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
     PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, RenderSnapshot,
     ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
@@ -63,8 +63,9 @@ pub(crate) mod tests;
 /// renderer draws, with every image placement marked unavailable and its
 /// placement preview built anew (`build_placement_preview`).
 ///
-/// The session name, every tab's name, every tab-bar entry's name and every
-/// pane title are filtered by [`sanitize_reported_text`]. A frame naming its
+/// The session name, every tab's name, every tab-bar entry's name, every pane
+/// title and every floating pane's title are filtered by
+/// [`sanitize_reported_text`]. A frame naming its
 /// session `"dev\u{7}"` reads back naming it `"dev"`.
 #[must_use]
 pub fn build_render_snapshot(received_painted_frame: &ReceivedPaintedFrame) -> RenderSnapshot {
@@ -109,7 +110,25 @@ fn build_render_snapshot_with_images(
                     is_pinned: frame_floating_pane_slot.is_pinned,
                 })
                 .collect(),
-            floating_pane_ids: painted_frame.session_snapshot.floating_pane_ids.clone(),
+            floating_panes: painted_frame
+                .session_snapshot
+                .floating_panes
+                .iter()
+                .map(|frame_floating_pane| FloatingPane {
+                    pane_id: frame_floating_pane.pane_id,
+                    pane_title: frame_floating_pane
+                        .pane_title
+                        .as_deref()
+                        .map(sanitize_reported_text),
+                    is_minimized: !painted_frame
+                        .session_snapshot
+                        .floating_pane_slots
+                        .iter()
+                        .any(|frame_floating_pane_slot| {
+                            frame_floating_pane_slot.pane_id == frame_floating_pane.pane_id
+                        }),
+                })
+                .collect(),
         },
         pane_snapshots: painted_frame
             .pane_snapshots

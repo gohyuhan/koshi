@@ -209,7 +209,7 @@ use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, FloatingPaneSlot, MouseFrame, PanePlacementMessage,
-    PanePlacementPresentation, PlacementPreview, PlacementTabSnapshot, Reconnecting,
+    PanePlacementPresentation, PaneSnapshot, PlacementPreview, PlacementTabSnapshot, Reconnecting,
     RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
@@ -347,7 +347,7 @@ pub(crate) struct ViewerPaint {
 }
 
 /// How long one placement preview change, committed placement slide, or
-/// undock slide runs: 160 ms.
+/// floating pane slide runs: 160 ms.
 const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
 
 /// The tab one available placement preview shows with one target placed,
@@ -436,16 +436,49 @@ struct CommittedPlacementAnimation {
     started_at: Instant,
 }
 
-/// The viewer-owned slide of a pane that this viewer drew tiled and a newer
-/// frame draws floating, from its tiled box to its floating box.
+/// The viewer-owned slide of a floating pane's box from `from_outer_rect` to
+/// the box the frame draws the pane in. An undock slides the pane from its
+/// tiled box, and a restore from its tray tile or the cell under the tray
+/// button.
 #[derive(Debug)]
-struct UndockAnimation {
-    /// The floated pane.
+struct FloatingPaneSlideAnimation {
+    /// The sliding floating pane.
     pane_id: PaneId,
-    /// The pane's tiled box as last drawn, counted from the pane-area origin.
+    /// The box the slide starts from, counted from the pane-area origin.
     from_outer_rect: CoreRect,
     /// The monotonic time at which this slide began.
     started_at: Instant,
+}
+
+/// The viewer-owned slide of a floating pane that this viewer minimized, from
+/// the box it was last drawn in to its tray tile or the cell under the tray
+/// button. The slide draws the pane's last drawn content without its images.
+#[derive(Debug)]
+struct FloatingPaneMinimizeAnimation {
+    /// The pane's content as last drawn, with no image placement.
+    pane_snapshot: PaneSnapshot,
+    /// Whether this viewer pinned the pane.
+    is_pinned: bool,
+    /// The box the pane was last drawn in, counted from the pane-area origin.
+    from_outer_rect: CoreRect,
+    /// The pane's tray tile or the cell under the tray button, counted from
+    /// the pane-area origin.
+    to_outer_rect: CoreRect,
+    /// The monotonic time at which this slide began.
+    started_at: Instant,
+}
+
+impl FloatingPaneMinimizeAnimation {
+    /// The box this slide draws its pane in at `current_time`. A slide from
+    /// `(16, 4)` `48x13` to `(72, 0)` `1x1` draws at `(44, 2)` `25x7` at
+    /// progress `0.5`.
+    fn compute_outer_rect(&self, current_time: Instant) -> CoreRect {
+        terminal::interpolate_rect(
+            self.from_outer_rect,
+            self.to_outer_rect,
+            compute_placement_animation_progress(self.started_at, current_time),
+        )
+    }
 }
 
 /// Return the bounded ease-out progress at `current_time` of a placement
@@ -790,12 +823,16 @@ struct Screen<B: Backend> {
     committed_placement_tab_ids: Vec<TabId>,
     /// The slide after a committed placement, if one is active.
     committed_placement_animation: Option<CommittedPlacementAnimation>,
-    /// The running slides of floated panes, one per pane, in the order they
-    /// started.
-    undock_animations: Vec<UndockAnimation>,
-    /// The floating pane slots the floated-pane slides drew in the last
-    /// successful paint, in slide order. Empty when that paint drew none.
-    shown_undock_floating_pane_slots: Vec<FloatingPaneSlot>,
+    /// The running slides of floating panes after an undock or a restore, one
+    /// per pane, in the order they started.
+    floating_pane_slide_animations: Vec<FloatingPaneSlideAnimation>,
+    /// The running slides of floating panes this viewer minimized, one per
+    /// pane, in the order they started.
+    floating_pane_minimize_animations: Vec<FloatingPaneMinimizeAnimation>,
+    /// The floating pane slots the floating pane slides drew in the last
+    /// successful paint ([`update_floating_pane_animations`](Self::update_floating_pane_animations)).
+    /// Empty when that paint drew none.
+    shown_animated_floating_pane_slots: Vec<FloatingPaneSlot>,
     /// The region solve and input revision committed with the frame on the
     /// screen. It starts with the compiled-in two-row solve.
     committed_regions: CommittedRegions,
@@ -843,8 +880,9 @@ impl<B: Backend> Screen<B> {
             shown_tab_snapshot: None,
             committed_placement_tab_ids: Vec::new(),
             committed_placement_animation: None,
-            undock_animations: Vec::new(),
-            shown_undock_floating_pane_slots: Vec::new(),
+            floating_pane_slide_animations: Vec::new(),
+            floating_pane_minimize_animations: Vec::new(),
+            shown_animated_floating_pane_slots: Vec::new(),
             committed_regions: CommittedRegions::build_core(viewport_size, 0),
             shown_viewer_paint: None,
             pending_snapshot: None,
@@ -920,6 +958,7 @@ impl<B: Backend> Screen<B> {
             .client_snapshot
             .viewport_size;
         let committed_regions = self.compute_committed_regions(viewport_size);
+        client.update_floating_pane_tray(self.pending_snapshot.as_ref()?, &committed_regions);
         let placement_display = self.update_previewed_placement_display(client, current_time);
         let committed_placement_tab_ids = std::mem::take(&mut self.committed_placement_tab_ids);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
@@ -929,14 +968,17 @@ impl<B: Backend> Screen<B> {
             current_time,
         );
         self.start_undock_animations(current_time);
-        let undock_floating_pane_slots =
-            self.update_undock_animations(client, placement_display.is_some(), current_time);
+        self.start_restore_animations(client, &committed_regions, current_time);
+        self.start_minimize_animations(client, &committed_regions, current_time);
+        let animated_floating_pane_slots =
+            self.update_floating_pane_animations(client, placement_display.is_some(), current_time);
         let snapshot = self.pending_snapshot.as_ref()?;
         let displayed_render_snapshot = build_displayed_render_snapshot(
             snapshot,
             placement_display.as_ref(),
             committed_placement_tab_snapshot,
-            &undock_floating_pane_slots,
+            &animated_floating_pane_slots,
+            &self.floating_pane_minimize_animations,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
         let frame_paint = ViewerPaint::from_client(
@@ -994,7 +1036,7 @@ impl<B: Backend> Screen<B> {
         let painted_viewer_chrome = frame_paint.chrome;
         self.shown_viewer_paint = Some(frame_paint);
         self.shown_placement_display = placement_display;
-        self.shown_undock_floating_pane_slots = undock_floating_pane_slots;
+        self.shown_animated_floating_pane_slots = animated_floating_pane_slots;
         self.shown_tab_snapshot = Some(
             displayed_snapshot
                 .session_snapshot
@@ -1054,8 +1096,8 @@ impl<B: Backend> Screen<B> {
             placement_display.is_some(),
             current_time,
         );
-        let undock_floating_pane_slots =
-            self.update_undock_animations(client, placement_display.is_some(), current_time);
+        let animated_floating_pane_slots =
+            self.update_floating_pane_animations(client, placement_display.is_some(), current_time);
         let snapshot = self.last_snapshot.as_ref()?;
         let displayed_active_tab_id = placement_display.as_ref().map_or(
             snapshot.client_snapshot.active_tab_id,
@@ -1072,7 +1114,7 @@ impl<B: Backend> Screen<B> {
         if self.shown_viewer_paint.as_ref() == Some(&viewer_paint)
             && self.shown_placement_display == placement_display
             && is_committed_tab_shown
-            && self.shown_undock_floating_pane_slots == undock_floating_pane_slots
+            && self.shown_animated_floating_pane_slots == animated_floating_pane_slots
             && !self.image_output_state.has_unselected_results()
         {
             return None;
@@ -1081,7 +1123,8 @@ impl<B: Backend> Screen<B> {
             snapshot,
             placement_display.as_ref(),
             committed_placement_tab_snapshot,
-            &undock_floating_pane_slots,
+            &animated_floating_pane_slots,
+            &self.floating_pane_minimize_animations,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
         if !is_frame_committed(terminal::paint_frame_with_writer(
@@ -1111,7 +1154,7 @@ impl<B: Backend> Screen<B> {
         let painted_viewer_chrome = viewer_paint.chrome;
         self.shown_viewer_paint = Some(viewer_paint);
         self.shown_placement_display = placement_display;
-        self.shown_undock_floating_pane_slots = undock_floating_pane_slots;
+        self.shown_animated_floating_pane_slots = animated_floating_pane_slots;
         self.shown_tab_snapshot = Some(
             displayed_snapshot
                 .session_snapshot
@@ -1376,11 +1419,7 @@ impl<B: Backend> Screen<B> {
         let pane_area_size = self.committed_regions.solved_regions.pane_rect.size;
         for floating_pane_slot in &pending_snapshot.session_snapshot.floating_pane_slots {
             let pane_id = floating_pane_slot.pane_id;
-            let is_sliding = self
-                .undock_animations
-                .iter()
-                .any(|undock_animation| undock_animation.pane_id == pane_id);
-            if is_sliding {
+            if self.is_floating_pane_sliding(pane_id) {
                 continue;
             }
             if let Some(from_outer_rect) = terminal::find_tiled_pane_rect_in_pane_area(
@@ -1388,28 +1427,173 @@ impl<B: Backend> Screen<B> {
                 pane_area_size,
                 pane_id,
             ) {
-                self.undock_animations.push(UndockAnimation {
-                    pane_id,
-                    from_outer_rect,
-                    started_at: current_time,
-                });
+                self.floating_pane_slide_animations
+                    .push(FloatingPaneSlideAnimation {
+                        pane_id,
+                        from_outer_rect,
+                        started_at: current_time,
+                    });
             }
         }
     }
 
-    /// Advance every floated-pane slide and return the floating pane slots
-    /// they draw at `current_time`, in slide order.
+    /// Whether a slide after an undock or a restore runs for `pane_id`.
+    fn is_floating_pane_sliding(&self, pane_id: PaneId) -> bool {
+        self.floating_pane_slide_animations
+            .iter()
+            .any(|floating_pane_slide_animation| floating_pane_slide_animation.pane_id == pane_id)
+    }
+
+    /// Start one slide at `current_time` for each pane that the pending frame
+    /// draws floating and the frame this screen drew last names minimized. A
+    /// pane whose minimize slide runs slides from the box that slide draws it
+    /// in, and its minimize slide ends. Every other pane slides from its tray
+    /// anchor in the pending frame
+    /// ([`Client::find_floating_pane_tray_anchor_rect`] with
+    /// `committed_regions`), and a pane with no tray anchor starts no slide. A
+    /// pane whose slide after an undock or a restore runs keeps it.
+    ///
+    /// With the tray closed and its glyph `⧉` at `(72, 0)` over a pane area at
+    /// `(0, 1)`, a pane restored to `(16, 4)` `48x13` slides from `(72, 0)`
+    /// `1x1`.
+    fn start_restore_animations(
+        &mut self,
+        client: &Client,
+        committed_regions: &CommittedRegions,
+        current_time: Instant,
+    ) {
+        let (Some(pending_snapshot), Some(last_snapshot)) =
+            (self.pending_snapshot.as_ref(), self.last_snapshot.as_ref())
+        else {
+            return;
+        };
+        for floating_pane_slot in &pending_snapshot.session_snapshot.floating_pane_slots {
+            let pane_id = floating_pane_slot.pane_id;
+            let was_minimized = last_snapshot
+                .session_snapshot
+                .is_floating_pane_minimized(pane_id);
+            if !was_minimized || self.is_floating_pane_sliding(pane_id) {
+                continue;
+            }
+            let minimize_animation_index = self
+                .floating_pane_minimize_animations
+                .iter()
+                .position(|minimize_animation| minimize_animation.pane_snapshot.pane_id == pane_id);
+            let from_outer_rect = match minimize_animation_index {
+                Some(minimize_animation_index) => self
+                    .floating_pane_minimize_animations
+                    .remove(minimize_animation_index)
+                    .compute_outer_rect(current_time),
+                None => match client.find_floating_pane_tray_anchor_rect(
+                    pending_snapshot,
+                    committed_regions,
+                    pane_id,
+                ) {
+                    Some(tray_anchor_rect) => tray_anchor_rect,
+                    None => continue,
+                },
+            };
+            self.floating_pane_slide_animations
+                .push(FloatingPaneSlideAnimation {
+                    pane_id,
+                    from_outer_rect,
+                    started_at: current_time,
+                });
+        }
+    }
+
+    /// Start one minimize slide at `current_time` for each floating pane that
+    /// the frame this screen drew last drew, and the pending frame names
+    /// minimized. The slide runs from the box the last paint drew the pane in
+    /// to its tray anchor in the pending frame
+    /// ([`Client::find_floating_pane_tray_anchor_rect`] with
+    /// `committed_regions`), and draws the last frame's content of the pane
+    /// with no image placement. The pane's slide after an undock or a restore
+    /// ends. A pane with no tray anchor or no content in the last frame starts
+    /// no slide, and a pane whose minimize slide runs keeps it.
+    ///
+    /// With the tray closed and its glyph `⧉` at `(72, 0)` over a pane area at
+    /// `(0, 1)`, a pane drawn at `(16, 4)` `48x13` slides to `(72, 0)` `1x1`.
+    fn start_minimize_animations(
+        &mut self,
+        client: &Client,
+        committed_regions: &CommittedRegions,
+        current_time: Instant,
+    ) {
+        let (Some(pending_snapshot), Some(last_snapshot), Some(shown_viewer_paint)) = (
+            self.pending_snapshot.as_ref(),
+            self.last_snapshot.as_ref(),
+            self.shown_viewer_paint.as_ref(),
+        ) else {
+            return;
+        };
+        let last_frame_layout = last_snapshot
+            .build_painted_frame_layout(shown_viewer_paint.chrome, &self.committed_regions);
+        for drawn_floating_pane_slot in last_frame_layout.list_drawn_floating_pane_slots() {
+            let pane_id = drawn_floating_pane_slot.pane_id;
+            let is_minimized = pending_snapshot
+                .session_snapshot
+                .is_floating_pane_minimized(pane_id);
+            let is_minimize_sliding = self
+                .floating_pane_minimize_animations
+                .iter()
+                .any(|minimize_animation| minimize_animation.pane_snapshot.pane_id == pane_id);
+            if !is_minimized || is_minimize_sliding {
+                continue;
+            }
+            let (Some(pane_snapshot), Some(to_outer_rect)) = (
+                last_snapshot.find_pane_snapshot(pane_id),
+                client.find_floating_pane_tray_anchor_rect(
+                    pending_snapshot,
+                    committed_regions,
+                    pane_id,
+                ),
+            ) else {
+                continue;
+            };
+            let from_outer_rect = self
+                .shown_animated_floating_pane_slots
+                .iter()
+                .find(|animated_floating_pane_slot| animated_floating_pane_slot.pane_id == pane_id)
+                .map_or(
+                    drawn_floating_pane_slot.outer_rect,
+                    |animated_floating_pane_slot| animated_floating_pane_slot.outer_rect,
+                );
+            self.floating_pane_slide_animations
+                .retain(|floating_pane_slide_animation| {
+                    floating_pane_slide_animation.pane_id != pane_id
+                });
+            self.floating_pane_minimize_animations
+                .push(FloatingPaneMinimizeAnimation {
+                    pane_snapshot: PaneSnapshot {
+                        image_placement_snapshots: Vec::new(),
+                        ..pane_snapshot.clone()
+                    },
+                    is_pinned: drawn_floating_pane_slot.is_pinned,
+                    from_outer_rect,
+                    to_outer_rect,
+                    started_at: current_time,
+                });
+        }
+    }
+
+    /// Advance every floating pane slide and return the floating pane slots
+    /// they draw at `current_time`: the slides after an undock or a restore,
+    /// then the minimize slides, each in the order they started.
     ///
     /// The frame is the pending frame, else the last drawn frame. Every slide
     /// ends, and the result is empty, when `is_placement_shown` is `true` or
     /// reduced motion is on. A slide ends once `PLACEMENT_ANIMATION_DURATION`
-    /// has passed, or when the frame draws its pane in no floating slot. Each
-    /// other slide draws its pane between its tiled box and the frame's
-    /// floating box.
+    /// has passed. A slide after an undock or a restore also ends when the
+    /// frame draws its pane in no floating slot, and draws its pane between
+    /// its start box and the frame's floating box. A minimize slide also ends
+    /// when the frame names its pane as no minimized floating pane, and draws
+    /// its pane between the box it was drawn in and its tray anchor
+    /// ([`FloatingPaneMinimizeAnimation::compute_outer_rect`]).
     ///
     /// A pane drawn at `(0, 0)` `40x22` that floats to `(16, 4)` `48x13` draws
     /// at `(8, 2)` `44x17` at progress `0.5`.
-    fn update_undock_animations(
+    fn update_floating_pane_animations(
         &mut self,
         client: &Client,
         is_placement_shown: bool,
@@ -1423,32 +1607,58 @@ impl<B: Backend> Screen<B> {
             return Vec::new();
         };
         if is_placement_shown || client.get_client_config().should_reduce_motion {
-            self.undock_animations.clear();
+            self.floating_pane_slide_animations.clear();
+            self.floating_pane_minimize_animations.clear();
             return Vec::new();
         }
-        let floating_pane_slots = &snapshot.session_snapshot.floating_pane_slots;
+        let session_snapshot = &snapshot.session_snapshot;
         let mut animated_floating_pane_slots = Vec::new();
-        self.undock_animations.retain(|undock_animation| {
-            let progress =
-                compute_placement_animation_progress(undock_animation.started_at, current_time);
-            let floating_pane_slot = floating_pane_slots
-                .iter()
-                .find(|floating_pane_slot| floating_pane_slot.pane_id == undock_animation.pane_id);
-            let floating_pane_slot = match floating_pane_slot {
-                Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
-                _ => return false,
-            };
-            animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
-                floating_pane_slot.pane_id,
-                terminal::interpolate_rect(
-                    undock_animation.from_outer_rect,
-                    floating_pane_slot.outer_rect,
-                    progress,
-                ),
-                floating_pane_slot.is_pinned,
-            ));
-            true
-        });
+        self.floating_pane_slide_animations
+            .retain(|floating_pane_slide_animation| {
+                let progress = compute_placement_animation_progress(
+                    floating_pane_slide_animation.started_at,
+                    current_time,
+                );
+                let floating_pane_slot =
+                    session_snapshot
+                        .floating_pane_slots
+                        .iter()
+                        .find(|floating_pane_slot| {
+                            floating_pane_slot.pane_id == floating_pane_slide_animation.pane_id
+                        });
+                let floating_pane_slot = match floating_pane_slot {
+                    Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
+                    _ => return false,
+                };
+                animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
+                    floating_pane_slot.pane_id,
+                    terminal::interpolate_rect(
+                        floating_pane_slide_animation.from_outer_rect,
+                        floating_pane_slot.outer_rect,
+                        progress,
+                    ),
+                    floating_pane_slot.is_pinned,
+                ));
+                true
+            });
+        self.floating_pane_minimize_animations
+            .retain(|minimize_animation| {
+                let pane_id = minimize_animation.pane_snapshot.pane_id;
+                let is_minimized = session_snapshot.is_floating_pane_minimized(pane_id);
+                let progress = compute_placement_animation_progress(
+                    minimize_animation.started_at,
+                    current_time,
+                );
+                if !is_minimized || progress >= 1.0 {
+                    return false;
+                }
+                animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
+                    pane_id,
+                    minimize_animation.compute_outer_rect(current_time),
+                    minimize_animation.is_pinned,
+                ));
+                true
+            });
         animated_floating_pane_slots
     }
 
@@ -1477,7 +1687,7 @@ impl<B: Backend> Screen<B> {
     }
 
     /// Return the next redraw interval for an active placement preview
-    /// interpolation, committed-placement slide or floated-pane slide: the shorter of
+    /// interpolation, committed-placement slide or floating pane slide: the shorter of
     /// `frame_interval` and the time the animation has left. `None` when no
     /// animation runs.
     fn compute_next_placement_animation_wakeup_at(
@@ -1496,9 +1706,14 @@ impl<B: Backend> Screen<B> {
                     .map(|committed_placement_animation| committed_placement_animation.started_at),
             )
             .chain(
-                self.undock_animations
+                self.floating_pane_slide_animations
                     .iter()
-                    .map(|undock_animation| undock_animation.started_at),
+                    .map(|floating_pane_slide_animation| floating_pane_slide_animation.started_at),
+            )
+            .chain(
+                self.floating_pane_minimize_animations
+                    .iter()
+                    .map(|minimize_animation| minimize_animation.started_at),
             )
             .min()?;
         let animation_remaining = PLACEMENT_ANIMATION_DURATION
@@ -1553,7 +1768,8 @@ impl<B: Backend> Screen<B> {
         self.shown_placement_display = None;
         self.committed_placement_tab_ids.clear();
         self.committed_placement_animation = None;
-        self.undock_animations.clear();
+        self.floating_pane_slide_animations.clear();
+        self.floating_pane_minimize_animations.clear();
     }
 
     /// Select the compiled-in region solve for a painted frame's viewport.
@@ -1578,15 +1794,18 @@ impl<B: Backend> Screen<B> {
 /// - with `placement_display`, `snapshot` showing that display's tab
 ///   ([`terminal::build_placement_render_snapshot`]);
 /// - else with `committed_placement_tab_snapshot` or a non-empty
-///   `undock_floating_pane_slots`, `snapshot` with that slide frame, if any,
-///   as its active tab, and each of `undock_floating_pane_slots` in place of
-///   the floating pane slot that names the same pane;
+///   `animated_floating_pane_slots`, `snapshot` with that slide frame, if any,
+///   as its active tab, and with `animated_floating_pane_slots`
+///   ([`terminal::build_committed_placement_render_snapshot`]). The content
+///   of each pane that `floating_pane_minimize_animations` slides joins its
+///   pane snapshots;
 /// - else `None`, and `snapshot` is painted as it is.
 fn build_displayed_render_snapshot(
     snapshot: &RenderSnapshot,
     placement_display: Option<&PlacementDisplay>,
     committed_placement_tab_snapshot: Option<TabSnapshot>,
-    undock_floating_pane_slots: &[FloatingPaneSlot],
+    animated_floating_pane_slots: &[FloatingPaneSlot],
+    floating_pane_minimize_animations: &[FloatingPaneMinimizeAnimation],
 ) -> Option<RenderSnapshot> {
     if let Some(placement_display) = placement_display {
         let (source_pane_id, _) = placement_display.placement_preview.get_placement_target();
@@ -1596,14 +1815,21 @@ fn build_displayed_render_snapshot(
             source_pane_id,
         ));
     }
-    if committed_placement_tab_snapshot.is_none() && undock_floating_pane_slots.is_empty() {
+    if committed_placement_tab_snapshot.is_none() && animated_floating_pane_slots.is_empty() {
         return None;
     }
-    Some(terminal::build_committed_placement_render_snapshot(
-        snapshot,
-        committed_placement_tab_snapshot,
-        undock_floating_pane_slots,
-    ))
+    let mut committed_placement_render_snapshot =
+        terminal::build_committed_placement_render_snapshot(
+            snapshot,
+            committed_placement_tab_snapshot,
+            animated_floating_pane_slots,
+        );
+    committed_placement_render_snapshot.pane_snapshots.extend(
+        floating_pane_minimize_animations
+            .iter()
+            .map(|minimize_animation| minimize_animation.pane_snapshot.clone()),
+    );
+    Some(committed_placement_render_snapshot)
 }
 
 fn warn_paint_error<BackendError: std::fmt::Debug>(
@@ -5736,6 +5962,9 @@ fn expire_input_timers(
 ///
 /// Each event, in turn:
 ///
+/// - A mouse event that the floating pane tray takes
+///   ([`Client::handle_floating_pane_tray_mouse`]) adds the actions it decided
+///   to `pending_mouse_actions` ([`queue_mouse_actions`]).
 /// - A mouse event that pane placement takes
 ///   ([`Client::handle_placement_mouse`]) writes the held mouse actions as one
 ///   round ([`flush_mouse_round`]), then sends what placement decided. An
@@ -5794,6 +6023,12 @@ fn handle_terminal_input_event(
                 let Some(mouse_frame) = mouse_frame else {
                     continue;
                 };
+                if let Some(mouse_actions) =
+                    client.handle_floating_pane_tray_mouse(mouse_input, mouse_frame)
+                {
+                    queue_mouse_actions(pending_mouse_actions, mouse_actions);
+                    continue;
+                }
                 match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
                     Some(placement_input_action) => {
                         flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);

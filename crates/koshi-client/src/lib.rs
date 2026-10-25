@@ -21,6 +21,8 @@ pub mod app;
 /// ending, and a broken link to a session on this machine end the client.
 pub mod attach;
 
+mod floating_pane_tray;
+
 pub mod input;
 
 pub mod mouse;
@@ -57,8 +59,8 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::placement::{PlacedPreview, PlacementPreviewError};
 use koshi_renderer::region::solve_core_regions;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, LinkStatus, PlacementHandleHover, PlacementPreview, PlacementSnapshot,
-    RenderSnapshot, SessionSnapshot,
+    ClientSnapshot, FloatingPaneTray, LinkStatus, PlacementHandleHover, PlacementPreview,
+    PlacementSnapshot, RenderSnapshot, SessionSnapshot,
 };
 use koshi_renderer::theme::Theme;
 
@@ -272,6 +274,8 @@ pub(crate) struct ViewerRestorePoint {
     sent_floating_pane_move: Option<SentFloatingPaneMove>,
     /// Dock/undock mode and the tiled pane it selected.
     dock_undock_mode: Option<DockUndockMode>,
+    /// The open floating pane tray.
+    floating_pane_tray: Option<FloatingPaneTray>,
 }
 
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
@@ -286,9 +290,10 @@ pub(crate) enum PlacementInputAction {
     /// Send `command` under `command_id`, issued by this viewer's key
     /// binding or by a mouse event in dock/undock mode: the `PlacePane` that
     /// floats the tiled pane dock/undock mode selected, the `MoveFloatingPane`
-    /// that floating pane move mode or dock/undock mode recorded as sent, or
-    /// the `FocusPane` that focuses the floating pane floating pane move mode
-    /// selected.
+    /// that floating pane move mode or dock/undock mode recorded as sent, the
+    /// `FocusPane` that focuses the floating pane floating pane move mode
+    /// selected, or the `SetPaneMinimized` that toggles the floating pane tray's
+    /// selected tile.
     SubmitCommand {
         /// The id the command carries.
         command_id: CommandId,
@@ -346,8 +351,9 @@ pub struct Client {
     registry: ActionRegistry,
     /// This viewer's base input mode. It decides what a key means when no local
     /// submode owns the keyboard. Pane placement mode, the move chooser,
-    /// floating pane move mode, and dock/undock mode overlay this value
-    /// without changing it: each returns to Normal or Locked.
+    /// floating pane move mode, dock/undock mode, and the floating pane tray
+    /// overlay this value without changing it: each returns to Normal or
+    /// Locked.
     /// The session keeps its own copy, which `koshi lock --client` reaches and
     /// `koshi list-clients` reports.
     lock_mode: LockMode,
@@ -442,6 +448,10 @@ pub struct Client {
     /// Dock/undock mode, or `None` when it is off. It is `None` while the move
     /// chooser or floating pane move mode is on.
     dock_undock_mode: Option<DockUndockMode>,
+    /// The floating pane tray this viewer shows under its tabline button, or
+    /// `None` while the tray is closed. It is `None` while any other local
+    /// submode is on, and while the viewer is not [`LinkStatus::Linked`].
+    floating_pane_tray: Option<FloatingPaneTray>,
     /// Restores the outer terminal when the client ends or the process
     /// panics. Held to be dropped with the client; nothing reads it.
     _terminal_cleanup_guard: TerminalCleanupGuard,
@@ -496,6 +506,7 @@ impl Client {
             visible_tab_ids: Vec::new(),
             pane_move_mode: None,
             dock_undock_mode: None,
+            floating_pane_tray: None,
             _terminal_cleanup_guard: terminal_cleanup_guard,
         }
     }
@@ -591,12 +602,16 @@ impl Client {
     ///
     /// Dock/undock mode, pane placement mode, the move chooser, and floating
     /// pane move mode own the keyboard only while the viewer is
-    /// [`LinkStatus::Linked`]. A change that moves the keyboard between one of
+    /// [`LinkStatus::Linked`]. A status other than `Linked` closes the
+    /// floating pane tray. A change that moves the keyboard between one of
     /// their keymaps and the base keymap drops an open key sequence, and no
     /// pane receives its chords.
     pub(crate) fn set_link_status(&mut self, link_status: LinkStatus) {
         let previous_active_input_mode = self.get_active_input_mode();
         self.link_status = link_status;
+        if link_status != LinkStatus::Linked {
+            self.floating_pane_tray = None;
+        }
         if self.get_active_input_mode() != previous_active_input_mode {
             self.pending_key_sequence = None;
         }
@@ -614,10 +629,13 @@ impl Client {
         self.viewport_size = viewport_size;
     }
 
-    /// Record the session that supplies the current event stream.
+    /// Record the session that supplies the current event stream. Another
+    /// session than the one recorded drops the unsent placement draft and
+    /// closes the floating pane tray.
     pub(crate) fn set_session_id(&mut self, session_id: SessionId) {
         if self.session_id != Some(session_id) {
             self.clear_placement_draft();
+            self.close_floating_pane_tray();
         }
         self.session_id = Some(session_id);
     }
@@ -763,6 +781,7 @@ impl Client {
             pane_move_mode: self.pane_move_mode,
             sent_floating_pane_move: self.sent_floating_pane_move,
             dock_undock_mode: self.dock_undock_mode,
+            floating_pane_tray: self.floating_pane_tray,
         }
     }
 
@@ -782,6 +801,7 @@ impl Client {
             pane_move_mode,
             sent_floating_pane_move,
             dock_undock_mode,
+            floating_pane_tray,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -796,6 +816,7 @@ impl Client {
         self.pane_move_mode = pane_move_mode;
         self.sent_floating_pane_move = sent_floating_pane_move;
         self.dock_undock_mode = dock_undock_mode;
+        self.floating_pane_tray = floating_pane_tray;
     }
 
     /// Record the view carried by the newest painted frame: its active tab,
@@ -1531,8 +1552,8 @@ impl Client {
     /// event or in the frame an attached viewer reads. The session owns the
     /// mode; this only moves the viewer's copy of it, which mouse routing
     /// reads. A change ends pane placement mode, the move chooser, floating
-    /// pane move mode that waits for no move, and dock/undock mode that waits
-    /// for no undock or dock.
+    /// pane move mode that waits for no move, dock/undock mode that waits for
+    /// no undock or dock, and the floating pane tray.
     pub fn set_mouse_selection_enabled(&mut self, is_mouse_selection_enabled: bool) {
         if self.is_mouse_selection_enabled != is_mouse_selection_enabled {
             if self.is_placement_mode_active() {
@@ -1540,6 +1561,7 @@ impl Client {
             }
             self.close_pane_move_mode();
             self.close_dock_undock_mode();
+            self.close_floating_pane_tray();
         }
         self.is_mouse_selection_enabled = is_mouse_selection_enabled;
     }
@@ -1547,17 +1569,13 @@ impl Client {
 
 /// Whether the pane `client_snapshot` focuses is floating: one of
 /// `session_snapshot`'s
-/// [`floating_pane_ids`](SessionSnapshot::floating_pane_ids). `false` when
-/// the client focuses no pane.
+/// [`floating_panes`](SessionSnapshot::floating_panes). `false` when the
+/// client focuses no pane.
 pub(crate) fn is_focused_pane_floating(
     session_snapshot: &SessionSnapshot,
     client_snapshot: &ClientSnapshot,
 ) -> bool {
     client_snapshot
         .focused_pane_id
-        .is_some_and(|focused_pane_id| {
-            session_snapshot
-                .floating_pane_ids
-                .contains(&focused_pane_id)
-        })
+        .is_some_and(|focused_pane_id| session_snapshot.is_floating_pane(focused_pane_id))
 }

@@ -32,7 +32,7 @@ fn action_name_parser_accepts_valid_grammar() {
             "{action_name_text:?} should be valid"
         );
     }
-    // Exactly the maximum length (1 + 30) is allowed.
+    // Exactly the maximum length (1 + 39) is allowed.
     let maximum_length_action_name =
         format!("a{}", "b".repeat(MAX_ACTION_NAME_CHARACTER_COUNT - 1));
     assert_eq!(
@@ -78,10 +78,10 @@ fn action_name_error_display_uses_stable_messages() {
     assert_eq!(ActionNameError::Empty.to_string(), "action name is empty");
     assert_eq!(
         ActionNameError::TooLong {
-            character_count: 32,
+            character_count: 41,
         }
         .to_string(),
-        "action name is 32 chars; the maximum is 31"
+        "action name is 41 chars; the maximum is 40"
     );
     assert_eq!(
         ActionNameError::InvalidStart {
@@ -904,6 +904,54 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             Client,
             vec![ClientTarget],
         ),
+        (
+            "core:toggle-floating-pane-tray".to_string(),
+            ClientActionKind::ToggleFloatingPaneTray,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:close-floating-pane-tray".to_string(),
+            ClientActionKind::CloseFloatingPaneTray,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:select-tray-tile-left".to_string(),
+            ClientActionKind::SelectTrayTile(Direction::Left),
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:select-tray-tile-down".to_string(),
+            ClientActionKind::SelectTrayTile(Direction::Down),
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:select-tray-tile-up".to_string(),
+            ClientActionKind::SelectTrayTile(Direction::Up),
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:select-tray-tile-right".to_string(),
+            ClientActionKind::SelectTrayTile(Direction::Right),
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:toggle-selected-tray-tile".to_string(),
+            ClientActionKind::ToggleSelectedTrayTile,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:toggle-minimize-all-floating-panes".to_string(),
+            ClientActionKind::ToggleMinimizeAllFloatingPanes,
+            Client,
+            vec![ClientTarget],
+        ),
     ];
     assert_eq!(
         actual_client_action_metadata,
@@ -1024,7 +1072,7 @@ fn continuous_action_seeds_are_stable() {
     assert_eq!(continuous_action_names, expected_continuous_action_names);
 }
 
-/// Pins every seed that carries a hint label, and its label: the seven
+/// Pins every seed that carries a hint label, and its label: the eight
 /// direction families. Every other seed carries none.
 #[test]
 fn hint_labels_name_each_direction_family_without_its_direction() {
@@ -1058,6 +1106,10 @@ fn hint_labels_name_each_direction_family_without_its_direction() {
         ("core:move-floating-pane-down", "Move Floating Pane"),
         ("core:move-floating-pane-up", "Move Floating Pane"),
         ("core:move-floating-pane-right", "Move Floating Pane"),
+        ("core:select-tray-tile-left", "Select Tray Tile"),
+        ("core:select-tray-tile-down", "Select Tray Tile"),
+        ("core:select-tray-tile-up", "Select Tray Tile"),
+        ("core:select-tray-tile-right", "Select Tray Tile"),
         ("core:focus-pane-left", "Focus Pane"),
         ("core:focus-pane-down", "Focus Pane"),
         ("core:focus-pane-up", "Focus Pane"),
@@ -1094,6 +1146,7 @@ fn hint_tiers_are_stable() {
         "core:cancel-floating-pane-move",
         "core:cancel-pane-move-choice",
         "core:cancel-pane-placement",
+        "core:close-floating-pane-tray",
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
@@ -1141,6 +1194,10 @@ fn hint_tiers_are_stable() {
         "core:select-pane-target-up",
         "core:select-previous-floating-pane",
         "core:select-previous-placement-tab",
+        "core:select-tray-tile-down",
+        "core:select-tray-tile-left",
+        "core:select-tray-tile-right",
+        "core:select-tray-tile-up",
     ];
     let expected_hint_tier_by_action_name: Vec<(HintTier, String)> = essential_action_names
         .map(|action_name| (HintTier::Essential, action_name.to_string()))
@@ -1173,6 +1230,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:cancel-floating-pane-move",
         "core:cancel-pane-move-choice",
         "core:cancel-pane-placement",
+        "core:close-floating-pane-tray",
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
@@ -1236,9 +1294,16 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:select-pane-target-up",
         "core:select-previous-floating-pane",
         "core:select-previous-placement-tab",
+        "core:select-tray-tile-down",
+        "core:select-tray-tile-left",
+        "core:select-tray-tile-right",
+        "core:select-tray-tile-up",
+        "core:toggle-floating-pane-tray",
         "core:toggle-lock",
+        "core:toggle-minimize-all-floating-panes",
         "core:toggle-pane-fullscreen",
         "core:toggle-pane-placement-stack",
+        "core:toggle-selected-tray-tile",
         "core:undock-pane",
         "core:unlock",
         "core:unpin-pane",

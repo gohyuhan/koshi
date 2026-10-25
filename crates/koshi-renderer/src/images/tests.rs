@@ -125,7 +125,7 @@ fn build_render_snapshot(
                 is_active: true,
             }],
             floating_pane_slots: Vec::new(),
-            floating_pane_ids: Vec::new(),
+            floating_panes: Vec::new(),
         },
         pane_snapshots: vec![pane_snapshot],
         client_snapshot: ClientSnapshot {
@@ -1658,5 +1658,67 @@ fn a_floating_panes_unavailable_image_shows_text_unless_a_later_floating_pane_co
     assert_eq!(
         list_lower_placeholder_rects(&[], ImageRenderMode::Native),
         [RatatuiRect::new(1, 3, 4, 2)]
+    );
+}
+
+#[test]
+fn an_image_the_open_tray_meets_is_left_out_and_paints_again_once_the_tray_closes() {
+    use crate::floating_pane_tray::tests::{
+        build_open_tray_viewer_chrome, build_tray_test_render_snapshot,
+    };
+
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    let mut render_snapshot = build_tray_test_render_snapshot(viewport_size, &["htop"]);
+    let tiled_pane_snapshot = &mut render_snapshot.pane_snapshots[0];
+    let tiled_pane_id = tiled_pane_snapshot.pane_id;
+    tiled_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(20, 78, Style::default()),
+        0,
+    ));
+    // The tiled pane's content starts at screen (1, 2), and the tray takes
+    // (17, 1) 57x8: the image at row 0, column 20 lies inside it, and the one
+    // at row 12, column 2 outside it.
+    tiled_pane_snapshot.image_placement_snapshots = vec![
+        build_image_placement(1, 8, 4, (0, 20), 4, 2),
+        build_image_placement(2, 8, 4, (12, 2), 4, 2),
+    ];
+    let committed_regions = CommittedRegions::build_core(viewport_size, 0);
+    let screen_area = RatatuiRect::new(0, 0, 80, 24);
+    let list_sorted_paint_targets = |viewer_chrome: ViewerChrome| {
+        let mut paint_targets = list_paint_targets(&build_image_paints(
+            &render_snapshot,
+            &committed_regions,
+            viewer_chrome,
+            screen_area,
+        ));
+        paint_targets.sort_by_key(|(_, target_area, _)| target_area.x);
+        paint_targets
+    };
+
+    assert_eq!(
+        list_sorted_paint_targets(build_open_tray_viewer_chrome(0)),
+        [(
+            tiled_pane_id,
+            RatatuiRect::new(3, 14, 4, 2),
+            build_whole_source_rect(8, 4)
+        )]
+    );
+    assert_eq!(
+        list_sorted_paint_targets(ViewerChrome::default()),
+        [
+            (
+                tiled_pane_id,
+                RatatuiRect::new(3, 14, 4, 2),
+                build_whole_source_rect(8, 4)
+            ),
+            (
+                tiled_pane_id,
+                RatatuiRect::new(21, 2, 4, 2),
+                build_whole_source_rect(8, 4)
+            ),
+        ]
     );
 }
