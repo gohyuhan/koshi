@@ -329,17 +329,19 @@ fn parse_u32_kdl_value_rejects_an_out_of_range_value() {
 #[test]
 fn set_parsed_field_stores_an_ok_value_and_adds_no_warning() {
     let mut parsed_field_value_slot: Option<u16> = None;
-    let mut parse_warnings = ParseWarnings::default();
+    let mut parse_problems = ParseProblems::default();
     set_parsed_field(
         &mut parsed_field_value_slot,
         Ok(20),
         "pane",
         &parse_test_kdl_node("min-cols 20"),
-        &mut parse_warnings,
+        &mut parse_problems,
     );
     assert_eq!(parsed_field_value_slot, Some(20));
     assert_eq!(
-        parse_warnings.format_in_file_order("min-cols 20"),
+        parse_problems
+            .resolve_file_problems("min-cols 20")
+            .expect("warnings refuse nothing"),
         Vec::<String>::new()
     );
 }
@@ -347,17 +349,19 @@ fn set_parsed_field_stores_an_ok_value_and_adds_no_warning() {
 #[test]
 fn set_parsed_field_leaves_the_slot_empty_and_names_the_field_on_error() {
     let mut parsed_field_value_slot: Option<u16> = None;
-    let mut parse_warnings = ParseWarnings::default();
+    let mut parse_problems = ParseProblems::default();
     set_parsed_field(
         &mut parsed_field_value_slot,
         Err("expected an integer".to_string()),
         "pane",
         &parse_test_kdl_node("min-cols \"x\""),
-        &mut parse_warnings,
+        &mut parse_problems,
     );
     assert_eq!(parsed_field_value_slot, None);
     assert_eq!(
-        parse_warnings.format_in_file_order("min-cols \"x\""),
+        parse_problems
+            .resolve_file_problems("min-cols \"x\"")
+            .expect("warnings refuse nothing"),
         ["line 1, column 1: ignored `pane.min-cols`: expected an integer"]
     );
 }
@@ -365,18 +369,20 @@ fn set_parsed_field_leaves_the_slot_empty_and_names_the_field_on_error() {
 #[test]
 fn set_parsed_field_keeps_an_earlier_value_when_the_next_one_fails() {
     let mut parsed_field_value_slot: Option<u16> = Some(20);
-    let mut parse_warnings = ParseWarnings::default();
-    parse_warnings.record_warning(SourceSpan::from(0..0), "earlier warning");
+    let mut parse_problems = ParseProblems::default();
+    parse_problems.record_warning(SourceSpan::from(0..0), "earlier warning");
     set_parsed_field(
         &mut parsed_field_value_slot,
         Err("must be between 0 and 65535".to_string()),
         "pane",
         &parse_test_kdl_node("gap 70000"),
-        &mut parse_warnings,
+        &mut parse_problems,
     );
     assert_eq!(parsed_field_value_slot, Some(20));
     assert_eq!(
-        parse_warnings.format_in_file_order("gap 70000"),
+        parse_problems
+            .resolve_file_problems("gap 70000")
+            .expect("warnings refuse nothing"),
         [
             "line 1, column 1: earlier warning",
             "line 1, column 1: ignored `pane.gap`: must be between 0 and 65535",
@@ -387,11 +393,13 @@ fn set_parsed_field_keeps_an_earlier_value_when_the_next_one_fails() {
 #[test]
 fn parse_warnings_come_out_in_file_order_whatever_order_they_are_recorded_in() {
     let config_source_text = "first 1\nsecond 2\n";
-    let mut parse_warnings = ParseWarnings::default();
-    parse_warnings.record_warning(SourceSpan::from(8..16), "at the second node");
-    parse_warnings.record_warning(SourceSpan::from(0..7), "at the first node");
+    let mut parse_problems = ParseProblems::default();
+    parse_problems.record_warning(SourceSpan::from(8..16), "at the second node");
+    parse_problems.record_warning(SourceSpan::from(0..7), "at the first node");
     assert_eq!(
-        parse_warnings.format_in_file_order(config_source_text),
+        parse_problems
+            .resolve_file_problems(config_source_text)
+            .expect("warnings refuse nothing"),
         [
             "line 1, column 1: at the first node",
             "line 2, column 1: at the second node",
@@ -679,63 +687,82 @@ fn a_version_node_that_is_wrong_as_a_whole_puts_the_caret_on_the_node() {
     );
 }
 
-/// The first problem `koshi.kdl` reports for `config_source_text`, as the
-/// user reads it.
-fn get_first_app_problem_message(config_source_text: &str) -> String {
-    match crate::app_config::parse_app_config(Path::new("koshi.kdl"), config_source_text) {
-        Err(ConfigError::Validation {
-            validation_error_detail,
-        }) => validation_error_detail,
-        unexpected_app_config_error => {
-            panic!("expected a validation error, got {unexpected_app_config_error:?}")
-        }
-    }
+#[test]
+fn a_refusal_returns_every_problem_in_file_order_warnings_included() {
+    let config_source_text = "first 1\nsecond 2\n";
+    let mut parse_problems = ParseProblems::default();
+    parse_problems.record_warning(SourceSpan::from(8..16), "at the second node");
+    parse_problems.record_refusal(SourceSpan::from(0..7), "refused at the first node");
+    let ConfigError::Validation { problem_messages } = parse_problems
+        .resolve_file_problems(config_source_text)
+        .expect_err("a refusal refuses the file")
+    else {
+        panic!("expected a validation error");
+    };
+    assert_eq!(
+        problem_messages,
+        [
+            "line 1, column 1: refused at the first node",
+            "line 2, column 1: at the second node",
+        ]
+    );
 }
 
-/// The first problem a theme file reports for `config_source_text`, as the
-/// user reads it.
-fn get_first_theme_problem_message(config_source_text: &str) -> String {
-    match crate::theme::parse_theme(Path::new("themes/midnight.kdl"), config_source_text) {
-        Err(ConfigError::Validation {
-            validation_error_detail,
-        }) => validation_error_detail,
-        unexpected_theme_parse_error => {
-            panic!("expected a validation error, got {unexpected_theme_parse_error:?}")
-        }
-    }
+/// Every problem `koshi.kdl` reports for `config_source_text`, as the user
+/// reads them.
+fn list_app_problem_messages(config_source_text: &str) -> Vec<String> {
+    crate::app_config::parse_app_config(Path::new("koshi.kdl"), config_source_text)
+        .expect_err("the version refuses the file")
+        .list_problem_messages()
 }
 
-/// The first problem `keybinding.kdl` reports for `config_source_text`, as
-/// the user reads it.
-fn get_first_keybinding_problem_message(config_source_text: &str) -> String {
-    match crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), config_source_text) {
-        Err(keybinding_parse_error @ crate::keybinding::KeybindingParseError::Invalid { .. }) => {
-            keybinding_parse_error.list_problem_messages().remove(0)
-        }
-        unexpected_keybinding_parse_error => {
-            panic!("expected schema diagnostics, got {unexpected_keybinding_parse_error:?}")
-        }
-    }
+/// Every problem a theme file reports for `config_source_text`, as the user
+/// reads them.
+fn list_theme_problem_messages(config_source_text: &str) -> Vec<String> {
+    crate::theme::parse_theme(Path::new("themes/midnight.kdl"), config_source_text)
+        .expect_err("the version refuses the file")
+        .list_problem_messages()
 }
 
-/// The first problem a profile file reports for `config_source_text`, as the
-/// user reads it. A `tab { pane }` line follows the text.
-fn get_first_profile_problem_message(config_source_text: &str) -> String {
+/// Every problem `keybinding.kdl` reports for `config_source_text`, as the
+/// user reads them.
+fn list_keybinding_problem_messages(config_source_text: &str) -> Vec<String> {
+    crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), config_source_text)
+        .expect_err("the version refuses the file")
+        .list_problem_messages()
+}
+
+/// Every problem a profile file reports for `config_source_text` followed by a
+/// `tab { pane }` line, as the user reads them.
+fn list_profile_problem_messages(config_source_text: &str) -> Vec<String> {
     let profile_source_text = format!("{config_source_text}\ntab {{ pane }}");
-    match crate::profile::parse_profile(Path::new("profile/dev.kdl"), &profile_source_text) {
-        Err(profile_error @ crate::profile::ProfileError::Invalid { .. }) => {
-            profile_error.list_problem_messages().remove(0)
-        }
-        unexpected_profile_parse_error => {
-            panic!("expected schema diagnostics, got {unexpected_profile_parse_error:?}")
+    crate::profile::parse_profile(Path::new("profile/dev.kdl"), &profile_source_text)
+        .expect_err("the version refuses the file")
+        .list_problem_messages()
+}
+
+/// The text after the path of the error `config check` gives for
+/// `config_source_text` as `koshi.kdl`.
+fn get_check_error_detail(config_source_text: &str) -> String {
+    match crate::migration::validate_config(
+        crate::migration::ConfigFileKind::App,
+        Path::new("koshi.kdl"),
+        config_source_text,
+    ) {
+        Err(crate::migration::MigrationError::Invalid {
+            validation_error_detail,
+            ..
+        }) => validation_error_detail,
+        unexpected_validation_result => {
+            panic!("expected an invalid file, got {unexpected_validation_result:?}")
         }
     }
 }
 
-/// The problem migration reports for `config_source_text`, as the user reads
-/// it after the file path.
+/// The version problem migration stops on for `config_source_text` as
+/// `koshi.kdl`.
 fn get_migration_version_error_detail(config_source_text: &str) -> String {
-    match crate::migration::validate_config(
+    match crate::migration::migrate_config(
         crate::migration::ConfigFileKind::App,
         Path::new("koshi.kdl"),
         config_source_text,
@@ -744,8 +771,8 @@ fn get_migration_version_error_detail(config_source_text: &str) -> String {
             version_error_detail,
             ..
         }) => version_error_detail,
-        unexpected_migration_error => {
-            panic!("expected a version error, got {unexpected_migration_error:?}")
+        unexpected_migration_result => {
+            panic!("expected a version error, got {unexpected_migration_result:?}")
         }
     }
 }
@@ -795,24 +822,29 @@ fn config_files_report_the_same_located_error_for_bad_version_fields() {
         ),
     ] {
         assert_eq!(
-            get_first_app_problem_message(&version_text),
-            expected_problem_message,
+            list_app_problem_messages(&version_text),
+            [expected_problem_message.as_str()],
             "koshi.kdl: {version_text}"
         );
         assert_eq!(
-            get_first_theme_problem_message(&version_text),
-            expected_problem_message,
+            list_theme_problem_messages(&version_text),
+            [expected_problem_message.as_str()],
             "theme: {version_text}"
         );
         assert_eq!(
-            get_first_keybinding_problem_message(&version_text),
-            expected_problem_message,
+            list_keybinding_problem_messages(&version_text),
+            [expected_problem_message.as_str()],
             "keybinding.kdl: {version_text}"
         );
         assert_eq!(
-            get_first_profile_problem_message(&version_text),
-            expected_problem_message,
+            list_profile_problem_messages(&version_text),
+            [expected_problem_message.as_str()],
             "profile: {version_text}"
+        );
+        assert_eq!(
+            get_check_error_detail(&version_text),
+            expected_problem_message,
+            "config check: {version_text}"
         );
         assert_eq!(
             get_migration_version_error_detail(&version_text),
@@ -820,4 +852,45 @@ fn config_files_report_the_same_located_error_for_bad_version_fields() {
             "migration: {version_text}"
         );
     }
+}
+
+#[test]
+fn a_newer_version_is_the_only_problem_every_config_file_reports() {
+    let newer_schema_version = SCHEMA_VERSION + 1;
+    let newer_version_text =
+        format!("// settings\nfrobnicate 1\n  version {newer_schema_version}\nbogus 2");
+    let expected_problem_message = format!(
+        "line 3, column 3: config schema version {newer_schema_version} is newer than this koshi \
+         supports ({SCHEMA_VERSION})"
+    );
+    assert_eq!(
+        list_app_problem_messages(&newer_version_text),
+        [expected_problem_message.as_str()]
+    );
+    assert_eq!(
+        list_theme_problem_messages(&newer_version_text),
+        [expected_problem_message.as_str()]
+    );
+    assert_eq!(
+        list_keybinding_problem_messages(&newer_version_text),
+        [expected_problem_message.as_str()]
+    );
+    assert_eq!(
+        list_profile_problem_messages(&newer_version_text),
+        [expected_problem_message.as_str()]
+    );
+    assert_eq!(
+        get_check_error_detail(&newer_version_text),
+        expected_problem_message
+    );
+}
+
+#[test]
+fn an_unusable_version_is_listed_with_every_other_problem_in_config_check() {
+    assert_eq!(
+        get_check_error_detail("frobnicate 1\nupdate { auto-check \"yes\" }\n"),
+        "line 1, column 1: ignored unknown key `frobnicate`; did you mean `update`?; line 1, \
+         column 1: file must declare `version`; line 2, column 10: invalid config key \
+         `update.auto-check`: expected a boolean (#true or #false)"
+    );
 }

@@ -19,8 +19,9 @@ use thiserror::Error;
 /// A failure in config discovery, parsing, or validation. Config problems are
 /// recoverable: Koshi falls back to defaults and surfaces the issue to the user.
 ///
-/// The text of each variant is its one problem and names no file. The caller
-/// names the file, such as `koshi.kdl not applied (<path>): <problem>`.
+/// Each problem reads `line <L>, column <C>: <message>` and names no file. The
+/// caller names the file, such as `koshi.kdl not applied (<path>):
+/// <problems>`.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// The config file is not valid KDL.
@@ -30,33 +31,28 @@ pub enum ConfigError {
         /// or the KDL error's own message when it has none.
         parse_error_detail: String,
     },
-    /// The config parsed but failed schema validation.
-    #[error("{validation_error_detail}")]
+    /// The config parsed, and at least one problem refuses the whole file.
+    /// The text is every problem, joined by `; `.
+    #[error("{}", .problem_messages.join("; "))]
     Validation {
-        /// The problem as `line <L>, column <C>: <message>`, at the node or
-        /// value that failed, such as ``line 3, column 5: invalid config key
-        /// `update.auto-check`: expected a boolean (#true or #false)``.
-        validation_error_detail: String,
+        /// Every problem of the file in file order, the refusals and the
+        /// skipped settings alike, such as ``line 2, column 1: ignored unknown
+        /// key `frobnicate`; did you mean `update`?`` and ``line 5, column 10:
+        /// invalid config key `update.auto-check`: expected a boolean (#true
+        /// or #false)``.
+        problem_messages: Vec<String>,
     },
 }
 
-/// The [`ConfigError::Validation`] for `validation_message` at the start of
-/// `problem_span` in `config_source_text`.
-///
-/// Example — in `version 2\nversion 2`, the span of the second `version`
-/// node and the message ``` `version` is declared more than once ``` give
-/// ``line 2, column 1: `version` is declared more than once``.
-pub(crate) fn build_validation_error(
-    config_source_text: &str,
-    problem_span: SourceSpan,
-    validation_message: impl Display,
-) -> ConfigError {
-    ConfigError::Validation {
-        validation_error_detail: format_problem_at_line_and_column(
-            config_source_text,
-            problem_span,
-            validation_message,
-        ),
+impl ConfigError {
+    /// One message per problem: the one [`ConfigError::Parse`] detail, or
+    /// every [`ConfigError::Validation`] problem in file order.
+    #[must_use]
+    pub fn list_problem_messages(&self) -> Vec<String> {
+        match self {
+            Self::Parse { parse_error_detail } => vec![parse_error_detail.clone()],
+            Self::Validation { problem_messages } => problem_messages.clone(),
+        }
     }
 }
 

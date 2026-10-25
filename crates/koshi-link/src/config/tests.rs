@@ -236,6 +236,26 @@ fn an_app_file_with_an_unsupported_version_is_refused_with_a_warning() {
 }
 
 #[test]
+fn an_app_file_from_a_newer_koshi_is_refused_naming_only_its_version() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let config_file_path = test_directory.path().join("koshi.kdl");
+    fs::write(&config_file_path, "version 3\nfrobnicate #true\n").expect("write");
+    assert_eq!(
+        load_app_config_at(&config_file_path),
+        LoadedAppConfig {
+            app_config_outcome: AppConfigOutcome::Refused {
+                app_config_source_text: "version 3\nfrobnicate #true\n".to_string(),
+            },
+            config_warnings: vec![format!(
+                "koshi.kdl not applied ({}): line 1, column 1: config schema version 3 is newer \
+                 than this koshi supports (2); using defaults",
+                config_file_path.display()
+            )],
+        }
+    );
+}
+
+#[test]
 fn an_empty_app_file_is_refused_with_a_warning() {
     // An empty file names no `version`, which `parse_app_config` refuses.
     let test_directory = tempfile::tempdir().expect("temp dir");
@@ -257,10 +277,11 @@ fn an_empty_app_file_is_refused_with_a_warning() {
 }
 
 #[test]
-fn an_app_file_with_a_bad_update_value_is_refused_naming_its_line_and_column() {
+fn an_app_file_with_a_bad_update_value_is_refused_naming_every_problem() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
-    let app_config_source_text = "version 2\nupdate {\n    auto-check \"yes\"\n}\n";
+    let app_config_source_text =
+        "version 2\nfrobnicate #true\npane {\n}\nupdate { auto-check \"yes\" }\n";
     fs::write(&config_file_path, app_config_source_text).expect("write");
     assert_eq!(
         load_app_config_at(&config_file_path),
@@ -269,7 +290,8 @@ fn an_app_file_with_a_bad_update_value_is_refused_naming_its_line_and_column() {
                 app_config_source_text: app_config_source_text.to_string(),
             },
             config_warnings: vec![format!(
-                "koshi.kdl not applied ({}): line 3, column 5: invalid config key \
+                "koshi.kdl not applied ({}): line 2, column 1: ignored unknown key `frobnicate`; \
+                 did you mean `update`?; line 5, column 10: invalid config key \
                  `update.auto-check`: expected a boolean (#true or #false); using defaults",
                 config_file_path.display()
             )],
@@ -489,6 +511,27 @@ fn a_theme_file_with_an_unsupported_version_falls_back_to_the_default_with_a_war
         vec![format!(
             "theme `midnight` not applied ({}): line 1, column 1: config schema version 999 is \
              newer than this koshi supports (2); using the default theme",
+            theme_file_path.display()
+        )]
+    );
+}
+
+#[test]
+fn a_theme_file_with_two_refusals_names_both_and_falls_back_to_the_default() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let theme_file_path =
+        write_theme_file(test_directory.path(), "midnight", "version 0\nversion 2\n");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "theme `midnight` not applied ({}): line 1, column 1: config schema version must be \
+             at least 1; line 2, column 1: `version` is declared more than once; using the \
+             default theme",
             theme_file_path.display()
         )]
     );

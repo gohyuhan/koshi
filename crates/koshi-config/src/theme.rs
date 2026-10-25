@@ -27,11 +27,11 @@ use std::path::Path;
 
 use kdl::{KdlDocument, KdlNode};
 
-use crate::error::{build_validation_error, ConfigError};
+use crate::error::ConfigError;
 use crate::layer::{PartialColorPalette, PartialThemeConfig};
 use crate::parser::{
-    find_section_block, format_unknown_key, parse_kdl, parse_string_kdl_value, set_parsed_field,
-    validate_version_node, ParseWarnings,
+    find_newer_version_error, find_section_block, find_version_node_problem, format_unknown_key,
+    parse_kdl, parse_string_kdl_value, set_parsed_field, ParseProblems,
 };
 use crate::types::RgbColor;
 
@@ -69,10 +69,12 @@ const COLOR_KEYS: &[&str] = &[
 /// Returns [`ConfigError::Validation`] when `version` is missing, declared
 /// twice, carries a `{ … }` block, is not a single integer from `0` to
 /// `4294967295`, is `0`, or is newer than this build supports. The error
-/// starts with the line and column of the node or value at fault, such as
-/// ``line 2, column 1: `version` is declared more than once``. A missing
-/// `version` names the position where the first node starts, `line 1, column
-/// 1` in an empty file.
+/// holds every problem of the file in file order, the warnings included. A
+/// first `version` node that declares a newer version gives that one problem,
+/// and no other node is read. Each problem starts with the line and column of
+/// the node or value at fault, such as ``line 2, column 1: `version` is
+/// declared more than once``. A missing `version` names the position where the
+/// first node starts, `line 1, column 1` in an empty file.
 pub fn parse_theme(
     theme_path: &Path,
     theme_source_text: &str,
@@ -90,34 +92,39 @@ pub(crate) fn parse_theme_from_document(
     theme_document: &KdlDocument,
     theme_source_text: &str,
 ) -> Result<(PartialThemeConfig, Vec<String>), ConfigError> {
+    if let Some(newer_version_error) = find_newer_version_error(theme_document, theme_source_text) {
+        return Err(newer_version_error);
+    }
     let mut partial_theme_config = PartialThemeConfig::default();
-    let mut parse_warnings = ParseWarnings::default();
+    let mut parse_problems = ParseProblems::default();
     let mut has_seen_version = false;
     let mut has_seen_colors = false;
     for config_node in theme_document.nodes() {
         match config_node.name().value() {
             "version" => {
                 if has_seen_version {
-                    return Err(build_validation_error(
-                        theme_source_text,
-                        config_node.span(),
-                        "`version` is declared more than once",
-                    ));
+                    parse_problems
+                        .record_refusal(config_node.span(), "`version` is declared more than once");
+                } else {
+                    has_seen_version = true;
+                    if let Some((version_error_span, version_error_detail)) =
+                        find_version_node_problem(config_node)
+                    {
+                        parse_problems.record_refusal(version_error_span, version_error_detail);
+                    }
                 }
-                has_seen_version = true;
-                validate_version_node(config_node, theme_source_text)?;
             }
             "colors" => {
                 if has_seen_colors {
-                    parse_warnings
+                    parse_problems
                         .record_warning(config_node.span(), "ignored duplicate `colors` section");
                 } else {
                     has_seen_colors = true;
                     partial_theme_config.colors =
-                        Some(parse_color_section(config_node, &mut parse_warnings));
+                        Some(parse_color_section(config_node, &mut parse_problems));
                 }
             }
-            unknown_section_name => parse_warnings.record_warning(
+            unknown_section_name => parse_problems.record_warning(
                 config_node.span(),
                 format!(
                     "ignored {}",
@@ -127,28 +134,24 @@ pub(crate) fn parse_theme_from_document(
         }
     }
     if !has_seen_version {
-        return Err(build_validation_error(
-            theme_source_text,
-            theme_document.span(),
-            "file must declare `version`",
-        ));
+        parse_problems.record_refusal(theme_document.span(), "file must declare `version`");
     }
     Ok((
         partial_theme_config,
-        parse_warnings.format_in_file_order(theme_source_text),
+        parse_problems.resolve_file_problems(theme_source_text)?,
     ))
 }
 
 /// Reads the `colors { … }` block into per-role overrides. A role whose value
 /// is unreadable, and a name outside [`COLOR_KEYS`], are left unset and
-/// recorded in `parse_warnings`. A `colors` node with no `{ … }` block sets no role, and a
+/// recorded in `parse_problems`. A `colors` node with no `{ … }` block sets no role, and a
 /// value written on the `colors` line itself is warned about and ignored.
 fn parse_color_section(
     config_node: &KdlNode,
-    parse_warnings: &mut ParseWarnings,
+    parse_problems: &mut ParseProblems,
 ) -> PartialColorPalette {
     let mut color_palette = PartialColorPalette::default();
-    let Some(color_section_children) = find_section_block(config_node, parse_warnings) else {
+    let Some(color_section_children) = find_section_block(config_node, parse_problems) else {
         return color_palette;
     };
     for color_node in color_section_children.nodes() {
@@ -168,7 +171,7 @@ fn parse_color_section(
             "letterbox" => &mut color_palette.letterbox,
             "bar-bg" => &mut color_palette.bar_bg,
             unknown_color_name => {
-                parse_warnings.record_warning(
+                parse_problems.record_warning(
                     color_node.span(),
                     format!(
                         "ignored {}",
@@ -183,7 +186,7 @@ fn parse_color_section(
             parse_rgb_color(color_node),
             "colors",
             color_node,
-            parse_warnings,
+            parse_problems,
         );
     }
     color_palette

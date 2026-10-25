@@ -31,7 +31,9 @@ use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
 use crate::error::{format_problems_at_line_and_column, ConfigParseDiagnostic};
-use crate::parser::{find_version_node_problem, format_unknown_key, parse_kdl};
+use crate::parser::{
+    find_newer_version_problem, find_version_node_problem, format_unknown_key, parse_kdl,
+};
 
 #[cfg(test)]
 mod tests;
@@ -136,7 +138,9 @@ pub fn parse_profile(
 /// from `profile_source_text`.
 ///
 /// # Errors
-/// [`ProfileError::Invalid`] with every schema violation.
+/// [`ProfileError::Invalid`] with every schema violation. A first `version`
+/// node that declares a newer version gives that one violation, and no other
+/// node is read.
 pub(crate) fn parse_profile_from_document(
     profile_path: &Path,
     profile_source_text: &str,
@@ -151,7 +155,13 @@ pub(crate) fn parse_profile_from_document(
         tab_leaf_count: 0,
         focused_tab_leaf_spans: Vec::new(),
     };
-    let profile_template = profile_walker.parse_profile_document(profile_document);
+    let profile_template = match find_newer_version_problem(profile_document) {
+        Some((newer_version_span, newer_version_detail)) => {
+            profile_walker.record_diagnostic(newer_version_span, newer_version_detail);
+            None
+        }
+        None => profile_walker.parse_profile_document(profile_document),
+    };
     profile_walker
         .profile_diagnostics
         .sort_by_key(|profile_diagnostic| profile_diagnostic.diagnostic_span.offset());

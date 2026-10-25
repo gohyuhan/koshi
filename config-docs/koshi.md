@@ -478,10 +478,12 @@ Self-update settings. Each installed koshi reads these from its own
 `koshi.kdl`. `koshi update` installs a newer release the way that koshi was
 installed: a Homebrew install runs `brew upgrade`, and a build from source
 downloads nothing. A bad value here drops the whole `koshi.kdl` for that
-launch, and the log names the line and column of the value. `auto-check "yes"`
-on line 3 gives ``koshi.kdl not applied (<path>): line 3, column 5: invalid
-config key `update.auto-check`: expected a boolean (#true or #false); using
-defaults``.
+launch. The log names every problem of the file in file order, each with its
+line and column, joined by `; `. `frobnicate #true` on line 2 and `update {
+auto-check "yes" }` on line 5 give ``koshi.kdl not applied (<path>): line 2,
+column 1: ignored unknown key `frobnicate`; did you mean `update`?; line 5,
+column 10: invalid config key `update.auto-check`: expected a boolean (#true or
+#false); using defaults``. `koshi config check` names the same problems.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|

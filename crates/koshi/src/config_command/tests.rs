@@ -486,9 +486,103 @@ fn check_collects_errors_from_all_files() {
     assert_eq!(
         config_error,
         format!(
-            "config failed: invalid config version in {}: line 1, column 1: file must declare `version`\ninvalid config file {}: line 2, column 10: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
+            "config failed: invalid config file {}: line 1, column 1: file must declare `version`\ninvalid config file {}: line 2, column 10: ignored `colors.accent`: color must be 6 hex digits (#RRGGBB), got 3",
             config_directory.path().join("koshi.kdl").display(),
             config_directory.path().join("themes").join("bad.kdl").display(),
+        )
+    );
+}
+
+#[test]
+fn check_lists_every_problem_of_a_refused_app_file_in_file_order() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        "version 2\nfrobnicate #true\npane {\n}\nupdate { auto-check \"yes\" }\n",
+    )
+    .unwrap();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: invalid config file {}: line 2, column 1: ignored unknown key \
+             `frobnicate`; did you mean `update`?; line 5, column 10: invalid config key \
+             `update.auto-check`: expected a boolean (#true or #false)",
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
+fn check_lists_a_missing_version_with_every_other_problem_in_file_order() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        "frobnicate 1\nupdate { auto-check \"yes\" }\n",
+    )
+    .unwrap();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: invalid config file {}: line 1, column 1: ignored unknown key \
+             `frobnicate`; did you mean `update`?; line 1, column 1: file must declare `version`; \
+             line 2, column 10: invalid config key `update.auto-check`: expected a boolean \
+             (#true or #false)",
+            app_config_path.display()
+        )
+    );
+}
+
+#[test]
+fn check_names_only_the_version_of_a_file_from_a_newer_koshi() {
+    let newer_schema_version = koshi_config::types::SCHEMA_VERSION + 1;
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        format!("version {newer_schema_version}\nfrobnicate 1\n"),
+    )
+    .unwrap();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: invalid config file {}: line 1, column 1: config schema version \
+             {newer_schema_version} is newer than this koshi supports ({})",
+            app_config_path.display(),
+            koshi_config::types::SCHEMA_VERSION
+        )
+    );
+}
+
+#[test]
+fn check_lists_every_bad_update_field() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(
+        &app_config_path,
+        "version 2\nupdate {\n    auto-check \"yes\"\n    check-interval-days -3\n}\n",
+    )
+    .unwrap();
+
+    let config_error = check_config_directory_read_at_start(config_directory.path()).unwrap_err();
+
+    assert_eq!(
+        config_error.to_string(),
+        format!(
+            "config failed: invalid config file {}: line 3, column 5: invalid config key \
+             `update.auto-check`: expected a boolean (#true or #false); line 4, column 5: \
+             invalid config key `update.check-interval-days`: must be between 0 and 4294967295",
+            app_config_path.display()
         )
     );
 }
@@ -513,10 +607,10 @@ fn check_names_the_line_and_column_of_each_file_that_fails_as_a_whole() {
     assert_eq!(
         config_error.to_string(),
         format!(
-            "config failed: invalid config version in {}: line 1, column 1: config schema version \
-             must be at least 1\ninvalid config file {}: line 3, column 5: invalid config key \
-             `update.auto-check`: expected a boolean (#true or #false)\ninvalid config version in \
-             {}: line 2, column 3: `version` is declared more than once",
+            "config failed: invalid config file {}: line 1, column 1: config schema version must \
+             be at least 1\ninvalid config file {}: line 3, column 5: invalid config key \
+             `update.auto-check`: expected a boolean (#true or #false)\ninvalid config file {}: \
+             line 2, column 3: `version` is declared more than once",
             keybinding_config_path.display(),
             app_config_path.display(),
             theme_config_path.display(),
@@ -686,7 +780,7 @@ fn check_reports_read_and_validation_errors_together() {
     assert_eq!(
         config_error.to_string(),
         format!(
-            "config failed: read {}: expected a regular file\ninvalid config version in {}: line 1, column 1: file must declare `version`",
+            "config failed: read {}: expected a regular file\ninvalid config file {}: line 1, column 1: file must declare `version`",
             app_config_path.display(),
             theme_config_path.display()
         )

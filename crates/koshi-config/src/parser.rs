@@ -4,7 +4,7 @@
 //! config file path to any syntax error as a [`ConfigParseDiagnostic`]. The
 //! `parse_*_kdl_value` readers turn one field node into a typed field value,
 //! `set_parsed_field` stores one field value or records the skip in
-//! `ParseWarnings`, and [`format_unknown_key`] names the nearest allowed key
+//! `ParseProblems`, and [`format_unknown_key`] names the nearest allowed key
 //! for an unrecognized one.
 
 use std::path::Path;
@@ -13,8 +13,8 @@ use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
 use miette::SourceSpan;
 
 use crate::error::{
-    build_validation_error, format_problems_at_line_and_column, validate_config_schema_version,
-    ConfigError, ConfigParseDiagnostic,
+    format_problem_at_line_and_column, format_problems_at_line_and_column,
+    validate_config_schema_version, ConfigError, ConfigParseDiagnostic, ConfigVersionDiagnostic,
 };
 use crate::types::SCHEMA_VERSION;
 
@@ -183,36 +183,65 @@ pub fn parse_kdl(
 // takes one field node (`key value`) and returns the typed field value, or a plain-words
 // reason it could not be read.
 
-/// The skipped settings of one field-partial file, `koshi.kdl` or a theme,
-/// each recorded at the node it skips.
+/// The problems of one field-partial file, `koshi.kdl` or a theme, each
+/// recorded at the node it names. A warning skips one setting, and the rest of
+/// the file still applies. A refusal refuses the whole file.
 #[derive(Debug, Default)]
-pub(crate) struct ParseWarnings {
-    /// `(byte offset where the skipped node starts, message)` per skipped
-    /// setting, in the order recorded.
-    warning_messages_by_offset: Vec<(usize, String)>,
+pub(crate) struct ParseProblems {
+    /// `(byte offset where the node starts, message)` per problem, warnings
+    /// and refusals alike, in the order recorded.
+    problem_messages_by_offset: Vec<(usize, String)>,
+    /// Whether at least one refusal is recorded.
+    has_refusal: bool,
 }
 
-impl ParseWarnings {
-    /// Records `warning_message` at the start of `warning_span`.
+impl ParseProblems {
+    /// Records `warning_message`, a skipped setting, at the start of
+    /// `warning_span`.
     pub(crate) fn record_warning(
         &mut self,
         warning_span: SourceSpan,
         warning_message: impl Into<String>,
     ) {
-        self.warning_messages_by_offset
+        self.problem_messages_by_offset
             .push((warning_span.offset(), warning_message.into()));
     }
 
-    /// Every recorded warning as `line <L>, column <C>: <message>`, the line
+    /// Records `refusal_message`, a problem that refuses the whole file, at
+    /// the start of `refusal_span`.
+    pub(crate) fn record_refusal(
+        &mut self,
+        refusal_span: SourceSpan,
+        refusal_message: impl Into<String>,
+    ) {
+        self.problem_messages_by_offset
+            .push((refusal_span.offset(), refusal_message.into()));
+        self.has_refusal = true;
+    }
+
+    /// Every recorded problem as `line <L>, column <C>: <message>`, the line
     /// and column of its node in `config_source_text`, in file order:
-    /// ascending node start, and the order recorded for one start.
+    /// ascending node start, and the order recorded for one start. With no
+    /// refusal recorded, returns the warnings.
     ///
     /// Example — `version 2\npane { gap "x" }` gives ``line 2, column 8:
     /// ignored `pane.gap`: expected an integer``.
-    pub(crate) fn format_in_file_order(mut self, config_source_text: &str) -> Vec<String> {
-        self.warning_messages_by_offset
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Validation`] that holds every problem, warnings
+    /// included, when a refusal is recorded.
+    pub(crate) fn resolve_file_problems(
+        mut self,
+        config_source_text: &str,
+    ) -> Result<Vec<String>, ConfigError> {
+        self.problem_messages_by_offset
             .sort_by_key(|(byte_offset, _)| *byte_offset);
-        format_problems_at_line_and_column(config_source_text, self.warning_messages_by_offset)
+        let problem_messages =
+            format_problems_at_line_and_column(config_source_text, self.problem_messages_by_offset);
+        if self.has_refusal {
+            return Err(ConfigError::Validation { problem_messages });
+        }
+        Ok(problem_messages)
     }
 }
 
@@ -224,10 +253,10 @@ impl ParseWarnings {
 /// `scrollback { max-lines 5000 }` gives the block and no warning.
 pub(crate) fn find_section_block<'a>(
     section_node: &'a KdlNode,
-    parse_warnings: &mut ParseWarnings,
+    parse_problems: &mut ParseProblems,
 ) -> Option<&'a KdlDocument> {
     if !section_node.entries().is_empty() {
-        parse_warnings.record_warning(
+        parse_problems.record_warning(
             section_node.span(),
             format!(
                 "ignored `{}` value: a section takes a `{{ … }}` block",
@@ -359,8 +388,6 @@ pub(crate) fn parse_version_argument(
 /// that holds no integer from 0 to 4294967295. Returns the whole node and the
 /// [`ConfigVersionDiagnostic`] message from [`validate_config_schema_version`]
 /// for `version 0` and for a version newer than `supported_schema_version`.
-///
-/// [`ConfigVersionDiagnostic`]: crate::error::ConfigVersionDiagnostic
 pub(crate) fn parse_supported_schema_version(
     version_node: &KdlNode,
     supported_schema_version: u32,
@@ -375,33 +402,55 @@ pub(crate) fn parse_supported_schema_version(
     Ok(declared_schema_version)
 }
 
+/// The problem of a document whose first `version` node declares a schema
+/// newer than [`SCHEMA_VERSION`]: that node's span and the
+/// [`ConfigVersionDiagnostic::TooNew`] message. `None` for every other
+/// document, one with no `version` node or a malformed one included.
+///
+/// A file parser that gets `Some` reports that one problem and reads no other
+/// node: `version 3` then `frobnicate 1` gives only `config schema version 3
+/// is newer than this koshi supports (2)` at the `version` node.
+pub(crate) fn find_newer_version_problem(
+    config_document: &KdlDocument,
+) -> Option<(SourceSpan, String)> {
+    let version_node = config_document
+        .nodes()
+        .iter()
+        .find(|kdl_node| kdl_node.name().value() == "version")?;
+    let declared_schema_version = parse_version_argument(version_node).ok()?;
+    if declared_schema_version <= SCHEMA_VERSION {
+        return None;
+    }
+    let newer_version_diagnostic = ConfigVersionDiagnostic::TooNew {
+        declared_schema_version,
+        supported_schema_version: SCHEMA_VERSION,
+    };
+    Some((version_node.span(), newer_version_diagnostic.to_string()))
+}
+
+/// The [`ConfigError::Validation`] that holds the one problem
+/// [`find_newer_version_problem`] finds in `config_document`, the document
+/// parsed from `config_source_text`, at its line and column. `None` for every
+/// other document.
+pub(crate) fn find_newer_version_error(
+    config_document: &KdlDocument,
+    config_source_text: &str,
+) -> Option<ConfigError> {
+    let (newer_version_span, newer_version_detail) = find_newer_version_problem(config_document)?;
+    Some(ConfigError::Validation {
+        problem_messages: vec![format_problem_at_line_and_column(
+            config_source_text,
+            newer_version_span,
+            newer_version_detail,
+        )],
+    })
+}
+
 /// The first problem in `version_node`, with the span a caret points at, or
 /// `None` when the node declares a version from 1 through [`SCHEMA_VERSION`].
 /// The problem is the error [`parse_supported_schema_version`] gives.
 pub(crate) fn find_version_node_problem(version_node: &KdlNode) -> Option<(SourceSpan, String)> {
     parse_supported_schema_version(version_node, SCHEMA_VERSION).err()
-}
-
-/// Reads `version_node`, a node of `config_source_text`, with
-/// [`find_version_node_problem`].
-///
-/// # Errors
-/// Returns the [`ConfigError::Validation`] that names the line and column of
-/// the span [`find_version_node_problem`] gives, and its reason: `version 0`
-/// on line 1 gives `line 1, column 1: config schema version must be at least
-/// 1`.
-pub(crate) fn validate_version_node(
-    version_node: &KdlNode,
-    config_source_text: &str,
-) -> Result<(), ConfigError> {
-    match find_version_node_problem(version_node) {
-        Some((version_error_span, version_error_detail)) => Err(build_validation_error(
-            config_source_text,
-            version_error_span,
-            version_error_detail,
-        )),
-        None => Ok(()),
-    }
 }
 
 /// Stores a parsed field value in `field_value_slot`. On `Err`, leaves the
@@ -416,11 +465,11 @@ pub(crate) fn set_parsed_field<FieldValue>(
     field_parse_result: Result<FieldValue, String>,
     section_name: &str,
     field_node: &KdlNode,
-    parse_warnings: &mut ParseWarnings,
+    parse_problems: &mut ParseProblems,
 ) {
     match field_parse_result {
         Ok(parsed_field_value) => *field_value_slot = Some(parsed_field_value),
-        Err(parse_error_message) => parse_warnings.record_warning(
+        Err(parse_error_message) => parse_problems.record_warning(
             field_node.span(),
             format!(
                 "ignored `{section_name}.{}`: {parse_error_message}",

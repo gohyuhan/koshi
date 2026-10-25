@@ -179,16 +179,16 @@ fn missing_version_is_rejected() {
 
     assert_eq!(
         migration_error,
-        MigrationError::Version {
+        MigrationError::Invalid {
             config_path: "themes/plain.kdl".to_string(),
-            version_error_detail: "line 1, column 1: file must declare `version`".to_string(),
+            validation_error_detail: "line 1, column 1: file must declare `version`".to_string(),
         }
     );
 }
 
-/// The `version` reason `validate_config` gives for `config_source_text`.
+/// The `version` reason `migrate_config` stops on for `config_source_text`.
 fn get_version_error_detail(config_source_text: &str) -> String {
-    match validate_config(
+    match migrate_config(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
         config_source_text,
@@ -279,9 +279,9 @@ fn version_zero_is_rejected() {
 
     assert_eq!(
         migration_error,
-        MigrationError::Version {
+        MigrationError::Invalid {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "line 1, column 1: config schema version must be at least 1"
+            validation_error_detail: "line 1, column 1: config schema version must be at least 1"
                 .to_string(),
         }
     );
@@ -654,6 +654,36 @@ fn a_version_newer_than_the_registry_reads_is_refused_at_its_node() {
 }
 
 #[test]
+fn validation_lists_every_problem_of_a_keybinding_file_with_no_version() {
+    let migration_error = validate_config(
+        ConfigFileKind::Keybinding,
+        Path::new("keybinding.kdl"),
+        "chord-timeout-ms 500\nmode \"normal\" { unbind \"<Tab>\" }\n",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        migration_error.to_string(),
+        "invalid config file keybinding.kdl: line 1, column 1: keybinding file must declare \
+         `version`; line 2, column 17: unknown key `unbind`; did you mean `bind`?"
+    );
+}
+
+#[test]
+fn an_older_valid_version_is_still_validated_against_its_own_schema() {
+    let validated_config =
+        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 1\n").unwrap();
+
+    assert_eq!(
+        validated_config,
+        ValidatedConfig {
+            schema_version: 1,
+            is_current: false,
+        }
+    );
+}
+
+#[test]
 fn an_empty_file_declares_no_version() {
     assert_eq!(
         get_version_error_detail(""),
@@ -776,9 +806,9 @@ fn validation_names_a_newer_schema_version_against_the_running_schema() {
 
     assert_eq!(
         migration_error,
-        MigrationError::Version {
+        MigrationError::Invalid {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail:
+            validation_error_detail:
                 "line 1, column 1: config schema version 3 is newer than this koshi supports (2)"
                     .to_string(),
         }

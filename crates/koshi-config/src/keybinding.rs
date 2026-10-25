@@ -39,7 +39,9 @@ use crate::error::{format_problems_at_line_and_column, ConfigParseDiagnostic};
 use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
-use crate::parser::{find_version_node_problem, format_unknown_key, parse_kdl};
+use crate::parser::{
+    find_newer_version_problem, find_version_node_problem, format_unknown_key, parse_kdl,
+};
 use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
@@ -157,7 +159,9 @@ pub fn parse_keybindings(
 /// parsed from `keybinding_source_text`.
 ///
 /// # Errors
-/// [`KeybindingParseError::Invalid`] with every schema violation.
+/// [`KeybindingParseError::Invalid`] with every schema violation. A first
+/// `version` node that declares a newer version gives that one violation, and
+/// no other node is read.
 pub(crate) fn parse_keybindings_from_document(
     keybinding_path: &Path,
     keybinding_source_text: &str,
@@ -170,8 +174,13 @@ pub(crate) fn parse_keybindings_from_document(
         ),
         diagnostics: Vec::new(),
     };
-    let partial_keybindings_config =
-        keybinding_document_walker.parse_keybinding_document(keybinding_document);
+    let partial_keybindings_config = match find_newer_version_problem(keybinding_document) {
+        Some((newer_version_span, newer_version_detail)) => {
+            keybinding_document_walker.record_diagnostic(newer_version_span, newer_version_detail);
+            PartialKeybindingsConfig::default()
+        }
+        None => keybinding_document_walker.parse_keybinding_document(keybinding_document),
+    };
     keybinding_document_walker
         .diagnostics
         .sort_by_key(|keybinding_diagnostic| keybinding_diagnostic.diagnostic_span.offset());

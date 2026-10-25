@@ -1331,7 +1331,7 @@ fn every_diagnostic_of_one_file_shares_one_source_text() {
 #[test]
 fn every_violation_is_collected_not_just_the_first() {
     let profile_source_text = r#"
-version 999
+version 0
 tab { pane; pane }
 tab { stack {pane} }
 "#;
@@ -1339,7 +1339,7 @@ tab { stack {pane} }
     assert_eq!(
         profile_diagnostic_messages,
         [
-            "config schema version 999 is newer than this koshi supports (2)",
+            "config schema version must be at least 1",
             "`tab` holds one root node; wrap multiple panes in `horizontal`, `vertical`, or \
              `stack`",
             "`stack` needs at least two members",

@@ -55,7 +55,14 @@ version 2
 
 `koshi config check` validates every present known file without changing it.
 Missing versions, bad KDL, bad values, unknown keys, and unsupported versions
-fail the check. Errors from all files are reported together.
+fail the check. Errors from all files are reported together. Each file names
+every problem it has, in file order, joined by `; `. A file whose KDL does not
+parse names that one problem. A file that declares a `version` newer than this
+koshi supports names only that problem: `version 3` then `bogus 1` gives
+``line 1, column 1: config schema version 3 is newer than this koshi supports
+(2)``. A file whose `version` is missing, repeated, carries a block, or is not
+one integer from `1` to `4294967295` names that problem together with every
+problem the file has under the current schema, as a normal start logs them.
 
 A session server and a router run config migration before they read the
 files. `koshi config migrate` runs the same migration on request. It applies
@@ -97,7 +104,10 @@ and marks the failed file as possibly changed.
   `koshi.kdl` give ``line 3, column 5: ignored unknown key `pane.bogus`; did
   you mean `pane.gap`?`` and the same message at `line 4, column 5`. A problem
   that refuses the whole file names its line and column too: an empty
-  `koshi.kdl` gives ``line 1, column 1: file must declare `version` ``.
+  `koshi.kdl` gives ``line 1, column 1: file must declare `version` ``. A
+  refused `koshi.kdl` or theme names every problem it has, the refusals and the
+  skipped fields alike. A file that declares a newer `version` names only that
+  problem.
 - **Unknown keys name the nearest valid key.** `min-col 2` inside `pane`
   results in ``unknown key `pane.min-col`; did you mean `pane.min-cols`?``.
   `koshi config check` treats that typo as an error even though normal startup
