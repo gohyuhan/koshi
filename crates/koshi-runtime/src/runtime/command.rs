@@ -67,7 +67,7 @@ use koshi_layout::{
 };
 use koshi_pty::backend::state::{PtyBackend, UNOBSERVED_EXIT};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
-use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
+use koshi_renderer::floating_chrome::compute_floating_content_size;
 use koshi_session::client::{
     compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin, FloatingPaneView,
 };
@@ -1080,7 +1080,7 @@ impl Server {
     /// [`Session::update_floating_member_sizes`] solves each pane with the
     /// pane minimum of [`Server::get_pane_sizing`]. With none — no client attached,
     /// or no client with a floating viewport — every solved size stays as it
-    /// is. Then each pane's PTY takes [`compute_floating_pane_content_size`] of
+    /// is. Then each pane's PTY takes [`compute_floating_content_size`] of
     /// its solved outer size: `40x12` → `38x8`. A pane undocked while no client
     /// has a floating viewport resizes from its tiled size to the floating
     /// minimum. A session this server does not hold changes nothing.
@@ -1109,7 +1109,7 @@ impl Server {
             .list_members()
             .iter()
             .map(|floating_member| {
-                let content_rect = Rect::from_size_at_origin(compute_floating_pane_content_size(
+                let content_rect = Rect::from_size_at_origin(compute_floating_content_size(
                     floating_member.solved_size,
                 ));
                 (floating_member.pane_id, Some(content_rect))

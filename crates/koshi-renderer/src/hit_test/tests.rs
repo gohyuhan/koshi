@@ -28,9 +28,9 @@ use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::render::tests::compute_version_badge_column_count;
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, FloatingPaneMoveDraft, FloatingPaneSlot, MouseFrame,
-    PaneSlot, PlacementHandleHover, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
-    ViewerChrome,
+    ClientSnapshot, CommittedRegions, DrawnNotifications, FloatingPaneMoveDraft, FloatingPaneSlot,
+    MouseFrame, PaneSlot, PlacementHandleHover, RenderSnapshot, SessionSnapshot, TabMetadata,
+    TabSnapshot, ViewerChrome,
 };
 
 fn build_screen_point(screen_column: u16, screen_row: u16) -> Point {
@@ -306,6 +306,7 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
         &render_snapshot,
         default_regions.clone(),
         ViewerChrome::default(),
+        DrawnNotifications::default(),
     );
     assert_eq!(
         resolve_hit_region(
@@ -333,8 +334,12 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
         4
     );
 
-    let replacement_mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, side_regions, ViewerChrome::default());
+    let replacement_mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        side_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
     assert_eq!(
         resolve_hit_region(
             replacement_mouse_frame.build_frame_layout(),
@@ -397,6 +402,7 @@ fn a_left_region_shifts_the_pane_area_right() {
             9,
         ),
         ViewerChrome::default(),
+        DrawnNotifications::default(),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
@@ -514,6 +520,7 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
             3,
         ),
         ViewerChrome::default(),
+        DrawnNotifications::default(),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
@@ -1582,6 +1589,7 @@ fn build_core_mouse_frame(
         render_snapshot,
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
         viewer_chrome,
+        DrawnNotifications::default(),
     )
 }
 
@@ -1962,7 +1970,8 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
 }
 
 #[test]
-fn an_open_tray_hits_its_tiles_its_label_and_its_body_over_the_floating_pane_under_it() {
+fn an_open_tray_hits_its_tiles_its_label_its_close_button_and_its_body_over_the_floating_pane_under_it(
+) {
     use crate::floating_pane_tray::tests::{
         build_open_tray_viewer_chrome, build_tray_test_render_snapshot,
         show_tray_test_floating_pane, EIGHTY_BY_TWENTY_FOUR_SIZE,
@@ -1970,8 +1979,8 @@ fn an_open_tray_hits_its_tiles_its_label_and_its_body_over_the_floating_pane_und
 
     let mut render_snapshot =
         build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop", "logs"]);
-    // Outer box at screen (16, 5) 48x13: its content starts at screen row 8,
-    // the tray's bottom border.
+    // Outer box at screen (16, 5) 48x13: its content runs from screen row 8
+    // to row 16, past the tray's bottom border at row 10.
     let htop_pane_id =
         show_tray_test_floating_pane(&mut render_snapshot, 0, build_cell_rect(16, 4, 48, 13));
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
@@ -1980,31 +1989,37 @@ fn an_open_tray_hits_its_tiles_its_label_and_its_body_over_the_floating_pane_und
 
     for (screen_point, expected_hit_region) in [
         (
-            build_screen_point(10, 3),
+            build_screen_point(10, 5),
             HitRegion::FloatingPaneTrayTile { tile_index: 0 },
         ),
         (
-            build_screen_point(25, 4),
+            build_screen_point(25, 6),
             HitRegion::FloatingPaneTrayTile { tile_index: 1 },
         ),
-        (build_screen_point(37, 2), HitRegion::FloatingPaneTray),
-        (build_screen_point(20, 6), HitRegion::FloatingPaneTray),
-        (build_screen_point(17, 3), HitRegion::FloatingPaneTray),
-        (
-            build_screen_point(58, 1),
-            HitRegion::FloatingPaneTrayToggleMinimizeAll,
-        ),
-        (
-            build_screen_point(71, 1),
-            HitRegion::FloatingPaneTrayToggleMinimizeAll,
-        ),
-        (build_screen_point(57, 1), HitRegion::FloatingPaneTray),
-        (build_screen_point(5, 1), HitRegion::FloatingPaneTray),
+        (build_screen_point(37, 5), HitRegion::FloatingPaneTray),
         (build_screen_point(20, 8), HitRegion::FloatingPaneTray),
-        (build_screen_point(73, 8), HitRegion::FloatingPaneTray),
+        (build_screen_point(17, 5), HitRegion::FloatingPaneTray),
+        (
+            build_screen_point(56, 2),
+            HitRegion::FloatingPaneTrayToggleMinimizeAll,
+        ),
+        (
+            build_screen_point(67, 2),
+            HitRegion::FloatingPaneTrayToggleMinimizeAll,
+        ),
+        (build_screen_point(55, 2), HitRegion::FloatingPaneTray),
+        (build_screen_point(68, 2), HitRegion::FloatingPaneTray),
+        (build_screen_point(70, 2), HitRegion::FloatingPaneTrayClose),
+        (build_screen_point(69, 2), HitRegion::FloatingPaneTray),
+        (build_screen_point(71, 2), HitRegion::FloatingPaneTray),
+        (build_screen_point(10, 2), HitRegion::FloatingPaneTray),
+        (build_screen_point(20, 3), HitRegion::FloatingPaneTray),
+        (build_screen_point(5, 1), HitRegion::FloatingPaneTray),
+        (build_screen_point(20, 10), HitRegion::FloatingPaneTray),
+        (build_screen_point(73, 10), HitRegion::FloatingPaneTray),
         (build_screen_point(72, 0), HitRegion::FloatingPaneTrayButton),
         (
-            build_screen_point(20, 9),
+            build_screen_point(20, 11),
             HitRegion::PaneContent {
                 pane_id: htop_pane_id,
             },
@@ -2082,7 +2097,7 @@ fn a_session_with_no_floating_pane_leaves_the_button_cells_to_the_tabline() {
 }
 
 #[test]
-fn an_open_notification_center_hits_its_close_control_its_clear_label_and_its_body_over_a_floating_pane(
+fn an_open_notification_center_hits_its_close_button_its_clear_all_label_and_its_body_over_a_floating_pane(
 ) {
     use crate::floating_pane_tray::tests::{
         build_tray_test_render_snapshot, show_tray_test_floating_pane, EIGHTY_BY_TWENTY_FOUR_SIZE,
@@ -2091,14 +2106,16 @@ fn an_open_notification_center_hits_its_close_control_its_clear_label_and_its_bo
 
     let mut render_snapshot =
         build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop"]);
-    // Outer box at screen (16, 5) 48x13: its content starts at screen row 8.
+    // Outer box at screen (16, 5) 48x13: its content is columns 17 to 62 of
+    // rows 8 to 16.
     let htop_pane_id =
         show_tray_test_floating_pane(&mut render_snapshot, 0, build_cell_rect(16, 4, 48, 13));
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
     let viewer_chrome = ViewerChrome {
         notification_center: Some(NotificationCenter {
             scroll_row_offset: 0,
-            is_focused: true,
+            selected_notification_id: None,
+            hidden_per_mille: 0,
         }),
         notification_button: Some(NotificationButton {
             unread_entry_count: 3,
@@ -2110,28 +2127,37 @@ fn an_open_notification_center_hits_its_close_control_its_clear_label_and_its_bo
 
     for (screen_point, expected_hit_region) in [
         (
-            build_screen_point(75, 1),
+            build_screen_point(76, 2),
             HitRegion::NotificationCenterClose,
         ),
+        (build_screen_point(75, 2), HitRegion::NotificationCenter),
+        (build_screen_point(77, 2), HitRegion::NotificationCenter),
+        (build_screen_point(60, 2), HitRegion::NotificationCenter),
+        (build_screen_point(60, 3), HitRegion::NotificationCenter),
         (
-            build_screen_point(77, 1),
-            HitRegion::NotificationCenterClose,
-        ),
-        (build_screen_point(74, 1), HitRegion::NotificationCenter),
-        (build_screen_point(78, 1), HitRegion::NotificationCenter),
-        (
-            build_screen_point(56, 22),
-            HitRegion::NotificationCenterClear,
+            build_screen_point(63, 21),
+            HitRegion::NotificationCenterClearAll,
         ),
         (
-            build_screen_point(62, 22),
-            HitRegion::NotificationCenterClear,
+            build_screen_point(71, 21),
+            HitRegion::NotificationCenterClearAll,
         ),
-        (build_screen_point(63, 22), HitRegion::NotificationCenter),
-        (build_screen_point(54, 10), HitRegion::NotificationCenter),
-        (build_screen_point(60, 10), HitRegion::NotificationCenter),
+        (build_screen_point(62, 21), HitRegion::NotificationCenter),
+        (build_screen_point(72, 21), HitRegion::NotificationCenter),
+        (build_screen_point(57, 4), HitRegion::NotificationCenterBody),
         (
-            build_screen_point(53, 10),
+            build_screen_point(78, 20),
+            HitRegion::NotificationCenterBody,
+        ),
+        (
+            build_screen_point(60, 10),
+            HitRegion::NotificationCenterBody,
+        ),
+        (build_screen_point(56, 10), HitRegion::NotificationCenter),
+        (build_screen_point(79, 10), HitRegion::NotificationCenter),
+        (build_screen_point(60, 22), HitRegion::NotificationCenter),
+        (
+            build_screen_point(55, 10),
             HitRegion::PaneContent {
                 pane_id: htop_pane_id,
             },
@@ -2150,7 +2176,61 @@ fn an_open_notification_center_hits_its_close_control_its_clear_label_and_its_bo
 }
 
 #[test]
-fn an_open_tray_hits_over_an_open_notification_center() {
+fn a_sliding_notification_center_hits_the_cells_it_draws_as_the_cells_of_the_center_at_rest() {
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::snapshot::NotificationCenter;
+
+    let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    // Half hidden, the center at rest at (56, 1) draws its 12 left columns at
+    // (68, 1): screen column 68 shows column 56 at rest.
+    let viewer_chrome = ViewerChrome {
+        notification_center: Some(NotificationCenter {
+            scroll_row_offset: 0,
+            selected_notification_id: None,
+            hidden_per_mille: 500,
+        }),
+        ..ViewerChrome::default()
+    };
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
+
+    for (screen_point, expected_hit_region) in [
+        (build_screen_point(68, 10), HitRegion::NotificationCenter),
+        (
+            build_screen_point(69, 10),
+            HitRegion::NotificationCenterBody,
+        ),
+        (
+            build_screen_point(75, 21),
+            HitRegion::NotificationCenterClearAll,
+        ),
+        (build_screen_point(74, 21), HitRegion::NotificationCenter),
+        (build_screen_point(79, 2), HitRegion::NotificationCenter),
+        (
+            build_screen_point(67, 10),
+            HitRegion::PaneContent {
+                pane_id: tiled_pane_id,
+            },
+        ),
+    ] {
+        assert_eq!(
+            resolve_hit_region(frame_layout, screen_point),
+            expected_hit_region,
+            "{screen_point:?}"
+        );
+    }
+}
+
+#[test]
+fn an_open_tray_hits_over_a_notification_center_that_slides_out() {
     use crate::floating_pane_tray::tests::{
         build_open_tray_viewer_chrome, build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
     };
@@ -2158,10 +2238,13 @@ fn an_open_tray_hits_over_an_open_notification_center() {
 
     let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop"]);
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    // The tray covers (5, 1) 69x10, and the half hidden center covers
+    // (68, 1) 12x22.
     let viewer_chrome = ViewerChrome {
         notification_center: Some(NotificationCenter {
             scroll_row_offset: 0,
-            is_focused: false,
+            selected_notification_id: None,
+            hidden_per_mille: 500,
         }),
         ..build_open_tray_viewer_chrome(0)
     };
@@ -2169,16 +2252,20 @@ fn an_open_tray_hits_over_an_open_notification_center() {
         render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
 
     assert_eq!(
-        resolve_hit_region(frame_layout, build_screen_point(60, 6)),
+        resolve_hit_region(frame_layout, build_screen_point(70, 2)),
+        HitRegion::FloatingPaneTrayClose
+    );
+    assert_eq!(
+        resolve_hit_region(frame_layout, build_screen_point(73, 6)),
         HitRegion::FloatingPaneTray
     );
     assert_eq!(
-        resolve_hit_region(frame_layout, build_screen_point(76, 1)),
-        HitRegion::NotificationCenterClose
+        resolve_hit_region(frame_layout, build_screen_point(76, 2)),
+        HitRegion::NotificationCenter
     );
     assert_eq!(
-        resolve_hit_region(frame_layout, build_screen_point(60, 10)),
-        HitRegion::NotificationCenter
+        resolve_hit_region(frame_layout, build_screen_point(70, 15)),
+        HitRegion::NotificationCenterBody
     );
 }
 
@@ -2247,7 +2334,8 @@ fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_un
     let toast_over_center_viewer_chrome = ViewerChrome {
         notification_center: Some(NotificationCenter {
             scroll_row_offset: 0,
-            is_focused: true,
+            selected_notification_id: None,
+            hidden_per_mille: 0,
         }),
         ..build_toast_viewer_chrome(0)
     };
@@ -2260,6 +2348,10 @@ fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_un
     assert_eq!(
         resolve_hit_region(toast_over_center_frame_layout, build_screen_point(60, 3)),
         HitRegion::NotificationCenter
+    );
+    assert_eq!(
+        resolve_hit_region(toast_over_center_frame_layout, build_screen_point(60, 5)),
+        HitRegion::NotificationCenterBody
     );
 }
 

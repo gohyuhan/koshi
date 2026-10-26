@@ -30,13 +30,15 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
 use koshi_layout::solver::StackHeader;
 use koshi_renderer::notification::{
-    NotificationCenterEntry, NotificationToastContent, NotificationView,
+    NotificationCenterEntries, NotificationCenterEntry, NotificationToastContent,
+    NotificationToastView, NotificationView, ToastTextRowCache,
 };
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
-    FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints, MouseFrame, NotificationButton,
-    NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PlacementHandleHover,
-    RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, DrawnNotifications, FloatingPane,
+    FloatingPaneMoveDraft, FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints, MouseFrame,
+    NotificationButton, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot,
+    PlacementHandleHover, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
+    TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -217,14 +219,9 @@ fn build_tiled_frame() -> (RenderSnapshot, PaneId, PaneId, PaneId) {
     )
 }
 
-/// The whole viewport as a ratatui area at the origin.
-fn build_viewport_area() -> RatatuiRect {
-    RatatuiRect::new(
-        0,
-        0,
-        TEST_VIEWPORT_SIZE.column_count,
-        TEST_VIEWPORT_SIZE.row_count,
-    )
+/// A `viewport_size` viewport as a ratatui area at the origin.
+fn build_viewport_area(viewport_size: Size) -> RatatuiRect {
+    RatatuiRect::new(0, 0, viewport_size.column_count, viewport_size.row_count)
 }
 
 /// Paint `render_snapshot` with `committed_regions` and `viewer_chrome` into a
@@ -239,22 +236,23 @@ fn paint_render_snapshot(
         committed_regions,
         viewer_chrome,
         NotificationView {
-            entries: &VecDeque::new(),
+            center_entries: &NotificationCenterEntries::default(),
             dropped_entry_count: 0,
-            toast_content: None,
+            shown_toast: None,
         },
     )
 }
 
 /// Paint `render_snapshot` with `committed_regions`, `viewer_chrome` and
-/// `notification_view` into a fresh viewport-sized buffer.
+/// `notification_view` into a fresh buffer the size of `render_snapshot`'s
+/// viewport.
 fn paint_render_snapshot_with_notifications(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     viewer_chrome: ViewerChrome,
     notification_view: NotificationView<'_>,
 ) -> Buffer {
-    let viewport_area = build_viewport_area();
+    let viewport_area = build_viewport_area(render_snapshot.client_snapshot.viewport_size);
     let mut screen_buffer = Buffer::empty(viewport_area);
     render_frame(
         &build_frame_geometry(
@@ -300,8 +298,12 @@ fn every_cell_classifies_as_what_was_painted() {
         ViewerChrome::default(),
     );
     let theme = Theme::default();
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     let statusline_row_index = TEST_VIEWPORT_SIZE.row_count - 1;
@@ -393,6 +395,7 @@ fn every_cell_classifies_as_what_was_painted() {
                 | HitRegion::FloatingPaneTrayButton
                 | HitRegion::FloatingPaneTrayTile { .. }
                 | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTrayClose
                 | HitRegion::FloatingPaneTray => {
                     panic!(
                         "floating pane region at ({column_index}, {row_index}) in a frame with no floating pane"
@@ -400,7 +403,8 @@ fn every_cell_classifies_as_what_was_painted() {
                 }
                 HitRegion::NotificationButton
                 | HitRegion::NotificationCenterClose
-                | HitRegion::NotificationCenterClear
+                | HitRegion::NotificationCenterClearAll
+                | HitRegion::NotificationCenterBody
                 | HitRegion::NotificationCenter
                 | HitRegion::NotificationToastClose => {
                     panic!(
@@ -452,7 +456,12 @@ fn a_shown_tiled_handle_paints_and_hits_the_three_cells_before_the_title() {
     };
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
     let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
-    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
     // The left pane's 25x10 box starts at screen (5, 2).
     assert_eq!(
@@ -526,8 +535,12 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
         &committed_regions,
         ViewerChrome::default(),
     );
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
     let floating_content_rect = find_pane_content_rect(frame_layout, floating_pane_id)
         .unwrap_or_else(|| panic!("the floating pane has no content rect"));
@@ -625,14 +638,26 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
         }),
         ..ViewerChrome::default()
     };
-    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    // A 15-row viewport leaves a 13-row pane area: the height of a tray of
+    // three rows of slots.
+    let tray_viewport_size = Size {
+        column_count: TEST_VIEWPORT_SIZE.column_count,
+        row_count: 15,
+    };
+    render_snapshot.client_snapshot.viewport_size = tray_viewport_size;
+    let committed_regions = CommittedRegions::build_core(tray_viewport_size, 0);
     let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
-    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     // ` TRAY ` takes columns 54 to 59 and the button 51 to 53. Four slots per
     // row fit the 54 columns left of the tray's right border: the tray is
-    // 47x11 at (7, 1), slot 0 at (9, 2) and slot 1 at (20, 2).
+    // 47x13 at (7, 1), slot 0 at (9, 4) and slot 1 at (20, 4).
     assert_eq!(get_row_text(&screen_buffer, 0, 51, 54), " ⧉ ");
     for column_index in 51..54 {
         assert_eq!(
@@ -646,12 +671,15 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
             HitRegion::FloatingPaneTrayButton
         );
     }
-    // The tray paints, row by row from (7, 1): the header with the selected
-    // tile's title and the label at columns 38 to 51, three rows of four
-    // slots, and the bottom border.
+    // The tray paints, row by row from (7, 1): the top border, the titlebar
+    // with the selected tile's title, the label at columns 36 to 47 and the
+    // close button at column 50, the separator, three rows of four slots,
+    // and the bottom border.
     let empty_slot_rows = ["┌────────┐", "│        │", "└────────┘"];
     let expected_tray_rows = vec![
-        format!("┌─ htop {} minimize all ─┐", "─".repeat(23)),
+        format!("┌{}┐", "─".repeat(45)),
+        format!("│ htop{}minimize all  ✕  │", " ".repeat(23)),
+        format!("├{}┤", "─".repeat(45)),
         format!("│ ┌ 1 ─────┐ ┌ 2 ─────┐ {0} {0} │", empty_slot_rows[0]),
         format!("│ │ htop   │ │ logs   │ {0} {0} │", empty_slot_rows[1]),
         format!("│ └────────┘ └────────┘ {0} {0} │", empty_slot_rows[2]),
@@ -663,17 +691,19 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
         format!("│ {0} {0} {0} {0} │", empty_slot_rows[2]),
         format!("└{}┘", "─".repeat(45)),
     ];
-    let painted_tray_rows: Vec<String> = (1..12)
+    let painted_tray_rows: Vec<String> = (1..14)
         .map(|row_index| get_row_text(&screen_buffer, row_index, 7, 54))
         .collect();
     assert_eq!(painted_tray_rows, expected_tray_rows);
 
     // Every cell of the tray hits the region painted there: tile 0's box at
-    // (9, 2) 10x3, tile 1's box at (20, 2) 10x3, the label's 14 cells on row
-    // 1, and the tray for every other cell, the empty slots included.
-    let tile_rects = [build_cell_rect(9, 2, 10, 3), build_cell_rect(20, 2, 10, 3)];
-    let label_rect = build_cell_rect(38, 1, 14, 1);
-    for row_index in 1..12 {
+    // (9, 4) 10x3, tile 1's box at (20, 4) 10x3, the label's 12 cells and the
+    // close button on row 2, and the tray for every other cell, the empty
+    // slots included.
+    let tile_rects = [build_cell_rect(9, 4, 10, 3), build_cell_rect(20, 4, 10, 3)];
+    let label_rect = build_cell_rect(36, 2, 12, 1);
+    let close_button_point = Point { column: 50, row: 2 };
+    for row_index in 1..14 {
         for column_index in 7..54 {
             let screen_point = Point {
                 column: column_index,
@@ -685,6 +715,8 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
                 HitRegion::FloatingPaneTrayTile { tile_index: 1 }
             } else if label_rect.is_point_inside(screen_point) {
                 HitRegion::FloatingPaneTrayToggleMinimizeAll
+            } else if screen_point == close_button_point {
+                HitRegion::FloatingPaneTrayClose
             } else {
                 HitRegion::FloatingPaneTray
             };
@@ -700,8 +732,8 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
 #[test]
 fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painted() {
     let (render_snapshot, ..) = build_tiled_frame();
-    let entries = VecDeque::from([NotificationEntry {
-        id: NotificationId {
+    let notification_entries = VecDeque::from([NotificationEntry {
+        notification_id: NotificationId {
             owner: NotificationQueueOwner::Session(SessionId::new()),
             epoch: NotificationEpoch::new(),
             sequence: 0,
@@ -716,7 +748,8 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         active_input_mode: Some(LockMode::NotificationCenter),
         notification_center: Some(NotificationCenter {
             scroll_row_offset: 0,
-            is_focused: true,
+            selected_notification_id: None,
+            hidden_per_mille: 0,
         }),
         notification_button: Some(NotificationButton {
             unread_entry_count: 3,
@@ -729,21 +762,31 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         ..ViewerChrome::default()
     };
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let mut center_entries = NotificationCenterEntries::default();
+    for notification_entry in &notification_entries {
+        center_entries.add_newest_center_entry(NotificationCenterEntry::from_notification_entry(
+            notification_entry.clone(),
+        ));
+    }
     let screen_buffer = paint_render_snapshot_with_notifications(
         &render_snapshot,
         &committed_regions,
         viewer_chrome,
         NotificationView {
-            entries: &entries
-                .iter()
-                .cloned()
-                .map(NotificationCenterEntry::from_entry)
-                .collect(),
+            center_entries: &center_entries,
             dropped_entry_count: 0,
-            toast_content: Some(NotificationToastContent::Entry(&entries[0])),
+            shown_toast: Some(NotificationToastView {
+                toast_content: NotificationToastContent::Entry(&notification_entries[0]),
+                toast_text_row_cache: &ToastTextRowCache::default(),
+            }),
         },
     );
-    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     // The mode tag ` NOTIFICATIONS ` takes columns 45 to 59 and the button
@@ -763,33 +806,42 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         );
     }
 
-    // The center is 24x12 at (36, 1): its close control at columns 55 to 57
-    // of row 1 and its clear label at columns 38 to 44 of row 12.
+    // The center is 24x12 at (36, 1): its close button at (56, 2), its body
+    // at (37, 4) 22x7 with the entry's card on rows 4 to 7, and `Clear all`
+    // at columns 43 to 51 of row 11.
     let expected_center_rows = vec![
-        "┌─ Notifications ── × ─┐".to_string(),
-        format!("│ [Koshi] Error{}│", " ".repeat(8)),
-        format!("│ pane exited{}│", " ".repeat(10)),
+        format!("┌{}┐", "─".repeat(22)),
+        "│ Notifications     ✕  │".to_string(),
+        format!("├{}┤", "─".repeat(22)),
+        format!("│┌{} ✕ ─┐│", "─".repeat(16)),
+        format!("││ [Koshi] Error{}││", " ".repeat(6)),
+        format!("││ pane exited{}││", " ".repeat(8)),
+        format!("│└{}┘│", "─".repeat(20)),
+        format!("│{}│", " ".repeat(22)),
+        format!("│{}│", " ".repeat(22)),
+        format!("│{}│", " ".repeat(22)),
+        "│      Clear all       │".to_string(),
+        format!("└{}┘", "─".repeat(22)),
     ];
-    let painted_center_rows: Vec<String> = (1..4)
+    let painted_center_rows: Vec<String> = (1..13)
         .map(|row_index| get_row_text(&screen_buffer, row_index, 36, 60))
         .collect();
     assert_eq!(painted_center_rows, expected_center_rows);
-    assert_eq!(
-        get_row_text(&screen_buffer, 12, 36, 60),
-        format!("└─ clear {}┘", "─".repeat(14))
-    );
-    let center_close_rect = build_cell_rect(55, 1, 3, 1);
-    let center_clear_rect = build_cell_rect(38, 12, 7, 1);
+    let center_close_point = Point { column: 56, row: 2 };
+    let center_body_rect = build_cell_rect(37, 4, 22, 7);
+    let center_clear_all_rect = build_cell_rect(43, 11, 9, 1);
     for row_index in 1..13 {
         for column_index in 36..60 {
             let screen_point = Point {
                 column: column_index,
                 row: row_index,
             };
-            let expected_hit_region = if center_close_rect.is_point_inside(screen_point) {
+            let expected_hit_region = if screen_point == center_close_point {
                 HitRegion::NotificationCenterClose
-            } else if center_clear_rect.is_point_inside(screen_point) {
-                HitRegion::NotificationCenterClear
+            } else if center_clear_all_rect.is_point_inside(screen_point) {
+                HitRegion::NotificationCenterClearAll
+            } else if center_body_rect.is_point_inside(screen_point) {
+                HitRegion::NotificationCenterBody
             } else {
                 HitRegion::NotificationCenter
             };
@@ -804,7 +856,7 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
     // The toast is 24x4 at (0, 9): its close control at columns 19 to 21 of
     // row 9. Every other toast cell hits what lies under the toast.
     let expected_toast_rows = vec![
-        format!("┌{} × ─┐", "─".repeat(18)),
+        format!("┌{} ✕ ─┐", "─".repeat(18)),
         format!("│ [Koshi] Error{}│", " ".repeat(8)),
         format!("│ pane exited{}│", " ".repeat(10)),
         format!("└{}┘", "─".repeat(22)),
@@ -865,7 +917,12 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     };
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
     let screen_buffer = paint_render_snapshot(&render_snapshot, &committed_regions, viewer_chrome);
-    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     // The 24x8 pane in the 60x12 pane area, which starts at screen row 1,
@@ -905,8 +962,12 @@ fn a_tab_ribbon_spells_the_tab_it_hits() {
         ViewerChrome::default(),
     );
     let tabs_metadata = render_snapshot.session_snapshot.tabs_metadata.clone();
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     for tab_metadata in &tabs_metadata {
@@ -952,11 +1013,15 @@ fn the_cursor_lands_in_the_focused_pane_content() {
         &render_snapshot,
         &committed_regions,
         ViewerChrome::default(),
-        build_viewport_area(),
+        build_viewport_area(TEST_VIEWPORT_SIZE),
     ))
     .expect("the focused pane has a cursor");
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     let content_rect =
@@ -1018,8 +1083,12 @@ fn a_zero_height_chrome_region_paints_nothing() {
         &committed_regions,
         ViewerChrome::default(),
     );
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default());
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
     let frame_layout = mouse_frame.build_frame_layout();
 
     let top_row_text = get_row_text(&screen_buffer, 0, 0, TEST_VIEWPORT_SIZE.column_count);

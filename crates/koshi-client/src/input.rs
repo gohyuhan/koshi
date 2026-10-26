@@ -193,7 +193,7 @@ impl Client {
 
     /// Return the keymap mode that currently owns this viewer's keyboard.
     ///
-    /// The floating pane tray, the focused notification center, dock/undock
+    /// The floating pane tray, the open notification center, dock/undock
     /// mode, pane placement mode, the move chooser, and floating pane move mode
     /// are local submodes layered over the stored normal or locked mode
     /// ([`find_viewer_local_input_mode`](Self::find_viewer_local_input_mode)).
@@ -211,8 +211,8 @@ impl Client {
     }
 
     /// Return the local submode on: `FloatingPaneTray` while the floating pane
-    /// tray is open, `NotificationCenter` while the notification center holds
-    /// the keyboard, `DockUndock` while dock/undock mode is on, also while its
+    /// tray is open, `NotificationCenter` while the notification center is
+    /// open, `DockUndock` while dock/undock mode is on, also while its
     /// pane placement mode is active, `PanePlacement` while pane placement
     /// mode is active, `PaneMoveChoice` while the move chooser is on, and
     /// `FloatingPaneMove` while floating pane move mode is on. `None` when no
@@ -222,11 +222,7 @@ impl Client {
         if self.floating_pane_tray.is_some() {
             return Some(LockMode::FloatingPaneTray);
         }
-        let is_notification_center_focused = self
-            .notification_history
-            .get_notification_center()
-            .is_some_and(|notification_center| notification_center.is_focused);
-        if is_notification_center_focused {
+        if self.notification_history.is_notification_center_open() {
             return Some(LockMode::NotificationCenter);
         }
         if self.dock_undock_mode.is_some() {
@@ -245,8 +241,8 @@ impl Client {
     /// Set the stored base input mode and clear an open sequence, an
     /// unconfirmed placement interaction, the move chooser, floating pane move
     /// mode that waits for no move, dock/undock mode that waits for no undock
-    /// or dock, and the floating pane tray. An open notification center stays
-    /// open and gives up the keyboard.
+    /// or dock, and the floating pane tray, and close an open notification
+    /// center (`close_notification_center`).
     ///
     /// Called both when this viewer's own `core:lock` fires and when the
     /// session reports a mode change aimed at this viewer (`koshi lock
@@ -260,7 +256,7 @@ impl Client {
             self.close_pane_move_mode();
             self.close_dock_undock_mode();
             self.close_floating_pane_tray();
-            self.unfocus_notification_center();
+            self.close_notification_center();
             self.lock_mode = lock_mode;
             self.pending_key_sequence = None;
         }
@@ -362,8 +358,11 @@ impl Client {
     /// sets, before the session runs that command, and wait for it: painted
     /// frames leave the lock mode as it is until one names `lock_command_id`
     /// as the last applied lock command. The switch is
-    /// [`set_lock_mode`](Self::set_lock_mode).
+    /// [`set_lock_mode`](Self::set_lock_mode). An open notification center
+    /// closes ([`close_notification_center`](Self::close_notification_center)),
+    /// also when `lock_mode` is the mode already on.
     pub(crate) fn apply_lock_command(&mut self, lock_command_id: CommandId, lock_mode: LockMode) {
+        self.close_notification_center();
         self.set_lock_mode(lock_mode);
         self.pending_lock_command_id = Some(lock_command_id);
     }
@@ -416,12 +415,17 @@ impl Client {
     /// or the placement confirmation the attachment sends next, or
     /// [`PlacementInputAction::Consumed`] when the action sends neither.
     ///
-    /// An action that is not a floating pane tray action closes the tray
-    /// first ([`close_floating_pane_tray`](Self::close_floating_pane_tray)).
-    /// An action that is not a notification center action takes the keyboard
-    /// from the center first
-    /// ([`unfocus_notification_center`](Self::unfocus_notification_center)).
-    /// A scroll action moves the center one row.
+    /// The floating pane tray and the notification center refuse each
+    /// other's actions: while the tray is open, a notification center action
+    /// does nothing and the tray stays open, and while the center is open, a
+    /// floating pane tray action does nothing and the center stays open. Any
+    /// other action that is not a tray action closes the tray first
+    /// ([`close_floating_pane_tray`](Self::close_floating_pane_tray)), and any
+    /// other action that is not a center action closes the center first
+    /// ([`close_notification_center`](Self::close_notification_center)).
+    ///
+    /// Example: `<A-n>` bound to `core:toggle-notification-center` in the
+    /// `floating-pane-tray` mode does nothing while the tray is open.
     pub(crate) fn apply_client_action(
         &mut self,
         client_action_kind: ClientActionKind,
@@ -434,19 +438,27 @@ impl Client {
                 | ClientActionKind::SelectTrayTile(_)
                 | ClientActionKind::ToggleSelectedTrayTile
         );
-        if !is_floating_pane_tray_action {
-            self.close_floating_pane_tray();
-        }
         let is_notification_center_action = matches!(
             client_action_kind,
             ClientActionKind::ToggleNotificationCenter
                 | ClientActionKind::CloseNotificationCenter
                 | ClientActionKind::ClearNotifications
-                | ClientActionKind::ScrollNotificationsUp
-                | ClientActionKind::ScrollNotificationsDown
+                | ClientActionKind::SelectNewerNotification
+                | ClientActionKind::SelectOlderNotification
+                | ClientActionKind::DismissSelectedNotification
         );
+        let is_floating_pane_tray_open = self.floating_pane_tray.is_some();
+        let is_notification_center_open = self.notification_history.is_notification_center_open();
+        if (is_notification_center_action && is_floating_pane_tray_open)
+            || (is_floating_pane_tray_action && is_notification_center_open)
+        {
+            return PlacementInputAction::Consumed;
+        }
+        if !is_floating_pane_tray_action {
+            self.close_floating_pane_tray();
+        }
         if !is_notification_center_action {
-            self.unfocus_notification_center();
+            self.close_notification_center();
         }
         match client_action_kind {
             ClientActionKind::BeginPanePlacement => self.begin_pane_move(mouse_frame),
@@ -520,7 +532,7 @@ impl Client {
             }
             ClientActionKind::ToggleSelectedTrayTile => self.toggle_selected_tray_tile(mouse_frame),
             ClientActionKind::ToggleNotificationCenter => {
-                self.toggle_notification_center();
+                self.toggle_notification_center(mouse_frame);
                 PlacementInputAction::Consumed
             }
             ClientActionKind::CloseNotificationCenter => {
@@ -531,12 +543,16 @@ impl Client {
                 self.clear_notifications();
                 PlacementInputAction::Consumed
             }
-            ClientActionKind::ScrollNotificationsUp => {
-                self.scroll_notification_center(true, 1, mouse_frame);
+            ClientActionKind::SelectNewerNotification => {
+                self.select_adjacent_notification(true, mouse_frame);
                 PlacementInputAction::Consumed
             }
-            ClientActionKind::ScrollNotificationsDown => {
-                self.scroll_notification_center(false, 1, mouse_frame);
+            ClientActionKind::SelectOlderNotification => {
+                self.select_adjacent_notification(false, mouse_frame);
+                PlacementInputAction::Consumed
+            }
+            ClientActionKind::DismissSelectedNotification => {
+                self.dismiss_selected_notification(mouse_frame);
                 PlacementInputAction::Consumed
             }
         }

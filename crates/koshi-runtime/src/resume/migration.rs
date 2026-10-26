@@ -1,6 +1,7 @@
 //! Ordered conversion of released resume bodies into the current shape.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
@@ -1309,6 +1310,7 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
                 notification_queue.post_core_entry(
                     NotificationSeverity::Error,
                     SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
+                    NonZeroU32::MIN,
                     SystemTime::now(),
                 );
             }

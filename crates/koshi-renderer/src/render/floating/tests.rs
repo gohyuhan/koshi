@@ -28,7 +28,8 @@ use koshi_terminal::style::Style as TerminalStyle;
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::images::ImageRenderMode;
-use crate::notification::tests::EMPTY_NOTIFICATION_VIEW;
+use crate::notification::tests::build_test_notification_view;
+use crate::notification::NotificationCenterEntries;
 use crate::render::tests::{format_rendered_cells, get_pane_snapshot_mut};
 use crate::render::{build_frame_geometry, render_frame};
 use crate::snapshot::{
@@ -192,7 +193,7 @@ fn render_core_frame(
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );

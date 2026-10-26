@@ -1,15 +1,18 @@
-//! Floating panes over the tiled layer: where each one this viewer draws sits
-//! in the frame, and how one is drawn.
+//! The chrome every floating component draws, and the floating panes over
+//! the tiled layer: where each one this viewer draws sits in the frame, and
+//! how one is drawn.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use koshi_core::constant::FLOATING_PANE_CHROME_SIZE;
+use koshi_core::constant::FLOATING_CHROME_SIZE;
 use koshi_core::geometry::{Rect, Size};
 
-use crate::floating_pane_chrome::compute_floating_pane_titlebar;
+use crate::floating_chrome::{
+    compute_floating_titlebar, FloatingTitlebar, FloatingTitlebarControls,
+};
 use crate::snapshot::{
     CommittedRegions, FloatingPaneSlot, PlacementHandleHover, RenderSnapshot, ViewerChrome,
 };
@@ -18,7 +21,7 @@ use crate::theme::Theme;
 use super::{
     clear_drawn_rows, compute_pane_area, compute_pane_border_style, compute_symbol_display_width,
     draw_grid, draw_pane_border, draw_pane_scroll_position, draw_placement_hover_tint,
-    get_area_origin, place_cell_rect, set_line_clipped, DrawnRows,
+    get_area_origin, place_cell_rect, set_line_clipped, write_text_clipped, DrawnRows,
 };
 
 /// The grab handle a floating pane draws in its titlebar.
@@ -33,8 +36,8 @@ const PINNED_TOGGLE_TEXT: &str = "[⚪]";
 /// The minimize button of a floating pane.
 const MINIMIZE_BUTTON_TEXT: &str = "–";
 
-/// The close button of a floating pane.
-const CLOSE_BUTTON_TEXT: &str = "✕";
+/// The close button on the titlebar of every floating component.
+pub(super) const CLOSE_BUTTON_TEXT: &str = "✕";
 
 /// One floating pane this viewer draws, placed in the frame: its slot, and
 /// its rects moved from pane-area cells to frame cells.
@@ -86,30 +89,28 @@ pub(crate) fn list_placed_floating_panes(
 /// Draw one placed floating pane over every cell drawn before it, in this
 /// order:
 ///
-/// 1. Blanks its outer area and the glyph that reaches into it from the left
-///    ([`clear_overlay_area`]).
-/// 2. Draws its border ring in the style [`compute_pane_border_style`] gives
-///    it, with the placement hover style while
-///    `viewer_chrome.placement_handle_hover` is
+/// 1. Draws the floating chrome ([`draw_floating_frame`]) with the floating
+///    pane's controls ([`FloatingTitlebarControls::FLOATING_PANE`]), in the
+///    style [`compute_pane_border_style`] gives the pane: the placement hover
+///    style while `viewer_chrome.placement_handle_hover` is
 ///    [`FloatingHandle`](PlacementHandleHover::FloatingHandle) of the pane
 ///    with its `is_pinned`.
-/// 3. On an outer area of 4 rows or more, draws the separator `├──┤` on the
-///    third row and the titlebar on the second row, each part where
-///    [`compute_floating_pane_titlebar`] places it: the grab handle `⣿⣿`, the
-///    pane title cut to its cells, the pin toggle `[ ]` (`[⚪]` while
-///    `is_pinned`), the minimize button `–` and the close button `✕`.
-/// 4. Draws the pane's cells into its visible content area.
-/// 5. Tints the visible content area while that hover is `FloatingHandle` of
+/// 2. Writes the grab handle `⣿⣿`, the pane title cut to its cells, the pin
+///    toggle `[ ]` (`[⚪]` while `is_pinned`) and the minimize button `–` on
+///    the titlebar row, each where [`compute_floating_titlebar`] places it, in
+///    the chrome's style.
+/// 3. Draws the pane's cells into its visible content area.
+/// 4. Tints the visible content area while that hover is `FloatingHandle` of
 ///    the pane with its `is_pinned`.
-/// 6. Writes the pane's scroll position ` up/total ` into its bottom border
+/// 5. Writes the pane's scroll position ` up/total ` into its bottom border
 ///    while it is scrolled back.
 ///
-/// The chrome takes the border style. A pane with no content snapshot draws
-/// its chrome with no title, no cells and no scroll position.
+/// A pane with no content snapshot draws its chrome with no title, no cells
+/// and no scroll position.
 ///
-/// Steps 1, 2, 4 and 5 run only over the rows `drawn_rows` draws. The
-/// separator, the titlebar and the scroll position are drawn only when
-/// `drawn_rows` draws their row. A box on no drawn row is not drawn.
+/// Steps 1, 3 and 4 run only over the rows `drawn_rows` draws. The titlebar
+/// parts and the scroll position are drawn only when `drawn_rows` draws their
+/// row. A box on no drawn row is not drawn.
 pub(super) fn draw_floating_pane(
     render_snapshot: &RenderSnapshot,
     placed_floating_pane: &PlacedFloatingPane,
@@ -135,34 +136,35 @@ pub(super) fn draw_floating_pane(
         viewer_chrome,
         theme,
     );
-    clear_overlay_area(outer_area, drawn_rows, screen_buffer);
-    draw_pane_border(outer_area, border_style, drawn_rows, screen_buffer);
+    let titlebar = draw_floating_frame(
+        outer_area,
+        FloatingTitlebarControls::FLOATING_PANE,
+        border_style,
+        drawn_rows,
+        screen_buffer,
+    );
 
     let pane_snapshot = render_snapshot.find_pane_snapshot(floating_pane_slot.pane_id);
-    if outer_area.width >= 2
-        && outer_area.height >= FLOATING_PANE_CHROME_SIZE.row_count
-        && drawn_rows.is_row_drawn(outer_area.y.saturating_add(2))
-    {
-        let separator_text = format!("├{}┤", "─".repeat(usize::from(outer_area.width - 2)));
-        set_line_clipped(
-            screen_buffer,
-            outer_area.x,
-            outer_area.y.saturating_add(2),
-            &Line::from(Span::styled(separator_text, border_style)),
-            outer_area.width,
-        );
-    }
-    let pane_title = pane_snapshot
-        .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
-        .unwrap_or("");
     if drawn_rows.is_row_drawn(outer_area.y.saturating_add(1)) {
-        draw_floating_pane_titlebar(
-            outer_area,
-            pane_title,
-            floating_pane_slot.is_pinned,
-            border_style,
-            screen_buffer,
-        );
+        let pane_title = pane_snapshot
+            .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
+            .unwrap_or("");
+        let pin_toggle_text = if floating_pane_slot.is_pinned {
+            PINNED_TOGGLE_TEXT
+        } else {
+            UNPINNED_TOGGLE_TEXT
+        };
+        let titlebar_parts = [
+            (titlebar.grab_handle_rect, GRAB_HANDLE_TEXT),
+            (titlebar.title_rect, pane_title),
+            (titlebar.pin_toggle_rect, pin_toggle_text),
+            (titlebar.minimize_button_rect, MINIMIZE_BUTTON_TEXT),
+        ];
+        for (part_rect, part_text) in titlebar_parts {
+            if let Some(part_rect) = part_rect {
+                write_text_clipped(screen_buffer, part_rect, part_text, border_style);
+            }
+        }
     }
 
     let Some(pane_snapshot) = pane_snapshot else {
@@ -190,6 +192,68 @@ pub(super) fn draw_floating_pane(
     }
 }
 
+/// Draw the chrome of a floating component whose box is `outer_area` over
+/// every cell drawn before it, in `chrome_style`, and return where its
+/// titlebar parts sit ([`compute_floating_titlebar`] with
+/// `titlebar_controls`). In this order:
+///
+/// 1. Blanks the box and the glyph that reaches into it from the left
+///    ([`clear_overlay_area`]).
+/// 2. Draws the border ring.
+/// 3. On a box of 4 rows or more, draws the separator `├──┤` on the third row
+///    and the close button `✕` on the titlebar row.
+///
+/// The component writes its title and its own controls into the returned
+/// rects. Every step runs only over the rows `drawn_rows` draws.
+///
+/// Example: a `24`-column box at `(0, 0)` with the close button only reads
+/// `┌──────────────────────┐`, `│                   ✕  │` and
+/// `├──────────────────────┤` on its first three rows.
+pub(super) fn draw_floating_frame(
+    outer_area: RatatuiRect,
+    titlebar_controls: FloatingTitlebarControls,
+    chrome_style: Style,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) -> FloatingTitlebar {
+    clear_overlay_area(outer_area, drawn_rows, screen_buffer);
+    draw_pane_border(outer_area, chrome_style, drawn_rows, screen_buffer);
+    if outer_area.width >= 2
+        && outer_area.height >= FLOATING_CHROME_SIZE.row_count
+        && drawn_rows.is_row_drawn(outer_area.y.saturating_add(2))
+    {
+        let separator_text = format!("├{}┤", "─".repeat(usize::from(outer_area.width - 2)));
+        set_line_clipped(
+            screen_buffer,
+            outer_area.x,
+            outer_area.y.saturating_add(2),
+            &Line::from(Span::styled(separator_text, chrome_style)),
+            outer_area.width,
+        );
+    }
+    let titlebar = compute_floating_titlebar(
+        Rect::from_origin_and_size(
+            get_area_origin(outer_area),
+            Size {
+                column_count: outer_area.width,
+                row_count: outer_area.height,
+            },
+        ),
+        titlebar_controls,
+    );
+    if let Some(close_button_rect) = titlebar.close_button_rect {
+        if drawn_rows.is_row_drawn(close_button_rect.origin.row) {
+            write_text_clipped(
+                screen_buffer,
+                close_button_rect,
+                CLOSE_BUTTON_TEXT,
+                chrome_style,
+            );
+        }
+    }
+    titlebar
+}
+
 /// Blank every cell of `overlay_area` on each row `drawn_rows` draws, and the
 /// glyph that starts left of `overlay_area` and reaches into it. The row is
 /// read from its first column, and each glyph covers the number of columns
@@ -215,53 +279,6 @@ pub(super) fn clear_overlay_area(
             }
             column_index = column_index.saturating_add(glyph_width);
         }
-    }
-}
-
-/// Write the titlebar parts of the floating pane whose box is `outer_area`,
-/// each cut to the cells [`compute_floating_pane_titlebar`] gives it, in
-/// `chrome_style`. An empty `pane_title` writes no title.
-///
-/// In a `48`-column box at `(0, 0)` titled `htop`, row `1` reads
-/// `│ ⣿⣿  htop                          [ ]  –  ✕  │` once the border is
-/// drawn.
-fn draw_floating_pane_titlebar(
-    outer_area: RatatuiRect,
-    pane_title: &str,
-    is_pinned: bool,
-    chrome_style: Style,
-    screen_buffer: &mut Buffer,
-) {
-    let titlebar = compute_floating_pane_titlebar(Rect::from_origin_and_size(
-        get_area_origin(outer_area),
-        Size {
-            column_count: outer_area.width,
-            row_count: outer_area.height,
-        },
-    ));
-    let pin_toggle_text = if is_pinned {
-        PINNED_TOGGLE_TEXT
-    } else {
-        UNPINNED_TOGGLE_TEXT
-    };
-    let titlebar_parts = [
-        (titlebar.grab_handle_rect, GRAB_HANDLE_TEXT),
-        (titlebar.title_rect, pane_title),
-        (titlebar.pin_toggle_rect, pin_toggle_text),
-        (titlebar.minimize_button_rect, MINIMIZE_BUTTON_TEXT),
-        (titlebar.close_button_rect, CLOSE_BUTTON_TEXT),
-    ];
-    for (part_rect, part_text) in titlebar_parts {
-        let Some(part_rect) = part_rect else {
-            continue;
-        };
-        set_line_clipped(
-            screen_buffer,
-            part_rect.origin.column,
-            part_rect.origin.row,
-            &Line::from(Span::styled(part_text, chrome_style)),
-            part_rect.size.column_count,
-        );
     }
 }
 

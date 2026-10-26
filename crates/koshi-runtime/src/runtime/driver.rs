@@ -259,7 +259,7 @@ impl Server {
                 ) = (key_binding_client_id, &command_result)
                 {
                     if !(has_directional_target && *reason == RejectReason::TargetNotFound) {
-                        let _ = self.send_command_rejection(
+                        self.send_command_rejection(
                             client_id,
                             *command_id,
                             fired_action,

@@ -23,11 +23,12 @@ mod tests;
 /// The session name with the `[v…]` version badge sits on the left and the mode
 /// tag on the right, painted as colored text over that fill. While the session
 /// holds a floating pane, the tray button ` ⧉ ` sits left of the mode tag in
-/// the mode tag's style, in reverse video while the viewer's tray is open.
-/// While the viewer's notification center holds an entry, the notification
-/// button ` ● ` or ` ●3 ` sits left of the tray button, or left of the mode tag
-/// with no tray button, in the mode tag's style, in reverse video while the
-/// center is open.
+/// the mode tag's style, in reverse video while the lock mode is
+/// `FloatingPaneTray`. While the viewer's notification center holds an entry,
+/// the notification button ` ● ` or ` ●3 ` sits left of the tray button, or
+/// left of the mode tag with no tray button, in the mode tag's style, in
+/// reverse video while the lock mode is `NotificationCenter`. A center that
+/// slides out draws the button with no reverse video.
 /// Only the tab list between them carries block backgrounds — each tab is a
 /// two-block ribbon on its own stop of the theme's chrome ramp (light-purple →
 /// light-blue by default). A tab that does not fit is dropped whole, and a `◀`
@@ -67,7 +68,7 @@ pub(super) fn draw_tabline(
     if let Some(floating_pane_tray_button_column) = tabline_layout.floating_pane_tray_button_column
     {
         let mut button_style = compute_mode_style(theme);
-        if tabline_inputs.is_floating_pane_tray_open {
+        if tabline_inputs.lock_mode == LockMode::FloatingPaneTray {
             button_style = button_style.add_modifier(Modifier::REVERSED);
         }
         set_line_clipped(
@@ -83,7 +84,7 @@ pub(super) fn draw_tabline(
         tabline_inputs.notification_button,
     ) {
         let mut button_style = compute_mode_style(theme);
-        if tabline_inputs.is_notification_center_open {
+        if tabline_inputs.lock_mode == LockMode::NotificationCenter {
             button_style = button_style.add_modifier(Modifier::REVERSED);
         }
         set_line_clipped(

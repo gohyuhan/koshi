@@ -1024,8 +1024,8 @@ impl Server {
     /// placement ([`Client::set_last_applied_placement_command_id`]). A
     /// refused placement changes nothing, and a
     /// [`CommandRejected`](koshi_ipc::event::SessionEvent::CommandRejected)
-    /// naming `command_id`, `fired_action`, the reason and the hint goes on
-    /// the client's queue ([`Self::send_command_rejection`]). `fired_action`
+    /// naming `command_id`, `fired_action`, the reason and the hint is
+    /// delivered to the client ([`Self::send_command_rejection`]). `fired_action`
     /// is the action the client's key fired to confirm, or `None` for a mouse
     /// drop.
     pub(crate) fn confirm_pane_placement(
@@ -1063,7 +1063,7 @@ impl Server {
                 command_result
             }
             Err(rejection) => {
-                let _ = self.send_command_rejection(
+                self.send_command_rejection(
                     client_id,
                     command_id,
                     fired_action,

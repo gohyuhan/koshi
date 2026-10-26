@@ -343,17 +343,22 @@ pub enum ClientActionKind {
     /// Minimize the selected tray tile's floating pane when the viewer shows
     /// it, and restore it when the viewer minimized it.
     ToggleSelectedTrayTile,
-    /// Open the notification center and give it the viewer's keyboard when it
-    /// is closed, and close it when it is open.
+    /// Open the notification center, which then holds the viewer's keys, when
+    /// it is closed, and close it when it is open.
     ToggleNotificationCenter,
     /// Close the notification center and return to the base input mode.
     CloseNotificationCenter,
     /// Remove every entry from the viewer's notification center and close it.
     ClearNotifications,
-    /// Scroll the notification center one row toward its newest entry.
-    ScrollNotificationsUp,
-    /// Scroll the notification center one row toward its oldest entry.
-    ScrollNotificationsDown,
+    /// Select the notification center's card one entry newer than the
+    /// selected one, and scroll the center to show it.
+    SelectNewerNotification,
+    /// Select the notification center's card one entry older than the
+    /// selected one, and scroll the center to show it.
+    SelectOlderNotification,
+    /// Remove the selected card's entry from the viewer's notification
+    /// center, and select the next older card, else the next newer one.
+    DismissSelectedNotification,
 }
 
 /// Where an action's key sorts among the keys of its modifier group in the
@@ -483,8 +488,8 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `move-floating-pane-*` `Move Floating Pane`, `select-tray-tile-*`
 /// `Select Tray Tile`, `focus-pane-*` `Focus Pane`,
 /// `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`, and
-/// `scroll-notifications-up`/`scroll-notifications-down`
-/// `Scroll Notifications`. Every other action has none.
+/// `select-newer-notification`/`select-older-notification`
+/// `Select Notification`. Every other action has none.
 ///
 /// Every `confirm-*` and `cancel-*` action, `new-pane`, `close-pane`,
 /// `close-pane-tree`, `new-tab`, `close-tab`, `lock`, `unlock`,
@@ -926,20 +931,28 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::ClearNotifications),
         ),
         build_core_action_seed(
-            "scroll-notifications-up",
-            "Scroll Notifications Up",
-            "Scroll the notification center one row toward its newest entry",
+            "select-newer-notification",
+            "Select Newer Notification",
+            "Select the notification card above the selected one in the notification center",
             Client,
             vec![ClientTarget],
-            CoreClient(ClientActionKind::ScrollNotificationsUp),
+            CoreClient(ClientActionKind::SelectNewerNotification),
         ),
         build_core_action_seed(
-            "scroll-notifications-down",
-            "Scroll Notifications Down",
-            "Scroll the notification center one row toward its oldest entry",
+            "select-older-notification",
+            "Select Older Notification",
+            "Select the notification card below the selected one in the notification center",
             Client,
             vec![ClientTarget],
-            CoreClient(ClientActionKind::ScrollNotificationsDown),
+            CoreClient(ClientActionKind::SelectOlderNotification),
+        ),
+        build_core_action_seed(
+            "dismiss-selected-notification",
+            "Dismiss Selected Notification",
+            "Remove the selected notification card from this client's notification center",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::DismissSelectedNotification),
         ),
         build_core_action_seed(
             "move-pane",
@@ -1289,7 +1302,9 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
                 Some("Focus Pane")
             }
             "scroll-pane-up" | "scroll-pane-down" => Some("Scroll Pane"),
-            "scroll-notifications-up" | "scroll-notifications-down" => Some("Scroll Notifications"),
+            "select-newer-notification" | "select-older-notification" => {
+                Some("Select Notification")
+            }
             _ => None,
         };
         let is_direction_family_member = action_metadata.hint_label.is_some();

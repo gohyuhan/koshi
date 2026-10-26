@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
+use std::num::NonZeroU32;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, TryLockError};
@@ -1728,6 +1729,7 @@ pub(crate) fn build_client_with_loaded_config(
         viewer_client.post_core_notification(
             NotificationSeverity::Warning,
             config_warning,
+            NonZeroU32::MIN,
             created_at,
         );
     }
@@ -1747,6 +1749,7 @@ pub(crate) fn build_client_with_loaded_config(
                     "keybinding.kdl was not applied: {fatal_diagnostic}; `koshi keys conflicts` \
                      lists every finding"
                 ),
+                NonZeroU32::MIN,
                 created_at,
             );
         }

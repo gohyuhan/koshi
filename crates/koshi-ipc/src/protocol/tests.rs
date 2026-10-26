@@ -407,7 +407,11 @@ pub(crate) fn build_fixed_test_uuid() -> uuid::Uuid {
 pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
     json!({
-        "id": { "owner": { "Session": wire_identifier }, "epoch": wire_identifier, "sequence": 0 },
+        "notification_id": {
+            "owner": { "Session": wire_identifier },
+            "epoch": wire_identifier,
+            "sequence": 0
+        },
         "source": "Core",
         "severity": "Error",
         "text": "pane …a1b2 killed by signal 9",
@@ -424,7 +428,7 @@ pub(crate) fn build_fixed_notification_queue_json() -> serde_json::Value {
         "owner": { "Session": wire_identifier },
         "epoch": wire_identifier,
         "revision": 1,
-        "entries": [build_fixed_notification_entry_json()]
+        "queued_entries": [build_fixed_notification_entry_json()]
     })
 }
 
@@ -1613,7 +1617,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"entries":[]}}}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"queued_entries":[]}}}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
 
@@ -1632,7 +1636,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
                         "owner": { "Session": "00000000-0000-0000-0000-000000000001" },
                         "epoch": "00000000-0000-0000-0000-000000000001",
                         "revision": 0,
-                        "entries": []
+                        "queued_entries": []
                     }))
                     .expect("an empty queue decodes"),
                 },

@@ -645,6 +645,8 @@ fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
                 subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
     assert_eq!(
@@ -707,6 +709,8 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
                 subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -775,6 +779,8 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
                 subscriber_id,
                 dropped_event_count: 2,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -806,6 +812,8 @@ fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
                 subscriber_id: kept_subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
     assert!(!server.event_bus.has_subscriber(orphan_subscriber_id));
@@ -1061,6 +1069,8 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
             subscriber_id,
             dropped_event_count: 1,
         },
+        held_command_rejections: Vec::new(),
+        dropped_command_rejection_count: 0,
     });
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -1198,6 +1208,8 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
             subscriber_id,
             dropped_event_count: 1,
         },
+        held_command_rejections: Vec::new(),
+        dropped_command_rejection_count: 0,
     });
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -4016,21 +4028,21 @@ fn a_session_post_reaches_every_attached_client_once_and_stays_in_the_session_qu
 
     let notification_queue = &server.list_sessions()[&session_id].notification_queue;
     let queued_entries: Vec<NotificationEntry> =
-        notification_queue.list_entries().cloned().collect();
+        notification_queue.list_queued_entries().cloned().collect();
     let [posted_entry] = queued_entries.as_slice() else {
         panic!("the session queue holds the one post, not {queued_entries:?}");
     };
     assert_eq!(
-        posted_entry.id.owner,
+        posted_entry.notification_id.owner,
         NotificationQueueOwner::Session(session_id)
     );
-    assert_eq!(posted_entry.id.sequence, 0);
+    assert_eq!(posted_entry.notification_id.sequence, 0);
     assert_eq!(posted_entry.severity, NotificationSeverity::Error);
     assert_eq!(posted_entry.text, "pane …a1b2 killed by signal 9");
     assert_eq!(notification_queue.get_revision(), 1);
     let expected_deliveries = vec![Delivery::NotificationPosted {
         revision: 1,
-        entry: Box::new(posted_entry.clone()),
+        posted_entry: Box::new(posted_entry.clone()),
     }];
     assert_eq!(
         first_delivery_receiver
@@ -4064,14 +4076,14 @@ fn a_killed_pane_the_session_survives_posts_one_error_to_each_attached_client() 
         let posted_texts: Vec<String> = delivery_receiver
             .try_iter()
             .filter_map(|delivery| match delivery {
-                Delivery::NotificationPosted { entry, .. } => Some(entry.text),
+                Delivery::NotificationPosted { posted_entry, .. } => Some(posted_entry.text),
                 _ => None,
             })
             .collect();
         assert_eq!(posted_texts, vec![expected_text.clone()]);
     }
     let session = &server.list_sessions()[&session_id];
-    assert_eq!(session.notification_queue.list_entries().count(), 1);
+    assert_eq!(session.notification_queue.list_queued_entries().count(), 1);
 }
 
 #[test]
@@ -4114,8 +4126,8 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
 
     assert_eq!(
         expected_notification_queue
-            .list_entries()
-            .map(|entry| entry.text.as_str())
+            .list_queued_entries()
+            .map(|queued_entry| queued_entry.text.as_str())
             .collect::<Vec<&str>>(),
         vec!["koshi.kdl: unknown key `tab-bar`"]
     );
@@ -4128,6 +4140,8 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
                 subscriber_id,
                 dropped_event_count: 2,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }

@@ -9,6 +9,7 @@
 //! existing file and a write into a directory that is not there each do.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
@@ -131,7 +132,7 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
         NotificationQueueOwner::Session(resume_header.session_id)
     );
     assert_eq!(session.notification_queue.get_revision(), 0);
-    assert_eq!(session.notification_queue.list_entries().count(), 0);
+    assert_eq!(session.notification_queue.list_queued_entries().count(), 0);
     assert_eq!(
         session
             .clients
@@ -210,7 +211,7 @@ fn migrate_format_four_with_a_shown_recovery_notice_restores_the_session_not_res
         &resumed_server.session_by_id[&resume_header.session_id].notification_queue;
     assert_eq!(
         notification_queue
-            .list_entries()
+            .list_queued_entries()
             .map(|notification_entry| (
                 notification_entry.severity,
                 notification_entry.text.as_str()
@@ -1485,11 +1486,13 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
     let expected_notification_queue = notification_queue.clone();
@@ -2547,7 +2550,7 @@ fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_and_posts_a_warning(
     assert_eq!(
         resumed_server.session_by_id[&populated_server.session_id]
             .notification_queue
-            .list_entries()
+            .list_queued_entries()
             .map(|notification_entry| (notification_entry.severity, notification_entry.text.clone()))
             .collect::<Vec<_>>(),
         vec![(

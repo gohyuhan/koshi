@@ -1545,34 +1545,76 @@ fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there(
 }
 
 #[test]
-fn the_notification_button_is_reversed_only_while_the_center_is_open() {
+fn the_notification_button_is_reversed_only_while_the_lock_mode_is_notification_center() {
     let mut tabline_test_frame =
         build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
     tabline_test_frame.viewer_chrome.notification_button = Some(NotificationButton {
         unread_entry_count: 0,
     });
-    let badge_column_count = compute_version_badge_column_count();
-    let tabline_column_count = 31 + badge_column_count;
-    let button_column = 22 + badge_column_count;
+    let tabline_column_count = 40 + compute_version_badge_column_count();
     let mode_style = compute_mode_style(&Theme::default());
+    let find_button_glyph_modifier = |render_buffer: &Buffer| {
+        let glyph_column = (0..tabline_column_count)
+            .find(|column| render_buffer[(*column, 0)].symbol() == "●")
+            .expect("the notification button is drawn");
+        render_buffer[(glyph_column, 0)].modifier
+    };
 
     let closed_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
     tabline_test_frame.viewer_chrome.notification_center = Some(NotificationCenter {
         scroll_row_offset: 0,
-        is_focused: false,
+        selected_notification_id: None,
+        hidden_per_mille: 500,
     });
+    let sliding_out_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+    tabline_test_frame.viewer_chrome.active_input_mode = Some(LockMode::NotificationCenter);
     let open_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
 
     assert_eq!(
-        format_rendered_cells(&closed_render_buffer, 0, button_column..button_column + 3),
-        " ● "
-    );
-    assert_eq!(
-        closed_render_buffer[(button_column + 1, 0)].modifier,
+        find_button_glyph_modifier(&closed_render_buffer),
         mode_style.add_modifier
     );
     assert_eq!(
-        open_render_buffer[(button_column + 1, 0)].modifier,
+        find_button_glyph_modifier(&sliding_out_render_buffer),
+        mode_style.add_modifier
+    );
+    assert_eq!(
+        find_button_glyph_modifier(&open_render_buffer),
+        mode_style.add_modifier | Modifier::REVERSED
+    );
+}
+
+#[test]
+fn the_tray_button_is_reversed_only_while_the_lock_mode_is_floating_pane_tray() {
+    let mut tabline_test_frame =
+        build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
+    tabline_test_frame
+        .render_snapshot
+        .session_snapshot
+        .floating_panes
+        .push(FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: None,
+        });
+    let tabline_column_count = 40 + compute_version_badge_column_count();
+    let mode_style = compute_mode_style(&Theme::default());
+    let find_button_glyph_modifier = |render_buffer: &Buffer| {
+        let glyph_column = (0..tabline_column_count)
+            .find(|column| render_buffer[(*column, 0)].symbol() == "⧉")
+            .expect("the tray button is drawn");
+        render_buffer[(glyph_column, 0)].modifier
+    };
+
+    let closed_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+    tabline_test_frame.viewer_chrome.active_input_mode = Some(LockMode::FloatingPaneTray);
+    let open_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+
+    assert_eq!(
+        find_button_glyph_modifier(&closed_render_buffer),
+        mode_style.add_modifier
+    );
+    assert_eq!(
+        find_button_glyph_modifier(&open_render_buffer),
         mode_style.add_modifier | Modifier::REVERSED
     );
 }

@@ -708,8 +708,9 @@ viewer undocks slides from its tiled place to its floating place in 160 ms.
 `#true` shows the selected destination and confirmation state without moving
 the preview through intermediate rectangles, and draws another viewer's
 accepted placement and an undocked pane at their final places at once. It
-also shows and removes a notification toast in one frame, and keeps the time
-the toast stays in place.
+also minimizes and restores a floating pane in one frame, opens and closes the
+notification center in one frame, and shows and removes a notification toast
+in one frame. The toast keeps the time it stays in place.
 
 Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 `reduced-motion #false`, `A` and `B` slide past each other. With
@@ -717,7 +718,7 @@ Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `reduced-motion` | boolean — skip placement preview interpolation, the slide after another viewer's accepted placement, the slide of an undocked pane, and the slide of a notification toast | `#false` | ≥ 0.5.0 |
+| `reduced-motion` | boolean — skip placement preview interpolation, the slide after another viewer's accepted placement, the slide of an undocked pane, the slide of a minimized or restored floating pane, the slide of the notification center, and the slide of a notification toast | `#false` | ≥ 0.5.0 |
 
 ## `stay-in-pane-placement-mode-after-placement`
 

@@ -26,7 +26,8 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::build_cell_rect;
 
-use crate::notification::tests::EMPTY_NOTIFICATION_VIEW;
+use crate::notification::tests::build_test_notification_view;
+use crate::notification::NotificationCenterEntries;
 use crate::render::tests::{build_core_regions, format_rendered_cells, get_pane_snapshot_mut};
 use crate::render::{build_frame_geometry, list_placed_floating_panes, DrawnRows};
 use crate::snapshot::{
@@ -1071,7 +1072,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut placeholder_buffer,
     );
@@ -1103,7 +1104,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[],
         Some(&placement_presentation),
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut placement_buffer,
     );
@@ -1128,7 +1129,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut native_buffer,
     );
@@ -1154,7 +1155,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[(pane_id, 1)],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut unavailable_buffer,
     );
@@ -1176,7 +1177,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[(pane_id, 2)],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut other_unavailable_buffer,
     );
@@ -1765,7 +1766,7 @@ fn an_image_the_open_notification_center_or_the_drawn_toast_meets_is_left_out() 
         0,
     ));
     // The tiled pane's content starts at screen (1, 2). The center takes
-    // (54, 1) 26x22 and a toast of two text rows in place (54, 1) 26x5: the
+    // (56, 1) 24x22 and a toast of two text rows in place (56, 1) 24x5: the
     // image at row 0, column 60 lies inside both, and the one at row 12,
     // column 2 outside both.
     tiled_pane_snapshot.image_placement_snapshots = vec![
@@ -1799,7 +1800,8 @@ fn an_image_the_open_notification_center_or_the_drawn_toast_meets_is_left_out() 
         list_sorted_paint_targets(ViewerChrome {
             notification_center: Some(NotificationCenter {
                 scroll_row_offset: 0,
-                is_focused: true,
+                selected_notification_id: None,
+                hidden_per_mille: 0,
             }),
             ..ViewerChrome::default()
         }),

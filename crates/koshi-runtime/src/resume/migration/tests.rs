@@ -642,7 +642,7 @@ fn take_added_notification_queue(resume_body: &mut Value, session_key: &str) {
         NotificationQueueOwner::Session(session_id)
     );
     assert_eq!(notification_queue.get_revision(), 0);
-    assert_eq!(notification_queue.list_entries().count(), 0);
+    assert_eq!(notification_queue.list_queued_entries().count(), 0);
 }
 
 #[test]
@@ -765,14 +765,15 @@ fn step_four_turns_a_shown_recovery_notice_into_one_session_not_restored_error()
     )
     .expect("the added queue decodes");
     let session_id = parse_step_four_session_id();
-    let notification_entries: Vec<&NotificationEntry> = notification_queue.list_entries().collect();
+    let notification_entries: Vec<&NotificationEntry> =
+        notification_queue.list_queued_entries().collect();
     assert_eq!(notification_entries.len(), 1);
     let notification_entry = notification_entries[0];
     assert_eq!(
-        notification_entry.id.owner,
+        notification_entry.notification_id.owner,
         NotificationQueueOwner::Session(session_id)
     );
-    assert_eq!(notification_entry.id.sequence, 0);
+    assert_eq!(notification_entry.notification_id.sequence, 0);
     assert_eq!(notification_entry.source, NotificationSource::Core);
     assert_eq!(notification_entry.severity, NotificationSeverity::Error);
     assert_eq!(

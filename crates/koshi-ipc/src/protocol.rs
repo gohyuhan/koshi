@@ -373,7 +373,9 @@ impl GraphicsCapabilities {
 /// `SubmitCommand` whose source is the client's key binding is also answered
 /// by one [`SessionEvent::CommandRejected`](crate::event::SessionEvent::CommandRejected),
 /// unless its target is a direction or the next or previous floating pane
-/// and it found none.
+/// and it found none. A client whose queue is full reads that rejection in
+/// the next [`SessionEvent::Resync`](crate::event::SessionEvent::Resync)
+/// instead.
 ///
 /// [`Mouse`](Self::Mouse) is answered by exactly one
 /// [`SessionEvent::MouseAnswer`](crate::event::SessionEvent::MouseAnswer)

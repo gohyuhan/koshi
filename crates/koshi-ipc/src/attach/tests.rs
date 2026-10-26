@@ -3,6 +3,7 @@
 //! field this build does not know is ignored, and a field this build needs is
 //! refused when absent: a tab's focus list and the notification queue.
 
+use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use koshi_core::geometry::SplitDirection;
@@ -26,6 +27,7 @@ fn build_attached_session_structure_snapshot() -> AttachedSessionStructureSnapsh
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
     let first_pane_id = PaneId::new();

@@ -109,6 +109,7 @@ use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
+use koshi_renderer::notification::NotificationCenterEntries;
 use koshi_renderer::snapshot::{
     list_pane_slots, CommittedRegions, FloatingPaneSlot, GridView, PaneSlot, PlacementSnapshot,
     PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabSnapshot, ViewerChrome,
@@ -814,6 +815,7 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                             &client,
                             render_snapshot.client_snapshot.active_tab_id,
                             &render_snapshot,
+                            &build_committed_regions(TEST_VIEWPORT_SIZE),
                         ),
                         graphics_support.get_image_render_mode(),
                         &mut image_output_state,
@@ -1098,6 +1100,7 @@ fn a_native_paint_snapshots_only_the_cells_under_its_images() {
         &client,
         render_snapshot.client_snapshot.active_tab_id,
         &render_snapshot,
+        &build_committed_regions(TEST_VIEWPORT_SIZE),
     );
     let image_target_areas = build_image_paints(&build_frame_geometry(
         &render_snapshot,
@@ -1208,6 +1211,7 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         );
 
         for should_show_preview in [false, true, false] {
@@ -1264,6 +1268,7 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
         &client,
         render_snapshot.client_snapshot.active_tab_id,
         &render_snapshot,
+        &build_committed_regions(TEST_VIEWPORT_SIZE),
     );
     paint_frame(
         &mut paint_driver,
@@ -1358,6 +1363,7 @@ fn assert_two_image_trace_output(
                         client,
                         render_snapshot.client_snapshot.active_tab_id,
                         &render_snapshot,
+                        &build_committed_regions(TEST_VIEWPORT_SIZE),
                     ),
                     graphics_support.get_image_render_mode(),
                     &mut image_output_state,
@@ -1477,6 +1483,7 @@ fn assert_partial_native_frame_write_recovers(
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         graphics_support.get_image_render_mode(),
         &mut image_output_state,
@@ -1586,6 +1593,7 @@ fn a_text_frame_writes_at_once_and_its_image_follows_inside_one_synchronized_upd
                     &client,
                     render_snapshot.client_snapshot.active_tab_id,
                     &render_snapshot,
+                    &build_committed_regions(TEST_VIEWPORT_SIZE),
                 ),
                 graphics_support.get_image_render_mode(),
                 image_output_state,
@@ -1812,6 +1820,7 @@ fn assert_image_trace_output(
                         client,
                         render_snapshot.client_snapshot.active_tab_id,
                         &render_snapshot,
+                        &build_committed_regions(TEST_VIEWPORT_SIZE),
                     ),
                     graphics_support.get_image_render_mode(),
                     &mut image_output_state,
@@ -1935,7 +1944,7 @@ fn list_notifications(
         .list_merged_entries()
         .map(|notification_entry| {
             (
-                notification_entry.id.owner,
+                notification_entry.notification_id.owner,
                 notification_entry.severity,
                 notification_entry.text.clone(),
             )
@@ -2051,6 +2060,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         &mut String::new(),
         &mut None,
@@ -2073,6 +2083,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         &mut String::new(),
         &mut None,
@@ -2104,6 +2115,7 @@ fn pty_output_is_painted_to_the_screen() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         &mut String::new(),
         &mut None,
@@ -2136,6 +2148,7 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         &mut String::new(),
         &mut last_cursor_style,
@@ -2175,6 +2188,7 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         &mut String::new(),
         &mut last_cursor_style,
@@ -2205,6 +2219,7 @@ fn painting_records_the_window_title_it_sent() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         &mut last_window_title,
         &mut None,
@@ -2238,6 +2253,7 @@ fn a_paint_after_a_title_change_records_the_new_title() {
                     &client,
                     render_snapshot.client_snapshot.active_tab_id,
                     render_snapshot,
+                    &build_committed_regions(TEST_VIEWPORT_SIZE),
                 ),
                 last_window_title,
                 &mut None,
@@ -3615,6 +3631,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
             &client,
             render_snapshot.client_snapshot.active_tab_id,
             &render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         ),
         ImageRenderMode::Placeholder,
         &mut image_output_state,
@@ -3907,12 +3924,17 @@ fn the_target_outline_stays_at_the_target_slot_of_the_tab_size_it_was_shown_at()
     );
 }
 
-/// The notification view of a viewer that holds no entry and shows no toast.
-const EMPTY_NOTIFICATION_VIEW: NotificationView<'static> = NotificationView {
-    entries: &VecDeque::new(),
-    dropped_entry_count: 0,
-    toast_content: None,
-};
+/// The notification view of a viewer that holds `center_entries`, counts no
+/// dropped entry and shows no toast.
+fn build_test_notification_view(
+    center_entries: &NotificationCenterEntries,
+) -> NotificationView<'_> {
+    NotificationView {
+        center_entries,
+        dropped_entry_count: 0,
+        shown_toast: None,
+    }
+}
 
 #[test]
 fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
@@ -3994,7 +4016,7 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
         &[],
         Some(&placement_presentation),
         Some(&placement_target),
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -4685,6 +4707,7 @@ impl ListedRowPaintCheck {
                 client,
                 render_snapshot.client_snapshot.active_tab_id,
                 render_snapshot,
+                &build_committed_regions(TEST_VIEWPORT_SIZE),
             ),
             self.image_mode,
             &mut self.image_output_state,
@@ -4743,7 +4766,9 @@ impl ListedRowPaintCheck {
                         placement_display_tab_snapshot: None,
                         placement_target: None,
                         placement_presentation: None,
-                        notification_view: EMPTY_NOTIFICATION_VIEW,
+                        notification_view: build_test_notification_view(
+                            &NotificationCenterEntries::default(),
+                        ),
                         drawn_rows,
                     }
                     .render(render_area, frame_buffer);
@@ -5362,6 +5387,7 @@ impl EmulatedOuterTerminal {
                 client,
                 render_snapshot.client_snapshot.active_tab_id,
                 render_snapshot,
+                &build_committed_regions(TEST_VIEWPORT_SIZE),
             ),
             self.graphics_support.get_image_render_mode(),
             &mut self.image_output_state,
@@ -5424,6 +5450,7 @@ fn build_expected_image_pixels(
             client,
             render_snapshot.client_snapshot.active_tab_id,
             render_snapshot,
+            &build_committed_regions(TEST_VIEWPORT_SIZE),
         )
         .chrome,
     )

@@ -177,6 +177,12 @@ pub struct Surface {
 ///   `notification_queue`: the session's whole notification queue. The
 ///   `NotificationPosted` event exists in 5 only: one entry the queue took,
 ///   with the queue's `revision` after it. 4 has no notification queue.
+/// - The `Resync` event carries `held_command_rejections`, the rejections of
+///   the client's commands since its queue overflowed: each run of equal
+///   rejections in a row as `fired_action`, `reject_reason`, `help` and
+///   `repeat_count`, at least 1. It also carries
+///   `dropped_command_rejection_count`, the runs dropped for room. Both fields
+///   are required. 4 dropped a rejection that found the queue full.
 /// - The `CommandRejected` event names a command from the client's key
 ///   binding, its pane placement confirmation, or a floating pane move from
 ///   its mouse round, that the session refused. It carries `command_id`,

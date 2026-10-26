@@ -171,6 +171,25 @@ impl<'a> FrameGeometry<'a> {
     pub(crate) fn get_layout_origin(&self) -> Point {
         get_area_origin(self.effective_layout_rect)
     }
+
+    /// The screen areas this frame draws over every floating pane, in draw
+    /// order: the cells the notification center covers
+    /// ([`NotificationCenterLayout::drawn_rect`]), the open tray's box, and
+    /// the cells the toast covers ([`NotificationToastLayout::drawn_rect`]).
+    /// Each one is listed only while it is drawn.
+    pub(crate) fn list_overlay_areas(&self) -> impl Iterator<Item = RatatuiRect> + '_ {
+        [
+            self.notification_center_layout
+                .map(|center_layout| center_layout.drawn_rect),
+            self.floating_pane_tray_layout
+                .map(|tray_layout| tray_layout.tray_rect),
+            self.notification_toast_layout
+                .map(|toast_layout| toast_layout.drawn_rect),
+        ]
+        .into_iter()
+        .flatten()
+        .map(place_screen_rect)
+    }
 }
 
 /// Solve where `render_snapshot` places its surfaces when it is painted over
@@ -245,8 +264,9 @@ pub fn build_frame_geometry<'a>(
 ///    `true`, only the placement source pane is drawn, and only while the
 ///    active tab holds no slot of it. None is drawn while every pane of the
 ///    active tab is suppressed.
-/// 9. Draws the viewer's open notification center over every cell drawn before
-///    it, at `frame_geometry`'s `notification_center_layout`, while
+/// 9. Draws the viewer's notification center, open or sliding, over every
+///    cell drawn before it, on the cells of `frame_geometry`'s
+///    `notification_center_layout` that its slide draws, while
 ///    `viewer_chrome.notification_center` is `Some` and the center fits. It
 ///    lists the entries of `notification_view`.
 /// 10. Draws the viewer's open floating pane tray over every cell drawn before
@@ -254,7 +274,7 @@ pub fn build_frame_geometry<'a>(
 ///     `viewer_chrome.floating_pane_tray` is `Some` and the tray fits.
 /// 11. Draws the viewer's toast over every cell drawn before it, at
 ///     `frame_geometry`'s `notification_toast_layout`, while
-///     `notification_view.toast_content` is `Some` and the toast has a drawn
+///     `notification_view.shown_toast` is `Some` and the toast has a drawn
 ///     cell.
 /// 12. Draws the tabline in the first committed region, over that margin. While
 ///     the session holds a floating pane, it shows the tray button ` ⧉ `.
@@ -292,11 +312,10 @@ pub fn build_frame_geometry<'a>(
 /// `drawn_rows` [`DrawnRows::Every`] runs every step above over every row.
 /// [`DrawnRows::Listed`] leaves each listed row as `Every` would, and runs
 /// each step that writes whole rows (steps 1, 3, 7, 8's cells, 9, 10, 11 and
-/// 14) only
-/// over the listed rows. A box, strip or bar that covers no listed row is
-/// not drawn. Example: rows `[10]` of a frame whose one pane prints on row
-/// 10 redraws the 200 cells of row 10, and the pane's border cells on that
-/// row.
+/// 14) only over the listed rows. A box, strip or bar that covers no listed
+/// row is not drawn. Example: rows `[10]` of a frame whose one pane prints on
+/// row 10 redraws the 200 cells of row 10, and the pane's border cells on
+/// that row.
 ///
 /// # Panics
 ///
@@ -431,7 +450,8 @@ pub fn render_frame(
         draw_image_placeholders(&floating_pane_placeholder_rects, screen_buffer);
     }
 
-    // The viewer's open notification center draws over the floating panes.
+    // The viewer's notification center, open or sliding, draws over the
+    // floating panes.
     if let (Some(notification_center), Some(center_layout)) = (
         viewer_chrome.notification_center,
         &frame_geometry.notification_center_layout,
@@ -463,17 +483,11 @@ pub fn render_frame(
     }
 
     // The toast draws over every other part of the pane area.
-    if let (Some(toast_content), Some(toast_layout)) = (
-        notification_view.toast_content,
+    if let (Some(shown_toast), Some(toast_layout)) = (
+        notification_view.shown_toast,
         &frame_geometry.notification_toast_layout,
     ) {
-        draw_notification_toast(
-            toast_layout,
-            toast_content,
-            theme,
-            drawn_rows,
-            screen_buffer,
-        );
+        draw_notification_toast(toast_layout, shown_toast, theme, drawn_rows, screen_buffer);
     }
 
     // The tabline draws from the same tab-row facts hit-testing reads.
@@ -752,20 +766,8 @@ pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Positio
             .iter()
             .any(|placed_floating_pane| placed_floating_pane.outer_area.contains(cursor_position))
         || frame_geometry
-            .floating_pane_tray_layout
-            .is_some_and(|tray_layout| {
-                place_screen_rect(tray_layout.tray_rect).contains(cursor_position)
-            })
-        || frame_geometry
-            .notification_center_layout
-            .is_some_and(|center_layout| {
-                place_screen_rect(center_layout.center_rect).contains(cursor_position)
-            })
-        || frame_geometry
-            .notification_toast_layout
-            .is_some_and(|toast_layout| {
-                place_screen_rect(toast_layout.drawn_rect).contains(cursor_position)
-            })
+            .list_overlay_areas()
+            .any(|overlay_area| overlay_area.contains(cursor_position))
     {
         return None;
     }
@@ -1648,6 +1650,59 @@ pub(crate) fn set_line_clipped(
         }
     }
     column_index
+}
+
+/// Write `text` in `text_style` from the top-left cell of the one-row
+/// `text_rect`, cut to its columns ([`set_line_clipped`]).
+fn write_text_clipped(screen_buffer: &mut Buffer, text_rect: Rect, text: &str, text_style: Style) {
+    set_line_clipped(
+        screen_buffer,
+        text_rect.origin.column,
+        text_rect.origin.row,
+        &Line::from(Span::styled(text, text_style)),
+        text_rect.size.column_count,
+    );
+}
+
+/// Write `text` in `text_style` from the top-left cell of the one-row
+/// `text_rect` of at least one cell, then `…`: the characters that fit before
+/// the rect's last cell, and `…` right after them. In 8 cells, `pane exited`
+/// reads `pane ex…`, and `abc` reads `abc…`.
+fn write_text_ending_in_ellipsis(
+    screen_buffer: &mut Buffer,
+    text_rect: Rect,
+    text: &str,
+    text_style: Style,
+) {
+    let column_count = text_rect.size.column_count;
+    let text_column_count = get_text_width(text).min(column_count - 1);
+    let ellipsis_column = set_line_clipped(
+        screen_buffer,
+        text_rect.origin.column,
+        text_rect.origin.row,
+        &Line::from(Span::styled(text, text_style)),
+        text_column_count,
+    );
+    set_line_clipped(
+        screen_buffer,
+        ellipsis_column,
+        text_rect.origin.row,
+        &Line::from(Span::styled("…", text_style)),
+        1,
+    );
+}
+
+/// Write `text` in `text_style` from the top-left cell of the one-row
+/// `text_rect` of at least one cell: whole when it fits
+/// ([`write_text_clipped`]), and ending in `…` when it is wider
+/// ([`write_text_ending_in_ellipsis`]). In 8 cells, `pane` reads `pane`, and
+/// `pane exited` reads `pane ex…`.
+fn write_text_fitted(screen_buffer: &mut Buffer, text_rect: Rect, text: &str, text_style: Style) {
+    if get_text_width(text) <= text_rect.size.column_count {
+        write_text_clipped(screen_buffer, text_rect, text, text_style);
+    } else {
+        write_text_ending_in_ellipsis(screen_buffer, text_rect, text, text_style);
+    }
 }
 
 /// The centered rect of the effective (solved) size within the pane area.

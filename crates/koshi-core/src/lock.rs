@@ -81,18 +81,19 @@ pub enum LockMode {
     /// - `core:close-floating-pane-tray` sends nothing and ends the mode.
     FloatingPaneTray,
     /// The notification center, opened by `core:toggle-notification-center`
-    /// or a click on the tabline's notification button `●`, while it holds
-    /// the viewer's keyboard.
+    /// or a click on the tabline's notification button `●`, while it is
+    /// open.
     ///
     /// - The viewer overlays the mode on Normal or Locked without changing the
     ///   stored base mode. The center's actions send no command.
-    /// - `core:scroll-notifications-up` and `core:scroll-notifications-down`
-    ///   scroll the center one row. `core:clear-notifications` removes every
+    /// - `core:select-newer-notification` and
+    ///   `core:select-older-notification` select the card above or below the
+    ///   selected one. `core:dismiss-selected-notification` removes the
+    ///   selected card's entry. `core:clear-notifications` removes every
     ///   entry from this viewer's center and closes it.
     /// - `core:close-notification-center` and
     ///   `core:toggle-notification-center` close the center and end the mode.
-    /// - A press outside the center ends the mode and leaves the center open.
-    ///   A press on the center starts the mode again.
+    /// - A press outside the center closes it and ends the mode.
     NotificationCenter,
 }
 

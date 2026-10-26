@@ -182,7 +182,10 @@ impl Client {
                 .hovered_tile_index
                 .filter(|&hovered_tile_index| hovered_tile_index < floating_pane_count),
         });
-        let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+        let viewer_chrome = self.build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            committed_regions,
+        );
         let frame_layout =
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
         let floating_pane_tray_layout = compute_floating_pane_tray_layout(frame_layout);
@@ -218,7 +221,10 @@ impl Client {
                 }
             });
         }
-        let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+        let viewer_chrome = self.build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            committed_regions,
+        );
         let glyph_cell = find_floating_pane_tray_glyph_cell(
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
         )?;
@@ -251,9 +257,10 @@ impl Client {
     ///   or to none. Over the tray it also clears the hovered pane and the
     ///   placement handle hover, and sends nothing.
     /// - A left press on a tile selects it and sends its
-    ///   [`build_tray_tile_toggle_command`]. A left press on the header label
-    ///   sends `ToggleAllFloatingPanesMinimized`. A left press on any other
-    ///   cell of the tray sends nothing.
+    ///   [`build_tray_tile_toggle_command`]. A left press on the titlebar
+    ///   label sends `ToggleAllFloatingPanesMinimized`. A left press on the
+    ///   close button `✕` closes the tray and sends nothing. A left press on
+    ///   any other cell of the tray sends nothing.
     /// - A press on the tray button `mouse_frame` shows closes the tray and
     ///   sends nothing. Two left presses on that button in one read, before a
     ///   paint, open the tray and close it.
@@ -275,6 +282,7 @@ impl Client {
             hit_region,
             HitRegion::FloatingPaneTrayTile { .. }
                 | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTrayClose
                 | HitRegion::FloatingPaneTray
         );
         match (mouse_input.mouse_kind, hit_region) {
@@ -311,6 +319,10 @@ impl Client {
                 Some(vec![MouseAction::Command(Box::new(
                     Command::ToggleAllFloatingPanesMinimized,
                 ))])
+            }
+            (MouseKind::Press(MouseButton::Left), HitRegion::FloatingPaneTrayClose) => {
+                self.close_floating_pane_tray();
+                Some(Vec::new())
             }
             (MouseKind::Press(_), _) if !is_on_tray => {
                 self.close_floating_pane_tray();

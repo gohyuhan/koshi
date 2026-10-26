@@ -37,6 +37,7 @@ pub(crate) mod terminal;
 
 pub mod theme;
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -50,11 +51,11 @@ use koshi_config::layer::{
 use koshi_config::types::ClientConfig;
 use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, TiledPlacementTarget};
-use koshi_core::event::RejectReason;
+use koshi_core::event::{HeldCommandRejection, RejectReason};
 use koshi_core::geometry::Direction;
 use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
-use koshi_core::notification::NotificationSeverity;
+use koshi_core::notification::{NotificationSeverity, MAX_QUEUED_NOTIFICATION_COUNT};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::{
     geometry::{PaneArea, Point, Size},
@@ -73,7 +74,9 @@ use koshi_renderer::theme::Theme;
 
 use crate::input::InputReadClock;
 use crate::mouse::{LastPress, LeftButtonGesture, MouseCapture, SentFloatingPaneMove, TablinePeek};
-use crate::notification_history::NotificationHistory;
+use crate::notification_history::{
+    NotificationCenterState, NotificationHistory, NotificationTakeError,
+};
 
 #[cfg(test)]
 mod tests;
@@ -284,6 +287,9 @@ pub(crate) struct ViewerRestorePoint {
     dock_undock_mode: Option<DockUndockMode>,
     /// The open floating pane tray.
     floating_pane_tray: Option<FloatingPaneTray>,
+    /// The notification center as it stood: open or sliding out, its scroll,
+    /// its selected card and its slide. `None` while it was closed.
+    notification_center_state: Option<NotificationCenterState>,
 }
 
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
@@ -617,14 +623,17 @@ impl Client {
     /// Dock/undock mode, pane placement mode, the move chooser, and floating
     /// pane move mode own the keyboard only while the viewer is
     /// [`LinkStatus::Linked`]. A status other than `Linked` closes the
-    /// floating pane tray. A change that moves the keyboard between one of
-    /// their keymaps and the base keymap drops an open key sequence, and no
-    /// pane receives its chords.
+    /// floating pane tray and the notification center
+    /// ([`close_notification_center`](Self::close_notification_center)). A
+    /// change that moves the
+    /// keyboard between one of their keymaps and the base keymap drops an open
+    /// key sequence, and no pane receives its chords.
     pub(crate) fn set_link_status(&mut self, link_status: LinkStatus) {
         let previous_active_input_mode = self.get_active_input_mode();
         self.link_status = link_status;
         if link_status != LinkStatus::Linked {
             self.close_floating_pane_tray();
+            self.close_notification_center();
         }
         if self.get_active_input_mode() != previous_active_input_mode {
             self.pending_key_sequence = None;
@@ -796,6 +805,7 @@ impl Client {
             sent_floating_pane_move: self.sent_floating_pane_move,
             dock_undock_mode: self.dock_undock_mode,
             floating_pane_tray: self.floating_pane_tray,
+            notification_center_state: self.notification_history.get_notification_center_state(),
         }
     }
 
@@ -816,6 +826,7 @@ impl Client {
             sent_floating_pane_move,
             dock_undock_mode,
             floating_pane_tray,
+            notification_center_state,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -831,6 +842,8 @@ impl Client {
         self.sent_floating_pane_move = sent_floating_pane_move;
         self.dock_undock_mode = dock_undock_mode;
         self.floating_pane_tray = floating_pane_tray;
+        self.notification_history
+            .set_notification_center_state(notification_center_state);
     }
 
     /// Record the view carried by the newest painted frame: its active tab,
@@ -1414,9 +1427,12 @@ impl Client {
     }
 
     /// Post one `Warning` from koshi to this viewer's own notification queue
-    /// for a command the session rejected, arriving at `created_at`: the
-    /// session's hint, or the reason when the rejection carries no hint,
-    /// after the action the key fired when `fired_action` names one.
+    /// for `rejection_count` equal rejections in a row of commands the
+    /// session rejected, the last arriving at `created_at`: the session's
+    /// hint, or the reason when the rejection carries no hint, after the
+    /// action the key fired when `fired_action` names one. The entry's
+    /// `repeat_count` rises by `rejection_count`
+    /// ([`post_core_notification`](Self::post_core_notification)).
     ///
     /// Example: `core:confirm-pane-placement` with the hint `placement
     /// preview is stale; confirm again` posts `core:confirm-pane-placement:
@@ -1430,6 +1446,7 @@ impl Client {
         fired_action: Option<&ActionReference>,
         reject_reason: RejectReason,
         help: Option<&str>,
+        rejection_count: NonZeroU32,
         created_at: SystemTime,
     ) {
         let rejection_detail = match help {
@@ -1440,7 +1457,52 @@ impl Client {
             Some(fired_action) => format!("{fired_action}: {rejection_detail}"),
             None => rejection_detail,
         };
-        self.post_core_notification(NotificationSeverity::Warning, &rejection_text, created_at);
+        self.post_core_notification(
+            NotificationSeverity::Warning,
+            &rejection_text,
+            rejection_count,
+            created_at,
+        );
+    }
+
+    /// Take the command rejections that the session held while this viewer's
+    /// queue was full, as a `Resync` carries them, arriving at `created_at`.
+    /// The history first counts `dropped_command_rejection_count` dropped
+    /// entries ([`NotificationHistory::add_dropped_entries`]). Then each run
+    /// of `held_command_rejections`, oldest first, posts one `Warning`
+    /// ([`post_command_rejection`](Self::post_command_rejection)).
+    ///
+    /// Example: the runs `core:resize-pane-left` ×3 with
+    /// [`RejectReason::MinimumSize`], then `core:resize-pane-right` ×1 with
+    /// the same reason, post `core:resize-pane-left: below minimum size` ×3,
+    /// then `core:resize-pane-right: below minimum size` ×1.
+    ///
+    /// # Errors
+    /// [`NotificationTakeError::TooManyHeldRejections`] for more than
+    /// [`MAX_QUEUED_NOTIFICATION_COUNT`] runs. The history stays as it was.
+    pub(crate) fn take_held_command_rejections(
+        &mut self,
+        held_command_rejections: &[HeldCommandRejection],
+        dropped_command_rejection_count: u64,
+        created_at: SystemTime,
+    ) -> Result<(), NotificationTakeError> {
+        if held_command_rejections.len() > MAX_QUEUED_NOTIFICATION_COUNT {
+            return Err(NotificationTakeError::TooManyHeldRejections {
+                held_rejection_count: held_command_rejections.len(),
+            });
+        }
+        self.notification_history
+            .add_dropped_entries(dropped_command_rejection_count);
+        for held_command_rejection in held_command_rejections {
+            self.post_command_rejection(
+                held_command_rejection.fired_action.as_ref(),
+                held_command_rejection.reject_reason,
+                held_command_rejection.help.as_deref(),
+                held_command_rejection.repeat_count,
+                created_at,
+            );
+        }
+        Ok(())
     }
 
     /// This viewer's notification history: its own queue's entries, the

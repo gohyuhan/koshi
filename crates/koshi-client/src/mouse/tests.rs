@@ -32,9 +32,9 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, FloatingPane, FloatingPaneSlot, LinkStatus, MousePane,
-    PaneSlot, PlacementSnapshot, PlacementTabSnapshot, Reconnecting, RenderSnapshot,
-    SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, DrawnNotifications, FloatingPane, FloatingPaneSlot,
+    LinkStatus, MousePane, PaneSlot, PlacementSnapshot, PlacementTabSnapshot, Reconnecting,
+    RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_test_support::fixtures::build_cell_rect;
 
@@ -169,16 +169,23 @@ pub(crate) fn build_mouse_frame(
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
         viewer_chrome: ViewerChrome::default(),
+        drawn_notifications: DrawnNotifications::default(),
     }
 }
 
 /// `mouse_frame` painted again with the chrome `client` builds for it now, as
 /// the attach loop paints at the end of each pass.
 fn repaint_mouse_frame(client: &Client, mouse_frame: &MouseFrame) -> MouseFrame {
-    MouseFrame {
-        viewer_chrome: client.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id),
+    let mut painted_mouse_frame = MouseFrame {
+        viewer_chrome: client.build_viewer_chrome(
+            mouse_frame.client_snapshot.active_tab_id,
+            &mouse_frame.committed_regions,
+        ),
         ..mouse_frame.clone()
-    }
+    };
+    painted_mouse_frame.drawn_notifications =
+        client.build_drawn_notifications(painted_mouse_frame.build_frame_layout());
+    painted_mouse_frame
 }
 
 /// A frame holding one plain terminal pane, focused.
@@ -634,7 +641,12 @@ fn a_tick_over_the_tabline_steps_the_viewers_own_strip() {
         "the strip is the viewer's own to move"
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
 
@@ -646,7 +658,12 @@ fn a_tick_over_the_tabline_steps_the_viewers_own_strip() {
         .expect("a wheel tick decides");
     assert_eq!(wheel_up_decision.mouse_action, None);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(0),
         "the first visible index saturates at zero"
     );
@@ -693,7 +710,12 @@ fn two_ticks_over_the_tabline_before_a_repaint_step_the_strip_twice() {
     scroll_tab_strip_down_twice(&mut client, &mouse_frame);
 
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(2)
     );
 }
@@ -720,7 +742,12 @@ fn a_tab_strip_drag_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_to(
     );
 
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
 }
@@ -759,7 +786,12 @@ fn a_right_arrow_click_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_
 
     assert_eq!(press_actions, Vec::new());
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(3)
     );
 }
@@ -786,7 +818,12 @@ fn a_left_arrow_click_before_a_repaint_steps_from_the_strip_the_ticks_scrolled_t
 
     assert_eq!(press_actions, Vec::new());
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(3)
     );
 }
@@ -830,7 +867,12 @@ fn a_placement_drag_onto_the_right_arrow_before_a_repaint_steps_from_the_strip_t
 
     assert_eq!(drag_action, Some(PlacementInputAction::Consumed));
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(3)
     );
 }
@@ -848,12 +890,22 @@ fn a_tab_switch_cancels_the_strip_peek() {
         )
         .expect("a wheel tick decides");
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
 
     assert_eq!(
-        client.build_viewer_chrome(TabId::new()).tabline_offset,
+        client
+            .build_viewer_chrome(
+                TabId::new(),
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         None,
         "a peek belongs to the tab it was made on"
     );
@@ -875,19 +927,34 @@ fn switching_away_and_back_does_not_bring_the_peek_out_again() {
         )
         .expect("a wheel tick decides");
     assert_eq!(
-        client.build_viewer_chrome(first_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                first_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
 
     client.note_active_tab(other_tab_id);
     assert_eq!(
-        client.build_viewer_chrome(other_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                other_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         None
     );
 
     client.note_active_tab(first_tab_id);
     assert_eq!(
-        client.build_viewer_chrome(first_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                first_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         None,
         "the peek was thrown away on the switch, not just ignored"
     );
@@ -910,7 +977,12 @@ fn a_mouse_event_on_another_tabs_frame_throws_the_peek_away() {
         )
         .expect("a wheel tick decides");
     assert_eq!(
-        client.build_viewer_chrome(first_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                first_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
 
@@ -925,7 +997,12 @@ fn a_mouse_event_on_another_tabs_frame_throws_the_peek_away() {
     );
 
     assert_eq!(
-        client.build_viewer_chrome(first_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                first_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         None
     );
 }
@@ -2024,7 +2101,12 @@ fn a_painted_frame_leaves_the_hover_until_a_mouse_event_meets_a_frame_without_it
     client.drop_gestures_the_frame_ended(&other_tab_frame);
     client.drop_gestures_the_frame_ended(&mouse_frame);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).hovered_pane_id,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
         Some(pane_id),
         "the pane under the still pointer stays hovered"
     );
@@ -2038,7 +2120,12 @@ fn a_painted_frame_leaves_the_hover_until_a_mouse_event_meets_a_frame_without_it
         Vec::new()
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).hovered_pane_id,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
         None,
         "a mouse event placed against a frame without the pane clears the hover"
     );
@@ -2212,7 +2299,12 @@ fn dragging_the_bare_tab_strip_peeks_one_tab_every_six_cells() {
         advance_time_by_seconds(current_time, 1),
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(0)
     );
 
@@ -2223,7 +2315,12 @@ fn dragging_the_bare_tab_strip_peeks_one_tab_every_six_cells() {
         advance_time_by_seconds(current_time, 2),
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(2)
     );
 
@@ -2235,7 +2332,12 @@ fn dragging_the_bare_tab_strip_peeks_one_tab_every_six_cells() {
         advance_time_by_seconds(current_time, 3),
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(0),
         "the first visible index saturates at zero"
     );
@@ -2839,7 +2941,10 @@ fn dragging_a_pane_focuses_the_source_and_hides_pointer_chrome() {
         })
     );
     assert_eq!(client.get_placement_source_pane_id(), Some(dragged_pane_id));
-    let viewer_chrome = client.build_viewer_chrome(active_tab_id);
+    let viewer_chrome = client.build_viewer_chrome(
+        active_tab_id,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
     assert_eq!(viewer_chrome.hovered_pane_id, None);
     assert_eq!(viewer_chrome.placement_handle_hover, None);
 }
@@ -3336,11 +3441,21 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
         .expect("a wheel tick decides");
     client.handle_mouse(build_mouse_motion(screen_point), &mouse_frame, current_time);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).hovered_pane_id,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
         Some(hovered_pane_id)
     );
 
@@ -3396,12 +3511,22 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
         "the new link owes no release for the right press"
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1),
         "the strip peek stands"
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).hovered_pane_id,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
         Some(hovered_pane_id),
         "the hovered pane stands"
     );
@@ -3889,7 +4014,12 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
         "the strip is this viewer's own; nothing goes to the session"
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(1)
     );
 
@@ -3901,7 +4031,12 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
         .expect("a wheel tick decides");
 
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(0)
     );
 
@@ -3913,7 +4048,12 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
         .expect("a wheel tick decides");
 
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(0),
         "the first tab is as far left as the strip goes"
     );
@@ -5083,7 +5223,10 @@ pub(crate) fn find_floating_pane_move_draft(
     mouse_frame: &MouseFrame,
 ) -> Option<FloatingPaneMoveDraft> {
     client
-        .build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id)
+        .build_viewer_chrome(
+            mouse_frame.client_snapshot.active_tab_id,
+            &mouse_frame.committed_regions,
+        )
         .floating_pane_move_draft
 }
 
@@ -6987,7 +7130,10 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle_and_its_top_border_sho
     );
     assert_eq!(
         client
-            .build_viewer_chrome(active_tab_id)
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
             .placement_handle_hover,
         Some(PlacementHandleHover::FloatingHandle {
             pane_id: floating_pane_id,
@@ -7005,7 +7151,10 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle_and_its_top_border_sho
         );
         assert_eq!(
             client
-                .build_viewer_chrome(active_tab_id)
+                .build_viewer_chrome(
+                    active_tab_id,
+                    &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+                )
                 .placement_handle_hover,
             None,
             "{screen_point:?}"
@@ -7028,7 +7177,10 @@ fn list_placement_handle_hovers(
         client.handle_mouse(*mouse_input, &painted_mouse_frame, Instant::now());
         placement_handle_hovers.push(
             client
-                .build_viewer_chrome(active_tab_id)
+                .build_viewer_chrome(
+                    active_tab_id,
+                    &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+                )
                 .placement_handle_hover,
         );
         painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);

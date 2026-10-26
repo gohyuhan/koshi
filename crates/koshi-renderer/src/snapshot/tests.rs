@@ -13,7 +13,12 @@ use super::*;
 fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);
-    MouseFrame::from_snapshot(&render_snapshot, committed_regions, ViewerChrome::default())
+    MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    )
 }
 
 use koshi_core::geometry::Point;
@@ -390,8 +395,12 @@ fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve_and_viewer_chrome()
         ..ViewerChrome::default()
     };
 
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone(), viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions.clone(),
+        viewer_chrome,
+        DrawnNotifications::default(),
+    );
 
     assert_eq!(mouse_frame.committed_regions, committed_regions);
     assert_eq!(mouse_frame.viewer_chrome, viewer_chrome);
@@ -682,8 +691,12 @@ fn a_mouse_frame_layout_carries_the_regions_and_viewer_chrome_that_were_painted(
         tabline_offset: Some(1),
         ..ViewerChrome::default()
     };
-    let mouse_frame =
-        MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone(), viewer_chrome);
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions.clone(),
+        viewer_chrome,
+        DrawnNotifications::default(),
+    );
 
     let frame_layout = mouse_frame.build_frame_layout();
 

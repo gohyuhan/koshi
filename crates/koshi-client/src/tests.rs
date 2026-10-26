@@ -29,9 +29,9 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, FloatingPane, PaneSlot, PlacementPreview, PlacementSnapshot,
-    PlacementSource, PlacementTabSnapshot, Reconnecting, RenderSnapshot, SessionSnapshot,
-    TabMetadata, TabSnapshot,
+    list_pane_slots, ClientSnapshot, CommittedRegions, FloatingPane, PaneSlot, PlacementPreview,
+    PlacementSnapshot, PlacementSource, PlacementTabSnapshot, Reconnecting, RenderSnapshot,
+    SessionSnapshot, TabMetadata, TabSnapshot,
 };
 
 use super::*;
@@ -2419,7 +2419,12 @@ fn a_frame_throws_away_a_tab_strip_peek_made_on_another_tab() {
 
     assert_eq!(client.tabline_peek, None);
     assert_eq!(
-        client.build_viewer_chrome(peeked_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                peeked_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         None,
         "switching back to the peeked tab starts the strip at its own first tab"
     );
@@ -2445,7 +2450,12 @@ fn a_frame_keeps_a_tab_strip_peek_made_on_the_tab_it_names() {
         })
     );
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).tabline_offset,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .tabline_offset,
         Some(3)
     );
 }
@@ -2455,7 +2465,12 @@ fn the_link_status_shows_on_the_chrome_the_viewer_paints() {
     let mut client = build_test_client();
     let active_tab_id = TabId::new();
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).link_status,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .link_status,
         LinkStatus::Linked,
         "a joined viewer is linked"
     );
@@ -2466,19 +2481,34 @@ fn the_link_status_shows_on_the_chrome_the_viewer_paints() {
     };
     client.set_link_status(LinkStatus::Redialing(reconnecting_state));
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).link_status,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .link_status,
         LinkStatus::Redialing(reconnecting_state)
     );
 
     client.set_link_status(LinkStatus::AwaitingRestartedSession);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).link_status,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .link_status,
         LinkStatus::AwaitingRestartedSession
     );
 
     client.set_link_status(LinkStatus::Linked);
     assert_eq!(
-        client.build_viewer_chrome(active_tab_id).link_status,
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .link_status,
         LinkStatus::Linked
     );
 }
@@ -2600,6 +2630,91 @@ fn a_rejected_paint_puts_back_the_move_mode_and_the_active_tab_focus() {
 
     assert_eq!(client.pane_move_mode, Some(PaneMoveMode::Choice));
     assert_eq!(client.active_tab_focused_pane_id, Some(tiled_pane_id));
+}
+
+#[test]
+fn a_rejected_paint_gives_back_the_notification_center_with_its_slide_and_its_keyboard() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    client.notification_history.open_notification_center(false);
+    let open_center_state = client
+        .get_notification_history()
+        .get_notification_center_state();
+    let viewer_restore_point = client.build_viewer_restore_point();
+    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Locked, false));
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+
+    client.restore_viewer(viewer_restore_point);
+
+    assert_eq!(
+        client
+            .get_notification_history()
+            .get_notification_center_state(),
+        open_center_state
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(client.get_active_input_mode(), LockMode::NotificationCenter);
+}
+
+#[test]
+fn a_rejected_paint_leaves_a_closed_notification_center_closed() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let viewer_restore_point = client.build_viewer_restore_point();
+    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Locked, false));
+
+    client.restore_viewer(viewer_restore_point);
+
+    assert_eq!(
+        client.get_notification_history().get_notification_center(),
+        None
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+}
+
+#[test]
+fn held_rejections_past_the_most_runs_a_queue_holds_are_refused_whole() {
+    let mut client = build_test_client();
+    let held_command_rejections: Vec<HeldCommandRejection> = (0..=MAX_QUEUED_NOTIFICATION_COUNT)
+        .map(|rejection_index| HeldCommandRejection {
+            fired_action: None,
+            reject_reason: RejectReason::InvalidState,
+            help: Some(format!("hint {rejection_index}")),
+            repeat_count: NonZeroU32::MIN,
+        })
+        .collect();
+    let revision_before = client.get_notification_history().get_revision();
+
+    let take_result =
+        client.take_held_command_rejections(&held_command_rejections, 3, SystemTime::UNIX_EPOCH);
+
+    assert_eq!(
+        take_result,
+        Err(NotificationTakeError::TooManyHeldRejections {
+            held_rejection_count: MAX_QUEUED_NOTIFICATION_COUNT + 1,
+        })
+    );
+    assert_eq!(
+        client.get_notification_history().get_revision(),
+        revision_before
+    );
+    assert_eq!(
+        client
+            .get_notification_history()
+            .list_merged_entries()
+            .count(),
+        0
+    );
+    assert_eq!(
+        client
+            .get_notification_history()
+            .build_notification_view()
+            .dropped_entry_count,
+        0
+    );
 }
 
 #[test]

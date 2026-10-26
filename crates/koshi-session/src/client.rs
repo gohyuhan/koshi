@@ -14,7 +14,7 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
-    constant::FLOATING_PANE_CHROME_SIZE,
+    constant::FLOATING_CHROME_SIZE,
     geometry::{
         compute_percent_cell_count, FloatingPanePosition, PaneArea, PixelCellSize, Point, Rect,
         Size,
@@ -29,12 +29,12 @@ use koshi_layout::{
 use serde::{Deserialize, Serialize};
 
 /// The smallest outer size of a floating pane: [`MIN_PANE_SIZE`] of content
-/// plus [`FLOATING_PANE_CHROME_SIZE`], `4x5`. A client whose
+/// plus [`FLOATING_CHROME_SIZE`], `4x5`. A client whose
 /// [`compute_floating_pane_size_cap`] of its pane area is smaller on either
 /// axis has no floating viewport ([`Client::get_floating_viewport`]).
 pub const MIN_FLOATING_PANE_SIZE: Size = Size {
-    column_count: MIN_PANE_SIZE.column_count + FLOATING_PANE_CHROME_SIZE.column_count,
-    row_count: MIN_PANE_SIZE.row_count + FLOATING_PANE_CHROME_SIZE.row_count,
+    column_count: MIN_PANE_SIZE.column_count + FLOATING_CHROME_SIZE.column_count,
+    row_count: MIN_PANE_SIZE.row_count + FLOATING_CHROME_SIZE.row_count,
 };
 
 /// The percent of a floating viewport's axis that a floating pane spans at

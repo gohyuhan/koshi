@@ -65,15 +65,9 @@ pub(crate) struct TablineInputs<'a> {
     /// Whether the session holds a floating pane: the tabline draws the tray
     /// button ` ⧉ ` left of the mode tag.
     pub(crate) has_floating_panes: bool,
-    /// Whether the viewer's floating pane tray is open: the tray button draws
-    /// in reverse video.
-    pub(crate) is_floating_pane_tray_open: bool,
     /// The notification button the tabline draws left of the tray button, or
     /// left of the mode tag with no tray button. `None` draws none.
     pub(crate) notification_button: Option<NotificationButton>,
-    /// Whether the viewer's notification center is open: the notification
-    /// button draws in reverse video.
-    pub(crate) is_notification_center_open: bool,
 }
 
 #[cfg(test)]

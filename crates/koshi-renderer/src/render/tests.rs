@@ -42,7 +42,8 @@
 
 use super::*;
 
-use crate::notification::tests::EMPTY_NOTIFICATION_VIEW;
+use crate::notification::tests::build_test_notification_view;
+use crate::notification::NotificationCenterEntries;
 use std::sync::Arc;
 
 use koshi_core::action::HintTier;
@@ -247,7 +248,7 @@ fn render_frame_to_buffer(
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -314,7 +315,7 @@ fn render_placement_preview(
         &[],
         Some(placement_presentation),
         placement_target,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -2087,7 +2088,7 @@ fn reused_buffer_is_blanked_before_painting() {
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -3484,7 +3485,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -3527,7 +3528,7 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -5239,7 +5240,7 @@ fn render_core_frame_rows(
         &[],
         None,
         None,
-        EMPTY_NOTIFICATION_VIEW,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         drawn_rows,
         screen_buffer,
     );

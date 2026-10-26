@@ -14684,7 +14684,7 @@ fn list_session_notifications(
 ) -> Vec<(NotificationSeverity, String)> {
     runtime.session_by_id[&session_id]
         .notification_queue
-        .list_entries()
+        .list_queued_entries()
         .map(|notification_entry| (notification_entry.severity, notification_entry.text.clone()))
         .collect()
 }

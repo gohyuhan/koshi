@@ -796,10 +796,12 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::Resync {
             dropped_event_count: 1,
             notification_queue: crate::protocol::tests::build_fixed_session_notification_queue(),
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         },
         SessionEvent::NotificationPosted {
             revision: 1,
-            entry: crate::protocol::tests::build_fixed_notification_entry(),
+            posted_entry: crate::protocol::tests::build_fixed_notification_entry(),
         },
         SessionEvent::MouseAnswer {
             request_id: 1,

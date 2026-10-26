@@ -46,7 +46,7 @@ use koshi_core::command::{
     TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::constant::{DEFAULT_MAX_FRAMES_PER_SECOND, MIN_LINK_TIMEOUT_MS};
-use koshi_core::event::RejectReason;
+use koshi_core::event::{HeldCommandRejection, RejectReason};
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{
@@ -80,9 +80,9 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
-    FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot, MousePane,
-    NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PlacementHandleHover,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, DrawnNotifications, FloatingPane,
+    FloatingPaneMoveDraft, FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot,
+    MousePane, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PlacementHandleHover,
     PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
     TabMetadata, TabSnapshot,
 };
@@ -96,7 +96,7 @@ use koshi_terminal::style::Style;
 use super::*;
 use crate::attach::paint::build_render_snapshot;
 use crate::floating_pane_tray::tests::{build_client_with_open_tray, build_tray_mouse_frame};
-use crate::input::tests::build_client_viewing;
+use crate::input::tests::{build_client_viewing, build_keymap_for_modes};
 use crate::mouse::tests::build_plain_mouse_pane;
 use crate::tests::{
     build_core_bound_action, build_test_client, create_session_with_attached_client,
@@ -661,6 +661,8 @@ fn every_other_frame_keeps_the_stream_reading() {
             notification_queue: build_fixed_epoch_notification_queue(
                 NotificationQueueOwner::Session(SessionId::new()),
             ),
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         },
     ];
     for session_event in session_events {
@@ -2680,6 +2682,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
         viewer_chrome: koshi_renderer::snapshot::ViewerChrome::default(),
+        drawn_notifications: DrawnNotifications::default(),
     }
 }
 
@@ -3626,7 +3629,10 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
     let painted_mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let active_tab_id = painted_mouse_frame.client_snapshot.active_tab_id;
     let mouse_frame = MouseFrame {
-        viewer_chrome: client.build_viewer_chrome(active_tab_id),
+        viewer_chrome: client.build_viewer_chrome(
+            active_tab_id,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        ),
         ..painted_mouse_frame
     };
     // The placement handle sits on the pane's top border, at screen `(1, 1)`.
@@ -6766,7 +6772,10 @@ fn mouse_pickup_previews_and_focuses_the_dragged_pane() {
         Instant::now(),
     );
     let mouse_frame = MouseFrame {
-        viewer_chrome: client.build_viewer_chrome(active_tab_id),
+        viewer_chrome: client.build_viewer_chrome(
+            active_tab_id,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        ),
         ..mouse_frame
     };
     let (request_sender, request_receiver) = mpsc::channel();
@@ -7954,10 +7963,14 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
         .draw_painted_frame(&mut client, Box::new(painted_frame))
         .expect("paint");
     let painted_render_snapshot = screen.last_snapshot.clone().expect("the frame painted");
-    let hovered_pane_id_before =
-        ViewerPaint::from_client(&client, active_tab_id, &painted_render_snapshot)
-            .chrome
-            .hovered_pane_id;
+    let hovered_pane_id_before = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &painted_render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    )
+    .chrome
+    .hovered_pane_id;
 
     handle_mouse_event(
         &mut client,
@@ -7966,10 +7979,14 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
         Instant::now(),
         &mut pending_mouse_actions,
     );
-    let hovered_pane_id_after =
-        ViewerPaint::from_client(&client, active_tab_id, &painted_render_snapshot)
-            .chrome
-            .hovered_pane_id;
+    let hovered_pane_id_after = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &painted_render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    )
+    .chrome
+    .hovered_pane_id;
     screen.refresh(&mut client, Some(active_tab_id));
 
     assert_eq!(hovered_pane_id_before, None);
@@ -8395,13 +8412,21 @@ fn locking_the_client_moves_what_the_viewer_paints() {
         build_test_painted_frame_with_lock_mode(LockMode::Locked),
     ));
     let active_tab_id = locked_render_snapshot.client_snapshot.active_tab_id;
-    let paint_before_lock =
-        ViewerPaint::from_client(&client, active_tab_id, &locked_render_snapshot);
+    let paint_before_lock = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &locked_render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
 
     client.apply_render_snapshot(&locked_render_snapshot);
 
-    let paint_after_lock =
-        ViewerPaint::from_client(&client, active_tab_id, &locked_render_snapshot);
+    let paint_after_lock = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &locked_render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
     assert_eq!(paint_before_lock.lock_mode, LockMode::Normal);
     assert_eq!(paint_after_lock.lock_mode, LockMode::Locked);
     assert_ne!(paint_after_lock, paint_before_lock);
@@ -8420,19 +8445,31 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints_at_its_hint_deadline() {
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let sequence_opener_chord = get_sequence_opener(&client);
     let which_key_delay = client.keymap_catalog.get_which_key_delay();
-    let paint_before_key_sequence =
-        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    let paint_before_key_sequence = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
     let key_read_at = Instant::now();
 
     assert_eq!(
         client.resolve_key(sequence_opener_chord, key_read_at),
         KeyOutcome::Pending
     );
-    let paint_during_which_key_delay =
-        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    let paint_during_which_key_delay = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
     client.expire_key_sequence(key_read_at + which_key_delay);
-    let paint_after_hint_deadline =
-        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    let paint_after_hint_deadline = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
 
     assert_eq!(paint_before_key_sequence.pending_key_sequence, None);
     assert_eq!(paint_during_which_key_delay, paint_before_key_sequence);
@@ -8466,16 +8503,31 @@ fn a_dock_undock_wait_moves_what_the_viewer_paints_only_when_it_hides_a_shown_ha
         (Some(PlacementHandleHover::TiledTopBorder { pane_id }), true),
     ] {
         client.placement_handle_hover = placement_handle_hover;
-        let paint_before_wait = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+        let paint_before_wait = ViewerPaint::from_client(
+            &client,
+            active_tab_id,
+            &render_snapshot,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        );
         let PlacementInputAction::SubmitCommand { command_id, .. } =
             client.submit_undock_command(pane_id)
         else {
             panic!("an undock sends its command");
         };
         assert!(client.is_dock_undock_command_pending());
-        let paint_during_wait = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+        let paint_during_wait = ViewerPaint::from_client(
+            &client,
+            active_tab_id,
+            &render_snapshot,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        );
         assert!(client.reject_undock_command(command_id));
-        let paint_after_wait = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+        let paint_after_wait = ViewerPaint::from_client(
+            &client,
+            active_tab_id,
+            &render_snapshot,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+        );
 
         assert_eq!(
             paint_before_wait.chrome.placement_handle_hover,
@@ -8500,7 +8552,12 @@ fn dialing_again_moves_what_the_viewer_paints() {
         build_test_painted_frame_with_lock_mode(LockMode::Normal),
     ));
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
-    let paint_before_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    let paint_before_reconnect = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
 
     let reconnecting = Reconnecting {
         attempt: 1,
@@ -8508,7 +8565,12 @@ fn dialing_again_moves_what_the_viewer_paints() {
     };
     client.set_link_status(LinkStatus::Redialing(reconnecting));
 
-    let paint_after_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
+    let paint_after_reconnect = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &render_snapshot,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
     assert_eq!(
         paint_before_reconnect.chrome.link_status,
         LinkStatus::Linked
@@ -10083,6 +10145,33 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
 }
 
 #[test]
+fn a_restart_rejoin_closes_the_open_center_and_holds_the_keys_typed_after_it() {
+    let mut client = build_test_client();
+    client.notification_history.open_notification_center(true);
+    client.set_link_status(LinkStatus::AwaitingRestartedSession);
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+    let typed_key_input = HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
+        build_plain_chord('a'),
+    )]);
+
+    link_recovery.hold_input(&mut client, typed_key_input.clone());
+
+    let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
+        panic!("holding never changes the recovery");
+    };
+    assert_eq!(
+        input_hold.map(|input_hold| input_hold.held_inputs),
+        Some(vec![typed_key_input])
+    );
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+}
+
+#[test]
 fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequence_alone() {
     let mut client = build_test_client();
     let (request_sender, request_receiver) = mpsc::channel();
@@ -11020,8 +11109,18 @@ fn a_pass_that_moves_nothing_leaves_what_the_viewer_paints_alone() {
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
 
     assert_eq!(
-        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot),
-        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot)
+        ViewerPaint::from_client(
+            &client,
+            active_tab_id,
+            &render_snapshot,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+        ),
+        ViewerPaint::from_client(
+            &client,
+            active_tab_id,
+            &render_snapshot,
+            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+        )
     );
 }
 
@@ -12770,7 +12869,10 @@ fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() 
         .expect("the pending frame paints on the next attempt");
     assert_eq!(
         client
-            .build_viewer_chrome(active_tab_id)
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
             .floating_pane_move_draft,
         moved_draft,
         "a frame that names no move leaves the move drawn"
@@ -12781,7 +12883,10 @@ fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() 
         .expect("the frame paints");
     assert_eq!(
         client
-            .build_viewer_chrome(active_tab_id)
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
             .floating_pane_move_draft,
         None
     );
@@ -14726,13 +14831,13 @@ fn a_minimized_pane_slides_into_its_tile_while_the_tray_is_open() {
         )
         .expect("the slide repaints without a session frame");
 
-    // Tile 0 sits at screen (7, 2), pane-area (7, 1) 10x3.
+    // Tile 0 sits at screen (7, 4), pane-area (7, 3) 10x3.
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
             floating_pane_id,
             8,
-            1,
+            3,
             15,
             4
         )]
@@ -14900,12 +15005,12 @@ fn list_history_entries(
     client
         .get_notification_history()
         .list_merged_entries()
-        .map(|entry| {
+        .map(|merged_entry| {
             (
-                entry.id.owner,
-                entry.severity,
-                entry.text.clone(),
-                entry.repeat_count,
+                merged_entry.notification_id.owner,
+                merged_entry.severity,
+                merged_entry.text.clone(),
+                merged_entry.repeat_count,
             )
         })
         .collect()
@@ -14984,12 +15089,14 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
         .post_core_entry(
             NotificationSeverity::Error,
             "pane …a1b2 killed by signal 9",
+            NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )
         .clone();
     session_notification_queue.post_core_entry(
         NotificationSeverity::Warning,
         "koshi.kdl: unknown key `tab-bar`",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
 
@@ -14999,15 +15106,17 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
         vec![
             build_session_event_incoming(SessionEvent::NotificationPosted {
                 revision: 1,
-                entry: first_entry.clone(),
+                posted_entry: first_entry.clone(),
             }),
             build_session_event_incoming(SessionEvent::Resync {
                 dropped_event_count: 1,
                 notification_queue: session_notification_queue,
+                held_command_rejections: Vec::new(),
+                dropped_command_rejection_count: 0,
             }),
             build_session_event_incoming(SessionEvent::NotificationPosted {
                 revision: 1,
-                entry: first_entry,
+                posted_entry: first_entry,
             }),
         ],
     );
@@ -15032,6 +15141,71 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
 }
 
 #[test]
+fn a_resync_posts_each_held_rejection_run_once_with_its_count_and_counts_the_dropped_runs() {
+    let session_id = SessionId::new();
+    let attached_notification_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+
+    let client = run_attachment_over_notification_events(
+        session_id,
+        &attached_notification_queue,
+        vec![
+            build_session_event_incoming(SessionEvent::CommandRejected {
+                command_id: CommandId::new(),
+                fired_action: Some(build_test_action_reference("resize-pane-left")),
+                reject_reason: RejectReason::MinimumSize,
+                help: None,
+            }),
+            build_session_event_incoming(SessionEvent::Resync {
+                dropped_event_count: 0,
+                notification_queue: attached_notification_queue.clone(),
+                held_command_rejections: vec![
+                    HeldCommandRejection {
+                        fired_action: Some(build_test_action_reference("resize-pane-left")),
+                        reject_reason: RejectReason::MinimumSize,
+                        help: None,
+                        repeat_count: NonZeroU32::new(3).expect("3 is not zero"),
+                    },
+                    HeldCommandRejection {
+                        fired_action: None,
+                        reject_reason: RejectReason::TargetGone,
+                        help: None,
+                        repeat_count: NonZeroU32::MIN,
+                    },
+                ],
+                dropped_command_rejection_count: 2,
+            }),
+        ],
+    );
+
+    let client_owner = NotificationQueueOwner::Client(client.get_client_id());
+    assert_eq!(
+        list_history_entries(&client),
+        vec![
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                String::from("core:resize-pane-left: below minimum size"),
+                4,
+            ),
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                String::from("target no longer exists"),
+                1,
+            ),
+        ]
+    );
+    assert_eq!(
+        client
+            .get_notification_history()
+            .build_notification_view()
+            .dropped_entry_count,
+        2
+    );
+}
+
+#[test]
 fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
     let session_id = SessionId::new();
     let attached_notification_queue =
@@ -15041,6 +15215,7 @@ fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
     foreign_notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
 
@@ -15050,6 +15225,8 @@ fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
         vec![build_session_event_incoming(SessionEvent::Resync {
             dropped_event_count: 1,
             notification_queue: foreign_notification_queue,
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })],
     );
 
@@ -15076,21 +15253,161 @@ fn the_notification_center_binding_opens_the_center_and_sends_no_request() {
         client.get_notification_history().get_notification_center(),
         Some(NotificationCenter {
             scroll_row_offset: 0,
-            is_focused: true,
+            selected_notification_id: None,
+            hidden_per_mille: 1000,
         })
     );
+    assert_eq!(client.get_active_input_mode(), LockMode::NotificationCenter);
     assert_eq!(
         request_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty)
     );
 }
 
+/// The commands `request_receiver` holds, oldest first. Every request must
+/// be a `SubmitCommand`.
+fn list_sent_commands(request_receiver: &mpsc::Receiver<IpcRequest>) -> Vec<Command> {
+    request_receiver
+        .try_iter()
+        .map(|sent_request| match sent_request.request_kind {
+            IpcRequestKind::SubmitCommand {
+                command_envelope, ..
+            } => command_envelope.command,
+            other_request_kind => panic!("the binding sends a command, not {other_request_kind:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_command_binding_fired_in_the_center_closes_it_and_sends_its_command() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    assert_eq!(
+        uplink.submit_bound_action(
+            &mut client,
+            build_core_bound_action("toggle-notification-center"),
+            Some(&mouse_frame),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(
+        uplink.submit_bound_action(
+            &mut client,
+            build_core_bound_action("next-tab"),
+            Some(&mouse_frame),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(
+        list_sent_commands(&request_receiver),
+        [Command::FocusTab(FocusTabArgs {
+            focus_target: TabTarget::Next,
+            client_id: None,
+        })]
+    );
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+}
+
+#[test]
+fn a_lock_binding_that_keeps_the_mode_closes_the_center() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    assert_eq!(
+        uplink.submit_bound_action(
+            &mut client,
+            build_core_bound_action("toggle-notification-center"),
+            Some(&mouse_frame),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(
+        uplink.submit_bound_action(
+            &mut client,
+            build_core_bound_action("unlock"),
+            Some(&mouse_frame),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(
+        list_sent_commands(&request_receiver),
+        [build_expected_lock_command(false)]
+    );
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+}
+
+#[test]
+fn a_continuous_command_fired_in_the_center_drops_the_prefix_it_rearmed() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let ctrl_y_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('y'));
+    let h_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('h'));
+    client.keymap_catalog = build_keymap_for_modes(
+        &[(
+            "notification-center",
+            &[(
+                KeySequence::from_first_and_rest(ctrl_y_chord, vec![h_chord]),
+                "focus-pane-left",
+            )],
+        )],
+        &KeybindingsConfig::default(),
+    );
+    client.open_notification_center(Some(&mouse_frame));
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let current_time = Instant::now();
+    assert_eq!(
+        client.resolve_key(ctrl_y_chord, current_time),
+        KeyOutcome::Pending
+    );
+    let KeyOutcome::Fire(bound_action) = client.resolve_key(h_chord, current_time) else {
+        panic!("<C-y> h fires core:focus-pane-left in the center");
+    };
+    let rearmed_prefix = client.get_pending_key_sequence().cloned();
+
+    assert_eq!(
+        uplink.submit_bound_action(&mut client, bound_action, Some(&mouse_frame)),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(rearmed_prefix, Some(KeySequence::from(ctrl_y_chord)));
+    assert_eq!(client.get_pending_key_sequence(), None);
+    assert_eq!(
+        list_sent_commands(&request_receiver),
+        [Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Direction(Direction::Left),
+            client_id: None,
+        })]
+    );
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+}
+
 /// `mouse_frame` as `client` paints it now: with the viewer chrome `client`
 /// holds.
 fn paint_viewer_chrome(client: &Client, mouse_frame: &MouseFrame) -> MouseFrame {
     let mut painted_mouse_frame = mouse_frame.clone();
-    painted_mouse_frame.viewer_chrome =
-        client.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id);
+    painted_mouse_frame.viewer_chrome = client.build_viewer_chrome(
+        mouse_frame.client_snapshot.active_tab_id,
+        &mouse_frame.committed_regions,
+    );
+    painted_mouse_frame.drawn_notifications =
+        client.build_drawn_notifications(painted_mouse_frame.build_frame_layout());
     painted_mouse_frame
 }
 
@@ -15142,11 +15459,12 @@ fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_a
     client.post_core_notification(
         NotificationSeverity::Info,
         "pane …a1b2 exited 101",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
     let start = Instant::now();
-    client.advance_notification_toast(start, false);
-    client.advance_notification_toast(start + Duration::from_secs(1), false);
+    client.advance_notification_clocks(start, false);
+    client.advance_notification_clocks(start + Duration::from_secs(1), false);
     let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
 
     let pending_mouse_actions = press_once(
@@ -15155,12 +15473,15 @@ fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_a
         Point { column: 76, row: 1 },
         start + Duration::from_secs(1),
     );
-    client.advance_notification_toast(start + Duration::from_secs(1), false);
-    client.advance_notification_toast(start + Duration::from_secs(2), false);
+    client.advance_notification_clocks(start + Duration::from_secs(1), false);
+    client.advance_notification_clocks(start + Duration::from_secs(2), false);
 
     assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(client.floating_pane_tray, open_floating_pane_tray);
-    assert_eq!(client.build_notification_toast(), None);
+    assert_eq!(
+        client.build_notification_toast(&mouse_frame.committed_regions),
+        None
+    );
     assert_eq!(
         client
             .get_notification_history()
@@ -15171,35 +15492,105 @@ fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_a
 }
 
 #[test]
-fn a_press_on_the_center_while_the_tray_is_open_closes_the_tray_and_focuses_the_center() {
+fn a_press_on_the_notification_button_while_the_tray_is_open_closes_the_tray_and_opens_the_center()
+{
     let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
-    let mut client = build_client_viewing(&mouse_frame);
-    client.apply_client_action(
-        ClientActionKind::ToggleNotificationCenter,
-        Some(&mouse_frame),
+    let mut client = build_client_with_open_tray(&mouse_frame);
+    client.post_core_notification(
+        NotificationSeverity::Info,
+        "pane …a1b2 exited 101",
+        NonZeroU32::MIN,
+        SystemTime::UNIX_EPOCH,
     );
-    client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
     let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
+    let button_cell = (0..TEST_VIEWPORT_SIZE.column_count)
+        .map(|column| Point { column, row: 0 })
+        .find(|cell| {
+            resolve_hit_region(painted_mouse_frame.build_frame_layout(), *cell)
+                == HitRegion::NotificationButton
+        })
+        .expect("the tabline draws the notification button");
 
     let pending_mouse_actions = press_once(
         &mut client,
         &painted_mouse_frame,
-        Point {
-            column: 60,
-            row: 10,
-        },
+        button_cell,
         Instant::now(),
     );
 
     assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(client.floating_pane_tray, None);
+    assert!(client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(client.get_active_input_mode(), LockMode::NotificationCenter);
+}
+
+#[test]
+fn a_press_on_the_notification_button_while_the_center_is_open_closes_it_and_sends_nothing() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.client_config.should_reduce_motion = true;
+    client.post_core_notification(
+        NotificationSeverity::Info,
+        "pane …a1b2 exited 101",
+        NonZeroU32::MIN,
+        SystemTime::UNIX_EPOCH,
+    );
+    client.open_notification_center(Some(&mouse_frame));
+    let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
+    let button_cell = (0..TEST_VIEWPORT_SIZE.column_count)
+        .map(|column| Point { column, row: 0 })
+        .find(|cell| {
+            resolve_hit_region(painted_mouse_frame.build_frame_layout(), *cell)
+                == HitRegion::NotificationButton
+        })
+        .expect("the tabline draws the notification button");
+
+    let pending_mouse_actions = press_once(
+        &mut client,
+        &painted_mouse_frame,
+        button_cell,
+        Instant::now(),
+    );
+
+    assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(
         client.get_notification_history().get_notification_center(),
-        Some(NotificationCenter {
-            scroll_row_offset: 0,
-            is_focused: true,
-        })
+        None
     );
+    assert_eq!(client.floating_pane_tray, None);
+}
+
+#[test]
+fn a_press_on_the_tray_button_while_the_center_is_open_closes_the_center_and_opens_the_tray() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.client_config.should_reduce_motion = true;
+    client.open_notification_center(Some(&mouse_frame));
+    let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
+    let tray_button_cell = (0..TEST_VIEWPORT_SIZE.column_count)
+        .map(|column| Point { column, row: 0 })
+        .find(|cell| {
+            resolve_hit_region(painted_mouse_frame.build_frame_layout(), *cell)
+                == HitRegion::FloatingPaneTrayButton
+        })
+        .expect("the tabline draws the tray button");
+
+    let pending_mouse_actions = press_once(
+        &mut client,
+        &painted_mouse_frame,
+        tray_button_cell,
+        Instant::now(),
+    );
+
+    assert_eq!(pending_mouse_actions, Vec::new());
+    assert_eq!(
+        client.get_notification_history().get_notification_center(),
+        None
+    );
+    assert!(client.floating_pane_tray.is_some());
+    assert_eq!(client.get_active_input_mode(), LockMode::FloatingPaneTray);
 }
 
 /// The toast of the frame `screen` last drew, and the notification revision
@@ -15257,7 +15648,8 @@ fn a_refresh_advances_the_toast_clock_and_draws_each_step() {
 fn post_one_row_notification(client: &mut Client) {
     client.post_core_notification(
         NotificationSeverity::Info,
-        "pane …a1b2 exited 101",
+        "pane …a1b2 exited 1",
+        NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
 }
@@ -15285,7 +15677,8 @@ fn the_toast_clock_stops_while_no_pane_has_room() {
         Some(no_room_tab_id),
         start + Duration::from_secs(2),
     );
-    let toast_with_no_room = client.build_notification_toast();
+    let toast_with_no_room =
+        client.build_notification_toast(&CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0));
     let roomy_frame = build_test_painted_frame();
     let roomy_tab_id = roomy_frame.client_snapshot.active_tab_id;
     screen
@@ -15351,6 +15744,75 @@ fn the_toast_clock_stops_while_the_viewport_has_no_cell() {
             client.get_notification_history().get_revision()
         ))
     );
+}
+
+#[test]
+fn the_toast_clock_stops_while_the_viewport_differs_from_the_shown_frames() {
+    let mut screen = build_test_screen();
+    let mut client = build_test_client();
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    post_one_row_notification(&mut client);
+    let start = Instant::now();
+
+    client.set_viewport_size(Size {
+        column_count: 100,
+        row_count: 30,
+    });
+    screen.refresh_at(&mut client, Some(active_tab_id), start);
+    let wakeup_with_other_viewport = client.compute_next_notification_wakeup(start);
+    client.set_viewport_size(TEST_VIEWPORT_SIZE);
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_secs(3),
+    );
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_millis(3500),
+    );
+
+    assert_eq!(wakeup_with_other_viewport, None);
+    assert_eq!(
+        find_shown_toast_paint(&screen),
+        Some((
+            build_one_row_toast(500),
+            client.get_notification_history().get_revision()
+        ))
+    );
+}
+
+#[test]
+fn the_toast_clock_stops_while_the_pane_area_holds_no_row_for_the_first_text_row() {
+    let compute_wakeup_at_row_count = |row_count| {
+        let viewport_size = Size {
+            column_count: 80,
+            row_count,
+        };
+        let mut screen =
+            Screen::from_backend_and_viewport_size(TestBackend::new(80, row_count), viewport_size);
+        let mut client = build_test_client();
+        client.set_viewport_size(viewport_size);
+        let painted_frame = build_test_painted_frame_with_viewport_size(viewport_size);
+        let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+        screen
+            .draw_painted_frame(&mut client, Box::new(painted_frame))
+            .expect("paint");
+        post_one_row_notification(&mut client);
+        let start = Instant::now();
+        screen.refresh_at(&mut client, Some(active_tab_id), start);
+        client.compute_next_notification_wakeup(start)
+    };
+
+    let wakeup_with_room = compute_wakeup_at_row_count(24);
+
+    assert_ne!(wakeup_with_room, None);
+    assert_eq!(compute_wakeup_at_row_count(6), wakeup_with_room);
+    assert_eq!(compute_wakeup_at_row_count(5), None);
 }
 
 #[test]

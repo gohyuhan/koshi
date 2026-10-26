@@ -20,7 +20,7 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-use koshi_renderer::snapshot::{CommittedRegions, MouseFrame, RenderSnapshot};
+use koshi_renderer::snapshot::{CommittedRegions, DrawnNotifications, MouseFrame, RenderSnapshot};
 
 use crate::server::Server;
 
@@ -33,8 +33,16 @@ pub(crate) fn build_mouse_frame(
 ) -> MouseFrame {
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);
-    let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
-    MouseFrame::from_snapshot(&render_snapshot, committed_regions, viewer_chrome)
+    let viewer_chrome = viewer.build_viewer_chrome(
+        render_snapshot.client_snapshot.active_tab_id,
+        &committed_regions,
+    );
+    MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        DrawnNotifications::default(),
+    )
 }
 
 /// The viewer half for `client_id` on an 80x24 viewport, on the stock
@@ -152,8 +160,7 @@ pub(crate) fn apply_mouse_actions(
                 if let CommandResult::Rejected { reason, help, .. } =
                     server.submit_command(command_envelope)
                 {
-                    let _ =
-                        server.send_command_rejection(client_id, command_id, None, reason, help);
+                    server.send_command_rejection(client_id, command_id, None, reason, help);
                 }
             }
         }

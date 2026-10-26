@@ -37,7 +37,7 @@ use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_pty::error::PtyError;
-use koshi_renderer::snapshot::{Delivery, ViewerChrome};
+use koshi_renderer::snapshot::{CommittedRegions, Delivery, ViewerChrome};
 use koshi_renderer::{compute_clamped_pane_cell, resolve_hit_region, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -226,7 +226,10 @@ fn find_tabline_pointer_column(
     let render_snapshot = server
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
-    let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+    let viewer_chrome = viewer.build_viewer_chrome(
+        render_snapshot.client_snapshot.active_tab_id,
+        &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+    );
     (minimum_column..render_snapshot.client_snapshot.viewport_size.column_count)
         .find(|&pointer_column| {
             region_predicate(resolve_hit_region(
@@ -246,7 +249,10 @@ fn get_tabline_offset(server: &Server, viewer: &ViewerClient) -> Option<usize> {
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
     viewer
-        .build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id)
+        .build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        )
         .tabline_offset
 }
 
@@ -1650,7 +1656,10 @@ fn find_hovered_pane_id(server: &Server, viewer: &ViewerClient) -> Option<PaneId
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
     viewer
-        .build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id)
+        .build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        )
         .hovered_pane_id
 }
 

@@ -19,9 +19,7 @@ use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
 use koshi_terminal::style::Style as CellStyle;
 
-use crate::render::{
-    list_visible_tiled_panes, place_screen_rect, FrameGeometry, PlacedFloatingPane,
-};
+use crate::render::{list_visible_tiled_panes, FrameGeometry, PlacedFloatingPane};
 use crate::snapshot::{
     ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot, RenderSnapshot,
 };
@@ -387,21 +385,7 @@ pub fn build_image_paints(frame_geometry: &FrameGeometry<'_>) -> Vec<ImagePaint>
         );
     }
 
-    let covering_overlay_areas = [
-        frame_geometry
-            .floating_pane_tray_layout
-            .map(|tray_layout| tray_layout.tray_rect),
-        frame_geometry
-            .notification_center_layout
-            .map(|center_layout| center_layout.center_rect),
-        frame_geometry
-            .notification_toast_layout
-            .map(|toast_layout| toast_layout.drawn_rect),
-    ]
-    .into_iter()
-    .flatten()
-    .map(place_screen_rect);
-    for covering_overlay_area in covering_overlay_areas {
+    for covering_overlay_area in frame_geometry.list_overlay_areas() {
         image_paints.retain(|image_paint| {
             covering_overlay_area
                 .intersection(image_paint.target_area)

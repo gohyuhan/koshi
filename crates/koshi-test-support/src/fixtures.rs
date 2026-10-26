@@ -100,7 +100,7 @@ pub fn build_fixed_epoch_notification_queue(owner: NotificationQueueOwner) -> No
         "owner": owner,
         "epoch": build_test_uuid_with_suffix(1),
         "revision": 0,
-        "entries": []
+        "queued_entries": []
     }))
     .expect("an empty queue decodes")
 }

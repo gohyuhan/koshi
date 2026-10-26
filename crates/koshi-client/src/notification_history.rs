@@ -17,35 +17,99 @@
 //! `/home/user/.config/koshi/koshi.kdl: unknown key frobnicate`, the history
 //! holds the session's entry only.
 //!
-//! The history also holds what the viewer shows of its entries: the open
-//! notification center, the count of entries that arrived since the center
-//! last opened, and the toast ([`NotificationToastQueue`]). Each entry that
+//! The history also holds what the viewer shows of its entries: the
+//! notification center with its selected card and its slide, the count of
+//! entries that arrived since the center last opened, and the toast
+//! ([`NotificationToastQueue`]). Each entry that
 //! arrives live, while the center is closed and toasts are on, queues a
 //! preview: an entry the viewer posts, an entry a `NotificationPosted` brings,
 //! and an entry newer than every entry taken before from the same session
 //! queue. The entries of the first queue the viewer takes from a session
 //! preview nothing.
 
-use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::ids::{ClientId, SessionId};
 use koshi_core::notification::{
     NotificationEntry, NotificationEpoch, NotificationId, NotificationQueue,
     NotificationQueueError, NotificationQueueOwner, NotificationSeverity, NotificationSource,
-    MAX_NOTIFICATION_TEXT_BYTE_COUNT,
+    MAX_NOTIFICATION_TEXT_BYTE_COUNT, MAX_QUEUED_NOTIFICATION_COUNT,
 };
 use koshi_core::text::sanitize_text_to_byte_count;
 use koshi_renderer::notification::{
-    NotificationCenterEntry, NotificationToastContent, NotificationView,
+    NotificationCenterEntries, NotificationCenterEntry, NotificationToastContent,
+    NotificationToastView, NotificationView, ToastTextRowCache,
 };
 use koshi_renderer::snapshot::NotificationCenter;
 
+use crate::attach::{compute_placement_animation_progress, PLACEMENT_ANIMATION_DURATION};
 use crate::notification_toast::{NotificationToastQueue, ToastPreview, ToastTiming};
 
 /// The most entries one viewer's history holds: 256. The next entry evicts the
 /// oldest.
 const MAX_MERGED_NOTIFICATION_COUNT: usize = 256;
+
+/// The thousandths of the center's width past the pane area's right edge
+/// while it is fully out of view: 1000.
+const FULLY_HIDDEN_PER_MILLE: u16 = 1000;
+
+/// The notification center while it is open or slides out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NotificationCenterState {
+    /// The body row drawn on the center's first body row, counted from `0`.
+    scroll_row_offset: usize,
+    /// The entry whose card the center's keys act on, or `None` while the
+    /// history holds no entry.
+    selected_notification_id: Option<NotificationId>,
+    /// Where the center's slide stands.
+    slide: NotificationCenterSlide,
+}
+
+/// Where the center's slide in or out stands.
+///
+/// A slide runs [`PLACEMENT_ANIMATION_DURATION`] with an ease-out, from
+/// `start_hidden_per_mille` to `0` while the center opens and to `1000`
+/// while it closes. It starts at the first advance of the clock after it was
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotificationCenterSlide {
+    /// Whether the center slides out to close. A closing center takes no key
+    /// and no click.
+    is_closing: bool,
+    /// The thousandths of the width past the edge when this slide started.
+    start_hidden_per_mille: u16,
+    /// When this slide started, or `None` before the clock first advanced
+    /// with it.
+    started_at: Option<Instant>,
+    /// The thousandths of the width past the edge when the clock last
+    /// advanced, from `0` to `1000`.
+    hidden_per_mille: u16,
+}
+
+impl NotificationCenterSlide {
+    /// A slide toward the place `is_closing` names, from
+    /// `start_hidden_per_mille`, that starts at the next advance of the
+    /// clock.
+    fn from_start(is_closing: bool, start_hidden_per_mille: u16) -> Self {
+        NotificationCenterSlide {
+            is_closing,
+            start_hidden_per_mille,
+            started_at: None,
+            hidden_per_mille: start_hidden_per_mille,
+        }
+    }
+
+    /// The thousandths past the edge this slide ends at: `1000` while
+    /// closing, and `0` while opening.
+    fn get_end_hidden_per_mille(&self) -> u16 {
+        if self.is_closing {
+            FULLY_HIDDEN_PER_MILLE
+        } else {
+            0
+        }
+    }
+}
 
 /// The newest entry of one session queue epoch that the history took: its
 /// sequence, and its repeat count when the history took it.
@@ -58,14 +122,15 @@ struct MergedThrough {
 }
 
 impl MergedThrough {
-    /// Whether `entry` arrived after the entry this mark names: a higher
-    /// sequence, or the same sequence with a higher repeat count. With
+    /// Whether `received_entry` arrived after the entry this mark names: a
+    /// higher sequence, or the same sequence with a higher repeat count. With
     /// `self` at sequence 4 and repeat count 2, sequence 5 and sequence 4 at
     /// repeat count 3 arrived after it; sequence 3, and sequence 4 at repeat
     /// count 2, did not.
-    fn is_older_than(self, entry: &NotificationEntry) -> bool {
-        entry.id.sequence > self.sequence
-            || (entry.id.sequence == self.sequence && entry.repeat_count > self.repeat_count)
+    fn is_older_than(self, received_entry: &NotificationEntry) -> bool {
+        received_entry.notification_id.sequence > self.sequence
+            || (received_entry.notification_id.sequence == self.sequence
+                && received_entry.repeat_count > self.repeat_count)
     }
 }
 
@@ -104,6 +169,12 @@ pub(crate) enum NotificationTakeError {
         /// The id of the posted entry.
         notification_id: NotificationId,
     },
+    /// A `Resync` carries more than [`MAX_QUEUED_NOTIFICATION_COUNT`] runs of
+    /// held command rejections.
+    TooManyHeldRejections {
+        /// How many runs it carries.
+        held_rejection_count: usize,
+    },
 }
 
 impl std::fmt::Display for NotificationTakeError {
@@ -118,6 +189,13 @@ impl std::fmt::Display for NotificationTakeError {
             NotificationTakeError::ForeignPost { .. } => {
                 formatter.write_str("a notification names another queue than the session's")
             }
+            NotificationTakeError::TooManyHeldRejections {
+                held_rejection_count,
+            } => write!(
+                formatter,
+                "the session held {held_rejection_count} runs of command rejections, more than \
+                 {MAX_QUEUED_NOTIFICATION_COUNT}"
+            ),
         }
     }
 }
@@ -132,8 +210,9 @@ pub(crate) struct NotificationHistory {
     /// it took any.
     session_queue_mark: Option<SessionQueueMark>,
     /// Every entry the history holds, oldest arrival first, at most
-    /// [`MAX_MERGED_NOTIFICATION_COUNT`]. No two share an id.
-    merged_entries: VecDeque<NotificationCenterEntry>,
+    /// [`MAX_MERGED_NOTIFICATION_COUNT`], with the center's body rows last
+    /// asked for. No two share an id.
+    merged_entries: NotificationCenterEntries,
     /// How many entries the viewer can no longer show since the history last
     /// cleared: each entry the history evicted for room, and each entry a
     /// session queue evicted before this viewer took it.
@@ -145,10 +224,13 @@ pub(crate) struct NotificationHistory {
     /// holds no entry of the viewer's own queue that has the severity and
     /// text of an entry from koshi it took from the session's queue.
     is_session_local: bool,
-    /// The open notification center, or `None` while it is closed.
-    notification_center: Option<NotificationCenter>,
+    /// The notification center while it is open or slides out, or `None`
+    /// while it is closed.
+    notification_center: Option<NotificationCenterState>,
     /// The toast and the previews that wait for it.
     notification_toast: NotificationToastQueue,
+    /// The rows of the shown toast's text last asked for.
+    toast_text_row_cache: ToastTextRowCache,
     /// Counts each change to what the center, the toast or the tabline's
     /// notification button draws, from `0`.
     revision: u64,
@@ -161,12 +243,13 @@ impl NotificationHistory {
         NotificationHistory {
             client_queue: NotificationQueue::from_owner(NotificationQueueOwner::Client(client_id)),
             session_queue_mark: None,
-            merged_entries: VecDeque::new(),
+            merged_entries: NotificationCenterEntries::default(),
             dropped_entry_count: 0,
             unread_entry_count: 0,
             is_session_local: false,
             notification_center: None,
             notification_toast: NotificationToastQueue::default(),
+            toast_text_row_cache: ToastTextRowCache::default(),
             revision: 0,
         }
     }
@@ -194,8 +277,8 @@ impl NotificationHistory {
     /// Every entry the history holds, oldest arrival first.
     pub(crate) fn list_merged_entries(&self) -> impl Iterator<Item = &NotificationEntry> {
         self.merged_entries
-            .iter()
-            .map(NotificationCenterEntry::get_entry)
+            .list_center_entries()
+            .map(NotificationCenterEntry::get_notification_entry)
     }
 
     /// How many of the newest entries arrived since the center last opened.
@@ -211,139 +294,330 @@ impl NotificationHistory {
         self.revision
     }
 
-    /// The open center, or `None` while it is closed.
+    /// The center as a frame draws it while it is open or slides out, or
+    /// `None` while it is closed.
     #[must_use]
     pub(crate) fn get_notification_center(&self) -> Option<NotificationCenter> {
         self.notification_center
+            .map(|center_state| NotificationCenter {
+                scroll_row_offset: center_state.scroll_row_offset,
+                selected_notification_id: center_state.selected_notification_id,
+                hidden_per_mille: center_state.slide.hidden_per_mille,
+            })
     }
 
-    /// Open the center, scrolled to its top and holding the viewer's
-    /// keyboard. Every entry counts as read, and every toast preview goes
+    /// The center's whole state, to put back with
+    /// [`set_notification_center_state`](Self::set_notification_center_state):
+    /// `None` while the center is closed.
+    #[must_use]
+    pub(crate) fn get_notification_center_state(&self) -> Option<NotificationCenterState> {
+        self.notification_center
+    }
+
+    /// Put back the center's whole state `notification_center_state`, as
+    /// [`get_notification_center_state`](Self::get_notification_center_state)
+    /// gave it.
+    pub(crate) fn set_notification_center_state(
+        &mut self,
+        notification_center_state: Option<NotificationCenterState>,
+    ) {
+        if self.notification_center != notification_center_state {
+            self.notification_center = notification_center_state;
+            self.revision += 1;
+        }
+    }
+
+    /// Whether the center is open: shown and not sliding out. Only an open
+    /// center takes the viewer's keys and clicks.
+    #[must_use]
+    pub(crate) fn is_notification_center_open(&self) -> bool {
+        self.notification_center
+            .is_some_and(|center_state| !center_state.slide.is_closing)
+    }
+
+    /// Open the center, scrolled to its top with its newest entry selected.
+    /// Every entry counts as read, and every toast preview goes
     /// ([`NotificationToastQueue::clear_previews`]). Does nothing while the
     /// center is open.
-    pub(crate) fn open_notification_center(&mut self) {
-        if self.notification_center.is_some() {
-            return;
-        }
-        self.notification_center = Some(NotificationCenter {
+    ///
+    /// With `should_reduce_motion`, the center shows in place at once.
+    /// Otherwise it slides in from where it stands: from past the edge when
+    /// it was closed, and from where a slide out left it.
+    pub(crate) fn open_notification_center(&mut self, should_reduce_motion: bool) {
+        let start_hidden_per_mille = match self.notification_center {
+            Some(center_state) if !center_state.slide.is_closing => return,
+            Some(center_state) => center_state.slide.hidden_per_mille,
+            None => FULLY_HIDDEN_PER_MILLE,
+        };
+        let slide_start_hidden_per_mille = if should_reduce_motion {
+            0
+        } else {
+            start_hidden_per_mille
+        };
+        self.notification_center = Some(NotificationCenterState {
             scroll_row_offset: 0,
-            is_focused: true,
+            selected_notification_id: self
+                .merged_entries
+                .find_newest_center_entry()
+                .map(|newest_entry| newest_entry.get_notification_entry().notification_id),
+            slide: NotificationCenterSlide::from_start(false, slide_start_hidden_per_mille),
         });
         self.unread_entry_count = 0;
         self.notification_toast.clear_previews();
         self.revision += 1;
     }
 
-    /// Close the center. Its entries stay. Does nothing while it is closed.
-    pub(crate) fn close_notification_center(&mut self) {
+    /// Close the center. Its entries stay. With `should_reduce_motion`, the
+    /// center goes at once. Otherwise it slides out from where it stands and
+    /// goes when the slide ends. Does nothing while the center is closed or
+    /// slides out.
+    pub(crate) fn close_notification_center(&mut self, should_reduce_motion: bool) {
+        let Some(center_state) = &mut self.notification_center else {
+            return;
+        };
+        if center_state.slide.is_closing {
+            return;
+        }
+        if should_reduce_motion {
+            self.notification_center = None;
+        } else {
+            center_state.slide =
+                NotificationCenterSlide::from_start(true, center_state.slide.hidden_per_mille);
+        }
+        self.revision += 1;
+    }
+
+    /// Remove the center at once, with no slide, whether it is open or slides
+    /// out. Does nothing while it is closed.
+    pub(crate) fn remove_notification_center(&mut self) {
         if self.notification_center.take().is_some() {
             self.revision += 1;
         }
     }
 
-    /// Give the open center the viewer's keyboard with `is_focused`, or take
-    /// it away. Does nothing while the center is closed.
-    pub(crate) fn set_notification_center_focus(&mut self, is_focused: bool) {
-        if let Some(notification_center) = &mut self.notification_center {
-            if notification_center.is_focused != is_focused {
-                notification_center.is_focused = is_focused;
-                self.revision += 1;
-            }
-        }
-    }
-
     /// Draw the open center's body from row `scroll_row_offset`. Does nothing
-    /// while the center is closed.
+    /// while the center is not open.
     pub(crate) fn set_notification_center_scroll_row_offset(&mut self, scroll_row_offset: usize) {
-        if let Some(notification_center) = &mut self.notification_center {
-            if notification_center.scroll_row_offset != scroll_row_offset {
-                notification_center.scroll_row_offset = scroll_row_offset;
-                self.revision += 1;
-            }
+        let Some(center_state) = self.find_open_center_state() else {
+            return;
+        };
+        if center_state.scroll_row_offset != scroll_row_offset {
+            center_state.scroll_row_offset = scroll_row_offset;
+            self.revision += 1;
         }
     }
 
-    /// Remove every entry, the dropped count and the unread count, close the
-    /// center and drop every toast preview. The marks on the viewer's own
-    /// queue and on the session's queue stay: a queue or post of the same
-    /// epoch that arrives after the clear adds only entries newer than every
-    /// entry taken before.
+    /// Select the card one entry newer than the selected one with
+    /// `is_selecting_newer`, and one entry older otherwise. Returns the newly
+    /// selected entry's id, or `None` when the selection did not move: the
+    /// center is not open, it selects no entry, or the selected entry is the
+    /// newest or the oldest in that direction.
+    ///
+    /// With entries `a`, `b` and `c`, oldest first, and `b` selected, a newer
+    /// step selects `c`, and a newer step from `c` gives `None`.
+    pub(crate) fn select_adjacent_entry(
+        &mut self,
+        is_selecting_newer: bool,
+    ) -> Option<NotificationId> {
+        let selected_notification_id = self.find_open_center_state()?.selected_notification_id?;
+        let selected_entry_index = self.find_merged_entry_index(selected_notification_id)?;
+        let next_entry_index = if is_selecting_newer {
+            selected_entry_index + 1
+        } else {
+            selected_entry_index.checked_sub(1)?
+        };
+        let next_notification_id = self
+            .merged_entries
+            .find_center_entry_at(next_entry_index)?
+            .get_notification_entry()
+            .notification_id;
+        self.set_selected_notification_id(Some(next_notification_id));
+        Some(next_notification_id)
+    }
+
+    /// Select the card of the entry `notification_id`. Does nothing while the
+    /// center is not open or the history holds no such entry.
+    pub(crate) fn select_entry(&mut self, notification_id: NotificationId) {
+        if self.is_notification_center_open()
+            && self.find_merged_entry_index(notification_id).is_some()
+        {
+            self.set_selected_notification_id(Some(notification_id));
+        }
+    }
+
+    /// Remove the entry `notification_id` and its toast previews. The dropped
+    /// count stays, and the marks on the queues stay: a queue or post that
+    /// carries the entry again adds it only as a newer arrival, such as a
+    /// repeat. A selected entry moves the selection to the next older entry,
+    /// else the next newer one
+    /// ([`remove_merged_entry_at`](Self::remove_merged_entry_at)). Does
+    /// nothing when the history holds no such entry.
+    ///
+    /// Example: with entries `a`, `b` and `c`, oldest first, and `b`
+    /// selected, dismissing `b` leaves `a` and `c` with `a` selected.
+    pub(crate) fn dismiss_merged_entry(&mut self, notification_id: NotificationId) {
+        let Some(merged_entry_index) = self.find_merged_entry_index(notification_id) else {
+            return;
+        };
+        self.remove_merged_entry_at(merged_entry_index);
+        self.notification_toast.remove_previews(notification_id);
+    }
+
+    /// Remove every entry, the dropped count and the unread count, and drop
+    /// every toast preview. An open center selects no entry and scrolls to
+    /// its top. The marks on the viewer's own queue and on the session's queue
+    /// stay: a queue or post of the same epoch that arrives after the clear
+    /// adds only entries newer than every entry taken before.
     ///
     /// Example: after a clear, a `Resync` that carries the session's entry
     /// `pane …a1b2 killed by signal 9` again adds nothing, and the next new
     /// entry of the same queue is the only entry the center lists.
-    pub(crate) fn clear_entries(&mut self) {
-        self.merged_entries.clear();
+    pub(crate) fn clear_merged_entries(&mut self) {
+        self.merged_entries.clear_center_entries();
         self.dropped_entry_count = 0;
         self.unread_entry_count = 0;
-        self.notification_center = None;
+        if let Some(center_state) = &mut self.notification_center {
+            center_state.scroll_row_offset = 0;
+            center_state.selected_notification_id = None;
+        }
         self.notification_toast.clear_previews();
         self.revision += 1;
     }
 
     /// What the center and the toast draw: every entry, the dropped count,
-    /// and the shown toast preview. A summary preview reads as `[Koshi]` at
-    /// the loudest severity among the entries it counts.
+    /// and the shown toast preview with the cache of its text's rows. A
+    /// summary preview reads as `[Koshi]` at the loudest severity among the
+    /// entries it counts.
     #[must_use]
     pub(crate) fn build_notification_view(&self) -> NotificationView<'_> {
         NotificationView {
-            entries: &self.merged_entries,
+            center_entries: &self.merged_entries,
             dropped_entry_count: self.dropped_entry_count,
-            toast_content: self.find_toast_content(),
+            shown_toast: self.find_toast_view(),
         }
     }
 
     /// The shown toast preview as the toast draws it, and the thousandths of
     /// its width past its side edge. `None` while no toast shows.
     #[must_use]
-    pub(crate) fn find_shown_toast(&self) -> Option<(NotificationToastContent<'_>, u16)> {
+    pub(crate) fn find_shown_toast(&self) -> Option<(NotificationToastView<'_>, u16)> {
         let hidden_per_mille = self.notification_toast.find_shown_preview()?.1;
-        Some((self.find_toast_content()?, hidden_per_mille))
+        Some((self.find_toast_view()?, hidden_per_mille))
     }
 
     /// Advance the toast's clock to `current_time` with the phase lengths of
-    /// `toast_timing`, stopped while `is_paused`
-    /// ([`NotificationToastQueue::advance`]).
-    pub(crate) fn advance_notification_toast(
+    /// `toast_timing`, stopped while `is_toast_paused`
+    /// ([`NotificationToastQueue::advance`]), and the center's slide to
+    /// `current_time`.
+    ///
+    /// The slide starts at its first advance and eases out over
+    /// [`PLACEMENT_ANIMATION_DURATION`]
+    /// ([`compute_placement_animation_progress`]). With
+    /// `toast_timing.should_reduce_motion`, it ends at once. A center whose
+    /// slide out ends goes.
+    ///
+    /// Example: a center that opens from `1000` and advances 80 ms after its
+    /// slide started stands at `125` thousandths past the edge.
+    pub(crate) fn advance_notification_clocks(
         &mut self,
         current_time: Instant,
         toast_timing: ToastTiming,
-        is_paused: bool,
+        is_toast_paused: bool,
     ) {
         if self
             .notification_toast
-            .advance(current_time, toast_timing, is_paused)
+            .advance(current_time, toast_timing, is_toast_paused)
         {
+            self.revision += 1;
+        }
+        let Some(center_state) = &mut self.notification_center else {
+            return;
+        };
+        let slide = &mut center_state.slide;
+        let end_hidden_per_mille = slide.get_end_hidden_per_mille();
+        let hidden_per_mille = if toast_timing.should_reduce_motion {
+            end_hidden_per_mille
+        } else {
+            let started_at = *slide.started_at.get_or_insert(current_time);
+            let progress = compute_placement_animation_progress(started_at, current_time);
+            let start_hidden_per_mille = f32::from(slide.start_hidden_per_mille);
+            (start_hidden_per_mille
+                + (f32::from(end_hidden_per_mille) - start_hidden_per_mille) * progress)
+                .round() as u16
+        };
+        if slide.hidden_per_mille != hidden_per_mille {
+            slide.hidden_per_mille = hidden_per_mille;
+            self.revision += 1;
+        }
+        if slide.is_closing && hidden_per_mille == FULLY_HIDDEN_PER_MILLE {
+            self.notification_center = None;
             self.revision += 1;
         }
     }
 
-    /// How long from `current_time` until the toast's clock next has
-    /// something to move ([`NotificationToastQueue::find_next_wakeup`]).
+    /// How long from `current_time` until the toast's clock or the center's
+    /// slide next has something to move: the toast's next step
+    /// ([`NotificationToastQueue::find_next_wakeup`]), and while the center
+    /// slides, the shorter of `frame_interval` and the time its slide has
+    /// left. A slide that has not started wakes at once. `None` while neither
+    /// has something to move.
     #[must_use]
-    pub(crate) fn find_next_toast_wakeup(
+    pub(crate) fn find_next_notification_wakeup(
         &self,
         current_time: Instant,
         toast_timing: ToastTiming,
+        frame_interval: Duration,
     ) -> Option<Duration> {
-        self.notification_toast
-            .find_next_wakeup(current_time, toast_timing)
+        let toast_wakeup = self
+            .notification_toast
+            .find_next_wakeup(current_time, toast_timing);
+        let center_wakeup = self.notification_center.and_then(|center_state| {
+            let slide = center_state.slide;
+            if slide.hidden_per_mille == slide.get_end_hidden_per_mille() && !slide.is_closing {
+                return None;
+            }
+            let Some(started_at) = slide.started_at else {
+                return Some(Duration::ZERO);
+            };
+            let slide_remaining = PLACEMENT_ANIMATION_DURATION
+                .saturating_sub(current_time.saturating_duration_since(started_at));
+            Some(slide_remaining.min(frame_interval))
+        });
+        match (toast_wakeup, center_wakeup) {
+            (Some(toast_wakeup), Some(center_wakeup)) => Some(toast_wakeup.min(center_wakeup)),
+            (toast_wakeup, center_wakeup) => toast_wakeup.or(center_wakeup),
+        }
     }
 
-    /// Withdraw the shown toast from where it stands
-    /// ([`NotificationToastQueue::request_withdraw`]). Its entry stays.
-    pub(crate) fn request_toast_withdraw(&mut self) {
-        self.notification_toast.request_withdraw();
+    /// The number of the shown toast
+    /// ([`NotificationToastQueue::find_shown_toast_number`]), or `None` while
+    /// no toast shows.
+    #[must_use]
+    pub(crate) fn find_shown_toast_number(&self) -> Option<u64> {
+        self.notification_toast.find_shown_toast_number()
     }
 
-    /// Post `text` from koshi in this viewer at `severity`, arriving at
-    /// `created_at`, to the viewer's own queue
-    /// ([`NotificationQueue::post_core_entry`]), and take the entry the post
-    /// made or changed as the newest arrival. With `should_show_toasts`, the
-    /// arrival queues a toast preview while the center is closed.
+    /// Withdraw the toast number `toast_number` from where it stands
+    /// ([`NotificationToastQueue::request_withdraw`]) while it shows. Its
+    /// entry stays. Does nothing while another toast or no toast shows.
+    ///
+    /// Example: toast `0` ends, and toast `1` shows. A withdraw of toast `0`
+    /// leaves toast `1` as it is.
+    pub(crate) fn request_toast_withdraw(&mut self, toast_number: u64) {
+        if self.notification_toast.find_shown_toast_number() == Some(toast_number) {
+            self.notification_toast.request_withdraw();
+        }
+    }
+
+    /// Post `text` from koshi in this viewer at `severity` `post_count` times
+    /// in a row, the last post arriving at `created_at`, to the viewer's own
+    /// queue ([`NotificationQueue::post_core_entry`]), and take the entry the
+    /// posts made or changed as the newest arrival. With `should_show_toasts`,
+    /// the arrival queues a toast preview while the center is closed.
     ///
     /// Example: two posts of `core:resize-pane-left: below minimum size` give
-    /// one entry with `repeat_count` 2.
+    /// one entry with `repeat_count` 2, and so does one post with
+    /// `post_count` 2.
     ///
     /// A history of a local session that holds a session entry from koshi
     /// with `severity` and the sanitized `text` posts nothing.
@@ -351,6 +625,7 @@ impl NotificationHistory {
         &mut self,
         severity: NotificationSeverity,
         text: &str,
+        post_count: NonZeroU32,
         created_at: SystemTime,
         should_show_toasts: bool,
     ) {
@@ -358,8 +633,10 @@ impl NotificationHistory {
             let sanitized_text =
                 sanitize_text_to_byte_count(text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
             let is_held_by_session = self.list_merged_entries().any(|merged_entry| {
-                matches!(merged_entry.id.owner, NotificationQueueOwner::Session(_))
-                    && is_core_notice(merged_entry, severity, &sanitized_text)
+                matches!(
+                    merged_entry.notification_id.owner,
+                    NotificationQueueOwner::Session(_)
+                ) && is_core_notice(merged_entry, severity, &sanitized_text)
             });
             if is_held_by_session {
                 return;
@@ -367,9 +644,9 @@ impl NotificationHistory {
         }
         let posted_entry = self
             .client_queue
-            .post_core_entry(severity, text, created_at)
+            .post_core_entry(severity, text, post_count, created_at)
             .clone();
-        let held_entry_index = self.find_merged_entry_index(posted_entry.id);
+        let held_entry_index = self.find_merged_entry_index(posted_entry.notification_id);
         self.take_arrival(posted_entry, held_entry_index, should_show_toasts);
     }
 
@@ -377,12 +654,17 @@ impl NotificationHistory {
     /// attach answer or a `Resync` carries it.
     ///
     /// A queue at a revision below the last one taken from the same owner and
-    /// epoch is left untaken. Otherwise each entry the history holds is
-    /// replaced where it stands, and each entry newer than every entry taken
-    /// from that epoch is added, oldest first. An entry of that epoch the
-    /// history no longer holds, and that is not newer, stays out. A queue of
-    /// another epoch keeps every entry the history holds and adds all of its
-    /// own.
+    /// epoch is left untaken. Otherwise each entry newer than every entry
+    /// taken from that epoch is taken as the newest arrival, oldest first: an
+    /// entry the history holds under its id moves to the newest place with the
+    /// queue's fields, and any other entry is added there. Every entry that is
+    /// not newer changes nothing, and one the history no longer holds stays
+    /// out. A queue of another epoch keeps every entry the history holds and
+    /// adds all of its own.
+    ///
+    /// Example: the viewer read the session's `Warning` `koshi.kdl: unknown
+    /// key` ×1. A `Resync` that carries it ×2 moves it to the newest place as
+    /// an unread entry.
     ///
     /// Each taken entry's text loses every character
     /// [`sanitize_text_to_byte_count`] removes and is cut to
@@ -395,13 +677,13 @@ impl NotificationHistory {
     /// the epoch, or the epoch's start, and the queue's next newer entry. A
     /// first queue whose oldest entry has sequence 40 adds 40.
     ///
-    /// With `should_show_toasts`, each added entry queues a toast preview
+    /// With `should_show_toasts`, each newer entry queues a toast preview
     /// while the center is closed, except in the first queue taken from its
     /// owner.
     ///
     /// # Errors
     /// [`NotificationTakeError::InvalidQueue`] when the queue fails
-    /// [`NotificationQueue::validate_entries`], and
+    /// [`NotificationQueue::validate_queued_entries`], and
     /// [`NotificationTakeError::ForeignQueue`] when its owner is not session
     /// `session_id`. Neither changes the history.
     pub(crate) fn take_session_queue(
@@ -411,7 +693,7 @@ impl NotificationHistory {
         should_show_toasts: bool,
     ) -> Result<(), NotificationTakeError> {
         notification_queue
-            .validate_entries()
+            .validate_queued_entries()
             .map_err(NotificationTakeError::InvalidQueue)?;
         let owner = notification_queue.get_owner();
         if owner != NotificationQueueOwner::Session(session_id) {
@@ -433,32 +715,22 @@ impl NotificationHistory {
         }
         let mut next_expected_sequence = merged_through
             .map_or(0, |merged_through: MergedThrough| {
-                merged_through.sequence + 1
+                merged_through.sequence.saturating_add(1)
             });
-        for queued_entry in notification_queue.list_entries() {
+        for queued_entry in notification_queue.list_queued_entries() {
             let received_entry = sanitize_received_entry(queued_entry.clone());
             self.count_skipped_sequences(&received_entry, &mut next_expected_sequence);
-            let held_entry_index = self.find_merged_entry_index(received_entry.id);
             let is_new = merged_through
                 .is_none_or(|merged_through| merged_through.is_older_than(&received_entry));
-            if is_new {
-                merged_through = Some(MergedThrough {
-                    sequence: received_entry.id.sequence,
-                    repeat_count: received_entry.repeat_count,
-                });
+            if !is_new {
+                continue;
             }
-            match held_entry_index {
-                Some(entry_index) => {
-                    self.notification_toast.update_entry(&received_entry);
-                    self.merged_entries[entry_index] =
-                        NotificationCenterEntry::from_entry(received_entry);
-                    self.revision += 1;
-                }
-                None if is_new => {
-                    self.push_merged_entry(received_entry, should_preview_new_entries);
-                }
-                None => {}
-            }
+            merged_through = Some(MergedThrough {
+                sequence: received_entry.notification_id.sequence,
+                repeat_count: received_entry.repeat_count,
+            });
+            let held_entry_index = self.find_merged_entry_index(received_entry.notification_id);
+            self.take_arrival(received_entry, held_entry_index, should_preview_new_entries);
         }
         self.session_queue_mark = Some(SessionQueueMark {
             owner,
@@ -469,15 +741,16 @@ impl NotificationHistory {
         Ok(())
     }
 
-    /// Take one `NotificationPosted` from the session: `entry` at the queue's
-    /// `revision`.
+    /// Take one `NotificationPosted` from the session: `posted_entry` at the
+    /// queue's `revision`.
     ///
     /// A post at a revision not above the last one taken from the queue is
-    /// dropped. Otherwise the entry, its text sanitized as
+    /// dropped. Otherwise `posted_entry`, its text sanitized as
     /// [`take_session_queue`](Self::take_session_queue) states, is taken as
-    /// the newest arrival: an entry the history holds under its id moves to
-    /// the newest place, and an entry newer than every entry taken from the
-    /// queue's epoch is added there. In a history of a local session, an
+    /// the newest arrival when it is newer than every entry taken from the
+    /// queue's epoch: an entry the history holds under its id moves to the
+    /// newest place, and any other entry is added there. A posted entry that
+    /// is not newer changes no entry. In a history of a local session, an
     /// entry from koshi removes the viewer's own entries with its severity
     /// and text. The dropped count adds the sequences the post skips, as
     /// [`take_session_queue`](Self::take_session_queue) counts them. With
@@ -492,18 +765,19 @@ impl NotificationHistory {
     pub(crate) fn take_session_post(
         &mut self,
         revision: u64,
-        entry: NotificationEntry,
+        posted_entry: NotificationEntry,
         should_show_toasts: bool,
     ) -> Result<(), NotificationTakeError> {
         let Some(session_queue_mark) = self.session_queue_mark.as_mut() else {
             return Err(NotificationTakeError::PostWithoutQueue {
-                notification_id: entry.id,
+                notification_id: posted_entry.notification_id,
             });
         };
-        if entry.id.owner != session_queue_mark.owner || entry.id.epoch != session_queue_mark.epoch
+        if posted_entry.notification_id.owner != session_queue_mark.owner
+            || posted_entry.notification_id.epoch != session_queue_mark.epoch
         {
             return Err(NotificationTakeError::ForeignPost {
-                notification_id: entry.id,
+                notification_id: posted_entry.notification_id,
             });
         }
         if revision <= session_queue_mark.revision {
@@ -512,20 +786,21 @@ impl NotificationHistory {
         session_queue_mark.revision = revision;
         let merged_through = session_queue_mark.merged_through;
         let is_new =
-            merged_through.is_none_or(|merged_through| merged_through.is_older_than(&entry));
+            merged_through.is_none_or(|merged_through| merged_through.is_older_than(&posted_entry));
         if is_new {
             session_queue_mark.merged_through = Some(MergedThrough {
-                sequence: entry.id.sequence,
-                repeat_count: entry.repeat_count,
+                sequence: posted_entry.notification_id.sequence,
+                repeat_count: posted_entry.repeat_count,
             });
         }
-        let mut next_expected_sequence =
-            merged_through.map_or(0, |merged_through| merged_through.sequence + 1);
-        self.count_skipped_sequences(&entry, &mut next_expected_sequence);
-        let held_entry_index = self.find_merged_entry_index(entry.id);
-        if is_new || held_entry_index.is_some() {
+        let mut next_expected_sequence = merged_through.map_or(0, |merged_through| {
+            merged_through.sequence.saturating_add(1)
+        });
+        self.count_skipped_sequences(&posted_entry, &mut next_expected_sequence);
+        if is_new {
+            let held_entry_index = self.find_merged_entry_index(posted_entry.notification_id);
             self.take_arrival(
-                sanitize_received_entry(entry),
+                sanitize_received_entry(posted_entry),
                 held_entry_index,
                 should_show_toasts,
             );
@@ -533,157 +808,254 @@ impl NotificationHistory {
         Ok(())
     }
 
-    /// Add the sequences between `next_expected_sequence` and `entry`'s to the
-    /// dropped count when `entry`'s sequence is at least
-    /// `next_expected_sequence`, and expect the sequence after `entry`'s
-    /// next. With `5` expected, an entry at sequence 8 adds 3, and an entry at
-    /// sequence 4 adds nothing.
+    /// Add the sequences between `next_expected_sequence` and
+    /// `received_entry`'s to the dropped count when `received_entry`'s
+    /// sequence is at least `next_expected_sequence`, and expect the sequence
+    /// after `received_entry`'s next. With `5` expected, an entry at sequence
+    /// 8 adds 3, and an entry at sequence 4 adds nothing. The dropped count
+    /// and the expected sequence saturate at [`u64::MAX`].
     fn count_skipped_sequences(
         &mut self,
-        entry: &NotificationEntry,
+        received_entry: &NotificationEntry,
         next_expected_sequence: &mut u64,
     ) {
-        let entry_sequence = entry.id.sequence;
-        if entry_sequence < *next_expected_sequence {
+        let received_sequence = received_entry.notification_id.sequence;
+        if received_sequence < *next_expected_sequence {
             return;
         }
-        let skipped_sequence_count = entry_sequence - *next_expected_sequence;
+        let skipped_sequence_count = received_sequence - *next_expected_sequence;
         if skipped_sequence_count > 0 {
-            self.dropped_entry_count += skipped_sequence_count;
+            self.dropped_entry_count = self
+                .dropped_entry_count
+                .saturating_add(skipped_sequence_count);
             self.revision += 1;
         }
-        *next_expected_sequence = entry_sequence + 1;
+        *next_expected_sequence = received_sequence.saturating_add(1);
     }
 
-    /// Put `entry` at the newest place ([`push_merged_entry`](Self::push_merged_entry)).
-    /// `held_entry_index` is the index of the entry held under `entry`'s id,
-    /// or `None` when the history holds none. A held entry moves there with
-    /// `entry`'s fields, and any other entry is added there. With
-    /// `should_show_toasts`, the arrival queues a toast preview while the
-    /// center is closed.
+    /// Put `arrived_entry` at the newest place
+    /// ([`push_merged_entry`](Self::push_merged_entry)). `held_entry_index` is
+    /// the index of the entry held under `arrived_entry`'s id, or `None` when
+    /// the history holds none. A held entry moves there with `arrived_entry`'s
+    /// fields, and any other entry is added there. A held entry the center
+    /// selected stays selected. With `should_show_toasts`, the arrival queues
+    /// a toast preview while the center is not open.
     fn take_arrival(
         &mut self,
-        entry: NotificationEntry,
+        arrived_entry: NotificationEntry,
         held_entry_index: Option<usize>,
         should_show_toasts: bool,
     ) {
-        if let Some(entry_index) = held_entry_index {
-            self.remove_merged_entry_at(entry_index);
+        let selected_notification_id = self
+            .notification_center
+            .and_then(|center_state| center_state.selected_notification_id);
+        let arrived_notification_id = arrived_entry.notification_id;
+        if let Some(held_entry_index) = held_entry_index {
+            self.remove_merged_entry_at(held_entry_index);
         }
-        self.push_merged_entry(entry, should_show_toasts);
+        self.push_merged_entry(arrived_entry, should_show_toasts);
+        if selected_notification_id == Some(arrived_notification_id) {
+            self.set_selected_notification_id(selected_notification_id);
+        }
     }
 
-    /// Add `entry` at the newest place, as an unread entry while the center is
-    /// closed.
+    /// Add `arrived_entry` at the newest place, as an unread entry while the
+    /// center is not open. An open center that selects no entry selects
+    /// `arrived_entry`.
     ///
-    /// In a history of a local session, a session `entry` from koshi first
-    /// removes every entry of the viewer's own queue from koshi with its
-    /// severity and text, and their toast previews show `entry`
-    /// ([`NotificationToastQueue::replace_entries`]). A history then holding
+    /// In a history of a local session, a session `arrived_entry` from koshi
+    /// first removes every entry of the viewer's own queue from koshi with its
+    /// severity and text, and their toast previews show `arrived_entry`
+    /// ([`NotificationToastQueue::repoint_previews`]). A history then holding
     /// [`MAX_MERGED_NOTIFICATION_COUNT`] entries evicts its oldest
     /// ([`evict_oldest_entry`](Self::evict_oldest_entry)).
     ///
-    /// With `should_preview` and the center closed, `entry` queues a toast
-    /// preview ([`NotificationToastQueue::queue_entry`]). Otherwise a preview
-    /// that shows `entry`'s id takes `entry` as its copy.
-    fn push_merged_entry(&mut self, entry: NotificationEntry, should_preview: bool) {
+    /// With `should_preview` and the center closed, `arrived_entry` queues a
+    /// toast preview ([`NotificationToastQueue::queue_preview`]). Otherwise a
+    /// preview that shows `arrived_entry`'s id takes `arrived_entry` as its
+    /// copy.
+    fn push_merged_entry(&mut self, arrived_entry: NotificationEntry, should_preview: bool) {
         if self.is_session_local
-            && matches!(entry.id.owner, NotificationQueueOwner::Session(_))
-            && entry.source == NotificationSource::Core
+            && matches!(
+                arrived_entry.notification_id.owner,
+                NotificationQueueOwner::Session(_)
+            )
+            && arrived_entry.source == NotificationSource::Core
         {
             let mut replaced_ids = Vec::new();
-            let mut entry_index = 0;
-            while entry_index < self.merged_entries.len() {
-                let merged_entry = self.merged_entries[entry_index].get_entry();
-                if matches!(merged_entry.id.owner, NotificationQueueOwner::Client(_))
-                    && is_core_notice(merged_entry, entry.severity, &entry.text)
+            let mut merged_entry_index = 0;
+            while merged_entry_index < self.merged_entries.count_center_entries() {
+                let merged_entry = self.merged_entries[merged_entry_index].get_notification_entry();
+                if matches!(
+                    merged_entry.notification_id.owner,
+                    NotificationQueueOwner::Client(_)
+                ) && is_core_notice(merged_entry, arrived_entry.severity, &arrived_entry.text)
                 {
-                    replaced_ids.push(merged_entry.id);
-                    self.remove_merged_entry_at(entry_index);
+                    replaced_ids.push(merged_entry.notification_id);
+                    self.remove_merged_entry_at(merged_entry_index);
                 } else {
-                    entry_index += 1;
+                    merged_entry_index += 1;
                 }
             }
             if !replaced_ids.is_empty() {
                 self.notification_toast
-                    .replace_entries(&replaced_ids, &entry);
+                    .repoint_previews(&replaced_ids, &arrived_entry);
             }
         }
-        if self.merged_entries.len() == MAX_MERGED_NOTIFICATION_COUNT {
+        if self.merged_entries.count_center_entries() == MAX_MERGED_NOTIFICATION_COUNT {
             self.evict_oldest_entry();
         }
-        let is_center_open = self.notification_center.is_some();
+        let is_center_open = self.is_notification_center_open();
         if should_preview && !is_center_open {
-            self.notification_toast.queue_entry(&entry);
+            self.notification_toast.queue_preview(&arrived_entry);
         } else {
-            self.notification_toast.update_entry(&entry);
+            self.notification_toast.update_previews(&arrived_entry);
         }
         if !is_center_open {
             self.unread_entry_count += 1;
         }
-        self.merged_entries
-            .push_back(NotificationCenterEntry::from_entry(entry));
+        if let Some(center_state) = self.find_open_center_state() {
+            center_state
+                .selected_notification_id
+                .get_or_insert(arrived_entry.notification_id);
+        }
+        self.merged_entries.add_newest_center_entry(
+            NotificationCenterEntry::from_notification_entry(arrived_entry),
+        );
+        self.revision += 1;
+    }
+
+    /// Add `dropped_entry_count` entries that never reached the viewer to the
+    /// dropped count. The count saturates at [`u64::MAX`]. A
+    /// `dropped_entry_count` of `0` changes nothing.
+    pub(crate) fn add_dropped_entries(&mut self, dropped_entry_count: u64) {
+        if dropped_entry_count == 0 {
+            return;
+        }
+        self.dropped_entry_count = self.dropped_entry_count.saturating_add(dropped_entry_count);
         self.revision += 1;
     }
 
     /// Evict the oldest entry: the dropped count adds 1, and its toast
-    /// previews go ([`NotificationToastQueue::remove_entry`]).
+    /// previews go ([`NotificationToastQueue::remove_previews`]).
     fn evict_oldest_entry(&mut self) {
         let Some(evicted_entry) = self.remove_merged_entry_at(0) else {
             return;
         };
         self.dropped_entry_count += 1;
         self.notification_toast
-            .remove_entry(evicted_entry.get_entry().id);
+            .remove_previews(evicted_entry.get_notification_entry().notification_id);
     }
 
-    /// Remove the entry at `entry_index` and return it, or `None` past the
-    /// newest entry. An unread entry takes 1 from the unread count.
-    fn remove_merged_entry_at(&mut self, entry_index: usize) -> Option<NotificationCenterEntry> {
-        let first_unread_index = self.merged_entries.len() - self.unread_entry_count;
-        let removed_entry = self.merged_entries.remove(entry_index)?;
-        if entry_index >= first_unread_index {
+    /// Remove the entry at `merged_entry_index` and return it, or `None` past
+    /// the newest entry. An unread entry takes 1 from the unread count. A
+    /// selected entry moves the center's selection to the entry older than
+    /// it, else to the entry newer than it, else to no entry.
+    ///
+    /// A caller that adds the same entry back at once keeps the selection
+    /// itself ([`take_arrival`](Self::take_arrival)).
+    fn remove_merged_entry_at(
+        &mut self,
+        merged_entry_index: usize,
+    ) -> Option<NotificationCenterEntry> {
+        let first_unread_index =
+            self.merged_entries.count_center_entries() - self.unread_entry_count;
+        let removed_entry = self
+            .merged_entries
+            .remove_center_entry_at(merged_entry_index)?;
+        if merged_entry_index >= first_unread_index {
             self.unread_entry_count -= 1;
+        }
+        let removed_notification_id = removed_entry.get_notification_entry().notification_id;
+        let is_removed_entry_selected = self.notification_center.is_some_and(|center_state| {
+            center_state.selected_notification_id == Some(removed_notification_id)
+        });
+        if is_removed_entry_selected {
+            let next_selected_notification_id = merged_entry_index
+                .checked_sub(1)
+                .or_else(|| {
+                    (merged_entry_index < self.merged_entries.count_center_entries())
+                        .then_some(merged_entry_index)
+                })
+                .map(|next_entry_index| {
+                    self.merged_entries[next_entry_index]
+                        .get_notification_entry()
+                        .notification_id
+                });
+            self.set_selected_notification_id(next_selected_notification_id);
         }
         self.revision += 1;
         Some(removed_entry)
     }
 
-    /// The shown toast preview as the toast draws it, or `None` while no
-    /// toast shows.
-    fn find_toast_content(&self) -> Option<NotificationToastContent<'_>> {
+    /// Set the center's selected entry to `selected_notification_id`. Does
+    /// nothing while the center is closed.
+    fn set_selected_notification_id(&mut self, selected_notification_id: Option<NotificationId>) {
+        let Some(center_state) = &mut self.notification_center else {
+            return;
+        };
+        if center_state.selected_notification_id != selected_notification_id {
+            center_state.selected_notification_id = selected_notification_id;
+            self.revision += 1;
+        }
+    }
+
+    /// The center's state while it is open, or `None` while it is closed or
+    /// slides out.
+    fn find_open_center_state(&mut self) -> Option<&mut NotificationCenterState> {
+        self.notification_center
+            .as_mut()
+            .filter(|center_state| !center_state.slide.is_closing)
+    }
+
+    /// The shown toast preview as the toast draws it, with the cache of its
+    /// text's rows, or `None` while no toast shows.
+    fn find_toast_view(&self) -> Option<NotificationToastView<'_>> {
         let (toast_preview, _) = self.notification_toast.find_shown_preview()?;
-        match toast_preview {
-            ToastPreview::Entry(entry) => Some(NotificationToastContent::Entry(entry)),
-            ToastPreview::Summary(summary_members) => Some(NotificationToastContent::Summary {
+        let toast_content = match toast_preview {
+            ToastPreview::Entry(previewed_entry) => {
+                NotificationToastContent::Entry(previewed_entry)
+            }
+            ToastPreview::Summary(summary_members) => NotificationToastContent::Summary {
                 notification_count: summary_members.len(),
                 severity: summary_members
                     .iter()
                     .map(|(_, member_severity)| *member_severity)
                     .max()?,
-            }),
-        }
+            },
+        };
+        Some(NotificationToastView {
+            toast_content,
+            toast_text_row_cache: &self.toast_text_row_cache,
+        })
     }
 
     /// Where the entry with `notification_id` stands in the history, or
     /// `None` when the history holds none.
     fn find_merged_entry_index(&self, notification_id: NotificationId) -> Option<usize> {
         self.list_merged_entries()
-            .position(|merged_entry| merged_entry.id == notification_id)
+            .position(|merged_entry| merged_entry.notification_id == notification_id)
     }
 }
 
-/// `entry` with its text stripped of every character
+/// `received_entry` with its text stripped of every character
 /// [`sanitize_text_to_byte_count`] removes and cut to
 /// [`MAX_NOTIFICATION_TEXT_BYTE_COUNT`] bytes.
-fn sanitize_received_entry(mut entry: NotificationEntry) -> NotificationEntry {
-    entry.text = sanitize_text_to_byte_count(&entry.text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
-    entry
+fn sanitize_received_entry(mut received_entry: NotificationEntry) -> NotificationEntry {
+    received_entry.text =
+        sanitize_text_to_byte_count(&received_entry.text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
+    received_entry
 }
 
-/// Whether `entry` comes from koshi with `severity` and `text`.
-fn is_core_notice(entry: &NotificationEntry, severity: NotificationSeverity, text: &str) -> bool {
-    entry.source == NotificationSource::Core && entry.severity == severity && entry.text == text
+/// Whether `notification_entry` comes from koshi with `severity` and `text`.
+fn is_core_notice(
+    notification_entry: &NotificationEntry,
+    severity: NotificationSeverity,
+    text: &str,
+) -> bool {
+    notification_entry.source == NotificationSource::Core
+        && notification_entry.severity == severity
+        && notification_entry.text == text
 }
 
 #[cfg(test)]

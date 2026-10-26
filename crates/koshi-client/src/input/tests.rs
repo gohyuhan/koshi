@@ -57,7 +57,7 @@ fn build_keymap_for_mode(
 
 /// A resolved keymap holding exactly the supplied bindings in each named mode,
 /// with the chord timeout and which-key delay of `keybindings_config`.
-fn build_keymap_for_modes(
+pub(crate) fn build_keymap_for_modes(
     mode_binding_sets: &[(&str, &[(KeySequence, &str)])],
     keybindings_config: &KeybindingsConfig,
 ) -> KeymapHintCatalog {
@@ -2180,7 +2180,10 @@ fn begin_pane_placement_opens_the_move_chooser_while_an_unpinned_floating_pane_i
     assert_eq!(client.get_active_input_mode(), LockMode::PaneMoveChoice);
     assert_eq!(
         client
-            .build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id)
+            .build_viewer_chrome(
+                mouse_frame.client_snapshot.active_tab_id,
+                &mouse_frame.committed_regions
+            )
             .active_input_mode,
         Some(LockMode::PaneMoveChoice)
     );
@@ -2517,7 +2520,10 @@ fn begin_floating_pane_move_selects_the_focused_floating_pane() {
     assert_eq!(client.get_active_input_mode(), LockMode::FloatingPaneMove);
     assert_eq!(
         client
-            .build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id)
+            .build_viewer_chrome(
+                mouse_frame.client_snapshot.active_tab_id,
+                &mouse_frame.committed_regions
+            )
             .active_input_mode,
         Some(LockMode::FloatingPaneMove)
     );

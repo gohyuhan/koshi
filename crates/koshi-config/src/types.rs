@@ -886,11 +886,15 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     let notification_center_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
         (
             parse_default_key_sequence("<Up>"),
-            build_bound_action("scroll-notifications-up"),
+            build_bound_action("select-newer-notification"),
         ),
         (
             parse_default_key_sequence("<Down>"),
-            build_bound_action("scroll-notifications-down"),
+            build_bound_action("select-older-notification"),
+        ),
+        (
+            parse_default_key_sequence("x"),
+            build_bound_action("dismiss-selected-notification"),
         ),
         (
             parse_default_key_sequence("c"),

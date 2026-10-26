@@ -1152,14 +1152,20 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
         build_expected_client_binding(
             "notification-center",
             "<Up>",
-            "scroll-notifications-up",
-            ClientActionKind::ScrollNotificationsUp,
+            "select-newer-notification",
+            ClientActionKind::SelectNewerNotification,
         ),
         build_expected_client_binding(
             "notification-center",
             "<Down>",
-            "scroll-notifications-down",
-            ClientActionKind::ScrollNotificationsDown,
+            "select-older-notification",
+            ClientActionKind::SelectOlderNotification,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "x",
+            "dismiss-selected-notification",
+            ClientActionKind::DismissSelectedNotification,
         ),
         build_expected_client_binding(
             "notification-center",

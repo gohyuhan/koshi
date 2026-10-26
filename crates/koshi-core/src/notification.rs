@@ -10,6 +10,7 @@
 //! attached client shows `[Koshi] pane …a1b2 killed by signal 9`.
 
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,7 @@ pub struct NotificationId {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationEntry {
     /// The entry's id, assigned by its queue.
-    pub id: NotificationId,
+    pub notification_id: NotificationId,
     /// Who wrote the text, assigned by its queue.
     pub source: NotificationSource,
     /// How loud the entry is.
@@ -127,7 +128,7 @@ pub struct NotificationQueue {
     revision: u64,
     /// The entries, oldest first. Each entry's id names this queue's owner and
     /// epoch, and the sequences rise from oldest to newest.
-    entries: VecDeque<NotificationEntry>,
+    queued_entries: VecDeque<NotificationEntry>,
 }
 
 /// Why a queue another process sent cannot be taken.
@@ -136,7 +137,7 @@ pub enum NotificationQueueError {
     /// The queue holds more than [`MAX_QUEUED_NOTIFICATION_COUNT`] entries.
     TooManyEntries {
         /// How many entries it holds.
-        entry_count: usize,
+        queued_entry_count: usize,
     },
     /// An entry's id names another owner or another epoch than the queue.
     ForeignEntry {
@@ -148,9 +149,9 @@ pub enum NotificationQueueError {
 impl std::fmt::Display for NotificationQueueError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NotificationQueueError::TooManyEntries { entry_count } => write!(
+            NotificationQueueError::TooManyEntries { queued_entry_count } => write!(
                 formatter,
-                "the notification queue holds {entry_count} entries, more than \
+                "the notification queue holds {queued_entry_count} entries, more than \
                  {MAX_QUEUED_NOTIFICATION_COUNT}"
             ),
             NotificationQueueError::ForeignEntry { notification_id } => write!(
@@ -172,7 +173,7 @@ impl NotificationQueue {
             owner,
             epoch: NotificationEpoch::new(),
             revision: 0,
-            entries: VecDeque::new(),
+            queued_entries: VecDeque::new(),
         }
     }
 
@@ -195,51 +196,57 @@ impl NotificationQueue {
     }
 
     /// The entries, oldest first.
-    pub fn list_entries(&self) -> impl Iterator<Item = &NotificationEntry> {
-        self.entries.iter()
+    pub fn list_queued_entries(&self) -> impl Iterator<Item = &NotificationEntry> {
+        self.queued_entries.iter()
     }
 
-    /// Post `text` from koshi itself at `severity`, arriving at `created_at`,
-    /// and return the entry the post made or changed.
+    /// Post `text` from koshi itself at `severity` `post_count` times in a
+    /// row, the last post arriving at `created_at`, and return the entry the
+    /// posts made or changed.
     ///
     /// `text` loses every character [`sanitize_text_to_byte_count`] removes
     /// and is cut to [`MAX_NOTIFICATION_TEXT_BYTE_COUNT`] bytes. When the
-    /// newest entry has the same source, severity and text, the post merges
-    /// into it: its `repeat_count` rises by 1 and its `created_at` becomes
-    /// `created_at`, and no entry is added. Otherwise a new entry takes the
-    /// next sequence, and a queue already holding
-    /// [`MAX_QUEUED_NOTIFICATION_COUNT`] entries first evicts its oldest.
-    /// Either way the revision rises by 1.
+    /// newest entry has the same source, severity and text, the posts merge
+    /// into it: its `repeat_count` rises by `post_count` and its `created_at`
+    /// becomes `created_at`, and no entry is added. Otherwise a new entry with
+    /// `repeat_count` `post_count` takes the next sequence, and a queue
+    /// already holding [`MAX_QUEUED_NOTIFICATION_COUNT`] entries first evicts
+    /// its oldest. Either way the revision rises by `post_count`.
     ///
-    /// Example: posting `a`, `a`, `b`, `a` gives the entries `a` ×2, `b`, `a`.
+    /// Example: posting `a`, `a`, `b`, `a` once each gives the entries `a` ×2,
+    /// `b`, `a`. Posting `a` 3 times, then `a` once, gives the entry `a` ×4.
     pub fn post_core_entry(
         &mut self,
         severity: NotificationSeverity,
         text: &str,
+        post_count: NonZeroU32,
         created_at: SystemTime,
     ) -> &NotificationEntry {
         let sanitized_text = sanitize_text_to_byte_count(text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
-        self.revision += 1;
-        let is_repeat = self.entries.back().is_some_and(|newest_entry| {
+        self.revision += u64::from(post_count.get());
+        let is_repeat = self.queued_entries.back().is_some_and(|newest_entry| {
             newest_entry.source == NotificationSource::Core
                 && newest_entry.severity == severity
                 && newest_entry.text == sanitized_text
         });
         if is_repeat {
-            let newest_entry = self.entries.back_mut().expect("the entry read above");
-            newest_entry.repeat_count = newest_entry.repeat_count.saturating_add(1);
+            let newest_entry = self
+                .queued_entries
+                .back_mut()
+                .expect("the entry read above");
+            newest_entry.repeat_count = newest_entry.repeat_count.saturating_add(post_count.get());
             newest_entry.created_at = created_at;
             return newest_entry;
         }
         let next_sequence = self
-            .entries
+            .queued_entries
             .back()
-            .map_or(0, |newest_entry| newest_entry.id.sequence + 1);
-        if self.entries.len() == MAX_QUEUED_NOTIFICATION_COUNT {
-            self.entries.pop_front();
+            .map_or(0, |newest_entry| newest_entry.notification_id.sequence + 1);
+        if self.queued_entries.len() == MAX_QUEUED_NOTIFICATION_COUNT {
+            self.queued_entries.pop_front();
         }
-        self.entries.push_back(NotificationEntry {
-            id: NotificationId {
+        self.queued_entries.push_back(NotificationEntry {
+            notification_id: NotificationId {
                 owner: self.owner,
                 epoch: self.epoch,
                 sequence: next_sequence,
@@ -248,9 +255,9 @@ impl NotificationQueue {
             severity,
             text: sanitized_text,
             created_at,
-            repeat_count: 1,
+            repeat_count: post_count.get(),
         });
-        self.entries.back().expect("the entry pushed above")
+        self.queued_entries.back().expect("the entry pushed above")
     }
 
     /// Check a queue another process sent: it holds at most
@@ -261,19 +268,18 @@ impl NotificationQueue {
     /// [`NotificationQueueError::TooManyEntries`] for a queue past the bound,
     /// and [`NotificationQueueError::ForeignEntry`] for the first entry whose
     /// id names another owner or epoch.
-    pub fn validate_entries(&self) -> Result<(), NotificationQueueError> {
-        if self.entries.len() > MAX_QUEUED_NOTIFICATION_COUNT {
+    pub fn validate_queued_entries(&self) -> Result<(), NotificationQueueError> {
+        if self.queued_entries.len() > MAX_QUEUED_NOTIFICATION_COUNT {
             return Err(NotificationQueueError::TooManyEntries {
-                entry_count: self.entries.len(),
+                queued_entry_count: self.queued_entries.len(),
             });
         }
-        match self
-            .entries
-            .iter()
-            .find(|entry| entry.id.owner != self.owner || entry.id.epoch != self.epoch)
-        {
+        match self.queued_entries.iter().find(|queued_entry| {
+            queued_entry.notification_id.owner != self.owner
+                || queued_entry.notification_id.epoch != self.epoch
+        }) {
             Some(foreign_entry) => Err(NotificationQueueError::ForeignEntry {
-                notification_id: foreign_entry.id,
+                notification_id: foreign_entry.notification_id,
             }),
             None => Ok(()),
         }

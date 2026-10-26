@@ -17,7 +17,7 @@ use koshi_ipc::frame::{
 use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::transport::ReceivedFrame;
 use koshi_layout::mode::LayoutMode;
-use koshi_renderer::snapshot::{CursorSnapshot, GridView};
+use koshi_renderer::snapshot::{CursorSnapshot, DrawnNotifications, GridView};
 use koshi_runtime::runtime::frame::build_wire_frame;
 use koshi_runtime::runtime::painted_update::{
     PaintedUpdateReceiver, PaintedUpdateSender, SessionFrame,
@@ -1716,6 +1716,7 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
         &render_snapshot,
         committed_regions,
         koshi_renderer::snapshot::ViewerChrome::default(),
+        DrawnNotifications::default(),
     );
     assert_eq!(mouse_frame.client_snapshot.active_tab_id, active_tab_id);
     assert_eq!(mouse_frame.client_snapshot.focused_pane_id, focused_pane_id);

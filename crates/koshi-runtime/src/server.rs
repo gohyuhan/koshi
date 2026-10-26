@@ -11,6 +11,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    num::NonZeroU32,
     path::Path,
     sync::{mpsc::Receiver, Arc},
     thread::JoinHandle,
@@ -1019,12 +1020,12 @@ impl Server {
             .map(|frame_subscription| frame_subscription.subscriber_id)
     }
 
-    /// Put the session's rejection of command `command_id` on the queue of
+    /// Deliver the session's rejection of command `command_id` to
     /// `client_id`, the client that sent it: `reject_reason`, the hint
     /// `help`, and `fired_action`, the action the client's key fired for the
-    /// command or `None`. Returns `true` when it is queued, and `false` when
-    /// `client_id` has no subscriber or the subscriber is disconnected or
-    /// desynchronized.
+    /// command or `None`
+    /// ([`EventBus::send_command_rejection`](crate::runtime::bus::EventBus::send_command_rejection)).
+    /// A `client_id` with no subscriber takes nothing.
     pub(crate) fn send_command_rejection(
         &mut self,
         client_id: ClientId,
@@ -1032,17 +1033,17 @@ impl Server {
         fired_action: Option<ActionReference>,
         reject_reason: RejectReason,
         help: Option<String>,
-    ) -> bool {
+    ) {
         let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
-            return false;
+            return;
         };
-        self.event_bus.try_send_command_rejection(
+        self.event_bus.send_command_rejection(
             subscriber_id,
             command_id,
             fired_action,
             reject_reason,
             help,
-        )
+        );
     }
 
     /// Post `text` from koshi itself at `severity` to session `session_id`'s
@@ -1067,7 +1068,7 @@ impl Server {
         };
         let notification_queue = &mut session.notification_queue;
         let posted_entry = notification_queue
-            .post_core_entry(severity, text, SystemTime::now())
+            .post_core_entry(severity, text, NonZeroU32::MIN, SystemTime::now())
             .clone();
         let revision = notification_queue.get_revision();
         let removed_subscriber_ids = self

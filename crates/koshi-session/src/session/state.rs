@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use koshi_core::{
     constant::{
-        FLOATING_PANE_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
+        FLOATING_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
     },
     event::Event,
     geometry::{
@@ -181,7 +181,7 @@ pub struct FloatingMember {
     /// The size the pane asks for, per axis.
     pub desired_size: FloatingPaneSize,
     /// The pane's outer size in cells from its last size solve, chrome
-    /// included. Its PTY is this size less [`FLOATING_PANE_CHROME_SIZE`].
+    /// included. Its PTY is this size less [`FLOATING_CHROME_SIZE`].
     pub solved_size: Size,
 }
 
@@ -302,17 +302,17 @@ impl FloatingSet {
 }
 
 /// The floating minimum: `pane_minimum_size` plus
-/// [`FLOATING_PANE_CHROME_SIZE`], each axis capped at `u16::MAX`. `20x6` →
+/// [`FLOATING_CHROME_SIZE`], each axis capped at `u16::MAX`. `20x6` →
 /// `22x10`; `65534x6` → `65535x10`.
 #[must_use]
 pub fn compute_floating_pane_minimum_size(pane_minimum_size: Size) -> Size {
     Size {
         column_count: pane_minimum_size
             .column_count
-            .saturating_add(FLOATING_PANE_CHROME_SIZE.column_count),
+            .saturating_add(FLOATING_CHROME_SIZE.column_count),
         row_count: pane_minimum_size
             .row_count
-            .saturating_add(FLOATING_PANE_CHROME_SIZE.row_count),
+            .saturating_add(FLOATING_CHROME_SIZE.row_count),
     }
 }
 

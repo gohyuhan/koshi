@@ -85,8 +85,8 @@ impl Server {
     }
 
     /// Dispatch `mouse_command` as [`Self::dispatch_mouse_command`] does. A
-    /// refused command puts one `CommandRejected` naming `command_id`, no fired
-    /// action, the reason and the hint on `client_id`'s queue
+    /// refused command delivers one rejection naming `command_id`, no fired
+    /// action, the reason and the hint to `client_id`
     /// ([`Self::send_command_rejection`]).
     fn dispatch_mouse_command_reporting_rejection(
         &mut self,
@@ -97,7 +97,7 @@ impl Server {
         if let (CommandResult::Rejected { reason, help, .. }, _) =
             self.dispatch_mouse_command(client_id, command_id, mouse_command)
         {
-            let _ = self.send_command_rejection(client_id, command_id, None, reason, help);
+            self.send_command_rejection(client_id, command_id, None, reason, help);
         }
     }
 
@@ -522,9 +522,11 @@ impl Server {
     /// frames name `command_id` as the last applied floating pane move. A move
     /// the session rejects puts one `CommandRejected` naming `command_id`,
     /// with no fired action, on the same subscriber's queue, ahead of the
-    /// round's answer. A command action the session rejects does the same
-    /// under the new command id it ran under. A border move the session
-    /// refuses sends no `CommandRejected`: its entry names `0` applied cells.
+    /// round's answer, or holds it while the subscriber is desynced
+    /// (`Server::send_command_rejection`). A command action the session
+    /// rejects does the same under the new command id it ran under. A border
+    /// move the session refuses sends no `CommandRejected`: its entry names
+    /// `0` applied cells.
     pub fn run_client_mouse(
         &mut self,
         client_id: ClientId,

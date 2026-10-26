@@ -16,11 +16,16 @@
 //! queue, live or desynced. A full queue drops only the wake, and a resync
 //! leaves the waiting bytes where they are. Then the session a subscriber's
 //! client moves to, which rides the queue the same way, and is refused for an
-//! unknown subscriber and for a desynced one.
+//! unknown subscriber and for a desynced one. Then a command rejection: it
+//! rides the queue of a live subscriber, and a desynced subscriber holds it
+//! in runs of equal rejections, at most [`MAX_HELD_COMMAND_REJECTION_COUNT`]
+//! runs, until its resync snapshot carries them.
 //!
 //! Then the wire conversion: one queue item becomes the frame the client is
 //! sent, and one host write becomes the frames that carry its bytes.
 
+use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -343,6 +348,8 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
                     subscriber_id,
                     dropped_event_count: 1,
                 },
+                held_command_rejections: Vec::new(),
+                dropped_command_rejection_count: 0,
             },
             Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id })),
         ]
@@ -382,6 +389,8 @@ fn the_dropped_count_holds_the_trigger_plus_every_withheld_event() {
                 subscriber_id,
                 dropped_event_count: 4,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -564,6 +573,8 @@ fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
                 subscriber_id,
                 dropped_event_count: 2,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -663,6 +674,8 @@ fn a_second_desync_counts_from_one_again() {
                 subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -1099,6 +1112,8 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
                 subscriber_id,
                 dropped_event_count: 2,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
     assert_eq!(
@@ -1106,6 +1121,8 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
         Some(SessionEvent::Resync {
             dropped_event_count: 2,
             notification_queue: *build_test_notification_queue(),
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
@@ -1462,6 +1479,8 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
                 subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })
     );
     assert_eq!(
@@ -1578,13 +1597,13 @@ fn a_rejected_command_reaches_its_subscriber_with_the_fired_action_and_help() {
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     let (other_subscriber_id, other_subscriber_receiver, _) = bus.subscribe();
 
-    assert!(bus.try_send_command_rejection(
+    bus.send_command_rejection(
         subscriber_id,
         command_id,
         Some(fired_action.clone()),
         RejectReason::MinimumSize,
         Some("the pane is at its minimum width".to_string()),
-    ));
+    );
 
     let queued_delivery = subscriber_receiver
         .try_recv()
@@ -1609,6 +1628,254 @@ fn a_rejected_command_reaches_its_subscriber_with_the_fired_action_and_help() {
     );
     assert_ne!(other_subscriber_id, subscriber_id);
     assert_eq!(other_subscriber_receiver.try_iter().count(), 0);
+    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
+}
+
+/// A run of `repeat_count` rejections of `core:<action_name>` with
+/// [`RejectReason::MinimumSize`] and no hint.
+fn build_held_resize_rejection(action_name: &str, repeat_count: u32) -> HeldCommandRejection {
+    HeldCommandRejection {
+        fired_action: Some(
+            ActionReference::from_core_action_name(action_name).expect("the action name is valid"),
+        ),
+        reject_reason: RejectReason::MinimumSize,
+        help: None,
+        repeat_count: NonZeroU32::new(repeat_count).expect("the repeat count is not zero"),
+    }
+}
+
+/// Send `subscriber_id` a rejection of a new command fired by
+/// `core:<action_name>`, with [`RejectReason::MinimumSize`] and no hint.
+fn send_resize_rejection(bus: &mut EventBus, subscriber_id: SubscriberId, action_name: &str) {
+    bus.send_command_rejection(
+        subscriber_id,
+        CommandId::new(),
+        Some(
+            ActionReference::from_core_action_name(action_name).expect("the action name is valid"),
+        ),
+        RejectReason::MinimumSize,
+        None,
+    );
+}
+
+#[test]
+fn a_rejection_that_finds_the_queue_full_is_held_and_the_resync_carries_it() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+
+    assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+    );
+    let render_snapshot = build_test_render_snapshot();
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
+    let resync_delivery = Delivery::Snapshot {
+        render_snapshot,
+        notification_queue: build_test_notification_queue(),
+        lag_report: SubscriberLagged {
+            subscriber_id,
+            dropped_event_count: 0,
+        },
+        held_command_rejections: vec![build_held_resize_rejection("resize-pane-left", 1)],
+        dropped_command_rejection_count: 0,
+    };
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        vec![resync_delivery.clone()]
+    );
+    assert_eq!(
+        build_wire_event(&resync_delivery),
+        Some(SessionEvent::Resync {
+            dropped_event_count: 0,
+            notification_queue: NotificationQueue::clone(&build_test_notification_queue()),
+            held_command_rejections: vec![build_held_resize_rejection("resize-pane-left", 1)],
+            dropped_command_rejection_count: 0,
+        })
+    );
+    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
+}
+
+#[test]
+fn a_desynced_subscriber_merges_equal_rejections_in_a_row_and_misses_none_of_them() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-right");
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+
+    assert_eq!(
+        subscriber_receiver.try_iter().count(),
+        SUBSCRIBER_QUEUE_CAPACITY
+    );
+    let render_snapshot = build_test_render_snapshot();
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            render_snapshot,
+            notification_queue: build_test_notification_queue(),
+            lag_report: SubscriberLagged {
+                subscriber_id,
+                dropped_event_count: 1,
+            },
+            held_command_rejections: vec![
+                build_held_resize_rejection("resize-pane-left", 2),
+                build_held_resize_rejection("resize-pane-right", 1),
+                build_held_resize_rejection("resize-pane-left", 1),
+            ],
+            dropped_command_rejection_count: 0,
+        }]
+    );
+}
+
+#[test]
+fn a_desynced_subscriber_holding_the_most_runs_drops_the_oldest_for_a_new_one() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+
+    for rejection_index in 0..=MAX_HELD_COMMAND_REJECTION_COUNT {
+        bus.send_command_rejection(
+            subscriber_id,
+            CommandId::new(),
+            None,
+            RejectReason::InvalidState,
+            Some(format!("hint {rejection_index}")),
+        );
+    }
+
+    assert_eq!(
+        subscriber_receiver.try_iter().count(),
+        SUBSCRIBER_QUEUE_CAPACITY
+    );
+    assert!(bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
+    let Ok(Delivery::Snapshot {
+        held_command_rejections,
+        dropped_command_rejection_count,
+        ..
+    }) = subscriber_receiver.try_recv()
+    else {
+        panic!("the resync snapshot is on the queue");
+    };
+    let expected_held_command_rejections: Vec<HeldCommandRejection> = (1
+        ..=MAX_HELD_COMMAND_REJECTION_COUNT)
+        .map(|rejection_index| HeldCommandRejection {
+            fired_action: None,
+            reject_reason: RejectReason::InvalidState,
+            help: Some(format!("hint {rejection_index}")),
+            repeat_count: NonZeroU32::MIN,
+        })
+        .collect();
+    assert_eq!(held_command_rejections, expected_held_command_rejections);
+    assert_eq!(dropped_command_rejection_count, 1);
+}
+
+#[test]
+fn a_run_held_the_most_times_stays_at_the_most() {
+    let mut held_command_rejections = VecDeque::from([HeldCommandRejection {
+        repeat_count: NonZeroU32::MAX,
+        ..build_held_resize_rejection("resize-pane-left", 1)
+    }]);
+    let mut dropped_command_rejection_count = 0;
+
+    hold_command_rejection(
+        &mut held_command_rejections,
+        &mut dropped_command_rejection_count,
+        Some(
+            ActionReference::from_core_action_name("resize-pane-left")
+                .expect("the action name is valid"),
+        ),
+        RejectReason::MinimumSize,
+        None,
+    );
+
+    assert_eq!(
+        held_command_rejections,
+        VecDeque::from([HeldCommandRejection {
+            repeat_count: NonZeroU32::MAX,
+            ..build_held_resize_rejection("resize-pane-left", 1)
+        }])
+    );
+    assert_eq!(dropped_command_rejection_count, 0);
+}
+
+#[test]
+fn a_resync_that_finds_the_queue_full_keeps_the_held_rejections_for_the_next_resync() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+    assert_eq!(
+        subscriber_receiver.try_iter().count(),
+        SUBSCRIBER_QUEUE_CAPACITY
+    );
+    let render_snapshot = build_test_render_snapshot();
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
+
+    assert_eq!(
+        subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            render_snapshot,
+            notification_queue: build_test_notification_queue(),
+            lag_report: SubscriberLagged {
+                subscriber_id,
+                dropped_event_count: 0,
+            },
+            held_command_rejections: vec![build_held_resize_rejection("resize-pane-left", 2)],
+            dropped_command_rejection_count: 0,
+        }]
+    );
+}
+
+#[test]
+fn a_rejection_for_an_unknown_subscriber_or_a_gone_receiver_is_not_held() {
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    let unknown_subscriber_id = SubscriberId::new();
+    drop(subscriber_receiver);
+
+    send_resize_rejection(&mut bus, unknown_subscriber_id, "resize-pane-left");
+    assert_eq!(bus.count_subscribers(), 1);
+    send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
+
+    assert_eq!(bus.count_subscribers(), 0);
+    assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 }
 
 #[test]
@@ -1976,10 +2243,14 @@ fn a_snapshot_converts_to_a_resync_carrying_the_dropped_count() {
                 subscriber_id: SubscriberId::new(),
                 dropped_event_count: 4,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }),
         Some(SessionEvent::Resync {
             dropped_event_count: 4,
             notification_queue: *build_test_notification_queue(),
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })
     );
 }

@@ -68,8 +68,8 @@ use koshi_core::mouse::{
 };
 use koshi_layout::placement::PlacementDestinations;
 use koshi_renderer::snapshot::{
-    find_shown_placement_handle_hover, FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane,
-    PlacementHandleHover, TabSnapshot, ViewerChrome,
+    find_shown_placement_handle_hover, CommittedRegions, FloatingPaneMoveDraft, FrameLayout,
+    MouseFrame, MousePane, PlacementHandleHover, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
@@ -375,7 +375,11 @@ impl Client {
     /// ([`note_active_tab`](Self::note_active_tab)), so switching back does not
     /// bring it out again.
     #[must_use]
-    pub fn build_viewer_chrome(&self, active_tab_id: TabId) -> ViewerChrome {
+    pub fn build_viewer_chrome(
+        &self,
+        active_tab_id: TabId,
+        committed_regions: &CommittedRegions,
+    ) -> ViewerChrome {
         let is_pane_placement_visible = self.is_pane_placement_visible();
         let active_input_mode = self.get_active_input_mode();
         ViewerChrome {
@@ -434,7 +438,7 @@ impl Client {
             floating_pane_tray: self.floating_pane_tray,
             notification_center: self.notification_history.get_notification_center(),
             notification_button: self.build_notification_button(),
-            notification_toast: self.build_notification_toast(),
+            notification_toast: self.build_notification_toast(committed_regions),
         }
     }
 
@@ -556,10 +560,12 @@ impl Client {
                 | HitRegion::FloatingPaneTrayButton
                 | HitRegion::FloatingPaneTrayTile { .. }
                 | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTrayClose
                 | HitRegion::FloatingPaneTray
                 | HitRegion::NotificationButton
                 | HitRegion::NotificationCenterClose
-                | HitRegion::NotificationCenterClear
+                | HitRegion::NotificationCenterClearAll
+                | HitRegion::NotificationCenterBody
                 | HitRegion::NotificationCenter
                 | HitRegion::NotificationToastClose
                 | HitRegion::Statusline
@@ -1654,14 +1660,16 @@ impl Client {
                 Vec::new()
             }
             HitRegion::NotificationButton => {
-                self.toggle_notification_center();
+                self.toggle_notification_center(Some(mouse_frame));
                 Vec::new()
             }
             HitRegion::FloatingPaneTrayTile { .. }
             | HitRegion::FloatingPaneTrayToggleMinimizeAll
+            | HitRegion::FloatingPaneTrayClose
             | HitRegion::FloatingPaneTray
             | HitRegion::NotificationCenterClose
-            | HitRegion::NotificationCenterClear
+            | HitRegion::NotificationCenterClearAll
+            | HitRegion::NotificationCenterBody
             | HitRegion::NotificationCenter
             | HitRegion::NotificationToastClose
             | HitRegion::Statusline
@@ -2650,8 +2658,10 @@ impl Client {
         mouse_frame: &'a MouseFrame,
     ) -> FrameLayout<'a> {
         let mut frame_layout = mouse_frame.build_frame_layout();
-        frame_layout.viewer_chrome =
-            self.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id);
+        frame_layout.viewer_chrome = self.build_viewer_chrome(
+            mouse_frame.client_snapshot.active_tab_id,
+            &mouse_frame.committed_regions,
+        );
         frame_layout
     }
 }

@@ -2384,7 +2384,7 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_and_po
     });
     let notifications: Vec<(NotificationSeverity, &str)> = attached_client_stream
         .notification_queue
-        .list_entries()
+        .list_queued_entries()
         .map(|notification_entry| {
             (
                 notification_entry.severity,

@@ -235,9 +235,10 @@ mode "floating-pane-tray" {
 }
 
 mode "notification-center" {
-    // The notification center owns these keys while it holds the keyboard.
-    bind "<Up>" "core:scroll-notifications-up"
-    bind "<Down>" "core:scroll-notifications-down"
+    // The notification center owns these keys while it is open.
+    bind "<Up>" "core:select-newer-notification"
+    bind "<Down>" "core:select-older-notification"
+    bind "x" "core:dismiss-selected-notification"
     bind "c" "core:clear-notifications"
     bind "<Esc>" "core:close-notification-center"
     bind "<A-n>" "core:toggle-notification-center"
@@ -457,11 +458,12 @@ order the panes became floating:
   this client minimized.
 - The tray holds 12 slots in 2 rows of 6. A narrow terminal puts fewer slots
   in each row.
-- The tray's top border shows the full title of the tile under the pointer,
-  else of the selected tile. A title too long for the border ends in `…`. Its
-  right end reads `minimize all` while this client shows a floating pane, and
-  `restore all` while it shows none. A tray of one slot per row has no room
-  for this label and leaves it out.
+- The tray's titlebar, the row under its top border, shows the full title of
+  the tile under the pointer, else of the selected tile. A title too long for
+  its cells ends in `…`. Right of the title, the titlebar reads `minimize all`
+  while this client shows a floating pane, and `restore all` while it shows
+  none, then the close button `✕`. A tray of one slot per row has no room for
+  this label and leaves it out.
 
 While the tray is open, the tabline shows the tag `TRAY`. The
 `floating-pane-tray` keymap has priority over the normal or locked keymap, and
@@ -477,15 +479,17 @@ screen only. Another client sees no change.
   the order the panes became floating, and focuses the last one. A click on
   `minimize all` or `restore all` does the same.
 - A click on a tile does what Enter does on that tile.
-- Escape (`core:close-floating-pane-tray`), `<leader>p w` and a click on the
-  button close the tray.
+- Escape (`core:close-floating-pane-tray`), `<leader>p w`, a click on the
+  button and a click on the close button `✕` close the tray.
 - A click outside the tray closes the tray. The same click then acts as it
   does with no tray open.
 
 The tray stays open after a tile changes, and it shows each change at once.
 It closes when the session holds no floating pane or the terminal has no room
 for it. A lock mode change, a mouse-select change, the loss of the terminal's
-focus, a lost link to the session and a session switch also close it.
+focus, a lost link to the session and a session switch also close it. The tray
+and the notification center are never open together: while the center is
+open, the tray's actions do nothing.
 
 A minimize shrinks the pane into its tile in 160 ms. With the tray closed, it
 shrinks into the cell under the glyph `⧉`, on the top row of the pane area. A
@@ -502,7 +506,10 @@ the label changes to `restore all`.
 Koshi states each message of its own as a notification: a pane that a signal
 killed, a config warning, or a key whose command the session refused. The
 notification center lists the notifications of this client, and a toast shows
-each new one for a short time.
+each new one for a short time. If this client reads its session slower than
+the session writes, the session keeps each refusal of this client's commands
+until the client catches up. Then equal refusals in a row show as one
+notification with their count: `[Koshi] Warning ×3`.
 
 The tabline shows the notification button `●` while this client holds at
 least one notification. The button sits left of the tray button, or left of
@@ -512,46 +519,77 @@ read once the center opens after it arrives.
 
 `<A-n>` (`core:toggle-notification-center`) or a click on the button opens the
 center. The center covers the right side of the pane area and changes no pane.
-It is as tall as the pane area and 1/3 of the terminal width, from 24 to 48
-columns wide. A terminal narrower than 24 columns gives it the full width. The
-center lists the newest notification first, each as a header and its text:
+It is as tall as the pane area and 1/10 of the pane area's width, from 24 to
+48 columns wide. A pane area narrower than 24 columns gives it the full width.
+The center slides in from the right edge in 160 ms, and slides out the same
+way when it closes. With `reduced-motion #true`, it opens and closes in one
+frame.
+
+The center's top row holds the title `Notifications` and the close button
+`✕`, and its last row holds `Clear all`. Between them, the center lists one
+card per notification, newest first. A card shows a header above the text:
 `[Koshi] Error` above `pane …a1b2 killed by signal 9`. A notification that
-repeats shows the count in its header: `[Koshi] Warning ×3`. When this client
-held more notifications than it keeps, the last row reads
+repeats shows the count in its header: `[Koshi] Warning ×3`. Each card holds
+a dismiss button `✕` on its top border. When this client held more
+notifications than it keeps, the text under the last card reads
 `3 older notifications were dropped`.
 
-While the center holds the keyboard, the tabline shows the tag
-`NOTIFICATIONS`, and the button shows in reverse video. The
+The center opens with the newest card selected, and the selected card draws
+its border in the hover color. While the center is open, the tabline shows
+the tag `NOTIFICATIONS`, and the button shows in reverse video. The
 `notification-center` keymap has priority over the normal or locked keymap,
 and the center consumes every key it does not bind. No key reaches a pane.
 
-- The Up and Down keys (`core:scroll-notifications-up`, `-down`) scroll the
-  list one row. The mouse wheel over the center scrolls it by `scroll-lines`
-  rows.
+- Up (`core:select-newer-notification`) and Down
+  (`core:select-older-notification`) select the next card in that direction.
+  The center then scrolls the fewest rows that show the whole card.
+- `x` (`core:dismiss-selected-notification`) and a click on a card's `✕`
+  remove that notification. If the removed card was selected, the next older
+  card is selected, or the next newer card when no older card is left.
+- A click on a card selects it. The mouse wheel over the center scrolls it by
+  `scroll-lines` rows.
 - Escape (`core:close-notification-center`), `<A-n>`, a click on the button,
-  and a click on ` × ` on the top border close the center. Every
-  notification stays.
-- `c` (`core:clear-notifications`) and a click on ` clear ` on the bottom
-  border remove every notification and close the center. A notification that
-  arrives after the clear stays in the center.
-- A click outside the center takes the keyboard from it, and the center stays
-  open. The same click then acts as it does with no center open. A click on
-  the center gives the keyboard back to it.
+  and a click on the close button `✕` close the center. Every notification
+  stays.
+- `c` (`core:clear-notifications`) and a click on `Clear all` remove every
+  notification and close the center. A notification that arrives after the
+  clear stays in the center.
+- A click outside the center closes it. The same click then acts as it does
+  with no center open.
 
-Any other action, and a lock mode change, also take the keyboard from the
-center. While another local mode is on, such as the floating pane tray, the
-center does not open. The center and its notifications belong to this client
+Any other action, a lock mode change and a lost link to the session also
+close the center. While the center slides out, it takes no key, and a click
+on it does nothing. The center
+and the floating pane tray are never open together. While the tray is open,
+the center's actions do nothing, and a click on the notification button
+closes the tray and opens the center. While another local mode is on, such as
+dock/undock mode, pane placement, the move chooser, or floating pane move
+mode, the center does not open. It also does not open while the link to the
+session is lost. A pane area narrower than 10 columns or
+shorter than 6 rows has no room for the center. Then the center does not
+open, and a resize to such a size closes it at once. It stays closed when the
+pane area grows again. The center and its notifications belong to this client
 only. Another client of the same session keeps its own list, and a clear on
 one client removes nothing from another.
 
 A toast slides in from the side of its corner, stays, and slides out again:
 1 s in, 3 s in place, and 1 s out. When more notifications wait, each part
 takes 0.5 s. At most 3 notifications wait for a toast. Each further one joins
-one last toast that counts them: `36 more notifications in the center`. A
-click on the toast's ` × ` slides it out at once, and its notification stays
-in the center. Opening the center removes every toast. A notification that
-arrives while the center is open shows no toast. The `notifications` block of
-`koshi.kdl` sets the corner and the time in place, and turns toasts off.
+one last toast that counts them: `36 more notifications in the center`. Once
+that toast shows, it counts no new notification: a notification that arrives
+then waits for a toast of its own after it. A click on the toast's ` ✕ `
+slides it out at once, and its notification stays in the center. Opening the
+center removes every toast. A notification that arrives while the center is
+open shows no toast.
+
+The toast is as wide as the center, and shows at most 2 rows of text under
+its header. A pane area too short for every row keeps the rows that fit, and
+the last row then ends in `…`. The toast's time stops while the pane area has
+no room for a box 10 columns wide that holds the toast's border, its header
+and the first row of its text: 4 rows tall. It also stops after a terminal
+resize, until a frame of the new size shows. The `notifications`
+block of `koshi.kdl` sets the corner and the time in place, and turns toasts
+off.
 
 Example: a build in a command pane fails with exit code 2 while the center is
 closed. The toast `[Koshi] Error` `pane …c3d4 exited 2` slides in at the top

@@ -4,6 +4,8 @@
 //! a frame this build has no name for reads as unknown, and a host write frame
 //! of [`MAX_HOST_WRITE_BYTE_COUNT`] bytes fits one frame.
 
+use std::num::NonZeroU32;
+
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -102,10 +104,20 @@ fn list_test_events() -> Vec<SessionEvent> {
         SessionEvent::Resync {
             dropped_event_count: 4,
             notification_queue: build_fixed_session_notification_queue(),
+            held_command_rejections: vec![HeldCommandRejection {
+                fired_action: Some(
+                    ActionReference::from_core_action_name("resize-pane-left")
+                        .expect("the action name is valid"),
+                ),
+                reject_reason: RejectReason::MinimumSize,
+                help: None,
+                repeat_count: NonZeroU32::new(3).expect("3 is not zero"),
+            }],
+            dropped_command_rejection_count: 2,
         },
         SessionEvent::NotificationPosted {
             revision: 1,
-            entry: build_fixed_notification_entry(),
+            posted_entry: build_fixed_notification_entry(),
         },
         SessionEvent::SwitchTo {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
@@ -384,11 +396,18 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!("Detached"),
             json!({ "Resync": {
                 "dropped_event_count": 4,
-                "notification_queue": build_fixed_notification_queue_json()
+                "notification_queue": build_fixed_notification_queue_json(),
+                "held_command_rejections": [{
+                    "fired_action": "core:resize-pane-left",
+                    "reject_reason": "MinimumSize",
+                    "help": null,
+                    "repeat_count": 3
+                }],
+                "dropped_command_rejection_count": 2
             } }),
             json!({ "NotificationPosted": {
                 "revision": 1,
-                "entry": build_fixed_notification_entry_json()
+                "posted_entry": build_fixed_notification_entry_json()
             } }),
             json!({ "SwitchTo": { "session_id": wire_identifier, "owner_user_id": 1001 } }),
             json!({ "CommandRejected": {
@@ -641,6 +660,13 @@ fn numeric_fields_round_trip_at_their_extremes() {
         SessionEvent::Resync {
             dropped_event_count: u64::MAX,
             notification_queue: build_fixed_session_notification_queue(),
+            held_command_rejections: vec![HeldCommandRejection {
+                fired_action: None,
+                reject_reason: RejectReason::TargetGone,
+                help: None,
+                repeat_count: NonZeroU32::MAX,
+            }],
+            dropped_command_rejection_count: u64::MAX,
         },
         SessionEvent::MouseAnswer {
             request_id: u64::MAX,
@@ -682,6 +708,28 @@ fn an_event_whose_count_is_negative_is_refused() {
             .expect_err("a negative index decoded instead of failing")
             .to_string(),
         "invalid value: integer `-1`, expected usize at line 1 column 84"
+    );
+}
+
+#[test]
+fn a_held_rejection_that_repeats_zero_times_or_names_no_fired_action_is_refused() {
+    let zero_repeat_rejection: Result<HeldCommandRejection, _> = serde_json::from_str(
+        r#"{"fired_action":null,"reject_reason":"TargetGone","help":null,"repeat_count":0}"#,
+    );
+    let rejection_without_fired_action: Result<HeldCommandRejection, _> =
+        serde_json::from_str(r#"{"reject_reason":"TargetGone","help":null,"repeat_count":1}"#);
+
+    assert_eq!(
+        zero_repeat_rejection
+            .expect_err("a run of zero rejections decoded instead of failing")
+            .to_string(),
+        "invalid value: integer `0`, expected a nonzero u32 at line 1 column 78"
+    );
+    assert_eq!(
+        rejection_without_fired_action
+            .expect_err("a run without fired_action decoded instead of failing")
+            .to_string(),
+        "missing field `fired_action` at line 1 column 59"
     );
 }
 

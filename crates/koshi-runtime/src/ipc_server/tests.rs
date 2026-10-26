@@ -7912,6 +7912,8 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
             SessionFrame::Event(SessionEvent::Resync {
                 dropped_event_count: 1,
                 notification_queue,
+                held_command_rejections: Vec::new(),
+                dropped_command_rejection_count: 0,
             }),
             SessionFrame::Painted(Box::new(build_first_received_painted_frame(
                 &render_snapshot,

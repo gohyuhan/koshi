@@ -1447,7 +1447,9 @@ fn serve_connection(
 /// round is answered on the writing half by exactly one
 /// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`, after one
 /// [`SessionEvent::CommandRejected`] for each floating pane move in the round
-/// that the session rejected. A `Resize` whose viewport holds more
+/// that the session rejected. A client whose queue is full reads those
+/// rejections in the next [`SessionEvent::Resync`] instead. A `Resize` whose
+/// viewport holds more
 /// than [`MAX_VIEWPORT_CELL_COUNT`] cells is read and dropped, and the client
 /// keeps the viewport it had. A `Ping` is read and dropped: nothing crosses for
 /// it, and nothing answers it. A `PaintedUpdate` reaches the writing thread as

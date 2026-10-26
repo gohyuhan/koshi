@@ -156,6 +156,7 @@
 use std::io;
 use std::io::Write;
 use std::mem::take;
+use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -209,6 +210,7 @@ use koshi_ipc::router::{
 use koshi_ipc::transport::{FrameReader, FrameWriter, MAX_FRAME_BYTE_COUNT};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
+use koshi_renderer::notification::has_notification_toast_room;
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, FloatingPaneSlot, MouseFrame, PanePlacementMessage,
@@ -353,9 +355,9 @@ pub(crate) struct ViewerPaint {
     pub(crate) notification_revision: u64,
 }
 
-/// How long one placement preview change, committed placement slide, or
-/// floating pane slide runs: 160 ms.
-const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
+/// How long one placement preview change, committed placement slide,
+/// floating pane slide, or notification center slide runs: 160 ms.
+pub(crate) const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
 
 /// The tab one available placement preview shows with one target placed,
 /// built once for that preview and target.
@@ -491,7 +493,10 @@ impl FloatingPaneMinimizeAnimation {
 /// Return the bounded ease-out progress at `current_time` of a placement
 /// animation that began at `started_at`: `0.0` at the start, `1.0` after
 /// `PLACEMENT_ANIMATION_DURATION`.
-fn compute_placement_animation_progress(started_at: Instant, current_time: Instant) -> f32 {
+pub(crate) fn compute_placement_animation_progress(
+    started_at: Instant,
+    current_time: Instant,
+) -> f32 {
     let elapsed_duration = current_time.saturating_duration_since(started_at);
     let linear_progress =
         (elapsed_duration.as_secs_f32() / PLACEMENT_ANIMATION_DURATION.as_secs_f32()).min(1.0);
@@ -514,17 +519,19 @@ fn can_slide_between_tab_snapshots(
 
 impl ViewerPaint {
     /// Read what `client` contributes to a paint of `render_snapshot` that
-    /// shows `displayed_active_tab_id`. A tab-strip peek made on any other tab
-    /// does not apply. The placement message names tabs from
-    /// `render_snapshot`'s tab list, and names the session's refusal of the
-    /// selected placement target ([`Client::find_placement_refusal`]).
+    /// shows `displayed_active_tab_id` with `committed_regions`. A tab-strip
+    /// peek made on any other tab does not apply. The placement message names
+    /// tabs from `render_snapshot`'s tab list, and names the session's
+    /// refusal of the selected placement target
+    /// ([`Client::find_placement_refusal`]).
     pub(crate) fn from_client(
         client: &Client,
         displayed_active_tab_id: TabId,
         render_snapshot: &RenderSnapshot,
+        committed_regions: &CommittedRegions,
     ) -> Self {
         ViewerPaint {
-            chrome: client.build_viewer_chrome(displayed_active_tab_id),
+            chrome: client.build_viewer_chrome(displayed_active_tab_id, committed_regions),
             lock_mode: client.get_active_input_mode(),
             is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             pending_key_sequence: if client.is_continuation_hint_hidden() {
@@ -978,6 +985,7 @@ impl<B: Backend> Screen<B> {
         let committed_regions = self.compute_committed_regions(viewport_size);
         let open_floating_pane_tray_layout =
             client.update_floating_pane_tray(self.pending_snapshot.as_ref()?, &committed_regions);
+        client.update_notification_center(self.pending_snapshot.as_ref()?, &committed_regions);
         let placement_display = self.update_previewed_placement_display(client, current_time);
         let committed_placement_tab_ids = std::mem::take(&mut self.committed_placement_tab_ids);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
@@ -1020,6 +1028,7 @@ impl<B: Backend> Screen<B> {
             client,
             displayed_snapshot.client_snapshot.active_tab_id,
             snapshot,
+            &committed_regions,
         );
         match terminal::paint_frame_with_writer(
             &mut self.frame_output,
@@ -1083,10 +1092,15 @@ impl<B: Backend> Screen<B> {
         } else {
             &snapshot
         };
+        let drawn_notifications = client.build_drawn_notifications(
+            mouse_frame_snapshot
+                .build_painted_frame_layout(painted_viewer_chrome, &committed_regions),
+        );
         let mouse_frame = MouseFrame::from_snapshot(
             mouse_frame_snapshot,
             committed_regions,
             painted_viewer_chrome,
+            drawn_notifications,
         );
         self.last_snapshot = Some(snapshot);
         Some(mouse_frame)
@@ -1106,10 +1120,14 @@ impl<B: Backend> Screen<B> {
     /// placement preview is drawn while
     /// [`Client::is_floating_dock_selection_idle`] is `true`.
     ///
-    /// Each refresh first advances the toast's clock
-    /// ([`Client::advance_notification_toast`]). The clock stops while no
-    /// frame shows, while the viewport has no column or no row, and while the
-    /// shown frame's active tab has no room for its panes.
+    /// Each refresh first advances the toast's clock and the notification
+    /// center's slide ([`Client::advance_notification_clocks`]). The toast's
+    /// clock stops while no frame shows, while the viewport differs from the
+    /// one the shown frame was committed for, and while the shown frame has
+    /// no room for the toast ([`has_notification_toast_room`]): a viewport
+    /// with no cell, every pane suppressed, or a pane area that holds no box
+    /// 10 columns wide and tall enough for the toast's border rows, its
+    /// header row and the first row of its text.
     fn refresh(&mut self, client: &mut Client, active_tab_id: Option<TabId>) -> Option<MouseFrame> {
         self.refresh_at(client, active_tab_id, Instant::now())
     }
@@ -1121,16 +1139,18 @@ impl<B: Backend> Screen<B> {
         current_time: Instant,
     ) -> Option<MouseFrame> {
         self.image_output_state.poll();
-        let viewport_size = client.get_viewport_size();
-        let is_toast_paused = viewport_size.column_count == 0
-            || viewport_size.row_count == 0
+        let is_toast_paused = client.get_viewport_size() != self.committed_regions.viewport_size
             || self.last_snapshot.as_ref().is_none_or(|last_snapshot| {
-                last_snapshot
-                    .session_snapshot
-                    .active_tab_snapshot
-                    .is_every_pane_suppressed
+                !has_notification_toast_room(last_snapshot.build_painted_frame_layout(
+                    ViewerChrome {
+                        notification_toast:
+                            client.build_notification_toast(&self.committed_regions),
+                        ..ViewerChrome::default()
+                    },
+                    &self.committed_regions,
+                ))
             });
-        client.advance_notification_toast(current_time, is_toast_paused);
+        client.advance_notification_clocks(current_time, is_toast_paused);
         if self.pending_snapshot.is_some() {
             return self.commit_pending_snapshot(client, current_time);
         }
@@ -1153,7 +1173,12 @@ impl<B: Backend> Screen<B> {
             snapshot.client_snapshot.active_tab_id,
             |placement_display| placement_display.displayed_tab_snapshot.tab_snapshot.tab_id,
         );
-        let viewer_paint = ViewerPaint::from_client(client, displayed_active_tab_id, snapshot);
+        let viewer_paint = ViewerPaint::from_client(
+            client,
+            displayed_active_tab_id,
+            snapshot,
+            &self.committed_regions,
+        );
         let is_committed_tab_shown = placement_display.is_some()
             || self.shown_tab_snapshot.as_ref()
                 == Some(
@@ -1216,10 +1241,15 @@ impl<B: Backend> Screen<B> {
         } else {
             snapshot
         };
+        let drawn_notifications = client.build_drawn_notifications(
+            mouse_frame_snapshot
+                .build_painted_frame_layout(painted_viewer_chrome, &self.committed_regions),
+        );
         Some(MouseFrame::from_snapshot(
             mouse_frame_snapshot,
             self.committed_regions.clone(),
             painted_viewer_chrome,
+            drawn_notifications,
         ))
     }
 
@@ -2350,11 +2380,12 @@ impl Uplink {
         }
     }
 
-    /// Run `dispatch_plan`, the plan of `fired_action`: queue its command
-    /// under a new command id, issued by `client`'s key binding, or run its
-    /// viewer-local action on `client` against `mouse_frame`, the frame this
-    /// terminal last painted, and send what that action asks of the session.
-    /// Each request names `fired_action`.
+    /// Run `dispatch_plan`, the plan of `fired_action`: close the
+    /// notification center ([`Client::close_notification_center`]) and queue
+    /// its command under a new command id, issued by `client`'s key binding,
+    /// or run its viewer-local action on `client` against `mouse_frame`, the
+    /// frame this terminal last painted, and send what that action asks of the
+    /// session. Each request names `fired_action`.
     fn run_dispatch_plan(
         &mut self,
         client: &mut Client,
@@ -2364,6 +2395,7 @@ impl Uplink {
     ) {
         match dispatch_plan {
             DispatchPlan::Command(command) => {
+                client.close_notification_center();
                 self.submit_key_binding_command(
                     client,
                     CommandId::new(),
@@ -3398,12 +3430,16 @@ fn run_attachment<B: Backend, W: Write>(
                                 fired_action.as_ref(),
                                 reject_reason,
                                 help.as_deref(),
+                                NonZeroU32::MIN,
                                 SystemTime::now(),
                             );
                         }
-                        Ok(SessionEvent::NotificationPosted { revision, entry }) => {
+                        Ok(SessionEvent::NotificationPosted {
+                            revision,
+                            posted_entry,
+                        }) => {
                             if let Err(take_error) =
-                                client.take_session_notification_post(revision, entry)
+                                client.take_session_notification_post(revision, posted_entry)
                             {
                                 tracing::warn!(%take_error, "a notification from the session was not taken");
                             }
@@ -3428,9 +3464,14 @@ fn run_attachment<B: Backend, W: Write>(
                         // resync forgets every remembered move, and the next
                         // move asks for its whole distance from the drag
                         // anchor. Nothing is released by this: no round ever
-                        // waited.
+                        // waited. The command rejections the session held
+                        // post their `Warning`s after the session's queue is
+                        // taken.
                         Ok(SessionEvent::Resync {
-                            notification_queue, ..
+                            notification_queue,
+                            held_command_rejections,
+                            dropped_command_rejection_count,
+                            ..
                         }) => {
                             sent_border_moves.clear();
                             client.prepare_placement_reconciliation();
@@ -3440,6 +3481,13 @@ fn run_attachment<B: Backend, W: Write>(
                                 session_id,
                                 &notification_queue,
                             );
+                            if let Err(take_error) = client.take_held_command_rejections(
+                                &held_command_rejections,
+                                dropped_command_rejection_count,
+                                SystemTime::now(),
+                            ) {
+                                tracing::warn!(%take_error, "the session's held command rejections were not taken");
+                            }
                         }
                         // The first bytes of a long host write wait for the
                         // `HostWrite` that ends it.

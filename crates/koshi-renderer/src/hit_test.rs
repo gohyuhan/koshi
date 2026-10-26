@@ -19,9 +19,12 @@
 //!   click on them is the cell under the toast.
 //! - The viewer's open **floating pane tray** comes next. It is drawn over the
 //!   notification center and the floating panes, so a click on it is the tray,
-//!   not the pane under it.
-//! - The viewer's open **notification center** comes next. It is drawn over
-//!   the floating panes.
+//!   not the pane under it. Its titlebar holds the floating chrome's close
+//!   button `✕`.
+//! - The viewer's **notification center** comes next, on the cells its slide
+//!   draws, while it is open and while it slides out. It is drawn over the
+//!   floating panes. Its titlebar holds the floating chrome's close button
+//!   `✕`.
 //! - **Floating panes** come next, the top of this viewer's draw order first.
 //!   They live in cells of the pane rectangle left by the committed region
 //!   solve, with no letterbox offset, so a float drawn in the letterbox margin
@@ -39,7 +42,9 @@ use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{PaneId, TabId};
 use ratatui::layout::Rect as RatatuiRect;
 
-use crate::floating_pane_chrome::compute_floating_pane_titlebar;
+use crate::floating_chrome::{
+    compute_floating_content_rect, compute_floating_titlebar, FloatingTitlebarControls,
+};
 use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
 use crate::notification::{
     find_drawn_notification_center_layout, find_drawn_notification_toast_layout,
@@ -127,25 +132,33 @@ pub enum HitRegion {
         /// [`floating_panes`](crate::snapshot::SessionSnapshot::floating_panes).
         tile_index: usize,
     },
-    /// The tray header's ` minimize all ` or ` restore all ` label; clicking
-    /// it runs `core:toggle-minimize-all-floating-panes`.
+    /// The tray titlebar's `minimize all` or `restore all` label; clicking it
+    /// runs `core:toggle-minimize-all-floating-panes`.
     FloatingPaneTrayToggleMinimizeAll,
-    /// A cell of the viewer's open floating pane tray off every tile and the
-    /// header label: its border, its title, a blank cell or an empty slot.
+    /// The close button `✕` on the titlebar of the viewer's open floating
+    /// pane tray; clicking it closes the tray.
+    FloatingPaneTrayClose,
+    /// A cell of the viewer's open floating pane tray off every tile, the
+    /// label and the close button: its border, its title, a blank cell or an
+    /// empty slot.
     FloatingPaneTray,
     /// The tabline's notification button ` ● ` or ` ●3 `; clicking it opens
     /// or closes the viewer's notification center.
     NotificationButton,
-    /// The close control ` × ` on the top border of the viewer's open
-    /// notification center; clicking it closes the center.
+    /// The close button `✕` on the titlebar of the viewer's notification
+    /// center; clicking it closes the center.
     NotificationCenterClose,
-    /// The label ` clear ` on the bottom border of the viewer's open
+    /// The label `Clear all` on the last content row of the viewer's
     /// notification center; clicking it clears the center and closes it.
-    NotificationCenterClear,
-    /// A cell of the viewer's open notification center off its close control
-    /// and its clear label: its border, its title, or a body cell.
+    NotificationCenterClearAll,
+    /// A cell of the body of the viewer's notification center, where its
+    /// cards sit ([`find_notification_card_at`](crate::notification::find_notification_card_at)
+    /// names the card).
+    NotificationCenterBody,
+    /// A cell of the viewer's notification center off its close button, its
+    /// clear-all label and its body: its border, its title, or a blank cell.
     NotificationCenter,
-    /// The close control ` × ` on the top border of the viewer's toast;
+    /// The close control ` ✕ ` on the top border of the viewer's toast;
     /// clicking it slides the toast out.
     NotificationToastClose,
     /// The tabline row, off any tab ribbon, arrow or tray button (session
@@ -212,10 +225,11 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
         }
     }
 
-    // The open notification center draws over the floating panes.
+    // The notification center draws over the floating panes, on the cells
+    // its slide draws.
     if let Some(center_layout) = find_drawn_notification_center_layout(frame_layout) {
-        if center_layout.center_rect.is_point_inside(screen_point) {
-            return classify_notification_center_region(&center_layout, screen_point);
+        if let Some(resting_point) = center_layout.find_resting_point(screen_point) {
+            return classify_notification_center_region(&center_layout, resting_point);
         }
     }
 
@@ -291,99 +305,196 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
     HitRegion::None
 }
 
-/// Classify `pane_area_point`, a cell inside `floating_pane_slot`'s outer rect
-/// counted from the pane-area origin. The content wins, then the titlebar parts
-/// that [`compute_floating_pane_titlebar`] places, then the border ring. Every
-/// other cell is [`PaneTitlebar`](HitRegion::PaneTitlebar): the titlebar cells
-/// with no control and the separator row.
+/// The part of a floating component's chrome or content under one cell of
+/// its box, as [`classify_floating_frame_point`] gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatingFramePart {
+    /// A cell of the content rect.
+    Content,
+    /// The grab handle `⣿⣿`.
+    GrabHandle,
+    /// The pin toggle `[ ]` or `[⚪]`.
+    PinToggle,
+    /// The minimize button `–`.
+    MinimizeButton,
+    /// The close button `✕`.
+    CloseButton,
+    /// A cell of the border ring, and which side of it.
+    Border {
+        /// The side the cell lies on. A corner cell resolves to the vertical
+        /// side.
+        side: Direction,
+        /// The horizontal side a corner cell also lies on. `None` on every
+        /// other border cell.
+        corner_horizontal_side: Option<Direction>,
+    },
+    /// A cell of the titlebar or separator row that holds no control: a
+    /// title cell or a blank cell.
+    Titlebar,
+}
+
+/// Classify `point`, a cell inside `outer_rect`, the box of a floating
+/// component whose content sits in `content_rect` and whose titlebar holds
+/// `titlebar_controls`. The content wins, then the titlebar parts that
+/// [`compute_floating_titlebar`] places, then the border ring. Every other
+/// cell is [`Titlebar`](FloatingFramePart::Titlebar): the titlebar cells with
+/// no control and the separator row. A control the component does not declare
+/// is never given.
 ///
-/// A `48x12` float at `(0, 0)`: `(2, 1)` is its grab handle, `(36, 1)` its pin
-/// toggle, `(41, 1)` minimize, `(44, 1)` close, `(5, 1)` and `(5, 2)` its
-/// titlebar, `(0, 1)` its left border, and `(5, 3)` its content.
+/// A floating pane's `48x12` box at `(0, 0)`: `(2, 1)` is its grab handle,
+/// `(36, 1)` its pin toggle, `(41, 1)` minimize, `(44, 1)` close, `(5, 1)` and
+/// `(5, 2)` its titlebar, `(0, 1)` its left border, and `(5, 3)` its content.
+pub(crate) fn classify_floating_frame_point(
+    outer_rect: Rect,
+    content_rect: Rect,
+    titlebar_controls: FloatingTitlebarControls,
+    point: Point,
+) -> FloatingFramePart {
+    if content_rect.is_point_inside(point) {
+        return FloatingFramePart::Content;
+    }
+    let titlebar = compute_floating_titlebar(outer_rect, titlebar_controls);
+    let is_on_titlebar_part = |part_rect: Option<Rect>| {
+        part_rect.is_some_and(|part_rect| part_rect.is_point_inside(point))
+    };
+    if is_on_titlebar_part(titlebar.grab_handle_rect) {
+        return FloatingFramePart::GrabHandle;
+    }
+    if is_on_titlebar_part(titlebar.pin_toggle_rect) {
+        return FloatingFramePart::PinToggle;
+    }
+    if is_on_titlebar_part(titlebar.minimize_button_rect) {
+        return FloatingFramePart::MinimizeButton;
+    }
+    if is_on_titlebar_part(titlebar.close_button_rect) {
+        return FloatingFramePart::CloseButton;
+    }
+    match resolve_border_side(outer_rect, point) {
+        Some((side, corner_horizontal_side)) => FloatingFramePart::Border {
+            side,
+            corner_horizontal_side,
+        },
+        None => FloatingFramePart::Titlebar,
+    }
+}
+
+/// Classify `pane_area_point`, a cell inside `floating_pane_slot`'s outer rect
+/// counted from the pane-area origin, by the part of the floating pane under
+/// it ([`classify_floating_frame_point`] with its content rect and
+/// [`FloatingTitlebarControls::FLOATING_PANE`]): its content, its grab handle
+/// ([`PlacementHandle`](HitRegion::PlacementHandle)), each control, its border
+/// ring, and [`PaneTitlebar`](HitRegion::PaneTitlebar) for every other cell.
 fn classify_floating_pane_region(
     floating_pane_slot: FloatingPaneSlot,
     pane_area_point: Point,
 ) -> HitRegion {
     let pane_id = floating_pane_slot.pane_id;
-    if floating_pane_slot
-        .content_rect
-        .is_point_inside(pane_area_point)
-    {
-        return HitRegion::PaneContent { pane_id };
-    }
-    let outer_rect = floating_pane_slot.outer_rect;
-    let titlebar = compute_floating_pane_titlebar(outer_rect);
-    let is_on_titlebar_part = |part_rect: Option<Rect>| {
-        part_rect.is_some_and(|part_rect| part_rect.is_point_inside(pane_area_point))
-    };
-    if is_on_titlebar_part(titlebar.grab_handle_rect) {
-        return HitRegion::PlacementHandle { pane_id };
-    }
-    if is_on_titlebar_part(titlebar.pin_toggle_rect) {
-        return HitRegion::PanePinToggle { pane_id };
-    }
-    if is_on_titlebar_part(titlebar.minimize_button_rect) {
-        return HitRegion::PaneMinimizeButton { pane_id };
-    }
-    if is_on_titlebar_part(titlebar.close_button_rect) {
-        return HitRegion::PaneCloseButton { pane_id };
-    }
-    match resolve_border_side(outer_rect, pane_area_point) {
-        Some((side, corner_horizontal_side)) => HitRegion::PaneBorder {
+    match classify_floating_frame_point(
+        floating_pane_slot.outer_rect,
+        floating_pane_slot.content_rect,
+        FloatingTitlebarControls::FLOATING_PANE,
+        pane_area_point,
+    ) {
+        FloatingFramePart::Content => HitRegion::PaneContent { pane_id },
+        FloatingFramePart::GrabHandle => HitRegion::PlacementHandle { pane_id },
+        FloatingFramePart::PinToggle => HitRegion::PanePinToggle { pane_id },
+        FloatingFramePart::MinimizeButton => HitRegion::PaneMinimizeButton { pane_id },
+        FloatingFramePart::CloseButton => HitRegion::PaneCloseButton { pane_id },
+        FloatingFramePart::Border {
+            side,
+            corner_horizontal_side,
+        } => HitRegion::PaneBorder {
             pane_id,
             side,
             corner_horizontal_side,
         },
-        None => HitRegion::PaneTitlebar { pane_id },
+        FloatingFramePart::Titlebar => HitRegion::PaneTitlebar { pane_id },
     }
 }
 
-/// Classify `screen_point`, a cell inside `tray_layout`'s tray rect: the slot
-/// of a floating pane, then the header label, then
-/// [`FloatingPaneTray`](HitRegion::FloatingPaneTray) for every other cell.
+/// Classify `screen_point`, a cell inside `tray_layout`'s tray rect, by the
+/// part of the tray's floating chrome under it
+/// ([`classify_floating_frame_point`] with the close button only): a content
+/// cell in the slot of a floating pane is that tile, the close button is
+/// [`FloatingPaneTrayClose`](HitRegion::FloatingPaneTrayClose), a titlebar
+/// cell of the label is the label, and every other cell is
+/// [`FloatingPaneTray`](HitRegion::FloatingPaneTray).
 ///
 /// With two floating panes on an `80`-column viewport, whose tray holds slot
-/// `1` at `(18, 2)` `10x3`, `(20, 3)` gives
-/// `FloatingPaneTrayTile { tile_index: 1 }`, and a cell of slot `2` gives
-/// `FloatingPaneTray`.
+/// `1` at `(18, 4)` `10x3`, `(20, 5)` gives
+/// `FloatingPaneTrayTile { tile_index: 1 }`, a cell of slot `2` gives
+/// `FloatingPaneTray`, and `(70, 2)` gives `FloatingPaneTrayClose`.
 fn classify_floating_pane_tray_region(
     frame_layout: FrameLayout<'_>,
     tray_layout: &FloatingPaneTrayLayout,
     screen_point: Point,
 ) -> HitRegion {
-    let tile_count = frame_layout.session_snapshot.floating_panes.len();
-    for (tile_index, slot_rect) in tray_layout.slot_rects.iter().take(tile_count).enumerate() {
-        if slot_rect.is_point_inside(screen_point) {
-            return HitRegion::FloatingPaneTrayTile { tile_index };
+    let tray_rect = tray_layout.tray_rect;
+    match classify_floating_frame_point(
+        tray_rect,
+        compute_floating_content_rect(tray_rect),
+        FloatingTitlebarControls::CLOSE_BUTTON_ONLY,
+        screen_point,
+    ) {
+        FloatingFramePart::Content => {
+            let tile_count = frame_layout.session_snapshot.floating_panes.len();
+            tray_layout
+                .slot_rects
+                .iter()
+                .take(tile_count)
+                .position(|slot_rect| slot_rect.is_point_inside(screen_point))
+                .map_or(HitRegion::FloatingPaneTray, |tile_index| {
+                    HitRegion::FloatingPaneTrayTile { tile_index }
+                })
         }
+        FloatingFramePart::CloseButton => HitRegion::FloatingPaneTrayClose,
+        FloatingFramePart::Titlebar
+            if tray_layout
+                .toggle_minimize_all_rect
+                .is_some_and(|label_rect| label_rect.is_point_inside(screen_point)) =>
+        {
+            HitRegion::FloatingPaneTrayToggleMinimizeAll
+        }
+        _ => HitRegion::FloatingPaneTray,
     }
-    if tray_layout
-        .toggle_minimize_all_rect
-        .is_some_and(|label_rect| label_rect.is_point_inside(screen_point))
-    {
-        return HitRegion::FloatingPaneTrayToggleMinimizeAll;
-    }
-    HitRegion::FloatingPaneTray
 }
 
-/// Classify `screen_point`, a cell inside `center_layout`'s center rect: the
-/// close control, then the clear label, then
-/// [`NotificationCenter`](HitRegion::NotificationCenter) for every other cell.
+/// Classify `resting_point`, a cell of `center_layout`'s center at rest, by
+/// the part of the center's floating chrome under it
+/// ([`classify_floating_frame_point`] with the close button only): the close
+/// button is [`NotificationCenterClose`](HitRegion::NotificationCenterClose),
+/// a content cell of `Clear all` is
+/// [`NotificationCenterClearAll`](HitRegion::NotificationCenterClearAll), a
+/// content cell of the body is
+/// [`NotificationCenterBody`](HitRegion::NotificationCenterBody), and every
+/// other cell is [`NotificationCenter`](HitRegion::NotificationCenter).
 ///
-/// A center at `(54, 1)` `26x22` gives `NotificationCenterClose` at `(76, 1)`,
-/// `NotificationCenterClear` at `(58, 22)`, and `NotificationCenter` at
-/// `(60, 5)`.
+/// A center at rest at `(56, 1)` `24x22` gives `NotificationCenterClose` at
+/// `(76, 2)`, `NotificationCenterClearAll` at `(65, 21)`,
+/// `NotificationCenterBody` at `(60, 5)`, and `NotificationCenter` at
+/// `(60, 2)`.
 fn classify_notification_center_region(
     center_layout: &NotificationCenterLayout,
-    screen_point: Point,
+    resting_point: Point,
 ) -> HitRegion {
-    if center_layout.close_rect.is_point_inside(screen_point) {
-        return HitRegion::NotificationCenterClose;
+    let center_rect = center_layout.center_rect;
+    match classify_floating_frame_point(
+        center_rect,
+        compute_floating_content_rect(center_rect),
+        FloatingTitlebarControls::CLOSE_BUTTON_ONLY,
+        resting_point,
+    ) {
+        FloatingFramePart::CloseButton => HitRegion::NotificationCenterClose,
+        FloatingFramePart::Content
+            if center_layout.clear_all_rect.is_point_inside(resting_point) =>
+        {
+            HitRegion::NotificationCenterClearAll
+        }
+        FloatingFramePart::Content if center_layout.body_rect.is_point_inside(resting_point) => {
+            HitRegion::NotificationCenterBody
+        }
+        _ => HitRegion::NotificationCenter,
     }
-    if center_layout.clear_rect.is_point_inside(screen_point) {
-        return HitRegion::NotificationCenterClear;
-    }
-    HitRegion::NotificationCenter
 }
 
 /// `screen_point` counted from the top-left cell of `frame_pane_area`, or

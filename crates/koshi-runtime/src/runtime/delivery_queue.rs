@@ -131,15 +131,17 @@ impl DeliverySender {
     ///
     /// # Errors
     /// [`TrySendError::Full`] when the queue holds its capacity, and
-    /// [`TrySendError::Disconnected`] when the receiver is gone. `delivery` is
-    /// dropped then.
-    pub fn try_send(&self, delivery: Delivery) -> Result<(), TrySendError<()>> {
+    /// [`TrySendError::Disconnected`] when the receiver is gone. Each error
+    /// hands back `delivery`.
+    // The error is as large as a `Delivery`.
+    #[allow(clippy::result_large_err)]
+    pub fn try_send(&self, delivery: Delivery) -> Result<(), TrySendError<Delivery>> {
         let mut queue_state = self.shared_queue.lock_queue_state();
         if queue_state.is_receiver_closed {
-            return Err(TrySendError::Disconnected(()));
+            return Err(TrySendError::Disconnected(delivery));
         }
         if queue_state.deliveries.len() >= queue_state.capacity {
-            return Err(TrySendError::Full(()));
+            return Err(TrySendError::Full(delivery));
         }
         queue_state.deliveries.push_back(delivery);
         self.shared_queue.queue_changed.notify_all();
@@ -151,8 +153,10 @@ impl DeliverySender {
     /// snapshot at the tail keeps its place.
     ///
     /// # Errors
-    /// The errors of [`try_send`](Self::try_send). A frame that replaces the
-    /// tail frame always fits.
+    /// [`TrySendError::Full`] when the queue holds its capacity, and
+    /// [`TrySendError::Disconnected`] when the receiver is gone.
+    /// `render_snapshot` is dropped then. A frame that replaces the tail frame
+    /// always fits.
     pub fn try_send_frame(
         &self,
         render_snapshot: Box<RenderSnapshot>,

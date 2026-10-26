@@ -14,10 +14,11 @@ pub const MAX_TAB_FOCUS_MRU_ENTRY_COUNT: u16 = 16;
 /// The most floating panes one session holds at once.
 pub const MAX_FLOATING_PANES_PER_SESSION: usize = 12;
 
-/// The cells a floating pane's chrome takes from its outer size: one border
-/// column on each side, and the top border, titlebar, separator and bottom
-/// border rows. A `40x12` floating pane holds `38x8` cells of content.
-pub const FLOATING_PANE_CHROME_SIZE: Size = Size {
+/// The cells the chrome of a floating component takes from its outer size:
+/// one border column on each side, and the top border, titlebar, separator
+/// and bottom border rows. A `40x12` floating pane holds `38x8` cells of
+/// content.
+pub const FLOATING_CHROME_SIZE: Size = Size {
     column_count: 2,
     row_count: 4,
 };
