@@ -127,14 +127,17 @@ fn build_version_refusal(
 
 /// A submit-command request carrying one command with no arguments.
 fn submit_command() -> IpcRequestKind {
-    IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
-        CommandId::new(),
-        CommandSource::ExternalCli {
-            session_id: None,
-            target_client_id: None,
-        },
-        Command::ToggleLockMode(ToggleLockModeArgs::default()),
-    )))
+    IpcRequestKind::SubmitCommand {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            CommandId::new(),
+            CommandSource::ExternalCli {
+                session_id: None,
+                target_client_id: None,
+            },
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+        )),
+        fired_action: None,
+    }
 }
 
 #[test]

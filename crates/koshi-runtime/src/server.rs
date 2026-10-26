@@ -19,11 +19,13 @@ use std::{
 
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::{ClientConfig, ServerConfig};
+use koshi_core::action::ActionReference;
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::constant::compute_frame_interval;
-use koshi_core::event::{Event, QuitCause};
+use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
+use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
@@ -362,18 +364,6 @@ impl Server {
         }
     }
 
-    /// Show the session's recovery notice on each viewer's statusline until
-    /// input reaches one of its panes.
-    ///
-    /// # Panics
-    /// Panics when `session_id` does not name a session this server holds.
-    pub fn show_session_recovery_notice(&mut self, session_id: SessionId) {
-        self.session_by_id
-            .get_mut(&session_id)
-            .expect("the recovered session was seeded")
-            .set_recovery_notice_visible(true);
-    }
-
     /// Rebuild a server from the state a previous process image carried out,
     /// over panes that are already running.
     ///
@@ -411,7 +401,10 @@ impl Server {
     /// 1. A driven pane that a session holds and the body carries a state for comes back with
     ///    that screen.
     /// 2. A driven pane that a session holds and the body carries no state for comes back with a
-    ///    blank screen showing [`SCREEN_NOT_RESTORED_NOTICE_BYTES`]. Its child keeps running.
+    ///    blank screen showing [`SCREEN_NOT_RESTORED_NOTICE_BYTES`]. Its child keeps running, and
+    ///    that session posts the `Warning` notification
+    ///    `pane …a1b2: its screen could not be restored after the restart; its program is still
+    ///    running`.
     /// 3. A driven pane that no session holds has its child ended with [`KillPolicy::Tree`] and
     ///    is not recorded.
     /// 4. A pane a session holds that the backend does not drive is closed with
@@ -465,25 +458,37 @@ impl Server {
             server.is_quit_requested = true;
             server.should_shutdown_immediately = carried_quit == CarriedQuit::Immediate;
         }
-        let session_pane_ids: HashSet<PaneId> = server
+        let session_id_by_pane_id: HashMap<PaneId, SessionId> = server
             .session_by_id
             .values()
-            .flat_map(|session| session.panes.list_pane_records())
-            .map(|pane_record| pane_record.get_pane_id())
+            .flat_map(|session| {
+                session
+                    .panes
+                    .list_pane_records()
+                    .map(|pane_record| (pane_record.get_pane_id(), session.session_id))
+            })
             .collect();
         let mut carried_pane_state_by_pane_id = body.carried_pane_state_by_pane_id;
         let restored_at = Instant::now();
         let restored_wall_time = SystemTime::now();
         for (pane_id, pty_size) in pty_size_by_pane_id {
-            if !session_pane_ids.contains(&pane_id) {
+            let Some(&session_id) = session_id_by_pane_id.get(&pane_id) else {
                 tracing::warn!(%pane_id, "a carried pane belongs to no session; its child is ended");
                 let _ = server.pty_backend.kill_pane(pane_id, KillPolicy::Tree);
                 continue;
-            }
+            };
             let Some(carried_pane_state) = carried_pane_state_by_pane_id.remove(&pane_id) else {
                 tracing::warn!(%pane_id, "a carried pane has no screen to restore; it comes back blank");
                 server.park_pane_pty(pane_id, pty_size);
                 server.handle_pty_output(pane_id, SCREEN_NOT_RESTORED_NOTICE_BYTES);
+                server.post_session_notification(
+                    session_id,
+                    NotificationSeverity::Warning,
+                    &format!(
+                        "{}: its screen could not be restored after the restart; its program is still running",
+                        pane_id.format_short_label()
+                    ),
+                );
                 continue;
             };
             server.live_pane_ids.insert(pane_id);
@@ -501,7 +506,9 @@ impl Server {
                 ),
             );
         }
-        resume_events.extend(server.close_undriven_panes(session_pane_ids, exit_status_by_pane_id));
+        resume_events.extend(
+            server.close_undriven_panes(session_id_by_pane_id.into_keys(), exit_status_by_pane_id),
+        );
         let pty_backend = Arc::clone(&server.pty_backend);
         let tab_ids_by_session_id: Vec<(SessionId, Vec<TabId>)> = server
             .session_by_id
@@ -527,7 +534,7 @@ impl Server {
     /// during the supervisor link when one exists.
     fn close_undriven_panes(
         &mut self,
-        session_pane_ids: HashSet<PaneId>,
+        session_pane_ids: impl IntoIterator<Item = PaneId>,
         mut exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
     ) -> Vec<Event> {
         let mut exit_events = Vec::new();
@@ -707,8 +714,9 @@ impl Server {
     /// ([`push_due_frames`](Self::push_due_frames)).
     ///
     /// The frame is this subscriber's viewing client's, built by
-    /// [`build_snapshot`](Self::build_snapshot), and goes regardless of the
-    /// subscriber's frame pace. A queued frame counts as the subscriber's
+    /// [`build_snapshot`](Self::build_snapshot), and goes with that client's
+    /// session's notification queue, regardless of the subscriber's frame
+    /// pace. A queued frame counts as the subscriber's
     /// frame at `current_time` (`FramePace::record_frame_sent`). A subscriber
     /// that views no client, or whose client is no longer attached, has its
     /// subscription dropped.
@@ -740,7 +748,11 @@ impl Server {
                 continue;
             };
             let client_id = self.subscriptions[subscription_index].client_id;
-            let Some(snapshot) = self.build_snapshot(client_id) else {
+            let (Some(snapshot), Some(notification_queue)) = (
+                self.build_snapshot(client_id),
+                self.get_session_for_client(client_id)
+                    .map(|session| Box::new(session.notification_queue.clone())),
+            ) else {
                 tracing::warn!(
                     subscriber_id = %desynced_subscriber_id,
                     client_id = %client_id,
@@ -749,10 +761,11 @@ impl Server {
                 self.event_bus.unsubscribe(desynced_subscriber_id);
                 continue;
             };
-            if self
-                .event_bus
-                .try_resync(desynced_subscriber_id, Box::new(snapshot))
-            {
+            if self.event_bus.try_resync(
+                desynced_subscriber_id,
+                Box::new(snapshot),
+                notification_queue,
+            ) {
                 self.subscriptions[subscription_index]
                     .frame_pace
                     .record_frame_sent(current_time);
@@ -839,10 +852,9 @@ impl Server {
     }
 
     /// Whether `view_changes_by_session_id` lists a state that a frame of
-    /// `client_id` shows: the tab bar, the floating panes, the pane sizing or
-    /// the recovery notice of the client's session, the client's own view, or
-    /// the layout of its active tab. `false` for a client attached to no
-    /// session.
+    /// `client_id` shows: the tab bar, the floating panes or the pane sizing of
+    /// the client's session, the client's own view, or the layout of its
+    /// active tab. `false` for a client attached to no session.
     fn is_client_frame_changed(
         &self,
         client_id: ClientId,
@@ -857,7 +869,6 @@ impl Server {
         view_changes.is_tab_bar_changed
             || view_changes.is_floating_set_changed
             || view_changes.is_pane_sizing_changed
-            || view_changes.is_recovery_notice_changed
             || view_changes.changed_client_ids.contains(&client_id)
             || session
                 .clients
@@ -1008,20 +1019,61 @@ impl Server {
             .map(|frame_subscription| frame_subscription.subscriber_id)
     }
 
-    /// Put one rejected pane placement command or floating pane move on the
-    /// queue of the client that sent it. Returns `true` when it is queued, and
-    /// `false` when `client_id` has no subscriber or the subscriber is
-    /// disconnected or desynchronized.
-    pub(crate) fn send_placement_command_rejection(
+    /// Put the session's rejection of command `command_id` on the queue of
+    /// `client_id`, the client that sent it: `reject_reason`, the hint
+    /// `help`, and `fired_action`, the action the client's key fired for the
+    /// command or `None`. Returns `true` when it is queued, and `false` when
+    /// `client_id` has no subscriber or the subscriber is disconnected or
+    /// desynchronized.
+    pub(crate) fn send_command_rejection(
         &mut self,
         client_id: ClientId,
         command_id: CommandId,
+        fired_action: Option<ActionReference>,
+        reject_reason: RejectReason,
+        help: Option<String>,
     ) -> bool {
         let Some(subscriber_id) = self.find_subscriber_id_by_client_id(client_id) else {
             return false;
         };
-        self.event_bus
-            .try_send_placement_command_rejection(subscriber_id, command_id)
+        self.event_bus.try_send_command_rejection(
+            subscriber_id,
+            command_id,
+            fired_action,
+            reject_reason,
+            help,
+        )
+    }
+
+    /// Post `text` from koshi itself at `severity` to session `session_id`'s
+    /// notification queue, at the current wall-clock time
+    /// ([`NotificationQueue::post_core_entry`](koshi_core::notification::NotificationQueue::post_core_entry)),
+    /// and deliver the post to every attached client as one
+    /// `NotificationPosted`.
+    /// A client that attaches after the post receives the queue in its attach
+    /// answer.
+    /// Does nothing when this process holds no session `session_id`.
+    ///
+    /// Example: posting `pane …a1b2 killed by signal 9` as an `Error` gives
+    /// each attached client one `NotificationPosted` carrying that entry.
+    pub fn post_session_notification(
+        &mut self,
+        session_id: SessionId,
+        severity: NotificationSeverity,
+        text: &str,
+    ) {
+        let Some(session) = self.session_by_id.get_mut(&session_id) else {
+            return;
+        };
+        let notification_queue = &mut session.notification_queue;
+        let posted_entry = notification_queue
+            .post_core_entry(severity, text, SystemTime::now())
+            .clone();
+        let revision = notification_queue.get_revision();
+        let removed_subscriber_ids = self
+            .event_bus
+            .publish_notification_post(revision, &posted_entry);
+        self.remove_subscriptions(&removed_subscriber_ids);
     }
 
     /// Log each of `events`, add it to the recent-events ring, then deliver it
@@ -1037,12 +1089,20 @@ impl Server {
             log_event(event);
             recent_events::record_event(event);
             let removed_subscriber_ids = self.event_bus.publish(event);
-            if !removed_subscriber_ids.is_empty() {
-                self.subscriptions.retain(|frame_subscription| {
-                    !removed_subscriber_ids.contains(&frame_subscription.subscriber_id)
-                });
-            }
+            self.remove_subscriptions(&removed_subscriber_ids);
         }
+    }
+
+    /// Drop the `subscriptions` entry of each of `removed_subscriber_ids`, the
+    /// subscribers a delivery removed from the bus. An empty slice changes
+    /// nothing and reads no entry.
+    fn remove_subscriptions(&mut self, removed_subscriber_ids: &[SubscriberId]) {
+        if removed_subscriber_ids.is_empty() {
+            return;
+        }
+        self.subscriptions.retain(|frame_subscription| {
+            !removed_subscriber_ids.contains(&frame_subscription.subscriber_id)
+        });
     }
 
     /// Queue `host_write` for `client_id`'s outer terminal on the first

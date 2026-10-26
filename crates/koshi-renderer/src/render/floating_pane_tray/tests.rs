@@ -19,6 +19,7 @@ use crate::floating_pane_tray::tests::{
     EIGHTY_BY_TWENTY_FOUR_SIZE,
 };
 use crate::images::ImageRenderMode;
+use crate::notification::tests::EMPTY_NOTIFICATION_VIEW;
 use crate::render::style::compute_mode_style;
 use crate::render::tests::{build_viewport_area, format_rendered_cells};
 use crate::render::{build_frame_geometry, get_cursor_position, render_frame};
@@ -56,6 +57,7 @@ fn render_tray_frame_rows(
         &[],
         None,
         None,
+        EMPTY_NOTIFICATION_VIEW,
         drawn_rows,
         render_buffer,
     );

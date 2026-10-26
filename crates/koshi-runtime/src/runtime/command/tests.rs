@@ -1142,12 +1142,9 @@ fn write_to_a_running_pane_delivers_the_bytes() {
     let ResizeFixture {
         mut runtime,
         fake_pty_backend,
-        session_id,
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.show_session_recovery_notice(session_id);
-
     // An explicit target on a live pane injects the bytes into its child and
     // completes with no events — the write is a side effect, not a state change.
     let command_envelope =
@@ -1172,9 +1169,7 @@ fn write_to_a_running_pane_delivers_the_bytes() {
             .unwrap(),
         vec![vec![b'l', b's', b'\n']]
     );
-    assert!(!runtime.list_sessions()[&session_id].is_recovery_notice_visible());
 
-    runtime.show_session_recovery_notice(session_id);
     let empty_write =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(split_pane_id),
@@ -1188,7 +1183,6 @@ fn write_to_a_running_pane_delivers_the_bytes() {
             emitted_events: Vec::new(),
         }
     );
-    assert!(runtime.list_sessions()[&session_id].is_recovery_notice_visible());
 
     fake_pty_backend.fail_writes_on(
         split_pane_id,
@@ -1210,7 +1204,6 @@ fn write_to_a_running_pane_delivers_the_bytes() {
             help: Some("pane is not accepting input".to_string()),
         }
     );
-    assert!(runtime.list_sessions()[&session_id].is_recovery_notice_visible());
 }
 
 /// A commanded write has no visibility guard: the bytes reach the pane's child
@@ -9179,6 +9172,7 @@ fn confirm_previewed_placement(
         placement_snapshot.source_pane_id,
         placement_target,
         &placed_preview.placed_tab_layout,
+        None,
     )
 }
 
@@ -9744,14 +9738,19 @@ fn a_confirmation_that_no_longer_matches_the_session_is_rejected_and_answered() 
         take_session_view_changes(&mut runtime, session_id),
         SessionViewChanges::default()
     );
-    let rejected_command_ids: Vec<CommandId> = delivery_receiver
+    let rejections: Vec<Delivery> = delivery_receiver
         .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::PlacementCommandRejected(rejected_command_id) => Some(rejected_command_id),
-            _ => None,
-        })
+        .filter(|delivery| matches!(delivery, Delivery::CommandRejected { .. }))
         .collect();
-    assert_eq!(rejected_command_ids, vec![command_id]);
+    assert_eq!(
+        rejections,
+        vec![Delivery::CommandRejected {
+            command_id,
+            fired_action: None,
+            reject_reason: RejectReason::InvalidState,
+            help: Some("placement preview is stale; confirm again".to_string()),
+        }]
+    );
     assert_eq!(
         get_attached_client(&runtime, session_id, client_id)
             .get_last_applied_placement_command_id(),
@@ -14635,6 +14634,196 @@ fn child_exit_of_an_unknown_pane_is_dropped() {
     let emitted_events = runtime.handle_child_exit(PaneId::new(), ExitStatus::ExitCode(0));
 
     assert!(emitted_events.is_empty());
+}
+
+/// A runtime holding one session whose one tab splits `survivor_pane_id`
+/// beside `exiting_pane_id`, viewed by one client. `exiting_pane_id` runs a
+/// named command when `is_command_pane`, and the default shell otherwise.
+fn build_two_pane_exit_fixture(
+    is_command_pane: bool,
+) -> (Server, mpsc::Sender<RuntimeEvent>, SessionId, PaneId) {
+    let (mut runtime, runtime_event_sender) = build_runtime();
+    let (tab_id, survivor_pane_id, exiting_pane_id) = (TabId::new(), PaneId::new(), PaneId::new());
+    let mut session = build_bare_session(SessionId::new());
+    register_pane_record(&mut session, survivor_pane_id);
+    let mut exiting_pane_record = PaneRecord::from_terminal_pane(exiting_pane_id);
+    if is_command_pane {
+        exiting_pane_record.spawn_spec = Some(build_spawn_spec());
+    }
+    session
+        .panes
+        .register_pane_record(exiting_pane_record)
+        .expect("unique pane id");
+    register_session_tab(&mut session, tab_id, survivor_pane_id);
+    let _ = session.update_tab_layout(
+        tab_id,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(survivor_pane_id),
+                LayoutNode::Pane(exiting_pane_id),
+            ],
+        )),
+    );
+    attach_client(
+        &mut session,
+        ClientId::new(),
+        tab_id,
+        Some(survivor_pane_id),
+    );
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+    (runtime, runtime_event_sender, session_id, exiting_pane_id)
+}
+
+/// The severity and text of each entry in `session_id`'s queue on `runtime`,
+/// oldest first.
+fn list_session_notifications(
+    runtime: &Server,
+    session_id: SessionId,
+) -> Vec<(NotificationSeverity, String)> {
+    runtime.session_by_id[&session_id]
+        .notification_queue
+        .list_entries()
+        .map(|notification_entry| (notification_entry.severity, notification_entry.text.clone()))
+        .collect()
+}
+
+#[test]
+fn a_pane_exit_the_session_survives_posts_by_its_outcome_and_never_the_pane_content() {
+    let windows_access_violation = ExitStatus::ExitCode(0xC000_0005_u32.cast_signed());
+    for (is_command_pane, exit_status, expected_outcome_text) in [
+        (false, ExitStatus::Signaled(9), Some("killed by signal 9")),
+        (true, ExitStatus::Signaled(15), Some("killed by signal 15")),
+        (true, ExitStatus::ExitCode(101), Some("exited 101")),
+        (false, ExitStatus::ExitCode(101), None),
+        (false, ExitStatus::ExitCode(1), None),
+        (false, ExitStatus::ExitCode(0), None),
+        (true, ExitStatus::ExitCode(0), None),
+        (false, windows_access_violation, Some("exited 0xC0000005")),
+        (true, windows_access_violation, Some("exited 0xC0000005")),
+        (
+            false,
+            UNOBSERVED_EXIT,
+            Some("ended; its exit status was not received"),
+        ),
+        (
+            true,
+            UNOBSERVED_EXIT,
+            Some("ended; its exit status was not received"),
+        ),
+    ] {
+        let (mut runtime, _runtime_event_sender, session_id, exiting_pane_id) =
+            build_two_pane_exit_fixture(is_command_pane);
+        runtime.handle_pty_output(exiting_pane_id, b"password: hunter2\r\n");
+
+        let emitted_events = runtime.handle_child_exit(exiting_pane_id, exit_status);
+
+        assert_eq!(
+            list_event_names(&emitted_events),
+            [
+                "PaneProcessExited",
+                "PaneClosing",
+                "PaneRemoved",
+                "LayoutChanged"
+            ],
+            "the session survives {exit_status:?}"
+        );
+        let expected_notifications: Vec<(NotificationSeverity, String)> = expected_outcome_text
+            .map(|outcome_text| {
+                (
+                    NotificationSeverity::Error,
+                    format!("{} {outcome_text}", exiting_pane_id.format_short_label()),
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(
+            list_session_notifications(&runtime, session_id),
+            expected_notifications,
+            "command pane {is_command_pane}, {exit_status:?}"
+        );
+    }
+}
+
+#[test]
+fn a_floating_pane_whose_child_is_killed_posts_one_error() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let session_id = SessionId::new();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        session_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("the session starts");
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+
+    runtime.handle_child_exit(floating_pane_id, ExitStatus::Signaled(9));
+
+    assert_eq!(
+        list_session_notifications(&runtime, session_id),
+        vec![(
+            NotificationSeverity::Error,
+            format!(
+                "{} killed by signal 9",
+                floating_pane_id.format_short_label()
+            )
+        )]
+    );
+}
+
+#[test]
+fn an_exit_that_ends_the_session_posts_nothing() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let (client_id, tab_id, root_pane_id) = (ClientId::new(), TabId::new(), PaneId::new());
+    let mut session = build_bare_session(SessionId::new());
+    register_pane_record(&mut session, root_pane_id);
+    register_session_tab(&mut session, tab_id, root_pane_id);
+    attach_client(&mut session, client_id, tab_id, Some(root_pane_id));
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+
+    let emitted_events = runtime.handle_child_exit(root_pane_id, ExitStatus::Signaled(9));
+
+    assert_eq!(list_event_names(&emitted_events).last(), Some(&"Quit"));
+    assert_eq!(list_session_notifications(&runtime, session_id), Vec::new());
+}
+
+#[test]
+fn an_exit_koshi_caused_by_closing_the_pane_posts_nothing() {
+    // `close-pane`, a forced close, and `close-pane-tree`.
+    for (should_force_close, should_kill_process_tree) in
+        [(false, false), (true, false), (false, true)]
+    {
+        let (mut runtime, _runtime_event_sender, session_id, exiting_pane_id) =
+            build_two_pane_exit_fixture(true);
+        let close_result = runtime.dispatch(build_sessionless_cli_command_envelope(
+            Command::ClosePane(ClosePaneArgs {
+                pane_id: Some(exiting_pane_id),
+                should_force_close,
+                should_kill_process_tree,
+            }),
+        ));
+        assert_eq!(
+            get_command_outcome(&close_result)
+                .map(|event_names| event_names.contains(&"PaneRemoved")),
+            Ok(true),
+            "the close ran"
+        );
+
+        let emitted_events = runtime.handle_child_exit(exiting_pane_id, ExitStatus::Signaled(1));
+
+        assert_eq!(emitted_events, Vec::new());
+        assert_eq!(list_session_notifications(&runtime, session_id), Vec::new());
+    }
 }
 
 // The root pane exits with a code, then the last pane is killed by a signal:
@@ -26870,6 +27059,7 @@ fn dock_refusals_name_the_reason_and_change_nothing() {
             floating_pane_id,
             dock_target,
             &stale_placed_tab_layout,
+            None,
         )),
         Err((
             RejectReason::InvalidState,

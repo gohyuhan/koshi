@@ -554,7 +554,7 @@ fn an_unavailable_preview_waits_for_the_answer_to_a_confirmation_then_ends_the_m
         Some(placement_target)
     );
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
 
     assert_eq!(client.placement_state.placement_mode, None);
     assert!(!client.is_placement_confirmation_pending());
@@ -634,7 +634,7 @@ fn a_frame_naming_another_placement_keeps_the_confirmation_until_the_session_rej
     );
     assert!(!client.placement_state.needs_placement_reconciliation);
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
@@ -1359,7 +1359,7 @@ fn a_rejected_keyboard_placement_keeps_pane_placement_mode_when_staying_is_off()
         .should_stay_in_pane_placement_mode_after_placement = false;
     record_pending_placement_command(&mut client, command_id);
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_placement_target(), None);
@@ -1386,7 +1386,7 @@ fn a_rejected_keyboard_placement_selects_the_whole_tab_of_the_held_preview() {
     placement_mode.pending_placement_command_id = Some(command_id);
     hold_placement_snapshot(&mut client, placement_snapshot);
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
@@ -1414,7 +1414,7 @@ fn rejected_mouse_placement_returns_to_the_base_mode() {
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
     assert!(!client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::Locked);
     assert!(client.placement_state.placement_mode.is_none());
@@ -1437,7 +1437,7 @@ fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
 
-    assert!(!client.reject_placement_command(CommandId::new()));
+    client.reject_placement_command(CommandId::new());
     assert!(client.is_placement_confirmation_pending());
     assert_eq!(
         client.get_placement_target().cloned(),
@@ -1462,7 +1462,6 @@ fn build_render_snapshot(
 ) -> Box<RenderSnapshot> {
     let active_tab_id = TabId::new();
     Box::new(RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: String::from("session"),
@@ -2356,6 +2355,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Split Pane",
             "Split Pane",
             "Toggle Floating Pane Tray",
+            "Toggle Notification Center",
             "Toggle Pane Fullscreen",
         ]
         .map(|hint_label| (hint_label.to_string(), false))

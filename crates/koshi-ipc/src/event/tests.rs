@@ -14,7 +14,11 @@ use crate::error::IpcError;
 use crate::frame::{
     FrameGraphicsProtocol, FrameImageAction, FrameImageRecordHeader, FrameImageTransfer,
 };
-use crate::protocol::tests::build_fixed_test_uuid;
+use crate::protocol::tests::{
+    build_fixed_notification_entry, build_fixed_notification_entry_json,
+    build_fixed_notification_queue_json, build_fixed_session_notification_queue,
+    build_fixed_test_uuid,
+};
 
 use super::*;
 
@@ -97,12 +101,25 @@ fn list_test_events() -> Vec<SessionEvent> {
         SessionEvent::Detached,
         SessionEvent::Resync {
             dropped_event_count: 4,
+            notification_queue: build_fixed_session_notification_queue(),
+        },
+        SessionEvent::NotificationPosted {
+            revision: 1,
+            entry: build_fixed_notification_entry(),
         },
         SessionEvent::SwitchTo {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
             owner_user_id: Some(1001),
         },
-        SessionEvent::PlacementCommandRejected { command_id },
+        SessionEvent::CommandRejected {
+            command_id,
+            fired_action: Some(
+                ActionReference::from_core_action_name("resize-pane-left")
+                    .expect("the action name is valid"),
+            ),
+            reject_reason: RejectReason::MinimumSize,
+            help: Some("the pane is at its minimum width".to_string()),
+        },
         SessionEvent::Pong,
     ]
 }
@@ -365,9 +382,21 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!("Quit"),
             json!("Restarting"),
             json!("Detached"),
-            json!({ "Resync": { "dropped_event_count": 4 } }),
+            json!({ "Resync": {
+                "dropped_event_count": 4,
+                "notification_queue": build_fixed_notification_queue_json()
+            } }),
+            json!({ "NotificationPosted": {
+                "revision": 1,
+                "entry": build_fixed_notification_entry_json()
+            } }),
             json!({ "SwitchTo": { "session_id": wire_identifier, "owner_user_id": 1001 } }),
-            json!({ "PlacementCommandRejected": { "command_id": wire_identifier } }),
+            json!({ "CommandRejected": {
+                "command_id": wire_identifier,
+                "fired_action": "core:resize-pane-left",
+                "reject_reason": "MinimumSize",
+                "help": "the pane is at its minimum width"
+            } }),
             json!("Pong"),
         ]
     );
@@ -611,6 +640,7 @@ fn numeric_fields_round_trip_at_their_extremes() {
         },
         SessionEvent::Resync {
             dropped_event_count: u64::MAX,
+            notification_queue: build_fixed_session_notification_queue(),
         },
         SessionEvent::MouseAnswer {
             request_id: u64::MAX,
@@ -683,14 +713,51 @@ fn quit_serializes_as_the_bare_name() {
 fn a_frame_this_build_has_reads_as_known() {
     let bare_event: IncomingEvent = serde_json::from_str(r#""Quit""#).expect("a bare name decodes");
     let event_with_fields: IncomingEvent =
-        serde_json::from_str(r#"{"Resync":{"dropped_event_count":4}}"#).expect("a frame decodes");
+        serde_json::from_str(r#"{"TabClosed":{"tab_id":"00000000-0000-0000-0000-000000000001"}}"#)
+            .expect("a frame decodes");
 
     assert_eq!(bare_event, MaybeKnown::Known(SessionEvent::Quit));
     assert_eq!(
         event_with_fields,
-        MaybeKnown::Known(SessionEvent::Resync {
-            dropped_event_count: 4,
+        MaybeKnown::Known(SessionEvent::TabClosed {
+            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
         })
+    );
+}
+
+#[test]
+fn a_resync_without_its_notification_queue_is_refused() {
+    let decoded_event_result: Result<SessionEvent, _> =
+        serde_json::from_str(r#"{"Resync":{"dropped_event_count":4}}"#);
+
+    let decode_error = decoded_event_result
+        .expect_err("a resync without the notification queue decoded instead of failing");
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `notification_queue` at line 1 column 35"
+    );
+}
+
+#[test]
+fn a_command_rejection_without_its_fired_action_or_help_is_refused() {
+    let without_fired_action: Result<SessionEvent, _> = serde_json::from_str(
+        r#"{"CommandRejected":{"command_id":"00000000-0000-0000-0000-000000000001","reject_reason":"MinimumSize","help":null}}"#,
+    );
+    let without_help: Result<SessionEvent, _> = serde_json::from_str(
+        r#"{"CommandRejected":{"command_id":"00000000-0000-0000-0000-000000000001","fired_action":null,"reject_reason":"MinimumSize"}}"#,
+    );
+
+    assert_eq!(
+        without_fired_action
+            .expect_err("a rejection without the fired action decoded instead of failing")
+            .to_string(),
+        "missing field `fired_action` at line 1 column 114"
+    );
+    assert_eq!(
+        without_help
+            .expect_err("a rejection without the help decoded instead of failing")
+            .to_string(),
+        "missing field `help` at line 1 column 122"
     );
 }
 

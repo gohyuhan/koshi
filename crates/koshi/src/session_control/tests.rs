@@ -82,7 +82,10 @@ fn answer_prepared_quit(
     let IpcRequestKind::Prepare(prepared_request_kind) = kill_prepare_request.request_kind else {
         panic!("expected a Prepare after the Hello");
     };
-    let IpcRequestKind::SubmitCommand(command_envelope) = *prepared_request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = *prepared_request_kind
+    else {
         panic!("expected a prepared submitted command");
     };
     assert_eq!(command_envelope.command, Command::Quit);

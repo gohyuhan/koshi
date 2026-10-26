@@ -27,7 +27,7 @@ use koshi_core::action::HintTier;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
@@ -36,23 +36,18 @@ use crate::render::{compute_bar_style, get_line_width, set_line_clipped};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
-const RECOVERY_NOTICE: &str =
-    "Restore failed: new shell; previous panes unavailable. Input clears notice. ";
-
 /// Paint the statusline from [`StatuslineInputs`] in `theme`'s colors.
 /// `statusline_area` is the row to paint into `screen_buffer`.
 ///
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
 /// 1. Blanks the row, then fills it with the theme's bar background.
-/// 2. When `is_recovery_notice_visible`, draws the session recovery notice
-///    across the row and stops.
-/// 3. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
+/// 2. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
 ///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
 ///    chord's prefix label, and only when bindings sit under it.
-/// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
+/// 3. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
-/// 5. Draws a `…` marker where the row ran out of room, and stops there.
+/// 4. Draws a `…` marker where the row ran out of room, and stops there.
 pub(crate) fn draw_statusline(
     statusline_inputs: StatuslineInputs<'_>,
     theme: &Theme,
@@ -65,26 +60,12 @@ pub(crate) fn draw_statusline(
     let StatuslineInputs {
         keymap_hints,
         pending_key_sequence,
-        is_recovery_notice_visible,
     } = statusline_inputs;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.
     Clear.render(statusline_area, screen_buffer);
     screen_buffer.set_style(statusline_area, compute_bar_style(theme));
-
-    if is_recovery_notice_visible {
-        let recovery_notice_line =
-            Line::from(Span::styled(RECOVERY_NOTICE, compute_warning_style()));
-        set_line_clipped(
-            screen_buffer,
-            statusline_area.x,
-            statusline_area.y,
-            &recovery_notice_line,
-            statusline_area.width,
-        );
-        return;
-    }
 
     let pending_chords = pending_key_sequence.map_or(&[][..], KeySequence::list_chords);
     let right_edge_column = statusline_area.right();
@@ -625,14 +606,6 @@ fn compute_breadcrumb_key_style(theme: &Theme) -> Style {
 fn compute_overflow_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.dimmed_ramp_text_color)
-        .add_modifier(Modifier::BOLD)
-}
-
-/// The warning colors used for a failed session restore.
-fn compute_warning_style() -> Style {
-    Style::default()
-        .fg(Color::White)
-        .bg(Color::Red)
         .add_modifier(Modifier::BOLD)
 }
 

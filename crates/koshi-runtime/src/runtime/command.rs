@@ -25,7 +25,9 @@ use crate::runtime::{
     bus::EventBus, spawn_env::add_koshi_environment, transaction::TransactionScope,
 };
 use crate::server::Server;
+use koshi_core::notification::NotificationSeverity;
 use koshi_core::{
+    action::ActionReference,
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
@@ -63,7 +65,7 @@ use koshi_layout::{
     solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
     tree::LayoutNode,
 };
-use koshi_pty::backend::state::PtyBackend;
+use koshi_pty::backend::state::{PtyBackend, UNOBSERVED_EXIT};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
 use koshi_renderer::floating_pane_chrome::compute_floating_pane_content_size;
 use koshi_session::client::{

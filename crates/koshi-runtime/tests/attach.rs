@@ -21,12 +21,13 @@ use common::{
     TEST_WAIT_TIMEOUT_DURATION,
 };
 
+use koshi_core::action::ActionReference;
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
     FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
     PanePlacementAnchor, PanePlacementTarget, TabTarget, TiledPlacementTarget,
 };
-use koshi_core::event::{Event, QuitCause};
+use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
@@ -264,16 +265,17 @@ fn the_frame_that_shows_a_viewers_lock_names_the_lock_command_it_sent() {
                 viewer_connection
                     .send(&IpcRequest {
                         request_id: 3,
-                        request_kind: IpcRequestKind::SubmitCommand(Box::new(
-                            CommandEnvelope::from_parts(
+                        request_kind: IpcRequestKind::SubmitCommand {
+                            command_envelope: Box::new(CommandEnvelope::from_parts(
                                 lock_command_id,
                                 CommandSource::from_key_binding(client_id),
                                 Command::SetLockMode(LockModeArgs {
                                     is_locked: true,
                                     client_id: None,
                                 }),
-                            ),
-                        )),
+                            )),
+                            fired_action: None,
+                        },
                     })
                     .expect("send the lock command");
                 let (viewer_connection, session_frames) = read_session_frames_until_painted_frame(
@@ -760,9 +762,10 @@ fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
             viewer_connection
                 .send(&IpcRequest {
                     request_id: 21,
-                    request_kind: IpcRequestKind::SubmitCommand(Box::new(build_new_tab_envelope(
-                        session_id,
-                    ))),
+                    request_kind: IpcRequestKind::SubmitCommand {
+                        command_envelope: Box::new(build_new_tab_envelope(session_id)),
+                        fired_action: None,
+                    },
                 })
                 .expect("send the next request");
             let (viewer_connection, session_frames) =
@@ -1361,6 +1364,7 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                         source_pane_id,
                         placement_target: placement_target.clone(),
                         expected_placed_tab_layout: expected_placed_tab_layout.clone(),
+                        fired_action: None,
                     },
                 })
                 .expect("send the confirmed pane swap");
@@ -1493,6 +1497,8 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
             let (viewer_connection, placement_snapshot) =
                 read_placement_preview(viewer_connection, source_pane_id, active_tab_id);
             let placement_target = TiledPlacementTarget::Swap { target_pane_id };
+            let confirm_action = ActionReference::from_core_action_name("confirm-pane-placement")
+                .expect("the action name is valid");
             let earlier_placed_tab_layout =
                 build_same_tab_placed_tab_layout(&placement_snapshot, &placement_target);
 
@@ -1525,12 +1531,16 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                         source_pane_id,
                         placement_target,
                         expected_placed_tab_layout: earlier_placed_tab_layout,
+                        fired_action: Some(confirm_action.clone()),
                     },
                 })
                 .expect("send the pane swap built on the earlier layout");
 
-            let expected_rejection = SessionEvent::PlacementCommandRejected {
+            let expected_rejection = SessionEvent::CommandRejected {
                 command_id: placement_command_id,
+                fired_action: Some(confirm_action),
+                reject_reason: RejectReason::InvalidState,
+                help: Some("placement preview is stale; confirm again".to_string()),
             };
             let (viewer_connection, answer_events) =
                 read_session_frames_until(viewer_connection, move |session_frame| {
@@ -1572,21 +1582,27 @@ fn a_refused_floating_pane_move_from_a_key_binding_is_rejected_to_its_viewer() {
             viewer_connection
                 .send(&IpcRequest {
                     request_id: 3,
-                    request_kind: IpcRequestKind::SubmitCommand(Box::new(
-                        CommandEnvelope::from_parts(
+                    request_kind: IpcRequestKind::SubmitCommand {
+                        command_envelope: Box::new(CommandEnvelope::from_parts(
                             move_command_id,
                             CommandSource::from_key_binding(client_id),
                             Command::MoveFloatingPane(MoveFloatingPaneArgs {
                                 pane_id: tiled_pane_id,
                                 top_left_cell: Point { column: 2, row: 3 },
                             }),
-                        ),
-                    )),
+                        )),
+                        fired_action: None,
+                    },
                 })
                 .expect("send the floating pane move of a tiled pane");
 
-            let expected_rejection = SessionEvent::PlacementCommandRejected {
+            let expected_rejection = SessionEvent::CommandRejected {
                 command_id: move_command_id,
+                fired_action: None,
+                reject_reason: RejectReason::InvalidState,
+                help: Some(format!(
+                    "{tiled_pane_id} is tiled; only a floating pane moves this way"
+                )),
             };
             let (viewer_connection, _) =
                 read_session_frames_until(viewer_connection, move |session_frame| {
@@ -1643,6 +1659,7 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
                         source_pane_id,
                         placement_target,
                         expected_placed_tab_layout: expected_placed_tab_layout.clone(),
+                        fired_action: None,
                     },
                 })
                 .expect("send the confirmed pane insertion");

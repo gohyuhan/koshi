@@ -285,7 +285,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         return session_server::run_session_server(
             &runtime_directory,
             config_directory.as_deref(),
-            loaded_app_config.into_app_config_layer(),
+            loaded_app_config,
             *session_id,
             session_name.clone(),
             loaded_profile,

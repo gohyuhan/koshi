@@ -120,7 +120,6 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
     };
 
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot,
         pane_snapshots: vec![pane_snapshot],
         client_snapshot,
@@ -615,6 +614,9 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             placement_source_pane_id: None,
             floating_pane_move_draft: None,
             floating_pane_tray: None,
+            notification_center: None,
+            notification_button: None,
+            notification_toast: None,
         }
     );
 }

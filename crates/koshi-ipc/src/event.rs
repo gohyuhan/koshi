@@ -21,6 +21,11 @@
 //! arrives, and each update that follows names a kept record without its
 //! RGBA bytes.
 //!
+//! [`NotificationPosted`](crate::event::SessionEvent::NotificationPosted)
+//! carries one entry the session's notification queue took. The attach
+//! structure and [`Resync`](crate::event::SessionEvent::Resync) carry the
+//! whole queue.
+//!
 //! Seven frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
 //! sends it after a client's queue overflowed, and it names how many deliveries
@@ -35,15 +40,19 @@
 //! [`MAX_HOST_WRITE_BYTE_COUNT`](crate::event::MAX_HOST_WRITE_BYTE_COUNT).
 //! [`SwitchTo`](crate::event::SessionEvent::SwitchTo) is the fifth: it names
 //! the session the client leaves this one for.
-//! [`PlacementCommandRejected`](crate::event::SessionEvent::PlacementCommandRejected)
-//! is the sixth: it names a pane placement command, or a floating pane move
-//! from a mouse round, that the session rejected.
+//! [`CommandRejected`](crate::event::SessionEvent::CommandRejected) is the
+//! sixth: it names a command from the client's key binding, its pane
+//! placement confirmation, or a floating pane move from its mouse round, that
+//! the session rejected.
 //! [`Pong`](crate::event::SessionEvent::Pong) is the seventh: the session
 //! writes one to a client whose `Attach` named a `link_timeout_ms` whenever it
 //! has written that client nothing for a third of it.
 
+use koshi_core::action::ActionReference;
 use koshi_core::command::PanePlacementTarget;
+use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::notification::{NotificationEntry, NotificationQueue};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::FrameImageTransfer;
@@ -213,6 +222,20 @@ pub enum SessionEvent {
     Resync {
         /// How many deliveries the client missed.
         dropped_event_count: u64,
+        /// The session's notification queue as it stands. The client takes
+        /// every entry of it that it does not hold.
+        notification_queue: NotificationQueue,
+    },
+    /// The session's notification queue took one post. Sent once to every
+    /// attached client.
+    NotificationPosted {
+        /// The queue's revision after the post. A client drops a post whose
+        /// revision is not above the last revision it took from the queue's
+        /// owner and epoch.
+        revision: u64,
+        /// The entry the post added, or the newest entry the post merged into,
+        /// under that entry's existing id with its new `repeat_count`.
+        entry: NotificationEntry,
     },
     /// What one round of mouse actions did. Sent once per
     /// [`IpcRequestKind::Mouse`](crate::protocol::IpcRequestKind::Mouse)
@@ -263,13 +286,27 @@ pub enum SessionEvent {
         #[serde(deserialize_with = "Option::deserialize")]
         owner_user_id: Option<u32>,
     },
-    /// A pane placement this client confirmed
+    /// The session rejected a command this client's key binding sent, a pane
+    /// placement this client confirmed
     /// ([`ConfirmPanePlacement`](crate::protocol::IpcRequestKind::ConfirmPanePlacement)),
-    /// a pane placement command from its key binding, or a floating pane move
-    /// from its key binding or its mouse round, was rejected.
-    PlacementCommandRejected {
+    /// or a floating pane move from this client's mouse round. Sent to that
+    /// client alone. A key-bound command whose target is a direction or the
+    /// next or previous floating pane, rejected as
+    /// [`RejectReason::TargetNotFound`], is not reported.
+    CommandRejected {
         /// The rejected command.
         command_id: CommandId,
+        /// The action the client's key fired, exactly as the request named
+        /// it, or `None` when no key fired the command. A message without
+        /// `fired_action` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        fired_action: Option<ActionReference>,
+        /// Why the session rejected the command.
+        reject_reason: RejectReason,
+        /// The session's hint for resolving the rejection, or `None` when it
+        /// has none. A message without `help` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        help: Option<String>,
     },
     /// A heartbeat from the session. Written to a client whose `Attach` named
     /// a `link_timeout_ms` whenever the session has written that client
@@ -301,11 +338,12 @@ impl SessionEvent {
             SessionEvent::Restarting => "Restarting",
             SessionEvent::Detached => "Detached",
             SessionEvent::Resync { .. } => "Resync",
+            SessionEvent::NotificationPosted { .. } => "NotificationPosted",
             SessionEvent::MouseAnswer { .. } => "MouseAnswer",
             SessionEvent::HostWrite { .. } => "HostWrite",
             SessionEvent::HostWritePart { .. } => "HostWritePart",
             SessionEvent::SwitchTo { .. } => "SwitchTo",
-            SessionEvent::PlacementCommandRejected { .. } => "PlacementCommandRejected",
+            SessionEvent::CommandRejected { .. } => "CommandRejected",
             SessionEvent::Pong => "Pong",
         }
     }
@@ -333,11 +371,12 @@ impl WireVariants for SessionEvent {
         "Restarting",
         "Detached",
         "Resync",
+        "NotificationPosted",
         "MouseAnswer",
         "HostWrite",
         "HostWritePart",
         "SwitchTo",
-        "PlacementCommandRejected",
+        "CommandRejected",
         "Pong",
     ];
 }

@@ -62,11 +62,6 @@ where
 /// pane sits, its [`FramePane`] says *what* is inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaintedFrame {
-    /// Whether the statusline shows that the session restarted with a new
-    /// shell. The field is left off the wire when no notice shows, and a frame
-    /// with no field means no notice.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_recovery_notice_visible: bool,
     /// The session being viewed: its identity, its solved active tab, its tab
     /// list, and the floating panes the viewing client shows.
     pub session_snapshot: FrameSession,

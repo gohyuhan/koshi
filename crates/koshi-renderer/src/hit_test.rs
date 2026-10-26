@@ -14,8 +14,14 @@
 //! - The **tabline** (top row) and the **statusline** (bottom row) are koshi-owned
 //!   chrome painted last, over whatever lies beneath, so a click on those rows
 //!   is chrome, not the pane under it.
+//! - The close control of the viewer's **toast** comes next. The toast is drawn
+//!   over every other part of the pane area. Its other cells are no region: a
+//!   click on them is the cell under the toast.
 //! - The viewer's open **floating pane tray** comes next. It is drawn over the
-//!   floating panes, so a click on it is the tray, not the pane under it.
+//!   notification center and the floating panes, so a click on it is the tray,
+//!   not the pane under it.
+//! - The viewer's open **notification center** comes next. It is drawn over
+//!   the floating panes.
 //! - **Floating panes** come next, the top of this viewer's draw order first.
 //!   They live in cells of the pane rectangle left by the committed region
 //!   solve, with no letterbox offset, so a float drawn in the letterbox margin
@@ -35,6 +41,10 @@ use ratatui::layout::Rect as RatatuiRect;
 
 use crate::floating_pane_chrome::compute_floating_pane_titlebar;
 use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
+use crate::notification::{
+    find_drawn_notification_center_layout, find_drawn_notification_toast_layout,
+    NotificationCenterLayout,
+};
 use crate::render::{
     compute_content_rect, compute_pane_area, find_region_area, is_placement_handle_shown,
     solve_tabline_layout, FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
@@ -123,6 +133,21 @@ pub enum HitRegion {
     /// A cell of the viewer's open floating pane tray off every tile and the
     /// header label: its border, its title, a blank cell or an empty slot.
     FloatingPaneTray,
+    /// The tabline's notification button ` ● ` or ` ●3 `; clicking it opens
+    /// or closes the viewer's notification center.
+    NotificationButton,
+    /// The close control ` × ` on the top border of the viewer's open
+    /// notification center; clicking it closes the center.
+    NotificationCenterClose,
+    /// The label ` clear ` on the bottom border of the viewer's open
+    /// notification center; clicking it clears the center and closes it.
+    NotificationCenterClear,
+    /// A cell of the viewer's open notification center off its close control
+    /// and its clear label: its border, its title, or a body cell.
+    NotificationCenter,
+    /// The close control ` × ` on the top border of the viewer's toast;
+    /// clicking it slides the toast out.
+    NotificationToastClose,
     /// The tabline row, off any tab ribbon, arrow or tray button (session
     /// name, gap, or mode tag).
     Tabline,
@@ -137,8 +162,11 @@ pub enum HitRegion {
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
 /// pane content beneath it: the committed tabline and statusline regions are
-/// tested first, then the viewer's open floating pane tray
-/// ([`find_drawn_floating_pane_tray_layout`]), then this viewer's drawn
+/// tested first, then the close control of the viewer's toast
+/// ([`find_drawn_notification_toast_layout`]), then the viewer's open
+/// floating pane tray ([`find_drawn_floating_pane_tray_layout`]), then the
+/// viewer's open notification center
+/// ([`find_drawn_notification_center_layout`]), then this viewer's drawn
 /// floating panes from the top of the draw order down, then the tiled layer.
 /// The tiled layout is centered inside the committed pane rectangle with a
 /// letterbox margin that hits nothing.
@@ -168,10 +196,26 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
         }
     }
 
-    // The open tray draws over the floating panes.
+    // The toast draws over every other part of the pane area. Only its close
+    // control is a region.
+    if find_drawn_notification_toast_layout(frame_layout)
+        .and_then(|toast_layout| toast_layout.close_rect)
+        .is_some_and(|close_rect| close_rect.is_point_inside(screen_point))
+    {
+        return HitRegion::NotificationToastClose;
+    }
+
+    // The open tray draws over the notification center and the floating panes.
     if let Some(tray_layout) = find_drawn_floating_pane_tray_layout(frame_layout) {
         if tray_layout.tray_rect.is_point_inside(screen_point) {
             return classify_floating_pane_tray_region(frame_layout, &tray_layout, screen_point);
+        }
+    }
+
+    // The open notification center draws over the floating panes.
+    if let Some(center_layout) = find_drawn_notification_center_layout(frame_layout) {
+        if center_layout.center_rect.is_point_inside(screen_point) {
+            return classify_notification_center_region(&center_layout, screen_point);
         }
     }
 
@@ -322,6 +366,26 @@ fn classify_floating_pane_tray_region(
     HitRegion::FloatingPaneTray
 }
 
+/// Classify `screen_point`, a cell inside `center_layout`'s center rect: the
+/// close control, then the clear label, then
+/// [`NotificationCenter`](HitRegion::NotificationCenter) for every other cell.
+///
+/// A center at `(54, 1)` `26x22` gives `NotificationCenterClose` at `(76, 1)`,
+/// `NotificationCenterClear` at `(58, 22)`, and `NotificationCenter` at
+/// `(60, 5)`.
+fn classify_notification_center_region(
+    center_layout: &NotificationCenterLayout,
+    screen_point: Point,
+) -> HitRegion {
+    if center_layout.close_rect.is_point_inside(screen_point) {
+        return HitRegion::NotificationCenterClose;
+    }
+    if center_layout.clear_rect.is_point_inside(screen_point) {
+        return HitRegion::NotificationCenterClear;
+    }
+    HitRegion::NotificationCenter
+}
+
 /// `screen_point` counted from the top-left cell of `frame_pane_area`, or
 /// `None` when it lies left of or above that cell. A pane area at `(0, 1)`
 /// turns screen `(30, 14)` into `(30, 13)`, and screen `(30, 0)` into `None`.
@@ -398,15 +462,16 @@ pub fn compute_tiled_pane_top_border(outer_rect: Rect) -> TiledPaneTopBorder {
     }
 }
 
-/// Classify a cell on the tabline row at `column`: the tray button, a scroll
-/// arrow, the tab whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off
-/// all of them.
+/// Classify a cell on the tabline row at `column`: the tray button, the
+/// notification button, a scroll arrow, the tab whose ribbon spans it, or
+/// [`Tabline`](HitRegion::Tabline) off all of them.
 fn classify_tabline_region(
     frame_layout: FrameLayout<'_>,
     tabline_rect: RatatuiRect,
     screen_column: u16,
 ) -> HitRegion {
-    let tabline_geometry = solve_tabline_layout(frame_layout.get_tabline_inputs(), tabline_rect);
+    let tabline_inputs = frame_layout.get_tabline_inputs();
+    let tabline_geometry = solve_tabline_layout(tabline_inputs, tabline_rect);
     if tabline_geometry
         .floating_pane_tray_button_column
         .is_some_and(|button_column| {
@@ -415,6 +480,15 @@ fn classify_tabline_region(
         })
     {
         return HitRegion::FloatingPaneTrayButton;
+    }
+    if tabline_geometry
+        .notification_button_columns
+        .as_ref()
+        .is_some_and(|notification_button_columns| {
+            notification_button_columns.contains(&screen_column)
+        })
+    {
+        return HitRegion::NotificationButton;
     }
     if tabline_geometry.left_scroll_arrow_column == Some(screen_column) {
         return HitRegion::TablineScrollLeft;

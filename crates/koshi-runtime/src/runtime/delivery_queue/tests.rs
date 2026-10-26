@@ -14,6 +14,7 @@ use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::ids::{PaneId, SubscriberId, TabId};
 
 use super::*;
+use crate::runtime::bus::tests::build_test_notification_queue;
 use crate::runtime::event::SessionEnding;
 use crate::runtime::frame::tests::build_render_snapshot;
 
@@ -128,6 +129,7 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
     delivery_sender
         .try_send(Delivery::Snapshot {
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+            notification_queue: build_test_notification_queue(),
             lag_report,
         })
         .expect("the resync snapshot fits");
@@ -139,6 +141,7 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
         vec![
             Delivery::Snapshot {
                 render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+                notification_queue: build_test_notification_queue(),
                 lag_report,
             },
             Delivery::Frame(build_named_frame(&base_render_snapshot, "d")),
@@ -315,6 +318,7 @@ fn a_paced_receive_holds_a_resync_snapshot_as_it_holds_a_frame() {
     delivery_sender
         .try_send(Delivery::Snapshot {
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+            notification_queue: build_test_notification_queue(),
             lag_report,
         })
         .expect("the resync snapshot fits");
@@ -327,6 +331,7 @@ fn a_paced_receive_holds_a_resync_snapshot_as_it_holds_a_frame() {
         delivery_receiver.recv_paced(None, true, &ending_notice),
         PacedReceive::Delivery(Delivery::Snapshot {
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+            notification_queue: build_test_notification_queue(),
             lag_report,
         })
     );

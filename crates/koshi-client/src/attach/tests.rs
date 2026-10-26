@@ -38,7 +38,7 @@ use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Size as RatatuiSize};
 
 use koshi_config::layer::PartialKeybindingsConfig;
-use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
+use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName, ToastPosition};
 use koshi_core::action::ClientActionKind;
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, CloseTabArgs, FocusTabArgs, GridPosition, NewTabArgs,
@@ -46,6 +46,7 @@ use koshi_core::command::{
     TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::constant::{DEFAULT_MAX_FRAMES_PER_SECOND, MIN_LINK_TIMEOUT_MS};
+use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{
@@ -54,6 +55,7 @@ use koshi_core::key::{
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking, ScrollDirection};
+use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSeverity};
 use koshi_input::host::{Event, Parser};
 use koshi_input::keyboard::decode_key_event;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
@@ -79,9 +81,10 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
-    FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot, MousePane, PaneSlot,
-    PaneSnapshot, PlacementHandleHover, PlacementSnapshot, PlacementSource, RenderSnapshot,
-    ScrollbackMetadata, SessionSnapshot, TabMetadata, TabSnapshot,
+    FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot, MousePane,
+    NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PlacementHandleHover,
+    PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 use koshi_terminal::graphics::{
@@ -107,8 +110,8 @@ use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::{
-    build_accepted_hello_result, build_image_chunk_frame, build_restarting_refusal,
-    build_test_runtime_directory, connect_test_socket_pair,
+    build_accepted_hello_result, build_fixed_epoch_notification_queue, build_image_chunk_frame,
+    build_restarting_refusal, build_test_runtime_directory, connect_test_socket_pair,
     spawn_session_listening_before_it_advertises, spawn_session_replacing_its_image,
     write_router_endpoint_file, write_session_endpoint_file,
 };
@@ -237,7 +240,6 @@ fn build_test_painted_frame_with_viewport_size(viewport_size: Size) -> PaintedFr
 fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame {
     let active_tab_id = TabId::new();
     PaintedFrame {
-        is_recovery_notice_visible: false,
         session_snapshot: FrameSession {
             session_id: SessionId::new(),
             session_name: String::from("session"),
@@ -656,6 +658,9 @@ fn every_other_frame_keeps_the_stream_reading() {
         },
         SessionEvent::Resync {
             dropped_event_count: 3,
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(SessionId::new()),
+            ),
         },
     ];
     for session_event in session_events {
@@ -856,7 +861,7 @@ fn a_restarted_remote_session_that_refuses_this_protocol_version_ends_the_redial
     );
 
     assert_eq!(
-        redial_result.map(|joined| joined.client_id),
+        redial_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RefusedAfterRestart(Box::new(
             CliError::ProtocolVersionRefused {
                 detail: "this session speaks protocol version 9".to_string(),
@@ -885,7 +890,7 @@ fn a_restarted_remote_session_that_refuses_for_another_reason_is_dialed_again() 
     );
 
     assert_eq!(
-        redial_result.map(|joined| joined.client_id),
+        redial_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RefusedAfterRestart(Box::new(
             CliError::ProtocolVersionRefused {
                 detail: "this session speaks protocol version 9".to_string(),
@@ -909,7 +914,7 @@ fn a_restarted_remote_session_still_refusing_past_the_deadline_ends_with_that_re
     );
 
     assert_eq!(
-        redial_result.map(|joined| joined.client_id),
+        redial_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RefusedAfterRestart(Box::new(
             CliError::IpcUnavailable {
                 detail: "session 7 is running but did not answer: it is restarting".to_string(),
@@ -940,7 +945,7 @@ fn a_restarted_remote_session_refused_first_and_unreachable_past_the_deadline_en
     );
 
     assert_eq!(
-        redial_result.map(|joined| joined.client_id),
+        redial_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::Restarting)
     );
     assert_eq!(dial_count, 2);
@@ -960,7 +965,7 @@ fn a_restarted_remote_session_still_unreachable_past_the_deadline_ends_the_redia
     );
 
     assert_eq!(
-        redial_result.map(|joined| joined.client_id),
+        redial_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::Restarting)
     );
     assert_eq!(dial_count, 1);
@@ -1040,7 +1045,8 @@ const PREVIOUS_RESUME_TOKEN: &str = "the resume token the last attach minted";
 const MINTED_RESUME_TOKEN: &str = "the resume token the rejoin minted";
 
 /// The Attach result naming `client_id` and `session_id`, echoing `pane_area`
-/// and minting `resume_token`: a session named `session` with no tabs.
+/// and minting `resume_token`: a session named `session` with no tabs and the
+/// empty notification queue [`build_fixed_epoch_notification_queue`] gives.
 fn build_attached_result(
     client_id: ClientId,
     session_id: SessionId,
@@ -1054,6 +1060,9 @@ fn build_attached_result(
             session_id,
             session_name: String::from("session"),
             tabs: Vec::new(),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
         },
         resume_token,
         pane_area,
@@ -1197,8 +1206,8 @@ fn coming_back_to_a_session_that_restarts_again_waits_for_its_next_image_and_joi
     )
     .expect("the next image hands the client record back");
 
-    assert_eq!(joined_session.client_id, client_id);
-    assert_eq!(joined_session.session_id, session_id);
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
+    assert_eq!(joined_session.attach_answer.session_id, session_id);
     assert_eq!(
         joined_session.connection_token,
         ConnectionToken::from_secret(THIRD_CONNECTION_TOKEN)
@@ -1226,8 +1235,16 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
         parse_attached_session(build_attached_result(client_id, session_id, None, None))
             .expect("the answer of an older session is accepted too");
 
-    assert_eq!(echoed_attached_session, (client_id, session_id, None));
-    assert_eq!(silent_attached_session, (client_id, session_id, None));
+    let expected_attach_answer = SessionAttachAnswer {
+        client_id,
+        session_id,
+        resume_token: None,
+        notification_queue: build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(
+            session_id,
+        )),
+    };
+    assert_eq!(echoed_attached_session, expected_attach_answer);
+    assert_eq!(silent_attached_session, expected_attach_answer);
 }
 
 /// A stream half over bytes held in memory: reads come from `read_bytes`,
@@ -1436,10 +1453,10 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
     .expect("the session joins");
     let join_ended_at = Instant::now();
 
-    assert_eq!(joined_session.client_id, client_id);
-    assert_eq!(joined_session.session_id, session_id);
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
+    assert_eq!(joined_session.attach_answer.session_id, session_id);
     assert_eq!(joined_session.connection_token, connection_token);
-    assert_eq!(joined_session.resume_token, None);
+    assert_eq!(joined_session.attach_answer.resume_token, None);
     let prepare_link_limits = LinkLimits {
         deadline: Some(link_deadline),
         idle_timeout: None,
@@ -1506,9 +1523,12 @@ fn a_remote_join_names_its_placement_target_and_pings_every_third_of_the_link_ti
             Some(placement_preview_target),
             MIN_LINK_TIMEOUT_MS,
         );
-        let _ = join_result_sender.send(
-            join_result.map(|joined_session| (joined_session.client_id, joined_session.session_id)),
-        );
+        let _ = join_result_sender.send(join_result.map(|joined_session| {
+            (
+                joined_session.attach_answer.client_id,
+                joined_session.attach_answer.session_id,
+            )
+        }));
     });
 
     let remote_attach: RemoteClientFrame = serving_frame_reader
@@ -1646,13 +1666,13 @@ fn coming_back_after_a_restart_presents_the_resume_token_and_keeps_the_one_it_mi
         None,
     )
     .expect("the stand-in session handed the client record back");
-    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
     assert_eq!(
         joined_session.connection_token,
         advertised_endpoint.connection_token
     );
     assert_eq!(
-        joined_session.resume_token,
+        joined_session.attach_answer.resume_token,
         Some(ConnectionToken::from_secret(MINTED_RESUME_TOKEN))
     );
     drop(joined_session);
@@ -1801,7 +1821,7 @@ fn a_restarted_session_that_refuses_the_join_ends_with_that_refusal() {
         None,
     );
     assert_eq!(
-        rejoin_result.map(|joined_session| joined_session.client_id),
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RefusedAfterRestart(Box::new(
             CliError::IpcUnavailable {
                 detail: "this session holds no such client".to_string(),
@@ -1846,7 +1866,7 @@ fn a_restarted_session_that_closes_before_answering_the_join_ends_as_restarting(
         .expect("the stand-in session read the Hello and closed");
 
     assert_eq!(
-        rejoin_result.map(|joined_session| joined_session.client_id),
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::Restarting)
     );
 }
@@ -1875,7 +1895,7 @@ fn a_restarted_session_whose_new_socket_takes_no_connection_ends_as_restarting()
     );
 
     assert_eq!(
-        rejoin_result.map(|joined_session| joined_session.client_id),
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::Restarting)
     );
 }
@@ -1919,7 +1939,7 @@ fn a_restarted_session_that_never_answers_the_join_ends_as_restarting_at_the_dea
     let rejoin_returned_at = Instant::now();
 
     assert_eq!(
-        rejoin_result.map(|joined_session| joined_session.client_id),
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::Restarting)
     );
     assert!(rejoin_returned_at < restart_deadline + Duration::from_secs(2));
@@ -1986,7 +2006,7 @@ fn a_restarted_session_that_mints_a_new_client_is_joined_as_that_client() {
         None,
     )
     .expect("the restarted session is joined as the client it minted");
-    assert_eq!(joined_session.client_id, minted_client_id);
+    assert_eq!(joined_session.attach_answer.client_id, minted_client_id);
     assert_eq!(
         joined_session.connection_token,
         advertised_endpoint.connection_token
@@ -2105,7 +2125,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
     );
 
     assert_eq!(
-        rejoin_result.map(|joined_session| joined_session.client_id),
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::Restarting)
     );
     assert!(
@@ -2192,8 +2212,8 @@ fn a_dial_refused_for_the_old_token_joins_once_the_session_advertises_its_own() 
     )
     .expect("the second dial presents the session's own token");
 
-    assert_eq!(joined_session.client_id, client_id);
-    assert_eq!(joined_session.session_id, session_id);
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
+    assert_eq!(joined_session.attach_answer.session_id, session_id);
     assert_eq!(
         joined_session.connection_token,
         ConnectionToken::from_secret(NEW_CONNECTION_TOKEN)
@@ -2226,7 +2246,7 @@ fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_i
         None,
     );
     assert_eq!(
-        rejoin_result.map(|joined_session| joined_session.client_id),
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
     );
 }
@@ -2336,7 +2356,7 @@ fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts()
     let reconnect_returned_at = Instant::now();
 
     assert_eq!(
-        reconnect_result.map(|joined_session| joined_session.client_id),
+        reconnect_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
     );
     let router_restarted_at = router_restart.join().expect("the router restart ran");
@@ -2375,7 +2395,7 @@ fn a_restart_into_an_incompatible_build_with_no_router_running_returns_at_once()
     );
 
     assert_eq!(
-        reconnect_result.map(|joined_session| joined_session.client_id),
+        reconnect_result.map(|joined_session| joined_session.attach_answer.client_id),
         Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
     );
     assert!(
@@ -3569,7 +3589,11 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
     );
     let tab_request = request_receiver.try_recv().expect("the Tab's command");
     assert_eq!(tab_request.request_id, FIRST_POST_ATTACH_REQUEST_ID + 1);
-    let IpcRequestKind::SubmitCommand(tab_command_envelope) = tab_request.request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope: tab_command_envelope,
+        ..
+    } = tab_request.request_kind
+    else {
         panic!("Tab submits a command, got {:?}", tab_request.request_kind);
     };
     assert_eq!(
@@ -3646,8 +3670,10 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
         .try_iter()
         .map(|ipc_request| ipc_request.request_kind)
         .collect();
-    let [scroll_round, IpcRequestKind::SubmitCommand(focus_command_envelope)] =
-        request_kinds.as_slice()
+    let [scroll_round, IpcRequestKind::SubmitCommand {
+        command_envelope: focus_command_envelope,
+        ..
+    }] = request_kinds.as_slice()
     else {
         panic!("expected a round and a command, got {request_kinds:?}");
     };
@@ -5686,7 +5712,6 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             .expect("the test image placement is valid");
 
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: String::from("session"),
@@ -6697,6 +6722,7 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
             source_pane_id: confirmed_source_pane_id,
             placement_target,
             expected_placed_tab_layout: *expected_placed_tab_layout,
+            fired_action: Some(build_test_action_reference("confirm-pane-placement")),
         }
     );
     assert!(client.is_placement_confirmation_pending());
@@ -6785,7 +6811,11 @@ fn mouse_pickup_previews_and_focuses_the_dragged_pane() {
         .try_recv()
         .expect("read the source focus command");
     assert_eq!(focus_request.request_id, FIRST_POST_ATTACH_REQUEST_ID);
-    let IpcRequestKind::SubmitCommand(focus_envelope) = focus_request.request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope: focus_envelope,
+        ..
+    } = focus_request.request_kind
+    else {
         panic!("the mouse pickup focuses its dragged pane");
     };
     assert_eq!(
@@ -6999,6 +7029,12 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         PlacementModeLifetime::UntilCancelled => 3,
         PlacementModeLifetime::UntilDragEnds => 4,
     };
+    let expected_fired_action = match placement_mode_lifetime {
+        PlacementModeLifetime::UntilCancelled => {
+            Some(build_test_action_reference("confirm-pane-placement"))
+        }
+        PlacementModeLifetime::UntilDragEnds => None,
+    };
 
     let draw_count = Arc::new(AtomicUsize::new(0));
     let mut screen = Screen::from_backend_and_viewport_size(
@@ -7081,6 +7117,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
             source_pane_id: confirmed_source_pane_id,
             placement_target: confirmed_placement_target,
             expected_placed_tab_layout: confirmed_placed_tab_layout,
+            fired_action: confirmed_fired_action,
         } = placement_request.request_kind
         else {
             return quit_with(String::from("the placement input confirmed no placement"));
@@ -7088,7 +7125,8 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         let is_expected_request = placement_request.request_id == FIRST_POST_ATTACH_REQUEST_ID + 2
             && confirmed_source_pane_id == source_pane_id
             && confirmed_placement_target == producer_placement_target
-            && confirmed_placed_tab_layout == expected_placed_tab_layout;
+            && confirmed_placed_tab_layout == expected_placed_tab_layout
+            && confirmed_fired_action == expected_fired_action;
         producer_sender
             .send(build_session_event_incoming(
                 SessionEvent::PanePlacementCommitted {
@@ -8577,6 +8615,11 @@ fn build_lock_chord() -> KeyChord {
     KeybindingsConfig::RESERVED_UNLOCK
 }
 
+/// The `core:` action named `action_name`.
+fn build_test_action_reference(action_name: &str) -> ActionReference {
+    ActionReference::from_core_action_name(action_name).expect("the action name is valid")
+}
+
 /// `<Tab>`, the key the built-in keymap binds to `core:next-tab` in normal
 /// mode and passes to the pane in locked mode.
 fn build_tab_chord() -> KeyChord {
@@ -8645,13 +8688,19 @@ fn build_blocked_attempt() -> (
 /// session end of that connection.
 fn build_joined_session(client_id: ClientId) -> (JoinedSession, Connection) {
     let (session_connection, reader, writer) = build_test_event_stream();
+    let session_id = SessionId::new();
     let joined_session = JoinedSession {
         reader,
         writer,
-        client_id,
-        session_id: SessionId::new(),
         connection_token: ConnectionToken::from_secret(NEW_CONNECTION_TOKEN),
-        resume_token: None,
+        attach_answer: SessionAttachAnswer {
+            client_id,
+            session_id,
+            resume_token: None,
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
+        },
     };
     (joined_session, session_connection)
 }
@@ -9376,7 +9425,7 @@ fn a_redial_that_joins_hands_back_the_session_and_holds_nothing_typed() {
     let Ok((joined_session, held_inputs)) = stretch_result else {
         panic!("the queued join ends the stretch");
     };
-    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
     assert_eq!(held_inputs, Vec::new());
     assert_eq!(viewer.client.link_status, LinkStatus::Linked);
     assert_eq!(
@@ -9538,9 +9587,12 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
             HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
                 build_plain_chord('a'),
             )]),
-            HeldInput::DispatchPlan(DispatchPlan::Command(Box::new(Command::NewTab(
-                NewTabArgs::default(),
-            )))),
+            HeldInput::FiredBinding {
+                dispatch_plan: DispatchPlan::Command(Box::new(Command::NewTab(
+                    NewTabArgs::default(),
+                ))),
+                fired_action: build_test_action_reference("new-tab"),
+            },
             HeldInput::Paste(String::from("pasted")),
         ],
     );
@@ -9555,13 +9607,18 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
             ))],
         }
     );
-    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[1].request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope,
+        fired_action,
+    } = &sent_requests[1].request_kind
+    else {
         panic!("the held binding goes up as its command");
     };
     assert_eq!(
         command_envelope.command,
         Command::NewTab(NewTabArgs::default())
     );
+    assert_eq!(*fired_action, Some(build_test_action_reference("new-tab")));
     assert_eq!(
         sent_requests[2].request_kind,
         IpcRequestKind::Paste {
@@ -9643,8 +9700,10 @@ fn keys_typed_after_the_lock_key_resolve_in_locked_mode_before_the_session_answe
         .try_iter()
         .map(|sent_request| sent_request.request_kind)
         .collect();
-    let [IpcRequestKind::SubmitCommand(lock_command_envelope), tab_request_kind] =
-        sent_request_kinds.as_slice()
+    let [IpcRequestKind::SubmitCommand {
+        command_envelope: lock_command_envelope,
+        ..
+    }, tab_request_kind] = sent_request_kinds.as_slice()
     else {
         panic!("the lock key and Tab send two requests, not {sent_request_kinds:?}");
     };
@@ -9694,8 +9753,10 @@ fn a_quit_key_bound_in_normal_mode_alone_reaches_the_pane_right_after_the_lock_k
         .try_iter()
         .map(|sent_request| sent_request.request_kind)
         .collect();
-    let [IpcRequestKind::SubmitCommand(lock_command_envelope), quit_key_request_kind] =
-        sent_request_kinds.as_slice()
+    let [IpcRequestKind::SubmitCommand {
+        command_envelope: lock_command_envelope,
+        ..
+    }, quit_key_request_kind] = sent_request_kinds.as_slice()
     else {
         panic!("the lock key and <C-x> send two requests, not {sent_request_kinds:?}");
     };
@@ -9731,9 +9792,9 @@ fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
     let sent_commands: Vec<(CommandId, Command)> = request_receiver
         .try_iter()
         .map(|sent_request| match sent_request.request_kind {
-            IpcRequestKind::SubmitCommand(command_envelope) => {
-                (command_envelope.command_id, command_envelope.command)
-            }
+            IpcRequestKind::SubmitCommand {
+                command_envelope, ..
+            } => (command_envelope.command_id, command_envelope.command),
             other_request_kind => panic!("a toggle sends a command, not {other_request_kind:?}"),
         })
         .collect();
@@ -9775,7 +9836,9 @@ fn the_minimize_all_binding_sends_the_session_toggle_and_keeps_the_tray_open() {
     let sent_commands: Vec<Command> = request_receiver
         .try_iter()
         .map(|sent_request| match sent_request.request_kind {
-            IpcRequestKind::SubmitCommand(command_envelope) => command_envelope.command,
+            IpcRequestKind::SubmitCommand {
+                command_envelope, ..
+            } => command_envelope.command,
             other_request_kind => panic!("the binding sends a command, not {other_request_kind:?}"),
         })
         .collect();
@@ -9873,13 +9936,24 @@ fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
     let [HeldInput::LockCommand {
         lock_command_id: first_lock_command_id,
         lock_mode: LockMode::Locked,
+        fired_action: lock_fired_action,
     }, HeldInput::Keyboard(locked_tab_key_inputs), HeldInput::LockCommand {
         lock_command_id: second_lock_command_id,
         lock_mode: LockMode::Normal,
-    }, HeldInput::DispatchPlan(next_tab_plan)] = held_inputs.as_slice()
+        fired_action: unlock_fired_action,
+    }, HeldInput::FiredBinding {
+        dispatch_plan: next_tab_plan,
+        fired_action: next_tab_fired_action,
+    }] = held_inputs.as_slice()
     else {
         panic!("lock, Tab, unlock and Tab are held as they resolved, not {held_inputs:?}");
     };
+    assert_eq!(*lock_fired_action, build_test_action_reference("lock"));
+    assert_eq!(*unlock_fired_action, build_test_action_reference("unlock"));
+    assert_eq!(
+        *next_tab_fired_action,
+        build_test_action_reference("next-tab")
+    );
     assert_ne!(first_lock_command_id, second_lock_command_id);
     assert_eq!(
         *locked_tab_key_inputs,
@@ -9965,6 +10039,7 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
         HeldInput::LockCommand {
             lock_command_id: held_unlock_command_id,
             lock_mode: LockMode::Normal,
+            fired_action: build_test_action_reference("unlock"),
         },
     );
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
@@ -9978,6 +10053,7 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
         HeldInput::LockCommand {
             lock_command_id: held_lock_command_id,
             lock_mode: LockMode::Locked,
+            fired_action: build_test_action_reference("lock"),
         },
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -10027,6 +10103,7 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
             HeldInput::LockCommand {
                 lock_command_id: first_lock_command_id,
                 lock_mode: LockMode::Locked,
+                fired_action: build_test_action_reference("lock"),
             },
             HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
                 build_tab_chord(),
@@ -10034,6 +10111,7 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
             HeldInput::LockCommand {
                 lock_command_id: second_lock_command_id,
                 lock_mode: LockMode::Normal,
+                fired_action: build_test_action_reference("unlock"),
             },
         ],
     );
@@ -10042,7 +10120,10 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
     let [first_lock_request, tab_request, second_lock_request] = sent_requests.as_slice() else {
         panic!("three held inputs send three requests, not {sent_requests:?}");
     };
-    let IpcRequestKind::SubmitCommand(first_lock_envelope) = &first_lock_request.request_kind
+    let IpcRequestKind::SubmitCommand {
+        command_envelope: first_lock_envelope,
+        ..
+    } = &first_lock_request.request_kind
     else {
         panic!("a held lock command goes up as a command");
     };
@@ -10057,7 +10138,10 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
             key_inputs: vec![crate::tests::build_key_input_for_chord(build_tab_chord())],
         }
     );
-    let IpcRequestKind::SubmitCommand(second_lock_envelope) = &second_lock_request.request_kind
+    let IpcRequestKind::SubmitCommand {
+        command_envelope: second_lock_envelope,
+        ..
+    } = &second_lock_request.request_kind
     else {
         panic!("a held lock command goes up as a command");
     };
@@ -10112,7 +10196,7 @@ fn a_join_read_before_a_quit_hands_the_quit_to_the_new_link() {
     let Ok((joined_session, held_inputs)) = stretch_result else {
         panic!("the join was read first");
     };
-    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
     assert_eq!(held_inputs, Vec::new());
     let Ok(Incoming::Input(terminal_input)) = viewer.incoming_receiver.try_recv() else {
         panic!("the quit stays on the channel for the linked loop");
@@ -10286,7 +10370,10 @@ fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer()
         .session_connection
         .recv()
         .expect("the quit reached the socket before the client left");
-    let IpcRequestKind::SubmitCommand(command_envelope) = quit_request.request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = quit_request.request_kind
+    else {
         panic!("the quit goes up as a command");
     };
     assert_eq!(command_envelope.command, Command::Quit);
@@ -10343,7 +10430,10 @@ fn the_quit_keybinding_ends_a_linked_attachment_at_once_as_detached() {
 
     assert_eq!(attachment_ending, AttachmentEnding::Detached);
     assert_eq!(sent_request_kinds.len(), 1);
-    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_request_kinds[0] else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = &sent_request_kinds[0]
+    else {
         panic!("the quit goes up as a command");
     };
     assert_eq!(command_envelope.command, Command::Quit);
@@ -12762,7 +12852,10 @@ fn a_key_read_after_the_ambiguity_deadline_fires_the_open_binding_and_then_resol
 
     let sent_requests: Vec<IpcRequest> = request_receiver.try_iter().collect();
     assert_eq!(sent_requests.len(), 2);
-    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[0].request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = &sent_requests[0].request_kind
+    else {
         panic!("the expired binding goes up as its command, got {sent_requests:?}");
     };
     assert_eq!(
@@ -12811,7 +12904,10 @@ fn a_key_read_before_the_ambiguity_deadline_continues_the_sequence_however_late_
 
     let sent_requests: Vec<IpcRequest> = request_receiver.try_iter().collect();
     assert_eq!(sent_requests.len(), 1);
-    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[0].request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = &sent_requests[0].request_kind
+    else {
         panic!("the completed sequence goes up as its command, got {sent_requests:?}");
     };
     assert_eq!(
@@ -13106,7 +13202,10 @@ fn a_paste_read_after_the_ambiguity_deadline_goes_up_after_the_binding_the_deadl
 
     let sent_requests: Vec<IpcRequest> = request_receiver.try_iter().collect();
     assert_eq!(sent_requests.len(), 2);
-    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[0].request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = &sent_requests[0].request_kind
+    else {
         panic!("the expired binding goes up first, got {sent_requests:?}");
     };
     assert_eq!(
@@ -13193,7 +13292,10 @@ fn a_mouse_event_read_after_the_ambiguity_deadline_sends_the_earlier_round_then_
         ))]),
         "the press read before the deadline goes up before the binding"
     );
-    let IpcRequestKind::SubmitCommand(command_envelope) = &sent_requests[1].request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = &sent_requests[1].request_kind
+    else {
         panic!("the expired binding follows the round, got {sent_requests:?}");
     };
     assert_eq!(
@@ -13376,9 +13478,12 @@ fn while_reconnecting_a_paste_read_after_the_deadline_is_held_after_the_binding_
     assert_eq!(
         held_inputs,
         vec![
-            HeldInput::DispatchPlan(DispatchPlan::Command(Box::new(Command::NewTab(
-                NewTabArgs::default(),
-            )))),
+            HeldInput::FiredBinding {
+                dispatch_plan: DispatchPlan::Command(Box::new(Command::NewTab(
+                    NewTabArgs::default(),
+                ))),
+                fired_action: build_test_action_reference("new-tab"),
+            },
             HeldInput::Paste(String::from("pasted")),
         ]
     );
@@ -14187,8 +14292,10 @@ fn a_bound_key_in_a_read_goes_up_between_the_keys_before_and_after_it() {
 
     let sent_request_kinds = list_requests_for_one_read(&mut client, runtime_events);
 
-    let [keys_before_request_kind, IpcRequestKind::SubmitCommand(lock_command_envelope), keys_after_request_kind] =
-        sent_request_kinds.as_slice()
+    let [keys_before_request_kind, IpcRequestKind::SubmitCommand {
+        command_envelope: lock_command_envelope,
+        ..
+    }, keys_after_request_kind] = sent_request_kinds.as_slice()
     else {
         panic!("the keys, the lock, then the keys go up, not {sent_request_kinds:?}");
     };
@@ -14736,4 +14843,547 @@ fn a_closed_floating_pane_starts_no_slide() {
 
     assert_eq!(screen.shown_animated_floating_pane_slots, Vec::new());
     assert_eq!(screen.floating_pane_minimize_animations.len(), 0);
+}
+
+/// Run one local attachment of session `session_id` over `incoming_events`,
+/// then a `Detached` event, and return the client. The client first takes
+/// `attached_notification_queue` as the attach answer carried it.
+fn run_attachment_over_notification_events(
+    session_id: SessionId,
+    attached_notification_queue: &NotificationQueue,
+    incoming_events: Vec<Incoming>,
+) -> Client {
+    let mut client = build_test_client();
+    client
+        .take_session_notification_queue(session_id, attached_notification_queue)
+        .expect("the attach answer's queue is the session's");
+    let client_id = client.get_client_id();
+    let mut screen = build_test_screen();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    for incoming_event in incoming_events
+        .into_iter()
+        .chain([build_session_event_incoming(SessionEvent::Detached)])
+    {
+        incoming_sender
+            .send(incoming_event)
+            .expect("the loop's channel takes it");
+    }
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        session_id,
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        TEXT_ONLY_ATTACH_SETTINGS,
+        &mut cell_size_query,
+        &mut Vec::new(),
+        incoming_sender,
+        incoming_receiver,
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::Detached);
+    client
+}
+
+/// The owner, severity, text and repeat count of every entry `client`'s
+/// notification history holds, oldest arrival first.
+fn list_history_entries(
+    client: &Client,
+) -> Vec<(NotificationQueueOwner, NotificationSeverity, String, u32)> {
+    client
+        .get_notification_history()
+        .list_merged_entries()
+        .map(|entry| {
+            (
+                entry.id.owner,
+                entry.severity,
+                entry.text.clone(),
+                entry.repeat_count,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn each_rejection_posts_one_warning_led_by_the_action_its_key_fired() {
+    let session_id = SessionId::new();
+    let attached_notification_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+    let tiled_pane_id = PaneId::new();
+
+    let client = run_attachment_over_notification_events(
+        session_id,
+        &attached_notification_queue,
+        vec![
+            build_session_event_incoming(SessionEvent::CommandRejected {
+                command_id: CommandId::new(),
+                fired_action: Some(build_test_action_reference("resize-pane-left")),
+                reject_reason: RejectReason::MinimumSize,
+                help: None,
+            }),
+            build_session_event_incoming(SessionEvent::CommandRejected {
+                command_id: CommandId::new(),
+                fired_action: Some(build_test_action_reference("confirm-floating-pane-move")),
+                reject_reason: RejectReason::InvalidState,
+                help: Some(format!(
+                    "{tiled_pane_id} is tiled; only a floating pane moves this way"
+                )),
+            }),
+            build_session_event_incoming(SessionEvent::CommandRejected {
+                command_id: CommandId::new(),
+                fired_action: None,
+                reject_reason: RejectReason::InvalidState,
+                help: None,
+            }),
+        ],
+    );
+
+    let client_owner = NotificationQueueOwner::Client(client.get_client_id());
+    assert_eq!(
+        list_history_entries(&client),
+        vec![
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                String::from("core:resize-pane-left: below minimum size"),
+                1,
+            ),
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                format!(
+                    "core:confirm-floating-pane-move: {tiled_pane_id} is tiled; only a floating \
+                     pane moves this way"
+                ),
+                1,
+            ),
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                String::from("invalid in the current state"),
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed() {
+    let session_id = SessionId::new();
+    let session_owner = NotificationQueueOwner::Session(session_id);
+    let attached_notification_queue = NotificationQueue::from_owner(session_owner);
+    let mut session_notification_queue = attached_notification_queue.clone();
+    let first_entry = session_notification_queue
+        .post_core_entry(
+            NotificationSeverity::Error,
+            "pane …a1b2 killed by signal 9",
+            SystemTime::UNIX_EPOCH,
+        )
+        .clone();
+    session_notification_queue.post_core_entry(
+        NotificationSeverity::Warning,
+        "koshi.kdl: unknown key `tab-bar`",
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let client = run_attachment_over_notification_events(
+        session_id,
+        &attached_notification_queue,
+        vec![
+            build_session_event_incoming(SessionEvent::NotificationPosted {
+                revision: 1,
+                entry: first_entry.clone(),
+            }),
+            build_session_event_incoming(SessionEvent::Resync {
+                dropped_event_count: 1,
+                notification_queue: session_notification_queue,
+            }),
+            build_session_event_incoming(SessionEvent::NotificationPosted {
+                revision: 1,
+                entry: first_entry,
+            }),
+        ],
+    );
+
+    assert_eq!(
+        list_history_entries(&client),
+        vec![
+            (
+                session_owner,
+                NotificationSeverity::Error,
+                String::from("pane …a1b2 killed by signal 9"),
+                1,
+            ),
+            (
+                session_owner,
+                NotificationSeverity::Warning,
+                String::from("koshi.kdl: unknown key `tab-bar`"),
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
+    let session_id = SessionId::new();
+    let attached_notification_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+    let mut foreign_notification_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(SessionId::new()));
+    foreign_notification_queue.post_core_entry(
+        NotificationSeverity::Error,
+        "pane …a1b2 killed by signal 9",
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let client = run_attachment_over_notification_events(
+        session_id,
+        &attached_notification_queue,
+        vec![build_session_event_incoming(SessionEvent::Resync {
+            dropped_event_count: 1,
+            notification_queue: foreign_notification_queue,
+        })],
+    );
+
+    assert_eq!(list_history_entries(&client), Vec::new());
+}
+
+#[test]
+fn the_notification_center_binding_opens_the_center_and_sends_no_request() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.submit_bound_action(
+            &mut client,
+            build_core_bound_action("toggle-notification-center"),
+            Some(&mouse_frame),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(
+        client.get_notification_history().get_notification_center(),
+        Some(NotificationCenter {
+            scroll_row_offset: 0,
+            is_focused: true,
+        })
+    );
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+/// `mouse_frame` as `client` paints it now: with the viewer chrome `client`
+/// holds.
+fn paint_viewer_chrome(client: &Client, mouse_frame: &MouseFrame) -> MouseFrame {
+    let mut painted_mouse_frame = mouse_frame.clone();
+    painted_mouse_frame.viewer_chrome =
+        client.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id);
+    painted_mouse_frame
+}
+
+/// Handle one left press at `screen_point` as `client` reads it at
+/// `read_at` over `painted_mouse_frame`, and return the mouse actions the
+/// press leaves to write. The press must send no request.
+fn press_once(
+    client: &mut Client,
+    painted_mouse_frame: &MouseFrame,
+    screen_point: Point,
+    read_at: Instant,
+) -> Vec<MouseAction> {
+    let client_id = client.get_client_id();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let mut pending_mouse_actions = Vec::new();
+    assert_eq!(
+        handle_terminal_input_event(
+            client,
+            &mut uplink,
+            &mut cell_size_query,
+            Some(painted_mouse_frame),
+            TerminalInput {
+                runtime_events: vec![RuntimeEvent::MouseInput {
+                    client_id,
+                    mouse_input: build_mouse_press(screen_point),
+                }],
+                read_at,
+            },
+            &mut Vec::new(),
+            &mut pending_mouse_actions,
+        ),
+        ControlFlow::Continue(())
+    );
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+    pending_mouse_actions
+}
+
+#[test]
+fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_and_keeps_the_tray()
+{
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_with_open_tray(&mouse_frame);
+    let open_floating_pane_tray = client.floating_pane_tray;
+    client.post_core_notification(
+        NotificationSeverity::Info,
+        "pane …a1b2 exited 101",
+        SystemTime::UNIX_EPOCH,
+    );
+    let start = Instant::now();
+    client.advance_notification_toast(start, false);
+    client.advance_notification_toast(start + Duration::from_secs(1), false);
+    let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
+
+    let pending_mouse_actions = press_once(
+        &mut client,
+        &painted_mouse_frame,
+        Point { column: 76, row: 1 },
+        start + Duration::from_secs(1),
+    );
+    client.advance_notification_toast(start + Duration::from_secs(1), false);
+    client.advance_notification_toast(start + Duration::from_secs(2), false);
+
+    assert_eq!(pending_mouse_actions, Vec::new());
+    assert_eq!(client.floating_pane_tray, open_floating_pane_tray);
+    assert_eq!(client.build_notification_toast(), None);
+    assert_eq!(
+        client
+            .get_notification_history()
+            .list_merged_entries()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_press_on_the_center_while_the_tray_is_open_closes_the_tray_and_focuses_the_center() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.apply_client_action(
+        ClientActionKind::ToggleNotificationCenter,
+        Some(&mouse_frame),
+    );
+    client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
+    let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
+
+    let pending_mouse_actions = press_once(
+        &mut client,
+        &painted_mouse_frame,
+        Point {
+            column: 60,
+            row: 10,
+        },
+        Instant::now(),
+    );
+
+    assert_eq!(pending_mouse_actions, Vec::new());
+    assert_eq!(client.floating_pane_tray, None);
+    assert_eq!(
+        client.get_notification_history().get_notification_center(),
+        Some(NotificationCenter {
+            scroll_row_offset: 0,
+            is_focused: true,
+        })
+    );
+}
+
+/// The toast of the frame `screen` last drew, and the notification revision
+/// that frame drew.
+fn find_shown_toast_paint(
+    screen: &Screen<TestBackend>,
+) -> Option<(Option<NotificationToast>, u64)> {
+    screen.shown_viewer_paint.as_ref().map(|viewer_paint| {
+        (
+            viewer_paint.chrome.notification_toast,
+            viewer_paint.notification_revision,
+        )
+    })
+}
+
+/// A top-right toast of one text row, `hidden_per_mille` thousandths past
+/// the right edge.
+fn build_one_row_toast(hidden_per_mille: u16) -> Option<NotificationToast> {
+    Some(NotificationToast {
+        toast_position: ToastPosition::TopRight,
+        text_row_count: 1,
+        hidden_per_mille,
+    })
+}
+
+#[test]
+fn a_refresh_advances_the_toast_clock_and_draws_each_step() {
+    let mut screen = build_test_screen();
+    let mut client = build_test_client();
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    post_one_row_notification(&mut client);
+    let start = Instant::now();
+
+    screen.refresh_at(&mut client, Some(active_tab_id), start);
+    let first_paint = find_shown_toast_paint(&screen);
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_millis(500),
+    );
+
+    let revision = client.get_notification_history().get_revision();
+    assert_eq!(first_paint, Some((build_one_row_toast(1000), revision)));
+    assert_eq!(
+        find_shown_toast_paint(&screen),
+        Some((build_one_row_toast(500), revision))
+    );
+}
+
+/// Post one `Info` entry to `client`'s own queue: a toast of one text row.
+fn post_one_row_notification(client: &mut Client) {
+    client.post_core_notification(
+        NotificationSeverity::Info,
+        "pane …a1b2 exited 101",
+        SystemTime::UNIX_EPOCH,
+    );
+}
+
+#[test]
+fn the_toast_clock_stops_while_no_pane_has_room() {
+    let mut screen = build_test_screen();
+    let mut client = build_test_client();
+    let mut no_room_frame = build_test_painted_frame();
+    no_room_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .is_every_pane_suppressed = true;
+    let no_room_tab_id = no_room_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(no_room_frame))
+        .expect("paint");
+    post_one_row_notification(&mut client);
+    let start = Instant::now();
+
+    screen.refresh_at(&mut client, Some(no_room_tab_id), start);
+    let wakeup_with_no_room = client.compute_next_notification_wakeup(start);
+    screen.refresh_at(
+        &mut client,
+        Some(no_room_tab_id),
+        start + Duration::from_secs(2),
+    );
+    let toast_with_no_room = client.build_notification_toast();
+    let roomy_frame = build_test_painted_frame();
+    let roomy_tab_id = roomy_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(roomy_frame))
+        .expect("paint");
+    screen.refresh_at(
+        &mut client,
+        Some(roomy_tab_id),
+        start + Duration::from_secs(3),
+    );
+    screen.refresh_at(
+        &mut client,
+        Some(roomy_tab_id),
+        start + Duration::from_millis(3500),
+    );
+
+    assert_eq!(wakeup_with_no_room, None);
+    assert_eq!(toast_with_no_room, build_one_row_toast(1000));
+    assert_eq!(
+        find_shown_toast_paint(&screen),
+        Some((
+            build_one_row_toast(500),
+            client.get_notification_history().get_revision()
+        ))
+    );
+}
+
+#[test]
+fn the_toast_clock_stops_while_the_viewport_has_no_cell() {
+    let mut screen = build_test_screen();
+    let mut client = build_test_client();
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    post_one_row_notification(&mut client);
+    let start = Instant::now();
+
+    client.set_viewport_size(Size {
+        column_count: 0,
+        row_count: 0,
+    });
+    screen.refresh_at(&mut client, Some(active_tab_id), start);
+    let wakeup_with_no_cell = client.compute_next_notification_wakeup(start);
+    client.set_viewport_size(TEST_VIEWPORT_SIZE);
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_secs(3),
+    );
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_millis(3500),
+    );
+
+    assert_eq!(wakeup_with_no_cell, None);
+    assert_eq!(
+        find_shown_toast_paint(&screen),
+        Some((
+            build_one_row_toast(500),
+            client.get_notification_history().get_revision()
+        ))
+    );
+}
+
+#[test]
+fn the_toast_clock_stops_while_no_frame_shows() {
+    let mut screen = build_test_screen();
+    let mut client = build_test_client();
+    post_one_row_notification(&mut client);
+    let start = Instant::now();
+
+    screen.refresh_at(&mut client, None, start);
+    let wakeup_with_no_frame = client.compute_next_notification_wakeup(start);
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_secs(3),
+    );
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_millis(3500),
+    );
+
+    assert_eq!(wakeup_with_no_frame, None);
+    assert_eq!(
+        find_shown_toast_paint(&screen),
+        Some((
+            build_one_row_toast(500),
+            client.get_notification_history().get_revision()
+        ))
+    );
 }

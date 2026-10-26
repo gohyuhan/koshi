@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::resume::read_resume_body;
+use koshi_core::notification::{NotificationEntry, NotificationSource};
 
 /// Every path in `migrated_json` whose value `decoded_json` does not hold at the
 /// same path. `.name` extends a path into an object field and `[index]` into an
@@ -614,11 +615,42 @@ fn migrate_resume_body_refuses_format_four_session_ids_repeated_with_different_l
     }
 }
 
+/// The session id every step-four test session carries.
+const STEP_FOUR_SESSION_KEY: &str = "00000000-0000-7000-8000-000000000001";
+
+/// [`STEP_FOUR_SESSION_KEY`] as a session id.
+fn parse_step_four_session_id() -> SessionId {
+    serde_json::from_value(Value::String(STEP_FOUR_SESSION_KEY.to_string()))
+        .expect("the session key is a session id")
+}
+
+/// Remove the `notification_queue` step 4 gave session `session_key` of
+/// `resume_body`, and check it: an empty queue at revision 0, owned by
+/// [`STEP_FOUR_SESSION_KEY`].
+fn take_added_notification_queue(resume_body: &mut Value, session_key: &str) {
+    let notification_queue_json = resume_body["session_by_id"][session_key]
+        .as_object_mut()
+        .expect("a session is an object")
+        .remove("notification_queue")
+        .expect("step 4 adds a notification queue");
+    let notification_queue: NotificationQueue =
+        serde_json::from_value(notification_queue_json).expect("the added queue decodes");
+    let session_id = parse_step_four_session_id();
+
+    assert_eq!(
+        notification_queue.get_owner(),
+        NotificationQueueOwner::Session(session_id)
+    );
+    assert_eq!(notification_queue.get_revision(), 0);
+    assert_eq!(notification_queue.list_entries().count(), 0);
+}
+
 #[test]
 fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
+                "session_id": STEP_FOUR_SESSION_KEY,
                 "session_name": "carried",
                 "tabs": {
                     "fresh-tab": {"tab_name": "code"},
@@ -640,6 +672,7 @@ fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
             "second": {
                 "floating_set": {"members": ["kept-member"]},
                 "starting_tab_id": "kept-starting-tab",
+                "notification_queue": "kept-queue",
                 "tabs": {},
                 "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {}}
@@ -650,11 +683,13 @@ fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
 
     migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
 
+    take_added_notification_queue(&mut resume_body, "first");
     assert_eq!(
         resume_body,
         serde_json::json!({
             "session_by_id": {
                 "first": {
+                    "session_id": STEP_FOUR_SESSION_KEY,
                     "session_name": "carried",
                     "floating_set": {"members": []},
                     "starting_tab_id": null,
@@ -689,6 +724,7 @@ fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
                 "second": {
                     "floating_set": {"members": ["kept-member"]},
                     "starting_tab_id": "kept-starting-tab",
+                    "notification_queue": "kept-queue",
                     "tabs": {},
                     "clients": {"client_by_id": {}},
                     "panes": {"pane_record_by_id": {}}
@@ -700,10 +736,66 @@ fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
 }
 
 #[test]
+fn step_four_turns_a_shown_recovery_notice_into_one_session_not_restored_error() {
+    let build_session = |is_recovery_notice_visible: bool| {
+        serde_json::json!({
+            "session_id": STEP_FOUR_SESSION_KEY,
+            "is_recovery_notice_visible": is_recovery_notice_visible,
+            "tabs": {},
+            "clients": {"client_by_id": {}},
+            "panes": {"pane_record_by_id": {}}
+        })
+    };
+    let mut resume_body = serde_json::json!({
+        "session_by_id": {"shown": build_session(true), "cleared": build_session(false)},
+        "carried_pane_state_by_pane_id": {}
+    });
+    let migrated_at = SystemTime::now();
+
+    migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
+
+    let shown_session = resume_body["session_by_id"]["shown"]
+        .as_object_mut()
+        .expect("a session is an object");
+    assert_eq!(shown_session.get("is_recovery_notice_visible"), None);
+    let notification_queue: NotificationQueue = serde_json::from_value(
+        shown_session
+            .remove("notification_queue")
+            .expect("step 4 adds a notification queue"),
+    )
+    .expect("the added queue decodes");
+    let session_id = parse_step_four_session_id();
+    let notification_entries: Vec<&NotificationEntry> = notification_queue.list_entries().collect();
+    assert_eq!(notification_entries.len(), 1);
+    let notification_entry = notification_entries[0];
+    assert_eq!(
+        notification_entry.id.owner,
+        NotificationQueueOwner::Session(session_id)
+    );
+    assert_eq!(notification_entry.id.sequence, 0);
+    assert_eq!(notification_entry.source, NotificationSource::Core);
+    assert_eq!(notification_entry.severity, NotificationSeverity::Error);
+    assert_eq!(
+        notification_entry.text,
+        "the session could not be restored after the restart; a new shell started"
+    );
+    assert_eq!(notification_entry.repeat_count, 1);
+    assert!(notification_entry.created_at >= migrated_at);
+    assert_eq!(notification_queue.get_revision(), 1);
+
+    take_added_notification_queue(&mut resume_body, "cleared");
+    assert_eq!(
+        resume_body["session_by_id"]["cleared"].get("is_recovery_notice_visible"),
+        None
+    );
+}
+
+#[test]
 fn step_four_turns_each_focused_pane_into_a_one_pane_focus_history() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
+                "session_id": STEP_FOUR_SESSION_KEY,
                 "floating_set": {"members": []},
                 "tabs": {},
                 "clients": {"client_by_id": {
@@ -744,6 +836,7 @@ fn step_four_removes_the_placement_revision_of_each_session_and_client() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
+                "session_id": STEP_FOUR_SESSION_KEY,
                 "placement_revision": 4,
                 "floating_set": {"members": []},
                 "tabs": {},
@@ -764,11 +857,13 @@ fn step_four_removes_the_placement_revision_of_each_session_and_client() {
 
     migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
 
+    take_added_notification_queue(&mut resume_body, "first");
     assert_eq!(
         resume_body,
         serde_json::json!({
             "session_by_id": {
                 "first": {
+                    "session_id": STEP_FOUR_SESSION_KEY,
                     "floating_set": {"members": []},
                     "starting_tab_id": null,
                     "tabs": {},
@@ -793,6 +888,7 @@ fn step_four_removes_the_lifecycle_and_close_policy_of_each_pane_record() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
+                "session_id": STEP_FOUR_SESSION_KEY,
                 "floating_set": {"members": []},
                 "tabs": {},
                 "clients": {"client_by_id": {}},
@@ -836,6 +932,11 @@ fn step_four_removes_the_lifecycle_and_close_policy_of_each_pane_record() {
 
 #[test]
 fn step_four_names_the_missing_or_misshapen_field() {
+    let invalid_session_id_detail = format!(
+        "body.session_by_id.S.session_id: {}",
+        serde_json::from_value::<SessionId>(Value::String("not-a-session-id".to_string()))
+            .expect_err("the text is not a session id")
+    );
     for (resume_body, expected_detail) in [
         (serde_json::json!({}), "body.session_by_id is missing"),
         (
@@ -845,6 +946,10 @@ fn step_four_names_the_missing_or_misshapen_field() {
         (
             serde_json::json!({"session_by_id": {"S": 7}}),
             "body.session_by_id.S must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"is_recovery_notice_visible": 7}}}),
+            "body.session_by_id.S.is_recovery_notice_visible must be a boolean",
         ),
         (
             serde_json::json!({"session_by_id": {"S": {}}}),
@@ -920,6 +1025,23 @@ fn step_four_names_the_missing_or_misshapen_field() {
                 "panes": {"pane_record_by_id": {"P": 7}}
             }}}),
             "session.panes.pane_record_by_id.P must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "tabs": {},
+                "clients": {"client_by_id": {}},
+                "panes": {"pane_record_by_id": {}}
+            }}}),
+            "body.session_by_id.S.session_id is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "session_id": "not-a-session-id",
+                "tabs": {},
+                "clients": {"client_by_id": {}},
+                "panes": {"pane_record_by_id": {}}
+            }}}),
+            invalid_session_id_detail.as_str(),
         ),
     ] {
         let mut resume_body = resume_body;

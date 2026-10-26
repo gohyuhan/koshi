@@ -317,6 +317,7 @@ The default leader is Ctrl.
 | `<C-t> x` | Close tab |
 | `Tab` / `Shift+Tab` | Next / previous tab |
 | `Alt+f` | Toggle pane fullscreen |
+| `Alt+n` | Open or close the notification center |
 | `<C-g>` | Toggle mouse selection |
 | `<C-l>` | Lock or unlock input |
 | `<C-q>` | Quit |
@@ -366,7 +367,7 @@ the user.
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, pane clipboard write, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
+| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, notification toast, pane clipboard write, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, environment values, and the starting input mode |
@@ -590,9 +591,10 @@ skips a release. For example, a resume file at format `2` passes through `3`
 and `4` before Koshi loads it as format `5`. No migration command is needed.
 
 If a session cannot read its restart record, it opens one new shell and the
-previous panes are unavailable. Koshi shows `Restore failed` in the statusline
-until input reaches a pane in that session. If the new shell clears its screen at
-startup, the statusline still reports the failed restore.
+previous panes are unavailable. The session posts the error `the session could
+not be restored after the restart; a new shell started` to every client that
+attaches. If the new shell clears its screen at startup, the notification still
+reports the failed restore.
 
 An update that koshi 0.4.0 or 0.5.0-pr.1 runs cannot confirm the restarts.
 Koshi 0.4.0 cannot read the files the installed build writes, and 0.5.0-pr.1

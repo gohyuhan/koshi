@@ -263,7 +263,10 @@ fn submit_session_command(
         connection,
         IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope),
+                fired_action: None,
+            },
         },
     );
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the command");
@@ -422,6 +425,7 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
         );
         if let SessionEvent::Resync {
             dropped_event_count,
+            ..
         } = session_event
         {
             break dropped_event_count;

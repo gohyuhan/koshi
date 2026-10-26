@@ -133,7 +133,10 @@ fn answer_scripted_connection(
     let IpcRequestKind::Prepare(prepared_request_kind) = &prepare_request.request_kind else {
         panic!("expected a Prepare after the Hello");
     };
-    let IpcRequestKind::SubmitCommand(command_envelope) = &**prepared_request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = &**prepared_request_kind
+    else {
         panic!("expected the Prepare to carry a SubmitCommand");
     };
     let IpcRequestKind::Hello {
@@ -2972,9 +2975,9 @@ fn spawn_settled_session(
         if let Some(next_request) = next_request {
             let prepared_command_id = match &next_request.request_kind {
                 IpcRequestKind::Prepare(prepared_request_kind) => match &**prepared_request_kind {
-                    IpcRequestKind::SubmitCommand(command_envelope) => {
-                        Some(command_envelope.command_id)
-                    }
+                    IpcRequestKind::SubmitCommand {
+                        command_envelope, ..
+                    } => Some(command_envelope.command_id),
                     _ => None,
                 },
                 _ => None,
@@ -3083,7 +3086,10 @@ fn take_prepared_command_envelope(prepare_request_kind: IpcRequestKind) -> Comma
     let IpcRequestKind::Prepare(prepared_request_kind) = prepare_request_kind else {
         panic!("expected a Prepare after the Hello, got {prepare_request_kind:?}");
     };
-    let IpcRequestKind::SubmitCommand(command_envelope) = *prepared_request_kind else {
+    let IpcRequestKind::SubmitCommand {
+        command_envelope, ..
+    } = *prepared_request_kind
+    else {
         panic!("expected the Prepare to carry a SubmitCommand");
     };
     *command_envelope

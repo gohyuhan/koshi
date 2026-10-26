@@ -343,6 +343,17 @@ pub enum ClientActionKind {
     /// Minimize the selected tray tile's floating pane when the viewer shows
     /// it, and restore it when the viewer minimized it.
     ToggleSelectedTrayTile,
+    /// Open the notification center and give it the viewer's keyboard when it
+    /// is closed, and close it when it is open.
+    ToggleNotificationCenter,
+    /// Close the notification center and return to the base input mode.
+    CloseNotificationCenter,
+    /// Remove every entry from the viewer's notification center and close it.
+    ClearNotifications,
+    /// Scroll the notification center one row toward its newest entry.
+    ScrollNotificationsUp,
+    /// Scroll the notification center one row toward its oldest entry.
+    ScrollNotificationsDown,
 }
 
 /// Where an action's key sorts among the keys of its modifier group in the
@@ -470,13 +481,15 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `Split Pane`, `resize-pane-*` `Resize Pane`, `select-pane-target-*`
 /// `Select Pane Target`, `select-pane-insertion-*` `Select Pane Insertion`,
 /// `move-floating-pane-*` `Move Floating Pane`, `select-tray-tile-*`
-/// `Select Tray Tile`, `focus-pane-*` `Focus Pane`, and
-/// `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`. Every other action has
-/// none.
+/// `Select Tray Tile`, `focus-pane-*` `Focus Pane`,
+/// `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`, and
+/// `scroll-notifications-up`/`scroll-notifications-down`
+/// `Scroll Notifications`. Every other action has none.
 ///
 /// Every `confirm-*` and `cancel-*` action, `new-pane`, `close-pane`,
-/// `close-pane-tree`, `new-tab`, `close-tab`, `lock`, `unlock` and
-/// `close-floating-pane-tray` are [`HintTier::Essential`]. The direction
+/// `close-pane-tree`, `new-tab`, `close-tab`, `lock`, `unlock`,
+/// `close-floating-pane-tray` and `close-notification-center` are
+/// [`HintTier::Essential`]. The direction
 /// families, `next-tab`, `previous-tab`, and the next and previous floating
 /// pane and placement tab actions are [`HintTier::Navigation`]. Every other
 /// action is [`HintTier::Other`].
@@ -889,6 +902,46 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::ToggleSelectedTrayTile),
         ),
         build_core_action_seed(
+            "toggle-notification-center",
+            "Toggle Notification Center",
+            "Open this client's notification center on the right side, or close it when it is open",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ToggleNotificationCenter),
+        ),
+        build_core_action_seed(
+            "close-notification-center",
+            "Close Notification Center",
+            "Close the notification center and keep its entries",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CloseNotificationCenter),
+        ),
+        build_core_action_seed(
+            "clear-notifications",
+            "Clear Notifications",
+            "Remove every entry from this client's notification center and close it",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ClearNotifications),
+        ),
+        build_core_action_seed(
+            "scroll-notifications-up",
+            "Scroll Notifications Up",
+            "Scroll the notification center one row toward its newest entry",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ScrollNotificationsUp),
+        ),
+        build_core_action_seed(
+            "scroll-notifications-down",
+            "Scroll Notifications Down",
+            "Scroll the notification center one row toward its oldest entry",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ScrollNotificationsDown),
+        ),
+        build_core_action_seed(
             "move-pane",
             "Move Pane",
             "Swap a pane with its visible neighbor in one direction and commit the swap at once",
@@ -1236,6 +1289,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
                 Some("Focus Pane")
             }
             "scroll-pane-up" | "scroll-pane-down" => Some("Scroll Pane"),
+            "scroll-notifications-up" | "scroll-notifications-down" => Some("Scroll Notifications"),
             _ => None,
         };
         let is_direction_family_member = action_metadata.hint_label.is_some();
@@ -1247,7 +1301,8 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             | "close-tab"
             | "lock"
             | "unlock"
-            | "close-floating-pane-tray" => HintTier::Essential,
+            | "close-floating-pane-tray"
+            | "close-notification-center" => HintTier::Essential,
             _ if action_name.starts_with("confirm-") || action_name.starts_with("cancel-") => {
                 HintTier::Essential
             }

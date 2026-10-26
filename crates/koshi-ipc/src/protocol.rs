@@ -18,6 +18,7 @@
 use std::fmt;
 use std::sync::OnceLock;
 
+use koshi_core::action::ActionReference;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs, TiledPlacementTarget,
 };
@@ -368,7 +369,11 @@ impl GraphicsCapabilities {
 /// On a connection already serving an attached client's event stream,
 /// [`Keyboard`](Self::Keyboard), [`Resize`](Self::Resize),
 /// [`Paste`](Self::Paste) and [`SubmitCommand`](Self::SubmitCommand) are
-/// answered by the next painted update, not by an [`IpcResponse`].
+/// answered by the next painted update, not by an [`IpcResponse`]. A rejected
+/// `SubmitCommand` whose source is the client's key binding is also answered
+/// by one [`SessionEvent::CommandRejected`](crate::event::SessionEvent::CommandRejected),
+/// unless its target is a direction or the next or previous floating pane
+/// and it found none.
 ///
 /// [`Mouse`](Self::Mouse) is answered by exactly one
 /// [`SessionEvent::MouseAnswer`](crate::event::SessionEvent::MouseAnswer)
@@ -512,7 +517,17 @@ pub enum IpcRequestKind {
     /// answer.
     Mouse(Vec<WireMouseAction>),
     /// Dispatch a command against the session.
-    SubmitCommand(Box<CommandEnvelope>),
+    SubmitCommand {
+        /// The command, its id and its source.
+        command_envelope: Box<CommandEnvelope>,
+        /// The action the attached client's key fired to build the command,
+        /// or `None` when no key fired it. The session names it in the
+        /// [`SessionEvent::CommandRejected`](crate::event::SessionEvent::CommandRejected)
+        /// it sends for the command, and reads it for nothing else. A message
+        /// without `fired_action` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        fired_action: Option<ActionReference>,
+    },
     /// Ask the session to describe itself in full. The caller narrows the
     /// answer to the query it was asked.
     Discovery,
@@ -537,7 +552,7 @@ pub enum IpcRequestKind {
     /// and runs the placement only when that layout equals
     /// `expected_placed_tab_layout`. A frame naming `command_id` as its
     /// client's `last_applied_placement_command_id` shows the placement. A
-    /// refused placement is answered with `PlacementCommandRejected` naming
+    /// refused placement is answered with `CommandRejected` naming
     /// `command_id`. On a connection with no attached client, it closes the
     /// connection.
     ConfirmPanePlacement {
@@ -549,6 +564,12 @@ pub enum IpcRequestKind {
         placement_target: TiledPlacementTarget,
         /// The destination tab as the client draws it after the placement.
         expected_placed_tab_layout: PlacedTabLayout,
+        /// The action the client's key fired to confirm, or `None` when a
+        /// mouse drop confirmed. The session names it in the
+        /// `CommandRejected` it sends for a refused placement. A message
+        /// without `fired_action` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        fired_action: Option<ActionReference>,
     },
     /// Ask the session for the events it published most recently, newest last.
     /// The answer holds each event's name and the ids it named, and no payload
@@ -739,7 +760,7 @@ impl IpcRequestKind {
             IpcRequestKind::CellSize { .. } => "CellSize",
             IpcRequestKind::Paste { .. } => "Paste",
             IpcRequestKind::Mouse(_) => "Mouse",
-            IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
+            IpcRequestKind::SubmitCommand { .. } => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
             IpcRequestKind::Layout { .. } => "Layout",
             IpcRequestKind::SetPanePlacementPreview { .. } => "SetPanePlacementPreview",
@@ -820,7 +841,7 @@ pub enum WireMouseAction {
     Command(Box<Command>),
     /// Move this client's view of a floating pane under `command_id`, the id
     /// the client chose. A move the session refuses is answered with
-    /// `PlacementCommandRejected` naming `command_id`.
+    /// `CommandRejected` naming `command_id`.
     MoveFloatingPane {
         /// The id the move command carries.
         command_id: CommandId,

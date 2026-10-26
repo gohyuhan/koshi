@@ -318,3 +318,12 @@ fn an_owned_session_id_refuses_any_other_text_around_the_slash() {
         );
     }
 }
+
+#[test]
+fn a_pane_short_label_names_the_last_four_hex_digits_of_its_uuid() {
+    let pane_id = PaneId::from_uuid(
+        Uuid::parse_str("0194F3C2-7A10-7C4E-9B2D-5E8F0C13A1B2").expect("literal UUID parses"),
+    );
+
+    assert_eq!(pane_id.format_short_label(), "pane …a1b2");
+}

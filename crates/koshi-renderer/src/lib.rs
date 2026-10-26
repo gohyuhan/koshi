@@ -1,14 +1,15 @@
 //! `koshi-renderer` — ratatui drawing: pane borders, floating panes and their
 //! chrome, the tabline (tab bar plus the right-aligned mode tag), the
-//! keybinding statusline, visible cell rendering, cursor placement, the chrome
-//! theme, render snapshots, the values each chrome row draws from, the
-//! compiled-in region solve that places those rows, and mapping a mouse cell
-//! to the region drawn under it.
+//! keybinding statusline, the notification center and the toast, visible cell
+//! rendering, cursor placement, the chrome theme, render snapshots, the values
+//! each chrome row draws from, the compiled-in region solve that places those
+//! rows, and mapping a mouse cell to the region drawn under it.
 
 pub mod floating_pane_chrome;
 pub mod floating_pane_tray;
 pub mod hit_test;
 pub mod images;
+pub mod notification;
 pub mod placement;
 pub mod region;
 pub mod render;

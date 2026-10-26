@@ -86,7 +86,6 @@ fn build_render_snapshot_with_images(
 ) -> RenderSnapshot {
     let painted_frame = &received_painted_frame.painted_frame;
     RenderSnapshot {
-        is_recovery_notice_visible: painted_frame.is_recovery_notice_visible,
         session_snapshot: SessionSnapshot {
             session_id: painted_frame.session_snapshot.session_id,
             session_name: sanitize_reported_text(&painted_frame.session_snapshot.session_name),

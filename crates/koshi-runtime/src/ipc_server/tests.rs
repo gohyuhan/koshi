@@ -7,10 +7,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
 
+use koshi_core::action::ActionReference;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
+use koshi_core::event::RejectReason;
 use koshi_core::geometry::{PixelCellSize, Size};
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{
@@ -18,6 +20,7 @@ use koshi_core::key::{
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
+use koshi_core::notification::NotificationQueueOwner;
 use koshi_image::{AnimationFrame, FrameDelay, LoopPolicy};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::image_chunk::IMAGE_CHUNK_FRAME_HEAD_BYTE_COUNT;
@@ -37,10 +40,10 @@ use koshi_terminal::graphics::{
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::{
-    build_accepted_hello_result, build_counting_bytes, build_image_chunk_frame,
-    build_key_input_for_chord, build_paint_report_request, build_restarting_refusal,
-    count_program_runs, read_prepared_and_send_commit, send_committed_request,
-    send_prepare_request, write_printing_program,
+    build_accepted_hello_result, build_counting_bytes, build_fixed_epoch_notification_queue,
+    build_image_chunk_frame, build_key_input_for_chord, build_paint_report_request,
+    build_restarting_refusal, count_program_runs, read_prepared_and_send_commit,
+    send_committed_request, send_prepare_request, write_printing_program,
 };
 
 use crate::executable_watch::RESTART_RETRY_INTERVAL_DURATION;
@@ -132,6 +135,7 @@ fn spawn_answering_dispatcher(
                 RuntimeEvent::Ipc {
                     command_envelope,
                     response_sender,
+                    ..
                 } => {
                     let _ = response_sender.send(CommandResult::Ok {
                         command_id: command_envelope.command_id,
@@ -148,12 +152,15 @@ fn spawn_answering_dispatcher(
 }
 
 /// The structure a stand-in attach answers with: the session, named, with
-/// nothing in it.
+/// nothing in it and an empty notification queue.
 fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSnapshot {
     AttachedSessionStructureSnapshot {
         session_id,
         session_name: "attachable".to_string(),
         tabs: Vec::new(),
+        notification_queue: build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(
+            session_id,
+        )),
     }
 }
 
@@ -187,7 +194,6 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id,
             session_name: String::from("session"),
@@ -1446,6 +1452,28 @@ const KITTY_GRAPHICS_CAPABILITIES: GraphicsCapabilities = GraphicsCapabilities {
     supports_sixel: false,
 };
 
+/// The `InvalidState` rejection of `command_id`, with no fired action and no
+/// hint, as the runtime queues it for one client.
+fn build_invalid_state_rejection(command_id: CommandId) -> Delivery {
+    Delivery::CommandRejected {
+        command_id,
+        fired_action: None,
+        reject_reason: RejectReason::InvalidState,
+        help: None,
+    }
+}
+
+/// The event a client reads for
+/// [`build_invalid_state_rejection`]`(command_id)`.
+fn build_invalid_state_rejection_event(command_id: CommandId) -> SessionEvent {
+    SessionEvent::CommandRejected {
+        command_id,
+        fired_action: None,
+        reject_reason: RejectReason::InvalidState,
+        help: None,
+    }
+}
+
 /// One client attached to a served socket, with the sender of the delivery
 /// queue that client's connection streams.
 struct AttachedFrameStream {
@@ -1497,13 +1525,13 @@ impl AttachedFrameStream {
             .expect("the writing thread holds the delivery queue");
     }
 
-    /// Queue a [`Delivery::PlacementCommandRejected`] with a new command id
+    /// Queue a [`Delivery::CommandRejected`] with a new command id
     /// after every delivery already queued, and return the event the client
     /// reads for it.
-    fn send_rejected_placement_command(&self) -> SessionEvent {
+    fn send_command_rejection(&self) -> SessionEvent {
         let command_id = CommandId::new();
-        self.send_delivery(Delivery::PlacementCommandRejected(command_id));
-        SessionEvent::PlacementCommandRejected { command_id }
+        self.send_delivery(build_invalid_state_rejection(command_id));
+        build_invalid_state_rejection_event(command_id)
     }
 
     /// Read the next frame the attached client receives: a JSON frame, an
@@ -1641,7 +1669,7 @@ fn an_event_between_two_painted_updates_keeps_its_place_and_the_earlier_update_i
         .delivery_sender
         .try_send_frame(Box::new(first_render_snapshot.clone()))
         .expect("the first frame fits");
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
     frame_stream
         .delivery_sender
         .try_send_frame(Box::new(second_render_snapshot.clone()))
@@ -1651,10 +1679,7 @@ fn an_event_between_two_painted_updates_keeps_its_place_and_the_earlier_update_i
         frame_stream.read_painted_frame(),
         build_wire_frame(&first_render_snapshot)
     );
-    assert_eq!(
-        frame_stream.read_session_event(),
-        rejected_placement_command_event
-    );
+    assert_eq!(frame_stream.read_session_event(), command_rejection_event);
     assert_eq!(
         frame_stream.read_painted_frame(),
         build_wire_frame(&second_render_snapshot)
@@ -1720,7 +1745,7 @@ fn a_client_that_reports_no_paint_receives_one_update_and_the_rest_waits_for_its
     for delivery in [
         Delivery::Frame(Box::new(first_render_snapshot.clone())),
         Delivery::Frame(Box::new(second_render_snapshot.clone())),
-        Delivery::PlacementCommandRejected(rejected_command_id),
+        build_invalid_state_rejection(rejected_command_id),
     ] {
         delivery_sender
             .try_send(delivery)
@@ -1774,9 +1799,7 @@ fn a_client_that_reports_no_paint_receives_one_update_and_the_rest_waits_for_its
     );
     assert_eq!(
         read_session_frame_unreported(&mut frame_reader),
-        SessionFrame::Event(SessionEvent::PlacementCommandRejected {
-            command_id: rejected_command_id,
-        })
+        SessionFrame::Event(build_invalid_state_rejection_event(rejected_command_id))
     );
 
     drop(frame_reader);
@@ -1795,7 +1818,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     );
     let render_snapshot = build_image_snapshot(frame_stream.client_id, build_image_record(1));
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
 
     let mut expected_painted_frame = build_wire_frame(&render_snapshot);
     let expected_image_placement =
@@ -1803,10 +1826,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     expected_image_placement.image_record = None;
     expected_image_placement.is_available = false;
     assert_eq!(frame_stream.read_painted_frame(), expected_painted_frame);
-    assert_eq!(
-        frame_stream.read_session_event(),
-        rejected_placement_command_event
-    );
+    assert_eq!(frame_stream.read_session_event(), command_rejection_event);
 
     frame_stream.close_frame_stream();
 }
@@ -1821,7 +1841,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     let render_snapshot = build_image_snapshot(frame_stream.client_id, Arc::clone(&image_record));
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
 
     let [image_start_frame, image_chunk_frame] = build_image_transfer_frames(1, &image_record);
     assert_eq!(
@@ -1831,10 +1851,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     assert_eq!(frame_stream.read_next_session_frame(), image_start_frame);
     assert_eq!(frame_stream.read_next_session_frame(), image_chunk_frame);
     // The second frame changes nothing the client holds, and sends nothing.
-    assert_eq!(
-        frame_stream.read_session_event(),
-        rejected_placement_command_event
-    );
+    assert_eq!(frame_stream.read_session_event(), command_rejection_event);
 
     frame_stream.close_frame_stream();
 }
@@ -1873,7 +1890,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     ] {
         frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
     }
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
 
     // The release of a record follows the frame that stops showing it.
     for (released_image_content_id, render_snapshot, image_content_id, image_record) in [
@@ -1913,10 +1930,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
         assert_eq!(frame_stream.read_next_session_frame(), image_start_frame);
         assert_eq!(frame_stream.read_next_session_frame(), image_chunk_frame);
     }
-    assert_eq!(
-        frame_stream.read_session_event(),
-        rejected_placement_command_event
-    );
+    assert_eq!(frame_stream.read_session_event(), command_rejection_event);
 
     frame_stream.close_frame_stream();
 }
@@ -2079,10 +2093,10 @@ fn each_frame_of_a_looping_animation_reaches_each_of_two_clients_once() {
         }
     }
     for frame_stream in &mut frame_streams {
-        let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+        let command_rejection_event = frame_stream.send_command_rejection();
         assert_eq!(
             frame_stream.read_session_event(),
-            rejected_placement_command_event,
+            command_rejection_event,
             "nothing else follows the last frame"
         );
     }
@@ -2168,7 +2182,7 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     .expect("the image placement is valid")];
     render_snapshot.pane_snapshots.push(second_pane_snapshot);
     frame_stream.send_delivery(Delivery::Frame(Box::new(render_snapshot.clone())));
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
     let painted_frame = build_wire_frame(&render_snapshot);
 
     assert_eq!(frame_stream.read_painted_frame(), painted_frame);
@@ -2195,10 +2209,7 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
         frame_stream.read_next_session_frame(),
         last_image_chunk_frame
     );
-    assert_eq!(
-        frame_stream.read_session_event(),
-        rejected_placement_command_event
-    );
+    assert_eq!(frame_stream.read_session_event(), command_rejection_event);
 
     frame_stream.close_frame_stream();
 }
@@ -2589,7 +2600,7 @@ fn an_update_over_the_frame_cap_sends_no_release_and_the_next_update_resets_the_
 
     frame_stream.send_delivery(Delivery::Frame(Box::new(oversized_snapshot)));
     frame_stream.send_delivery(Delivery::Frame(Box::new(empty_snapshot.clone())));
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
 
     assert_eq!(
         frame_stream.read_session_event(),
@@ -2599,10 +2610,7 @@ fn an_update_over_the_frame_cap_sends_no_release_and_the_next_update_resets_the_
         frame_stream.read_painted_frame(),
         build_wire_frame(&empty_snapshot)
     );
-    assert_eq!(
-        frame_stream.read_session_event(),
-        rejected_placement_command_event
-    );
+    assert_eq!(frame_stream.read_session_event(), command_rejection_event);
     frame_stream.close_frame_stream();
 }
 
@@ -2635,10 +2643,10 @@ fn every_image_release_names_no_record_the_newest_update_shows() {
     ] {
         frame_stream.send_delivery(delivery);
     }
-    let rejected_placement_command_event = frame_stream.send_rejected_placement_command();
+    let command_rejection_event = frame_stream.send_command_rejection();
 
     let released_image_content_ids =
-        read_frames_checking_image_releases(&mut frame_stream, &rejected_placement_command_event);
+        read_frames_checking_image_releases(&mut frame_stream, &command_rejection_event);
 
     assert!(
         released_image_content_ids.contains(&2),
@@ -2709,6 +2717,7 @@ fn spawn_reporting_dispatcher(
             if let RuntimeEvent::Ipc {
                 command_envelope,
                 response_sender,
+                ..
             } = runtime_event
             {
                 let _ = response_sender.send(CommandResult::Ok {
@@ -2781,7 +2790,10 @@ fn submit_command_envelope(
         connection,
         IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope),
+                fired_action: None,
+            },
         },
     );
     let dispatched_command_envelope = received_command_envelopes
@@ -3037,7 +3049,10 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
         &mut connection,
         IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope.clone()),
+                fired_action: None,
+            },
         },
     );
 
@@ -3093,7 +3108,10 @@ fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_s
         &mut connection,
         IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope.clone()),
+                fired_action: None,
+            },
         },
     );
     let command_response: IpcResponse = connection.recv().expect("command reply");
@@ -3173,7 +3191,10 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
         &mut connection,
         IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope.clone()),
+                fired_action: None,
+            },
         },
     );
     let command_response: IpcResponse = connection.recv().expect("command reply");
@@ -3383,7 +3404,10 @@ fn a_request_before_hello_is_refused_and_the_connection_keeps_serving() {
     connection
         .send(&IpcRequest {
             request_id: 7,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(build_test_command_envelope()),
+                fired_action: None,
+            },
         })
         .expect("send submit before hello");
     let refusal_response: IpcResponse = connection.recv().expect("refusal reply");
@@ -3597,6 +3621,8 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         row_count: 40,
     };
     let command_envelope = build_test_command_envelope();
+    let fired_action =
+        ActionReference::from_core_action_name("new-tab").expect("the action name is valid");
 
     connection
         .send(&IpcRequest {
@@ -3646,16 +3672,21 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     connection
         .send(&IpcRequest {
             request_id: 5,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope.clone())),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope.clone()),
+                fired_action: Some(fired_action.clone()),
+            },
         })
         .expect("send submit");
     let RuntimeEvent::Ipc {
         command_envelope: dispatched_command_envelope,
+        fired_action: dispatched_fired_action,
         response_sender,
     } = received_runtime_events.recv().expect("submit event")
     else {
         panic!("expected Ipc");
     };
+    assert_eq!(dispatched_fired_action, Some(fired_action));
     assert_eq!(
         *dispatched_command_envelope,
         CommandEnvelope::from_parts(
@@ -4128,7 +4159,10 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
         &mut connection,
         IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(build_test_command_envelope()),
+                fired_action: None,
+            },
         },
     );
     assert!(
@@ -5574,9 +5608,10 @@ fn build_restarting_refusal_response(request_id: u64) -> IpcResponse {
 fn build_prepared_submit_request() -> IpcRequest {
     IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            build_test_command_envelope(),
-        )))),
+        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_test_command_envelope()),
+            fired_action: None,
+        })),
     }
 }
 
@@ -5796,6 +5831,7 @@ fn a_request_handed_over_before_the_refusal_is_answered_and_the_wait_ends_once_t
     let Ok(RuntimeEvent::Ipc {
         command_envelope,
         response_sender,
+        ..
     }) = inbox_receiver.recv()
     else {
         panic!("expected the committed command");
@@ -5821,6 +5857,52 @@ fn a_request_handed_over_before_the_refusal_is_answered_and_the_wait_ends_once_t
         }
     );
 
+    drop(connection);
+    ipc_server.shutdown();
+    drop(inbox_receiver);
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_command_line_submit_naming_a_fired_action_reaches_the_runtime_without_it() {
+    let (ipc_server, session_id, runtime_directory, inbox_receiver) =
+        start_inbox_test_server("cli-fired-action");
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(build_test_command_envelope()),
+                fired_action: Some(
+                    ActionReference::from_core_action_name("new-tab")
+                        .expect("the action name is valid"),
+                ),
+            })),
+        })
+        .expect("send the Prepare");
+    answer_next_prepare_probe(&inbox_receiver);
+    let _: IpcResponse = connection.recv().expect("the Prepare is answered");
+    connection
+        .send(&build_commit_request())
+        .expect("send the Commit");
+
+    let Ok(RuntimeEvent::Ipc {
+        command_envelope,
+        fired_action,
+        response_sender,
+    }) = inbox_receiver.recv()
+    else {
+        panic!("expected the committed command");
+    };
+
+    assert_eq!(fired_action, None);
+    response_sender
+        .send(CommandResult::Ok {
+            command_id: command_envelope.command_id,
+            emitted_events: Vec::new(),
+        })
+        .expect("the serving thread waits for the answer");
+    let _: IpcResponse = connection.recv().expect("the Commit is answered");
     drop(connection);
     ipc_server.shutdown();
     drop(inbox_receiver);
@@ -7146,16 +7228,14 @@ fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     };
     let rejected_command_id = CommandId::new();
     delivery_sender
-        .try_send(Delivery::PlacementCommandRejected(rejected_command_id))
+        .try_send(build_invalid_state_rejection(rejected_command_id))
         .expect("the writing thread holds the delivery queue");
 
     assert_eq!(detached_client_id, client_id);
     assert!(is_returning);
     assert_eq!(
         connection.recv::<SessionEvent>().expect("the client reads"),
-        SessionEvent::PlacementCommandRejected {
-            command_id: rejected_command_id
-        }
+        build_invalid_state_rejection_event(rejected_command_id)
     );
 
     drop(delivery_sender);
@@ -7281,7 +7361,7 @@ fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() 
     let rejected_command_id = CommandId::new();
     let rejection_queued_at = Instant::now();
     delivery_sender
-        .try_send(Delivery::PlacementCommandRejected(rejected_command_id))
+        .try_send(build_invalid_state_rejection(rejected_command_id))
         .expect("the writing thread holds the delivery queue");
     let rejection_event = loop {
         let session_event = frame_reader.recv::<SessionEvent>().expect("the rejection");
@@ -7294,9 +7374,7 @@ fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() 
 
     assert_eq!(
         rejection_event,
-        SessionEvent::PlacementCommandRejected {
-            command_id: rejected_command_id
-        }
+        build_invalid_state_rejection_event(rejected_command_id)
     );
     assert_eq!(next_event, SessionEvent::Pong);
     assert!(
@@ -7774,7 +7852,7 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
         .close();
 
     delivery_sender
-        .try_send(Delivery::PlacementCommandRejected(CommandId::new()))
+        .try_send(build_invalid_state_rejection(CommandId::new()))
         .expect("the writing thread holds the delivery queue");
 
     let RuntimeEvent::ClientDetached {
@@ -7812,7 +7890,13 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_alternating_grid_snapshot(ClientId::new(), 2, 2);
-    assert!(event_bus.try_resync(subscriber_id, Box::new(render_snapshot.clone())));
+    let notification_queue =
+        build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(SessionId::new()));
+    assert!(event_bus.try_resync(
+        subscriber_id,
+        Box::new(render_snapshot.clone()),
+        Box::new(notification_queue.clone()),
+    ));
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
 
@@ -7826,7 +7910,8 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
         ),
         vec![
             SessionFrame::Event(SessionEvent::Resync {
-                dropped_event_count: 1
+                dropped_event_count: 1,
+                notification_queue,
             }),
             SessionFrame::Painted(Box::new(build_first_received_painted_frame(
                 &render_snapshot,
@@ -7860,9 +7945,10 @@ fn a_held_command_runs_on_its_commit_and_answers_under_the_commit_id() {
     let prepare_response = exchange_request(
         &mut connection,
         2,
-        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            command_envelope.clone(),
-        )))),
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(command_envelope.clone()),
+            fired_action: None,
+        })),
     );
     let commit_response = exchange_request(&mut connection, 3, IpcRequestKind::Commit);
 
@@ -7897,9 +7983,10 @@ fn a_held_command_never_runs_when_its_connection_ends_before_the_commit() {
     let prepare_response = exchange_request(
         &mut connection,
         2,
-        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            build_test_command_envelope(),
-        )))),
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_test_command_envelope()),
+            fired_action: None,
+        })),
     );
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -7923,9 +8010,10 @@ fn a_ping_between_prepare_and_commit_gets_no_answer_and_keeps_the_held_command()
     let prepare_response = exchange_request(
         &mut connection,
         2,
-        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            command_envelope.clone(),
-        )))),
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(command_envelope.clone()),
+            fired_action: None,
+        })),
     );
     connection
         .send(&IpcRequest {
@@ -7969,16 +8057,18 @@ fn a_second_prepare_replaces_the_held_command() {
     let first_prepare_response = exchange_request(
         &mut connection,
         2,
-        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            first_command_envelope,
-        )))),
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(first_command_envelope),
+            fired_action: None,
+        })),
     );
     let second_prepare_response = exchange_request(
         &mut connection,
         3,
-        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            second_command_envelope.clone(),
-        )))),
+        IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(second_command_envelope.clone()),
+            fired_action: None,
+        })),
     );
     let commit_response = exchange_request(&mut connection, 4, IpcRequestKind::Commit);
 
@@ -8048,7 +8138,10 @@ fn every_held_kind_without_prepare_a_kind_that_cannot_be_held_and_a_bare_commit_
     frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
     let refused_request_kinds = [
         (
-            IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
+            IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(build_test_command_envelope()),
+                fired_action: None,
+            },
             "the session runs SubmitCommand requests only after Prepare and Commit",
         ),
         (
@@ -8303,9 +8396,10 @@ fn a_prepare_or_a_commit_on_an_attached_connection_detaches_its_client_and_runs_
     for (directory_tag, request_kind) in [
         (
             "attached-prepare",
-            IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-                build_test_command_envelope(),
-            )))),
+            IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(build_test_command_envelope()),
+                fired_action: None,
+            })),
         ),
         ("attached-commit", IpcRequestKind::Commit),
     ] {

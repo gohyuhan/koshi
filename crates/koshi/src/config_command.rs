@@ -194,7 +194,8 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.reduced-motion",
         "koshi.kdl",
         "#false",
-        "Draw placement previews and other viewers' placements without sliding.",
+        "Draw placement previews, other viewers' placements and the notification toast without \
+         sliding.",
     ),
     build_config_field_help(
         "koshi.stay-in-pane-placement-mode-after-placement",
@@ -269,6 +270,26 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.kdl",
         "#true",
         "Trim line-end spaces when copying.",
+    ),
+    build_config_field_help(
+        "koshi.notifications.toast",
+        "koshi.kdl",
+        "#true",
+        "Slide each new notification in as a toast. The notification center keeps every \
+         notification either way.",
+    ),
+    build_config_field_help(
+        "koshi.notifications.toast-position",
+        "koshi.kdl",
+        "\"top-right\"",
+        "Corner of the pane area the toast sits in: \"top-right\", \"top-left\", \
+         \"bottom-right\" or \"bottom-left\".",
+    ),
+    build_config_field_help(
+        "koshi.notifications.toast-duration-ms",
+        "koshi.kdl",
+        "3000",
+        "How long a toast stays in place, in milliseconds, from 1000 to 60000.",
     ),
     build_config_field_help(
         "koshi.terminal.term",

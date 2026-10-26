@@ -77,7 +77,6 @@ fn build_render_snapshot(
         .collect();
 
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: "s".to_string(),
@@ -2080,4 +2079,218 @@ fn a_session_with_no_floating_pane_leaves_the_button_cells_to_the_tabline() {
         ),
         HitRegion::Tabline
     );
+}
+
+#[test]
+fn an_open_notification_center_hits_its_close_control_its_clear_label_and_its_body_over_a_floating_pane(
+) {
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, show_tray_test_floating_pane, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::snapshot::{NotificationButton, NotificationCenter};
+
+    let mut render_snapshot =
+        build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop"]);
+    // Outer box at screen (16, 5) 48x13: its content starts at screen row 8.
+    let htop_pane_id =
+        show_tray_test_floating_pane(&mut render_snapshot, 0, build_cell_rect(16, 4, 48, 13));
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    let viewer_chrome = ViewerChrome {
+        notification_center: Some(NotificationCenter {
+            scroll_row_offset: 0,
+            is_focused: true,
+        }),
+        notification_button: Some(NotificationButton {
+            unread_entry_count: 3,
+        }),
+        ..ViewerChrome::default()
+    };
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
+
+    for (screen_point, expected_hit_region) in [
+        (
+            build_screen_point(75, 1),
+            HitRegion::NotificationCenterClose,
+        ),
+        (
+            build_screen_point(77, 1),
+            HitRegion::NotificationCenterClose,
+        ),
+        (build_screen_point(74, 1), HitRegion::NotificationCenter),
+        (build_screen_point(78, 1), HitRegion::NotificationCenter),
+        (
+            build_screen_point(56, 22),
+            HitRegion::NotificationCenterClear,
+        ),
+        (
+            build_screen_point(62, 22),
+            HitRegion::NotificationCenterClear,
+        ),
+        (build_screen_point(63, 22), HitRegion::NotificationCenter),
+        (build_screen_point(54, 10), HitRegion::NotificationCenter),
+        (build_screen_point(60, 10), HitRegion::NotificationCenter),
+        (
+            build_screen_point(53, 10),
+            HitRegion::PaneContent {
+                pane_id: htop_pane_id,
+            },
+        ),
+        (build_screen_point(67, 0), HitRegion::NotificationButton),
+        (build_screen_point(70, 0), HitRegion::NotificationButton),
+        (build_screen_point(71, 0), HitRegion::FloatingPaneTrayButton),
+        (build_screen_point(66, 0), HitRegion::Tabline),
+    ] {
+        assert_eq!(
+            resolve_hit_region(frame_layout, screen_point),
+            expected_hit_region,
+            "{screen_point:?}"
+        );
+    }
+}
+
+#[test]
+fn an_open_tray_hits_over_an_open_notification_center() {
+    use crate::floating_pane_tray::tests::{
+        build_open_tray_viewer_chrome, build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::snapshot::NotificationCenter;
+
+    let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop"]);
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    let viewer_chrome = ViewerChrome {
+        notification_center: Some(NotificationCenter {
+            scroll_row_offset: 0,
+            is_focused: false,
+        }),
+        ..build_open_tray_viewer_chrome(0)
+    };
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
+
+    assert_eq!(
+        resolve_hit_region(frame_layout, build_screen_point(60, 6)),
+        HitRegion::FloatingPaneTray
+    );
+    assert_eq!(
+        resolve_hit_region(frame_layout, build_screen_point(76, 1)),
+        HitRegion::NotificationCenterClose
+    );
+    assert_eq!(
+        resolve_hit_region(frame_layout, build_screen_point(60, 10)),
+        HitRegion::NotificationCenter
+    );
+}
+
+#[test]
+fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_under_it() {
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::snapshot::{NotificationCenter, NotificationToast};
+    use koshi_config::types::ToastPosition;
+
+    let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .pane_id;
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    let build_toast_viewer_chrome = |hidden_per_mille: u16| ViewerChrome {
+        notification_toast: Some(NotificationToast {
+            toast_position: ToastPosition::TopRight,
+            text_row_count: 2,
+            hidden_per_mille,
+        }),
+        ..ViewerChrome::default()
+    };
+    let in_place_frame_layout = render_snapshot
+        .build_painted_frame_layout(build_toast_viewer_chrome(0), &committed_regions);
+
+    for (screen_point, expected_hit_region) in [
+        (build_screen_point(75, 1), HitRegion::NotificationToastClose),
+        (build_screen_point(77, 1), HitRegion::NotificationToastClose),
+        (
+            build_screen_point(74, 1),
+            HitRegion::PaneBorder {
+                pane_id: tiled_pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            },
+        ),
+        (
+            build_screen_point(60, 3),
+            HitRegion::PaneContent {
+                pane_id: tiled_pane_id,
+            },
+        ),
+    ] {
+        assert_eq!(
+            resolve_hit_region(in_place_frame_layout, screen_point),
+            expected_hit_region,
+            "{screen_point:?}"
+        );
+    }
+
+    let half_hidden_frame_layout = render_snapshot
+        .build_painted_frame_layout(build_toast_viewer_chrome(500), &committed_regions);
+    assert_eq!(
+        resolve_hit_region(half_hidden_frame_layout, build_screen_point(76, 1)),
+        HitRegion::PaneBorder {
+            pane_id: tiled_pane_id,
+            side: Direction::Up,
+            corner_horizontal_side: None,
+        }
+    );
+
+    let toast_over_center_viewer_chrome = ViewerChrome {
+        notification_center: Some(NotificationCenter {
+            scroll_row_offset: 0,
+            is_focused: true,
+        }),
+        ..build_toast_viewer_chrome(0)
+    };
+    let toast_over_center_frame_layout = render_snapshot
+        .build_painted_frame_layout(toast_over_center_viewer_chrome, &committed_regions);
+    assert_eq!(
+        resolve_hit_region(toast_over_center_frame_layout, build_screen_point(76, 1)),
+        HitRegion::NotificationToastClose
+    );
+    assert_eq!(
+        resolve_hit_region(toast_over_center_frame_layout, build_screen_point(60, 3)),
+        HitRegion::NotificationCenter
+    );
+}
+
+#[test]
+fn the_notification_button_sits_left_of_the_mode_tag_with_no_tray_button() {
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::snapshot::NotificationButton;
+
+    let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    let viewer_chrome = ViewerChrome {
+        notification_button: Some(NotificationButton {
+            unread_entry_count: 0,
+        }),
+        ..ViewerChrome::default()
+    };
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
+
+    for (screen_point, expected_hit_region) in [
+        (build_screen_point(70, 0), HitRegion::Tabline),
+        (build_screen_point(71, 0), HitRegion::NotificationButton),
+        (build_screen_point(73, 0), HitRegion::NotificationButton),
+        (build_screen_point(74, 0), HitRegion::Tabline),
+    ] {
+        assert_eq!(
+            resolve_hit_region(frame_layout, screen_point),
+            expected_hit_region,
+            "{screen_point:?}"
+        );
+    }
 }

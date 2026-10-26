@@ -10,7 +10,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, TryLockError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
@@ -24,11 +24,13 @@ use ratatui::widgets::Widget;
 use crate::attach::ViewerPaint;
 use crate::input::InputReadClock;
 use crate::{is_focused_pane_floating, Client};
+use koshi_config::conflict::ConflictSeverity;
 use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::constant::limit_viewport_size;
 use koshi_core::geometry::{PixelCellSize, Point, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeySequence;
+use koshi_core::notification::NotificationSeverity;
 use koshi_input::host::{Event, WindowSize};
 use koshi_input::keyboard::decode_key_event;
 use koshi_input::mouse::decode_mouse;
@@ -41,6 +43,7 @@ use koshi_kitty::{
     KITTY_QUERY_IMAGE_ID,
 };
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_renderer::notification::NotificationView;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorStyle, FloatingPaneSlot, KeymapHints, PanePlacementPresentation,
     PaneSnapshot, PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabSnapshot,
@@ -131,6 +134,8 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) placement_target: Option<&'a TiledPlacementTarget>,
     /// The whole-pane visual explanation for the viewer's placement.
     pub(crate) placement_presentation: Option<&'a PanePlacementPresentation>,
+    /// The notification center's entries and the toast's content.
+    pub(crate) notification_view: NotificationView<'a>,
     /// The rows of the buffer the frame draws.
     pub(crate) drawn_rows: DrawnRows<'a>,
 }
@@ -146,6 +151,7 @@ impl Widget for SnapshotWidget<'_> {
             self.unavailable_image_placement_keys,
             self.placement_presentation,
             self.placement_target,
+            self.notification_view,
             self.drawn_rows,
             render_buffer,
         );
@@ -1688,32 +1694,63 @@ fn compute_pixel_cell_size(window_size: WindowSize) -> Option<PixelCellSize> {
 ///
 /// `loaded_config.app_config_layer` and `loaded_config.theme_config_layer`
 /// fold into the viewer's settings and chrome colors and always apply.
-/// `loaded_config.keybindings_config_layer` is validated: a verdict other than
-/// [`Apply`](koshi_config::conflict::KeymapVerdict::Apply) logs a warning
-/// naming `koshi keys conflicts`, an `Apply` logs `"keybinding.kdl applied"`,
-/// and a `None` keymap layer logs nothing.
+/// `loaded_config.keybindings_config_layer` is validated: a keymap with a
+/// fatal finding is not applied, logs a warning naming `koshi keys
+/// conflicts`, and posts one `Warning` naming its first fatal finding, such
+/// as ``keybinding.kdl was not applied: locked mode has no binding from
+/// `<C-l>` to `core:unlock`; the unlock escape would be unreachable; `koshi
+/// keys conflicts` lists every finding``. A keymap that applies logs
+/// `"keybinding.kdl applied"`, and a `None` keymap layer logs nothing.
+///
+/// Each of `config_warnings`, the warnings the config load produced, posts
+/// one `Warning` with its own text to the viewer's own notification queue,
+/// in order, before the keymap's entry. Every post follows the settings the
+/// files give: with `notifications { toast #false; }`, none of them shows a
+/// toast.
 pub(crate) fn build_client_with_loaded_config(
     client_id: ClientId,
     viewport_size: Size,
     terminal_cleanup_guard: TerminalCleanupGuard,
     loaded_config: koshi_link::config::LoadedConfig,
+    config_warnings: &[String],
     input_read_clock: Arc<InputReadClock>,
 ) -> Client {
     let mut viewer_client =
         Client::from_client_id_and_viewport_size(client_id, viewport_size, terminal_cleanup_guard);
     viewer_client.input_read_clock = input_read_clock;
-    match viewer_client.load_startup_config(
+    let conflict_report = viewer_client.load_startup_config(
         loaded_config.app_config_layer,
         loaded_config.theme_config_layer,
         loaded_config.keybindings_config_layer,
-    ) {
-        Some(conflict_report)
-            if conflict_report.get_verdict() != koshi_config::conflict::KeymapVerdict::Apply =>
-        {
+    );
+    let created_at = SystemTime::now();
+    for config_warning in config_warnings {
+        viewer_client.post_core_notification(
+            NotificationSeverity::Warning,
+            config_warning,
+            created_at,
+        );
+    }
+    let Some(conflict_report) = conflict_report else {
+        return viewer_client;
+    };
+    let first_fatal_diagnostic = conflict_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.get_severity() == ConflictSeverity::Fatal);
+    match first_fatal_diagnostic {
+        Some(fatal_diagnostic) => {
             tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
+            viewer_client.post_core_notification(
+                NotificationSeverity::Warning,
+                &format!(
+                    "keybinding.kdl was not applied: {fatal_diagnostic}; `koshi keys conflicts` \
+                     lists every finding"
+                ),
+                created_at,
+            );
         }
-        Some(_) => tracing::info!("keybinding.kdl applied"),
-        None => {}
+        None => tracing::info!("keybinding.kdl applied"),
     }
     viewer_client
 }
@@ -1742,6 +1779,9 @@ pub(crate) struct FrameInputs {
     terminal_size: Size,
     /// Whether the frame draws a placement preview, outline or explanation.
     has_placement_state: bool,
+    /// The count of changes to what the notification center, the toast and
+    /// the notification button draw.
+    notification_revision: u64,
 }
 
 impl FrameInputs {
@@ -1768,6 +1808,7 @@ impl FrameInputs {
             unavailable_image_placement_keys,
             terminal_size,
             has_placement_state,
+            notification_revision,
         } = next_frame_inputs;
         if self.has_placement_state
             || *has_placement_state
@@ -1779,6 +1820,7 @@ impl FrameInputs {
             || self.image_mode != *image_mode
             || self.unavailable_image_placement_keys != *unavailable_image_placement_keys
             || self.terminal_size != *terminal_size
+            || self.notification_revision != *notification_revision
         {
             return None;
         }
@@ -1951,6 +1993,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
             || placement_display_tab_snapshot.is_some()
             || frame_paint.placement_target.is_some()
             || frame_paint.placement_presentation.is_some(),
+        notification_revision: frame_paint.notification_revision,
     };
     let changed_rows = shown_frame_inputs.take().and_then(|last_frame_inputs| {
         last_frame_inputs.list_changed_screen_rows(&frame_inputs, &frame_geometry)
@@ -1983,6 +2026,9 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
                         placement_display_tab_snapshot,
                         placement_target: frame_paint.placement_target.as_ref(),
                         placement_presentation: frame_paint.placement_presentation.as_ref(),
+                        notification_view: client
+                            .get_notification_history()
+                            .build_notification_view(),
                         drawn_rows,
                     }
                     .render(render_area, frame_buffer);

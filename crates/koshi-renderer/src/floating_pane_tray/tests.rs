@@ -32,7 +32,6 @@ pub(crate) fn build_tray_test_render_snapshot(
     };
     let tiled_outer_rect = Rect::from_size_at_origin(tab_size);
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: "s".to_string(),

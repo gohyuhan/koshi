@@ -13,10 +13,6 @@ use crate::runtime::command::tests::{
     create_session_with_attached_client, get_command_outcome,
 };
 use crate::runtime::pty_inbox::InboxSink;
-use crate::runtime::render_schedule::tests::{
-    mark_changed_views_then_compute_frame_wait, subscribe_and_push_first_frame,
-    DEFAULT_FRAME_INTERVAL_DURATION,
-};
 use crate::runtime::tests::build_viewer;
 use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
@@ -50,153 +46,6 @@ use koshi_core::ids::CommandId;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
 use std::time::SystemTime;
-
-#[test]
-fn recovery_notice_clears_only_after_pane_input_succeeds() {
-    let (mut server, fake_pty_backend, client_id, _) = build_test_server();
-    let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("attached session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
-    assert!(
-        server
-            .build_snapshot(client_id)
-            .expect("painted snapshot")
-            .is_recovery_notice_visible
-    );
-
-    fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
-    server.handle_key_inputs(
-        client_id,
-        &[build_key_input_for_chord(build_key_chord(
-            BindingModifierFlags::NONE,
-            'x',
-        ))],
-    );
-    assert!(
-        server
-            .build_snapshot(client_id)
-            .expect("painted snapshot")
-            .is_recovery_notice_visible
-    );
-
-    let (mut server, _, client_id, _) = build_test_server();
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("attached session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
-    server.handle_key_inputs(
-        client_id,
-        &[build_key_input_for_chord(build_key_chord(
-            BindingModifierFlags::NONE,
-            'x',
-        ))],
-    );
-    assert!(
-        !server
-            .build_snapshot(client_id)
-            .expect("painted snapshot")
-            .is_recovery_notice_visible
-    );
-}
-
-#[test]
-fn showing_and_clearing_the_recovery_notice_each_mark_the_view_of_every_subscriber() {
-    let (mut server, _, client_id, _) = build_test_server();
-    let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("attached session")
-        .session_id;
-    let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
-    let client_ids = [client_id, other_client_id];
-    let shown_time = Instant::now();
-    let _delivery_receivers = client_ids.map(|viewing_client_id| {
-        subscribe_and_push_first_frame(&mut server, viewing_client_id, shown_time)
-    });
-
-    server.show_session_recovery_notice(session_id);
-    for viewing_client_id in client_ids {
-        assert_eq!(
-            mark_changed_views_then_compute_frame_wait(&mut server, viewing_client_id, shown_time),
-            Some(DEFAULT_FRAME_INTERVAL_DURATION)
-        );
-    }
-
-    let cleared_time = shown_time + DEFAULT_FRAME_INTERVAL_DURATION;
-    server.push_due_frames(cleared_time);
-    for viewing_client_id in client_ids {
-        assert_eq!(
-            mark_changed_views_then_compute_frame_wait(
-                &mut server,
-                viewing_client_id,
-                cleared_time
-            ),
-            None
-        );
-    }
-    server.clear_session_recovery_notice_after_pane_input(pane_id);
-    for viewing_client_id in client_ids {
-        assert_eq!(
-            mark_changed_views_then_compute_frame_wait(
-                &mut server,
-                viewing_client_id,
-                cleared_time
-            ),
-            Some(DEFAULT_FRAME_INTERVAL_DURATION)
-        );
-    }
-}
-
-#[test]
-fn recovery_notice_stays_for_empty_or_failed_paste_and_clears_for_written_paste() {
-    let (mut server, fake_pty_backend, client_id, _) = build_test_server();
-    let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("attached session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
-
-    server.handle_host_paste(client_id, "");
-    assert!(
-        server
-            .build_snapshot(client_id)
-            .expect("frame")
-            .is_recovery_notice_visible
-    );
-
-    fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
-    server.handle_host_paste(client_id, "failed");
-    assert!(
-        server
-            .build_snapshot(client_id)
-            .expect("frame")
-            .is_recovery_notice_visible
-    );
-
-    let (mut server, fake_pty_backend, client_id, _) = build_test_server();
-    let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("attached session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
-    server.handle_host_paste(client_id, "ready");
-    assert_eq!(
-        fake_pty_backend.list_pane_write_bytes(pane_id),
-        Ok(vec![b"ready".to_vec()])
-    );
-    assert!(
-        !server
-            .build_snapshot(client_id)
-            .expect("frame")
-            .is_recovery_notice_visible
-    );
-}
 
 impl Server {
     /// Run the action a viewer's keypress resolved to, the way an attached
@@ -3045,11 +2894,8 @@ fn the_keys_of_one_read_are_each_encoded_for_the_pane_flags_in_one_write() {
 fn a_read_whose_write_the_backend_refuses_writes_none_of_its_keys() {
     let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
     let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_client(client_id)
-        .expect("attached session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
+    server.handle_pty_output(pane_id, &b"\n".repeat(40));
+    server.scroll_up(client_id, pane_id, 3);
     fake_pty_backend.fail_writes_on(
         pane_id,
         PtyError::InputQueueFull {
@@ -3066,11 +2912,9 @@ fn a_read_whose_write_the_backend_refuses_writes_none_of_its_keys() {
             .expect("writes"),
         Vec::<Vec<u8>>::new()
     );
-    assert!(
-        server
-            .build_snapshot(client_id)
-            .expect("painted snapshot")
-            .is_recovery_notice_visible,
+    assert_eq!(
+        get_client_scroll_offset(&server, client_id, pane_id),
+        3,
         "a refused write leaves the view as it is"
     );
 }

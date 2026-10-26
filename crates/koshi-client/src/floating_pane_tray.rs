@@ -21,7 +21,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 
-use crate::mouse::{build_frame_layout_without_tray, MouseAction};
+use crate::mouse::{build_frame_layout_without_overlays, MouseAction};
 use crate::{Client, PlacementInputAction};
 
 #[cfg(test)]
@@ -245,7 +245,7 @@ impl Client {
     /// The event is placed against the tray as this viewer holds it, where a
     /// frame with the tray open draws it ([`build_tray_frame_layout`]). A
     /// press off the tray is placed against `mouse_frame` as it was painted,
-    /// with no tray ([`build_frame_layout_without_tray`]):
+    /// with no tray ([`build_frame_layout_without_overlays`]):
     ///
     /// - A pointer motion sets the hovered tile to the tile under the pointer,
     ///   or to none. Over the tray it also clears the hovered pane and the
@@ -315,7 +315,7 @@ impl Client {
             (MouseKind::Press(_), _) if !is_on_tray => {
                 self.close_floating_pane_tray();
                 let painted_hit_region = resolve_hit_region(
-                    build_frame_layout_without_tray(mouse_frame),
+                    build_frame_layout_without_overlays(mouse_frame),
                     mouse_input.position,
                 );
                 (painted_hit_region == HitRegion::FloatingPaneTrayButton).then(Vec::new)

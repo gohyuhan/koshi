@@ -171,6 +171,26 @@ fn a_pane_takes_input_and_prints_the_child_output() {
     );
 }
 
+/// A child that ends with an NTSTATUS error code reports the `i32` with the
+/// same bits: `cmd.exe` exiting with `-1073741819` reports `0xC0000005`.
+#[test]
+fn a_child_ending_with_an_ntstatus_error_code_reports_the_same_bits() {
+    let (pty_backend, pane_output_recorder) = build_pty_backend();
+    let pane_id = PaneId::new();
+    pty_backend
+        .spawn_pane(
+            pane_id,
+            build_spawn_spec("cmd.exe", &["/C", "exit -1073741819"]),
+            STANDARD_PTY_SIZE,
+        )
+        .expect("spawn cmd");
+
+    assert_eq!(
+        wait_for_pane_exit(&pane_output_recorder, pane_id, Duration::from_secs(15)),
+        Some(ExitStatus::ExitCode(0xC000_0005_u32.cast_signed())),
+    );
+}
+
 /// Input written in the first moments of a pane still reaches its child.
 ///
 /// Nothing is read back before the write, so it lands while the pane's terminal

@@ -149,8 +149,11 @@ pub(crate) fn apply_mouse_actions(
                     CommandSource::from_mouse(client_id),
                     Command::MoveFloatingPane(command_args),
                 );
-                if let CommandResult::Rejected { .. } = server.submit_command(command_envelope) {
-                    let _ = server.send_placement_command_rejection(client_id, command_id);
+                if let CommandResult::Rejected { reason, help, .. } =
+                    server.submit_command(command_envelope)
+                {
+                    let _ =
+                        server.send_command_rejection(client_id, command_id, None, reason, help);
                 }
             }
         }

@@ -35,10 +35,13 @@ use koshi_core::event::{
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use koshi_core::lock::LockMode;
+use koshi_core::notification::NotificationQueueOwner;
 use koshi_core::process::PtySize;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{ClientSnapshot, SessionSnapshot, TabSnapshot};
-use koshi_test_support::fixtures::build_counting_bytes;
+use koshi_test_support::fixtures::{
+    build_counting_bytes, build_fixed_epoch_notification_queue, build_test_uuid_with_suffix,
+};
 
 use super::*;
 use crate::runtime::delivery_queue::PacedReceive;
@@ -63,11 +66,18 @@ impl EventBus {
     }
 }
 
+/// An empty notification queue of the session
+/// `00000000-0000-0000-0000-000000000001`. Equal on every call.
+pub(crate) fn build_test_notification_queue() -> Box<NotificationQueue> {
+    Box::new(build_fixed_epoch_notification_queue(
+        NotificationQueueOwner::Session(SessionId::from_uuid(build_test_uuid_with_suffix(1))),
+    ))
+}
+
 /// A minimal frame to resync from: one empty tab and no panes.
 fn build_test_render_snapshot() -> Box<RenderSnapshot> {
     let tab_id = TabId::new();
     Box::new(RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: String::from("session"),
@@ -281,7 +291,11 @@ fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 
-    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
 
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     // Nothing was queued: the backlog is still exactly the pre-gap events.
@@ -308,7 +322,11 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
     }
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 
     bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
@@ -320,6 +338,7 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
             Delivery::Event(Event::TabCreated(TabCreated { tab_id })),
             Delivery::Snapshot {
                 render_snapshot,
+                notification_queue: build_test_notification_queue(),
                 lag_report: SubscriberLagged {
                     subscriber_id,
                     dropped_event_count: 1,
@@ -348,12 +367,17 @@ fn the_dropped_count_holds_the_trigger_plus_every_withheld_event() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot,
+            notification_queue: build_test_notification_queue(),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 4,
@@ -526,11 +550,16 @@ fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot,
+            notification_queue: build_test_notification_queue(),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 2,
@@ -552,7 +581,11 @@ fn a_desynced_subscriber_whose_receiver_is_gone_is_removed_by_the_resync() {
     );
     drop(subscriber_receiver);
 
-    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -566,8 +599,16 @@ fn a_resync_of_a_live_or_unknown_subscriber_does_nothing() {
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     bus.publish(&Event::TabCreated(TabCreated { tab_id }));
 
-    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
-    assert!(!bus.try_resync(SubscriberId::new(), build_test_render_snapshot()));
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
+    assert!(!bus.try_resync(
+        SubscriberId::new(),
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -592,7 +633,11 @@ fn a_second_desync_counts_from_one_again() {
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
-    assert!(bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
     assert_eq!(subscriber_receiver.try_iter().count(), 1);
 
     // Second gap, on a queue refilled from scratch: the count restarts.
@@ -603,12 +648,17 @@ fn a_second_desync_counts_from_one_again() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot,
+            notification_queue: build_test_notification_queue(),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
@@ -628,10 +678,18 @@ fn a_resync_of_a_just_resynced_subscriber_does_nothing() {
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
-    assert!(bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
     assert_eq!(subscriber_receiver.try_iter().count(), 1);
 
-    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
 
     // No second frame was queued, and the subscriber is still live.
     assert_eq!(
@@ -666,7 +724,11 @@ fn every_desynced_subscriber_is_listed_in_subscription_order() {
 
     // Resyncing the first leaves the second listed, still in order.
     assert_eq!(first_receiver.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
-    assert!(bus.try_resync(first_subscriber_id, build_test_render_snapshot()));
+    assert!(bus.try_resync(
+        first_subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
     assert_eq!(
         bus.list_desynced_subscriber_ids(),
         vec![second_subscriber_id]
@@ -694,7 +756,11 @@ fn a_desynced_subscriber_whose_receiver_is_gone_survives_every_publish() {
     assert!(bus.has_subscriber(subscriber_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 
-    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -865,7 +931,11 @@ fn a_resync_snapshot_that_does_not_fit_marks_one_owed_frame_and_the_dropped_even
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert!(!writer_handoff.take_owed_frame_mark());
 
-    assert!(!bus.try_resync(subscriber_id, build_test_render_snapshot()));
+    assert!(!bus.try_resync(
+        subscriber_id,
+        build_test_render_snapshot(),
+        build_test_notification_queue()
+    ));
 
     assert!(writer_handoff.take_owed_frame_mark());
     assert!(!writer_handoff.take_owed_frame_mark());
@@ -1013,13 +1083,18 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
     );
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
 
     let queued_deliveries: Vec<_> = subscriber_receiver.try_iter().collect();
     assert_eq!(
         queued_deliveries,
         vec![Delivery::Snapshot {
             render_snapshot,
+            notification_queue: build_test_notification_queue(),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 2,
@@ -1029,7 +1104,8 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
     assert_eq!(
         build_wire_event(&queued_deliveries[0]),
         Some(SessionEvent::Resync {
-            dropped_event_count: 2
+            dropped_event_count: 2,
+            notification_queue: *build_test_notification_queue(),
         })
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
@@ -1369,7 +1445,11 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
     );
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(subscriber_id, render_snapshot.clone()));
+    assert!(bus.try_resync(
+        subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
 
     let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
     assert_eq!(queued_deliveries.len(), SUBSCRIBER_QUEUE_CAPACITY);
@@ -1377,6 +1457,7 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
         queued_deliveries.last(),
         Some(&Delivery::Snapshot {
             render_snapshot,
+            notification_queue: build_test_notification_queue(),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
@@ -1489,24 +1570,45 @@ fn a_switch_reaches_the_subscriber_as_the_session_and_user_it_names() {
 }
 
 #[test]
-fn a_rejected_placement_command_reaches_the_subscriber_with_its_command_id() {
+fn a_rejected_command_reaches_its_subscriber_with_the_fired_action_and_help() {
     let command_id = CommandId::new();
+    let fired_action = ActionReference::from_core_action_name("resize-pane-left")
+        .expect("the action name is valid");
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
+    let (other_subscriber_id, other_subscriber_receiver, _) = bus.subscribe();
 
-    assert!(bus.try_send_placement_command_rejection(subscriber_id, command_id));
+    assert!(bus.try_send_command_rejection(
+        subscriber_id,
+        command_id,
+        Some(fired_action.clone()),
+        RejectReason::MinimumSize,
+        Some("the pane is at its minimum width".to_string()),
+    ));
 
     let queued_delivery = subscriber_receiver
         .try_recv()
-        .expect("the placement rejection reaches its subscriber");
+        .expect("the rejection reaches its subscriber");
     assert_eq!(
         queued_delivery,
-        Delivery::PlacementCommandRejected(command_id)
+        Delivery::CommandRejected {
+            command_id,
+            fired_action: Some(fired_action.clone()),
+            reject_reason: RejectReason::MinimumSize,
+            help: Some("the pane is at its minimum width".to_string()),
+        }
     );
     assert_eq!(
         build_wire_event(&queued_delivery),
-        Some(SessionEvent::PlacementCommandRejected { command_id })
+        Some(SessionEvent::CommandRejected {
+            command_id,
+            fired_action: Some(fired_action),
+            reject_reason: RejectReason::MinimumSize,
+            help: Some("the pane is at its minimum width".to_string()),
+        })
     );
+    assert_ne!(other_subscriber_id, subscriber_id);
+    assert_eq!(other_subscriber_receiver.try_iter().count(), 0);
 }
 
 #[test]
@@ -1869,13 +1971,15 @@ fn a_snapshot_converts_to_a_resync_carrying_the_dropped_count() {
     assert_eq!(
         build_wire_event(&Delivery::Snapshot {
             render_snapshot: build_test_render_snapshot(),
+            notification_queue: build_test_notification_queue(),
             lag_report: SubscriberLagged {
                 subscriber_id: SubscriberId::new(),
                 dropped_event_count: 4,
             },
         }),
         Some(SessionEvent::Resync {
-            dropped_event_count: 4
+            dropped_event_count: 4,
+            notification_queue: *build_test_notification_queue(),
         })
     );
 }

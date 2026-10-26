@@ -284,7 +284,10 @@ fn a_quit_refused_for_the_old_token_is_sent_again_once_the_session_advertises_it
         "the token of the session before",
         "the token of this session",
         |request_kind| {
-            let IpcRequestKind::SubmitCommand(command_envelope) = request_kind else {
+            let IpcRequestKind::SubmitCommand {
+                command_envelope, ..
+            } = request_kind
+            else {
                 panic!("expected a SubmitCommand, got {request_kind:?}");
             };
             assert_eq!(command_envelope.command, Command::Quit);
@@ -316,7 +319,10 @@ fn a_quit_refused_while_the_session_replaces_its_image_is_sent_again_to_the_new_
         "the token of the new image",
         |_| build_restarting_refusal(),
         |request_kind| {
-            let IpcRequestKind::SubmitCommand(command_envelope) = request_kind else {
+            let IpcRequestKind::SubmitCommand {
+                command_envelope, ..
+            } = request_kind
+            else {
                 panic!("expected a SubmitCommand, got {request_kind:?}");
             };
             assert_eq!(command_envelope.command, Command::Quit);

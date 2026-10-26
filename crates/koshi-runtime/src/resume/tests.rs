@@ -26,6 +26,7 @@ use koshi_core::command::{
 use koshi_core::geometry::Rect;
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
+use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use koshi_layout::content::find_content_rect;
 use koshi_layout::solver::solve_layout_with_sizing;
@@ -126,6 +127,12 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     assert_eq!(session.validate_session_consistency(), Ok(()));
     assert_eq!(session.starting_tab_id, None);
     assert_eq!(
+        session.notification_queue.get_owner(),
+        NotificationQueueOwner::Session(resume_header.session_id)
+    );
+    assert_eq!(session.notification_queue.get_revision(), 0);
+    assert_eq!(session.notification_queue.list_entries().count(), 0);
+    assert_eq!(
         session
             .clients
             .list_attached_clients()
@@ -187,6 +194,33 @@ fn read_edited_format_four_fixture(
 /// The format-4 fixture's first tab id.
 fn get_format_four_first_tab_id() -> TabId {
     serde_json::from_value(serde_json::json!(FORMAT_FOUR_FIRST_TAB_KEY)).expect("a tab id")
+}
+
+#[test]
+fn migrate_format_four_with_a_shown_recovery_notice_restores_the_session_not_restored_error() {
+    let (resume_header, resume_body) = read_edited_format_four_fixture(|fixture_json| {
+        fixture_json["raw_body"]["session_by_id"][FORMAT_FOUR_SESSION_KEY]
+            ["is_recovery_notice_visible"] = serde_json::json!(true);
+    });
+    assert_eq!(resume_header.resume_format, 4);
+
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+
+    let notification_queue =
+        &resumed_server.session_by_id[&resume_header.session_id].notification_queue;
+    assert_eq!(
+        notification_queue
+            .list_entries()
+            .map(|notification_entry| (
+                notification_entry.severity,
+                notification_entry.text.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            NotificationSeverity::Error,
+            "the session could not be restored after the restart; a new shell started"
+        )]
+    );
 }
 
 /// Each `resize_delta` of the root split of `layout_tree`.
@@ -1442,6 +1476,23 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
         .panes
         .clone();
     let expected_pty_size_by_pane_id = populated_server.server.pty_size_by_pane_id.clone();
+    let notification_queue = &mut populated_server
+        .server
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the populated session")
+        .notification_queue;
+    notification_queue.post_core_entry(
+        NotificationSeverity::Error,
+        "pane …a1b2 killed by signal 9",
+        SystemTime::UNIX_EPOCH,
+    );
+    notification_queue.post_core_entry(
+        NotificationSeverity::Error,
+        "pane …a1b2 killed by signal 9",
+        SystemTime::UNIX_EPOCH,
+    );
+    let expected_notification_queue = notification_queue.clone();
 
     let (resume_header, resume_body) = populated_server
         .server
@@ -1468,6 +1519,11 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     );
     let session = &resumed_server.session_by_id[&session_id];
     assert_eq!(session.session_name, "carried");
+    assert_eq!(
+        session.notification_queue, expected_notification_queue,
+        "the notification queue keeps its epoch, revision and entries"
+    );
+    assert_eq!(session.notification_queue.get_revision(), 2);
     assert_eq!(session.tabs, expected_tabs, "every tab and its layout tree");
     assert_eq!(
         session.panes, expected_pane_registry,
@@ -2472,7 +2528,7 @@ fn a_screen_for_a_pane_no_session_holds_and_nothing_drives_is_dropped() {
 }
 
 #[test]
-fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_showing_the_notice() {
+fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_and_posts_a_warning() {
     let (populated_server, carried_pty_panes, resume_header, mut resume_body) =
         carry_out_populated_server();
     let blank_pane_id = carried_pty_panes[1].pane_id;
@@ -2487,6 +2543,20 @@ fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_showing_the_notice()
             resumed_server.terminal_engine_by_pane_id[&blank_pane_id].get_terminal_state()
         ),
         "[koshi] This pane's screen could not be restored after the restart. The program in it is still running."
+    );
+    assert_eq!(
+        resumed_server.session_by_id[&populated_server.session_id]
+            .notification_queue
+            .list_entries()
+            .map(|notification_entry| (notification_entry.severity, notification_entry.text.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            NotificationSeverity::Warning,
+            format!(
+                "{}: its screen could not be restored after the restart; its program is still running",
+                blank_pane_id.format_short_label()
+            )
+        )]
     );
     let blank_pane_pty_size = resume_header.carried_panes[1].get_pty_size();
     assert_eq!(

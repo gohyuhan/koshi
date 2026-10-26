@@ -91,9 +91,9 @@ went before.
 
 A `mode` block holds the bindings for one built-in keymap — `"normal"`,
 `"locked"`, `"pane-placement"`, `"pane-move-choice"`, `"floating-pane-move"`,
-`"dock-undock"`, or `"floating-pane-tray"`. Normal and locked are base modes.
-The other five are local modes. Each one takes priority over the base mode
-while it is open.
+`"dock-undock"`, `"floating-pane-tray"`, or `"notification-center"`. Normal
+and locked are base modes. The other six are local modes. Each one takes
+priority over the base mode while it is open.
 
 A block for any other mode name, such as `mode "resize"`, binds nothing. The
 rest of the file still applies, and `koshi keys conflicts` warns that the mode
@@ -110,7 +110,7 @@ Run `koshi actions list` to see every action name you can bind to.
 ## Full example
 
 Complete built-in keymap. `<leader>` bindings follow the configured leader.
-`<C-l>`, `<A-f>`, Tab, and Shift+Tab stay fixed.
+`<C-l>`, `<A-f>`, `<A-n>`, Tab, and Shift+Tab stay fixed.
 
 ```kdl
 // keybinding.kdl — the complete default keymap.
@@ -154,6 +154,7 @@ mode "normal" {
 
     // explicit chords — they never move with the leader
     bind "<A-f>" "core:toggle-pane-fullscreen"
+    bind "<A-n>" "core:toggle-notification-center"
     bind "<Tab>" "core:next-tab"
     bind "<S-Tab>" "core:previous-tab"
 }
@@ -231,6 +232,15 @@ mode "floating-pane-tray" {
     bind "a" "core:toggle-minimize-all-floating-panes"
     bind "<Esc>" "core:close-floating-pane-tray"
     bind "<leader>p w" "core:toggle-floating-pane-tray"
+}
+
+mode "notification-center" {
+    // The notification center owns these keys while it holds the keyboard.
+    bind "<Up>" "core:scroll-notifications-up"
+    bind "<Down>" "core:scroll-notifications-down"
+    bind "c" "core:clear-notifications"
+    bind "<Esc>" "core:close-notification-center"
+    bind "<A-n>" "core:toggle-notification-center"
 }
 ```
 
@@ -319,8 +329,9 @@ The effective `pane-placement` map must keep one live
 action to another key rejects the keymap. The same rule holds for
 `core:cancel-pane-move-choice` in `pane-move-choice`,
 `core:cancel-floating-pane-move` in `floating-pane-move`,
-`core:cancel-dock-undock` in `dock-undock`, and
-`core:close-floating-pane-tray` in `floating-pane-tray`.
+`core:cancel-dock-undock` in `dock-undock`,
+`core:close-floating-pane-tray` in `floating-pane-tray`, and
+`core:close-notification-center` in `notification-center`.
 
 `<leader>p m` opens the mode, then `<Right>` selects a destination instead of
 running `core:focus-pane-right`. A normal-mode binding for `<leader>p
@@ -485,6 +496,67 @@ Example: the session holds `htop`, `logs` and `notes`, and this client shows
 `htop` and `logs`. Tiles 1 and 2 are lit, and tile 3 is gray. Enter on tile 1
 minimizes `htop`, and tile 1 turns gray. `a` then minimizes `logs` too, and
 the label changes to `restore all`.
+
+## Notification center
+
+Koshi states each message of its own as a notification: a pane that a signal
+killed, a config warning, or a key whose command the session refused. The
+notification center lists the notifications of this client, and a toast shows
+each new one for a short time.
+
+The tabline shows the notification button `●` while this client holds at
+least one notification. The button sits left of the tray button, or left of
+the mode tag when the tabline shows no tray button. With unread notifications,
+the button shows their count: `●3`, and `●99+` above 99. A notification is
+read once the center opens after it arrives.
+
+`<A-n>` (`core:toggle-notification-center`) or a click on the button opens the
+center. The center covers the right side of the pane area and changes no pane.
+It is as tall as the pane area and 1/3 of the terminal width, from 24 to 48
+columns wide. A terminal narrower than 24 columns gives it the full width. The
+center lists the newest notification first, each as a header and its text:
+`[Koshi] Error` above `pane …a1b2 killed by signal 9`. A notification that
+repeats shows the count in its header: `[Koshi] Warning ×3`. When this client
+held more notifications than it keeps, the last row reads
+`3 older notifications were dropped`.
+
+While the center holds the keyboard, the tabline shows the tag
+`NOTIFICATIONS`, and the button shows in reverse video. The
+`notification-center` keymap has priority over the normal or locked keymap,
+and the center consumes every key it does not bind. No key reaches a pane.
+
+- The Up and Down keys (`core:scroll-notifications-up`, `-down`) scroll the
+  list one row. The mouse wheel over the center scrolls it by `scroll-lines`
+  rows.
+- Escape (`core:close-notification-center`), `<A-n>`, a click on the button,
+  and a click on ` × ` on the top border close the center. Every
+  notification stays.
+- `c` (`core:clear-notifications`) and a click on ` clear ` on the bottom
+  border remove every notification and close the center. A notification that
+  arrives after the clear stays in the center.
+- A click outside the center takes the keyboard from it, and the center stays
+  open. The same click then acts as it does with no center open. A click on
+  the center gives the keyboard back to it.
+
+Any other action, and a lock mode change, also take the keyboard from the
+center. While another local mode is on, such as the floating pane tray, the
+center does not open. The center and its notifications belong to this client
+only. Another client of the same session keeps its own list, and a clear on
+one client removes nothing from another.
+
+A toast slides in from the side of its corner, stays, and slides out again:
+1 s in, 3 s in place, and 1 s out. When more notifications wait, each part
+takes 0.5 s. At most 3 notifications wait for a toast. Each further one joins
+one last toast that counts them: `36 more notifications in the center`. A
+click on the toast's ` × ` slides it out at once, and its notification stays
+in the center. Opening the center removes every toast. A notification that
+arrives while the center is open shows no toast. The `notifications` block of
+`koshi.kdl` sets the corner and the time in place, and turns toasts off.
+
+Example: a build in a command pane fails with exit code 2 while the center is
+closed. The toast `[Koshi] Error` `pane …c3d4 exited 2` slides in at the top
+right, and the button changes from `●` to `●1`. `<A-n>` opens the center with
+the notification on top, and the button changes back to `●`.
 
 ## Floating pane actions
 

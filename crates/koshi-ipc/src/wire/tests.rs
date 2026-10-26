@@ -795,6 +795,11 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::Detached,
         SessionEvent::Resync {
             dropped_event_count: 1,
+            notification_queue: crate::protocol::tests::build_fixed_session_notification_queue(),
+        },
+        SessionEvent::NotificationPosted {
+            revision: 1,
+            entry: crate::protocol::tests::build_fixed_notification_entry(),
         },
         SessionEvent::MouseAnswer {
             request_id: 1,
@@ -810,8 +815,11 @@ fn sample_events() -> Vec<SessionEvent> {
             session_id: SessionId::new(),
             owner_user_id: None,
         },
-        SessionEvent::PlacementCommandRejected {
+        SessionEvent::CommandRejected {
             command_id: koshi_core::ids::CommandId::new(),
+            fired_action: None,
+            reject_reason: koshi_core::event::RejectReason::InvalidState,
+            help: None,
         },
         SessionEvent::Pong,
     ]

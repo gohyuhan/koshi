@@ -297,7 +297,6 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
     let active_tab_id = TabId::new();
     let secondary_tab_id = TabId::new();
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: String::from("session"),
@@ -455,7 +454,6 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
     expected_render_snapshot
         .client_snapshot
         .active_tab_focused_pane_id = Some(empty_pane_id);
-    expected_render_snapshot.is_recovery_notice_visible = true;
     expected_render_snapshot
         .client_snapshot
         .last_applied_lock_command_id = Some(CommandId::new());

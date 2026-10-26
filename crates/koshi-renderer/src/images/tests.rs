@@ -26,6 +26,7 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style;
 use koshi_test_support::fixtures::build_cell_rect;
 
+use crate::notification::tests::EMPTY_NOTIFICATION_VIEW;
 use crate::render::tests::{build_core_regions, format_rendered_cells, get_pane_snapshot_mut};
 use crate::render::{build_frame_geometry, list_placed_floating_panes, DrawnRows};
 use crate::snapshot::{
@@ -95,7 +96,6 @@ fn build_render_snapshot(
         },
     };
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: String::from("session"),
@@ -1071,6 +1071,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[],
         None,
         None,
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut placeholder_buffer,
     );
@@ -1102,6 +1103,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[],
         Some(&placement_presentation),
         None,
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut placement_buffer,
     );
@@ -1126,6 +1128,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[],
         None,
         None,
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut native_buffer,
     );
@@ -1151,6 +1154,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[(pane_id, 1)],
         None,
         None,
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut unavailable_buffer,
     );
@@ -1172,6 +1176,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         &[(pane_id, 2)],
         None,
         None,
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut other_unavailable_buffer,
     );
@@ -1741,5 +1746,78 @@ fn an_image_the_open_tray_meets_is_left_out_and_paints_again_once_the_tray_close
                 build_whole_source_rect(8, 4)
             ),
         ]
+    );
+}
+
+#[test]
+fn an_image_the_open_notification_center_or_the_drawn_toast_meets_is_left_out() {
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::snapshot::{NotificationCenter, NotificationToast};
+    use koshi_config::types::ToastPosition;
+
+    let mut render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+    let tiled_pane_snapshot = &mut render_snapshot.pane_snapshots[0];
+    let tiled_pane_id = tiled_pane_snapshot.pane_id;
+    tiled_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(20, 78, Style::default()),
+        0,
+    ));
+    // The tiled pane's content starts at screen (1, 2). The center takes
+    // (54, 1) 26x22 and a toast of two text rows in place (54, 1) 26x5: the
+    // image at row 0, column 60 lies inside both, and the one at row 12,
+    // column 2 outside both.
+    tiled_pane_snapshot.image_placement_snapshots = vec![
+        build_image_placement(1, 8, 4, (0, 60), 4, 2),
+        build_image_placement(2, 8, 4, (12, 2), 4, 2),
+    ];
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    let screen_area = RatatuiRect::new(0, 0, 80, 24);
+    let list_sorted_paint_targets = |viewer_chrome: ViewerChrome| {
+        let mut paint_targets = list_paint_targets(&build_image_paints(&build_frame_geometry(
+            &render_snapshot,
+            &committed_regions,
+            viewer_chrome,
+            screen_area,
+        )));
+        paint_targets.sort_by_key(|(_, target_area, _)| target_area.x);
+        paint_targets
+    };
+    let outside_paint_target = (
+        tiled_pane_id,
+        RatatuiRect::new(3, 14, 4, 2),
+        build_whole_source_rect(8, 4),
+    );
+    let inside_paint_target = (
+        tiled_pane_id,
+        RatatuiRect::new(61, 2, 4, 2),
+        build_whole_source_rect(8, 4),
+    );
+
+    assert_eq!(
+        list_sorted_paint_targets(ViewerChrome {
+            notification_center: Some(NotificationCenter {
+                scroll_row_offset: 0,
+                is_focused: true,
+            }),
+            ..ViewerChrome::default()
+        }),
+        [outside_paint_target]
+    );
+    assert_eq!(
+        list_sorted_paint_targets(ViewerChrome {
+            notification_toast: Some(NotificationToast {
+                toast_position: ToastPosition::TopRight,
+                text_row_count: 2,
+                hidden_per_mille: 0,
+            }),
+            ..ViewerChrome::default()
+        }),
+        [outside_paint_target]
+    );
+    assert_eq!(
+        list_sorted_paint_targets(ViewerChrome::default()),
+        [outside_paint_target, inside_paint_target]
     );
 }

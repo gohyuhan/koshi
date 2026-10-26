@@ -4,6 +4,8 @@
 //! receiving end of that subscriber's own bounded queue, and its
 //! [`WriterHandoff`].
 //! `EventBus::publish` clones each event into every subscriber's queue,
+//! `EventBus::publish_notification_post` clones one post of the session's
+//! notification queue into every subscriber's queue,
 //! `EventBus::try_send_frame` puts the frame the session composed for one
 //! subscriber's client on that subscriber's own queue, in the place of a frame
 //! at the tail of the queue that the writing thread has not taken,
@@ -19,9 +21,10 @@
 //! until `EventBus::try_resync` puts a fresh
 //! [`RenderSnapshot`] on its queue and returns it to live delivery. The
 //! snapshot rides the same queue as events, so the subscriber reads the
-//! backlog it already had, then the snapshot, then live events again. A mouse
-//! answer, session switch, or placement command rejection that does not fit
-//! marks the subscriber desynced the same way; a frame that does not fit is dropped and the subscriber stays live.
+//! backlog it already had, then the snapshot, then live events again. A
+//! notification post reaches a desynced subscriber through the notification
+//! queue its snapshot carries. A mouse answer, session switch, or command
+//! rejection that does not fit marks the subscriber desynced the same way; a frame that does not fit is dropped and the subscriber stays live.
 //!
 //! A frame or a resync snapshot that does not fit also marks the subscriber's
 //! [`WriterHandoff`] owed a frame. The thread that writes the subscriber's
@@ -54,9 +57,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex};
 
-use koshi_core::event::{Event, SubscriberLagged};
+use koshi_core::action::ActionReference;
+use koshi_core::event::{Event, RejectReason, SubscriberLagged};
 use koshi_core::ids::{CommandId, SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
+use koshi_core::notification::{NotificationEntry, NotificationQueue};
 use koshi_ipc::event::{SessionEvent, MAX_HOST_WRITE_BYTE_COUNT};
 use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 
@@ -311,7 +316,46 @@ impl EventBus {
         if let Some(session_ending) = session_ending {
             self.ending_notice.raise_session_ending(session_ending);
         }
-        let is_stream_ending = session_ending.is_some();
+        self.deliver_to_every_subscriber(
+            || Delivery::Event(event.clone()),
+            session_ending.is_some(),
+            event.get_event_name(),
+        )
+    }
+
+    /// Deliver one post of the session's notification queue to every live
+    /// subscriber: `entry` as the queue holds it after the post, with the
+    /// queue's `revision` after it. A desynced subscriber
+    /// counts the post as missed, and a live one whose queue is full misses it
+    /// and becomes desynced, as [`publish`](Self::publish) states for an
+    /// event. Returns the subscribers removed for a receiver that is gone.
+    pub(crate) fn publish_notification_post(
+        &mut self,
+        revision: u64,
+        entry: &NotificationEntry,
+    ) -> Vec<SubscriberId> {
+        self.deliver_to_every_subscriber(
+            || Delivery::NotificationPosted {
+                revision,
+                entry: Box::new(entry.clone()),
+            },
+            false,
+            "NotificationPosted",
+        )
+    }
+
+    /// Put the delivery `build_delivery` builds on every live subscriber's
+    /// queue, and on every desynced one when `is_stream_ending`. A desynced
+    /// subscriber otherwise counts it as missed. A live subscriber whose queue
+    /// is full misses it and becomes desynced; a desynced one whose queue is
+    /// full misses it and counts it. Each drop logs `delivery_name`. Returns
+    /// the subscribers removed for a receiver that is gone.
+    fn deliver_to_every_subscriber(
+        &mut self,
+        build_delivery: impl Fn() -> Delivery,
+        is_stream_ending: bool,
+        delivery_name: &'static str,
+    ) -> Vec<SubscriberId> {
         let mut removed_subscriber_ids = Vec::new();
         self.subscribers.retain_mut(|subscriber| {
             if let DeliveryState::Desynced {
@@ -323,10 +367,7 @@ impl EventBus {
                     return true;
                 }
             }
-            match subscriber
-                .delivery_sender
-                .try_send(Delivery::Event(event.clone()))
-            {
+            match subscriber.delivery_sender.try_send(build_delivery()) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
                     // The writing thread reads the raised notice when it
@@ -341,7 +382,7 @@ impl EventBus {
                             *dropped_event_count += 1;
                             tracing::warn!(
                                 subscriber_id = %subscriber.subscriber_id,
-                                event = event.get_event_name(),
+                                event = delivery_name,
                                 "last frame dropped; subscriber queue full"
                             );
                         }
@@ -351,7 +392,7 @@ impl EventBus {
                             };
                             tracing::warn!(
                                 subscriber_id = %subscriber.subscriber_id,
-                                event = event.get_event_name(),
+                                event = delivery_name,
                                 "event dropped; subscriber desynced, awaiting snapshot"
                             );
                         }
@@ -428,8 +469,9 @@ impl EventBus {
             .retain(|subscriber| subscriber.subscriber_id != subscriber_id);
     }
 
-    /// Put `snapshot` on desynced subscriber `subscriber_id`'s queue and return it to live
-    /// delivery, reporting how many deliveries it missed.
+    /// Put `snapshot` and `notification_queue`, the session's notification
+    /// queue, on desynced subscriber `subscriber_id`'s queue and return it to
+    /// live delivery, reporting how many deliveries it missed.
     ///
     /// Returns `true` once the snapshot is queued. Returns `false` when `subscriber_id` is
     /// unknown, when it is already live, or when its queue is full. A full
@@ -439,6 +481,7 @@ impl EventBus {
         &mut self,
         subscriber_id: SubscriberId,
         render_snapshot: Box<RenderSnapshot>,
+        notification_queue: Box<NotificationQueue>,
     ) -> bool {
         let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
             return false;
@@ -459,6 +502,7 @@ impl EventBus {
             Delivery::Snapshot {
                 render_snapshot,
                 lag_report,
+                notification_queue,
             },
         ) {
             Ok(()) => {
@@ -703,26 +747,36 @@ impl EventBus {
         }
     }
 
-    /// Put a rejected pane placement command or floating pane move on the live
-    /// subscriber's queue.
+    /// Put the session's rejection of command `command_id` on the live
+    /// subscriber's queue: `reject_reason`, the hint `help`, and
+    /// `fired_action`, the action the client's key fired for the command or
+    /// `None`.
     ///
     /// Returns `true` when the rejection is queued and `false` when the
     /// subscriber is missing, disconnected, or desynchronized.
-    pub(crate) fn try_send_placement_command_rejection(
+    pub(crate) fn try_send_command_rejection(
         &mut self,
         subscriber_id: SubscriberId,
         command_id: CommandId,
+        fired_action: Option<ActionReference>,
+        reject_reason: RejectReason,
+        help: Option<String>,
     ) -> bool {
         match self.try_send_delivery(
             subscriber_id,
-            Delivery::PlacementCommandRejected(command_id),
+            Delivery::CommandRejected {
+                command_id,
+                fired_action,
+                reject_reason,
+                help,
+            },
         ) {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
                     subscriber_id = %subscriber_id,
                     %command_id,
-                    "placement command rejection dropped; subscriber desynced, awaiting snapshot"
+                    "command rejection dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
             }
@@ -739,8 +793,12 @@ impl EventBus {
 /// paint images receives new RGBA records after it.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
-/// of missed events. The connection writer sends the snapshot's frame right
-/// after it, as a painted update.
+/// of missed events and the session's notification queue. The connection
+/// writer sends the snapshot's frame right after it, as a painted update.
+///
+/// A [`Delivery::NotificationPosted`] becomes
+/// [`SessionEvent::NotificationPosted`] carrying the same revision, dropped
+/// count and entry.
 ///
 /// A [`Delivery::MouseAnswer`] becomes [`SessionEvent::MouseAnswer`] carrying
 /// the id of the round it answers and that round's answers.
@@ -753,8 +811,8 @@ impl EventBus {
 /// of the session the client attaches to next and the user id whose shared
 /// folder advertises it.
 ///
-/// A [`Delivery::PlacementCommandRejected`] becomes
-/// [`SessionEvent::PlacementCommandRejected`] carrying the rejected command id.
+/// A [`Delivery::CommandRejected`] becomes [`SessionEvent::CommandRejected`]
+/// carrying the same command id, fired action, reason and hint.
 ///
 /// Every [`Event`] variant with no [`SessionEvent`] spelling is named here and
 /// returns `None`. The match takes no wildcard arm, so a new variant is a
@@ -840,9 +898,20 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             | Event::PaneMinimizedChanged(_) => None,
         },
         Delivery::Frame(_) => None,
-        Delivery::Snapshot { lag_report, .. } => Some(SessionEvent::Resync {
+        Delivery::Snapshot {
+            lag_report,
+            notification_queue,
+            ..
+        } => Some(SessionEvent::Resync {
             dropped_event_count: lag_report.dropped_event_count,
+            notification_queue: NotificationQueue::clone(notification_queue),
         }),
+        Delivery::NotificationPosted { revision, entry } => {
+            Some(SessionEvent::NotificationPosted {
+                revision: *revision,
+                entry: NotificationEntry::clone(entry),
+            })
+        }
         Delivery::MouseAnswer {
             request_id,
             mouse_answers,
@@ -858,11 +927,17 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             session_id: *session_id,
             owner_user_id: *owner_user_id,
         }),
-        Delivery::PlacementCommandRejected(command_id) => {
-            Some(SessionEvent::PlacementCommandRejected {
-                command_id: *command_id,
-            })
-        }
+        Delivery::CommandRejected {
+            command_id,
+            fired_action,
+            reject_reason,
+            help,
+        } => Some(SessionEvent::CommandRejected {
+            command_id: *command_id,
+            fired_action: fired_action.clone(),
+            reject_reason: *reject_reason,
+            help: help.clone(),
+        }),
     }
 }
 
@@ -889,4 +964,4 @@ pub fn build_wire_host_write_events(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

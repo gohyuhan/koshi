@@ -1110,3 +1110,46 @@ fn a_higher_precedence_layer_can_clear_the_default_shell() {
     assert_eq!(merged_server_config.terminal.default_shell, None);
     assert_eq!(merged_server_config.terminal.term, "xterm-256color"); // sibling untouched
 }
+
+#[test]
+fn a_skipped_notifications_value_keeps_the_lower_layers_value() {
+    let user_layer = PartialKoshiConfig {
+        notifications: Some(PartialNotificationConfig {
+            should_show_toasts: Some(false),
+            toast_position: Some(ToastPosition::BottomRight),
+            toast_duration_ms: Some(5_000),
+        }),
+        ..Default::default()
+    };
+    let session_layer = PartialKoshiConfig {
+        notifications: Some(PartialNotificationConfig {
+            should_show_toasts: None,
+            toast_position: Some(ToastPosition::TopLeft),
+            toast_duration_ms: None,
+        }),
+        ..Default::default()
+    };
+    let merged_client_config =
+        merge_client(ClientConfig::default(), vec![user_layer, session_layer]);
+
+    assert_eq!(
+        merged_client_config.notifications,
+        NotificationConfig {
+            should_show_toasts: false,
+            toast_position: ToastPosition::TopLeft,
+            toast_duration_ms: 5_000,
+        }
+    );
+    let merged_server_config = merge_server(
+        ServerConfig::default(),
+        vec![PartialKoshiConfig {
+            notifications: Some(PartialNotificationConfig {
+                should_show_toasts: Some(false),
+                toast_position: None,
+                toast_duration_ms: None,
+            }),
+            ..Default::default()
+        }],
+    );
+    assert_eq!(merged_server_config, ServerConfig::default());
+}

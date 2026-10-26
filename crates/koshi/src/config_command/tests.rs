@@ -9,14 +9,14 @@ use koshi_config::key::Leader;
 use koshi_config::keybinding::parse_keybindings;
 use koshi_config::layer::{
     PartialColorPalette, PartialCopyConfig, PartialKeybindingsConfig, PartialKoshiConfig,
-    PartialLayoutDefaults, PartialLoggingConfig, PartialMouseConfig,
+    PartialLayoutDefaults, PartialLoggingConfig, PartialMouseConfig, PartialNotificationConfig,
     PartialPaneClipboardWriteConfig, PartialPaneConfig, PartialScrollbackConfig,
     PartialTerminalConfig, PartialThemeConfig, PartialUpdateConfig,
 };
 use koshi_config::parser::parse_kdl;
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
-use koshi_config::types::{RgbColor, WheelScroll};
+use koshi_config::types::{RgbColor, ToastPosition, WheelScroll};
 use koshi_core::geometry::Direction;
 use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord};
 use koshi_core::log::{LogFormat, LogLevel};
@@ -232,6 +232,11 @@ mouse {
 copy {
     trim-trailing-whitespace #false
 }
+notifications {
+    toast #false
+    toast-position "bottom-left"
+    toast-duration-ms 5000
+}
 pane-clipboard-writes {
     allow #true
     max-copy-bytes 1024
@@ -283,6 +288,11 @@ update {
                 }),
                 copy: Some(PartialCopyConfig {
                     should_trim_trailing_whitespace: Some(false),
+                }),
+                notifications: Some(PartialNotificationConfig {
+                    should_show_toasts: Some(false),
+                    toast_position: Some(ToastPosition::BottomLeft),
+                    toast_duration_ms: Some(5000),
                 }),
                 terminal: Some(PartialTerminalConfig {
                     term: Some("xterm-kitty".to_string()),

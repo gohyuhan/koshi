@@ -1,24 +1,41 @@
 //! Tests for the attach structure's wire form: it survives an encode/decode
 //! round trip with every field intact, including a stack's active member, a
 //! field this build does not know is ignored, and a field this build needs is
-//! refused when absent.
+//! refused when absent: a tab's focus list and the notification queue.
+
+use std::time::SystemTime;
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::{PaneId, SessionId, TabId};
+use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 
 use super::*;
 
+/// An empty notification queue of session `session_id`.
+fn build_session_notification_queue(session_id: SessionId) -> NotificationQueue {
+    NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id))
+}
+
 /// A two-tab session: one stacked tab of three panes with the middle one
-/// expanded, and one single-pane tab.
+/// expanded, and one single-pane tab. Its notification queue holds one
+/// `Error` entry.
 fn build_attached_session_structure_snapshot() -> AttachedSessionStructureSnapshot {
+    let session_id = SessionId::new();
+    let mut notification_queue = build_session_notification_queue(session_id);
+    notification_queue.post_core_entry(
+        NotificationSeverity::Error,
+        "pane …a1b2 killed by signal 9",
+        SystemTime::UNIX_EPOCH,
+    );
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let third_pane_id = PaneId::new();
     let logs_pane_id = PaneId::new();
 
     AttachedSessionStructureSnapshot {
-        session_id: SessionId::new(),
+        session_id,
+        notification_queue,
         session_name: "koshi-dev".to_string(),
         tabs: vec![
             TabStructure {
@@ -98,8 +115,10 @@ fn a_tab_carrying_an_unknown_field_ignores_it() {
 fn a_directional_split_arrives_with_its_direction_and_child_order() {
     let left_pane_id = PaneId::new();
     let right_pane_id = PaneId::new();
+    let session_id = SessionId::new();
     let expected_structure = AttachedSessionStructureSnapshot {
-        session_id: SessionId::new(),
+        session_id,
+        notification_queue: build_session_notification_queue(session_id),
         session_name: "s".to_string(),
         tabs: vec![TabStructure {
             tab_id: TabId::new(),
@@ -135,8 +154,10 @@ fn a_directional_split_arrives_with_its_direction_and_child_order() {
 
 #[test]
 fn a_session_with_no_tabs_survives_a_round_trip() {
+    let session_id = SessionId::new();
     let expected_structure = AttachedSessionStructureSnapshot {
-        session_id: SessionId::new(),
+        session_id,
+        notification_queue: build_session_notification_queue(session_id),
         session_name: String::new(),
         tabs: Vec::new(),
     };
@@ -151,8 +172,10 @@ fn a_session_with_no_tabs_survives_a_round_trip() {
 #[test]
 fn a_tab_that_has_focused_nothing_yet_arrives_with_an_empty_focus_list() {
     let pane_id = PaneId::new();
+    let session_id = SessionId::new();
     let expected_structure = AttachedSessionStructureSnapshot {
-        session_id: SessionId::new(),
+        session_id,
+        notification_queue: build_session_notification_queue(session_id),
         session_name: "s".to_string(),
         tabs: vec![TabStructure {
             tab_id: TabId::new(),
@@ -184,4 +207,22 @@ fn a_tab_missing_its_focus_list_is_refused() {
         .expect_err("a tab without its focus list decoded instead of failing");
 
     assert_eq!(decode_error.to_string(), "missing field `focus_mru`");
+}
+
+#[test]
+fn a_structure_missing_its_notification_queue_is_refused() {
+    let mut encoded_json =
+        serde_json::to_value(build_attached_session_structure_snapshot()).expect("encodes");
+    encoded_json
+        .as_object_mut()
+        .expect("a structure encodes as an object")
+        .remove("notification_queue");
+
+    let decode_error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded_json)
+        .expect_err("a structure without its notification queue decoded instead of failing");
+
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `notification_queue`"
+    );
 }

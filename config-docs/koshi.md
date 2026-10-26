@@ -154,6 +154,31 @@ dragged.
 |---|---|---|---|
 | `trim-trailing-whitespace` | boolean — drop trailing blanks from copied lines | `#true` | ≥ 0.1.0 |
 
+## `notifications`
+
+Each terminal reads this for itself. It sets the toast that shows each new
+notification for a short time. The notification center keeps every
+notification whatever these keys say (see the notification center in
+`keybinding.md`).
+
+A toast slides in from the side edge of its corner in 1 s, stays in place for
+`toast-duration-ms`, then slides out in 1 s. When more notifications wait,
+each of the three parts takes 0.5 s. With `reduced-motion #true`, the toast
+appears and goes in one frame, and it stays in place as long.
+
+A value the key does not accept is skipped with a warning, and the key keeps
+the value it had.
+
+Example: `toast-position "bottom-left"` and `toast-duration-ms 5000` slide a
+toast in from the left edge at the bottom left of the pane area, and keep it
+there for 5 s.
+
+| Key | Value / type | Default | Since |
+|---|---|---|---|
+| `toast` | boolean — show a toast for each new notification | `#true` | ≥ 0.6.0 |
+| `toast-position` | `"top-right"`, `"top-left"`, `"bottom-right"` or `"bottom-left"` — the corner of the pane area the toast sits in | `"top-right"` | ≥ 0.6.0 |
+| `toast-duration-ms` | integer, `1000` to `60000` — how long a toast stays in place, in milliseconds | `3000` | ≥ 0.6.0 |
+
 ## `pane-clipboard-writes`
 
 A program in a pane can copy text to the clipboard in two ways:
@@ -682,7 +707,9 @@ places slides to its new place on this screen in 160 ms, and a pane that this
 viewer undocks slides from its tiled place to its floating place in 160 ms.
 `#true` shows the selected destination and confirmation state without moving
 the preview through intermediate rectangles, and draws another viewer's
-accepted placement and an undocked pane at their final places at once.
+accepted placement and an undocked pane at their final places at once. It
+also shows and removes a notification toast in one frame, and keeps the time
+the toast stays in place.
 
 Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 `reduced-motion #false`, `A` and `B` slide past each other. With
@@ -690,7 +717,7 @@ Example: another viewer swaps panes `A` and `B` in the tab you watch. With
 
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `reduced-motion` | boolean — skip placement preview interpolation, the slide after another viewer's accepted placement, and the slide of an undocked pane | `#false` | ≥ 0.5.0 |
+| `reduced-motion` | boolean — skip placement preview interpolation, the slide after another viewer's accepted placement, the slide of an undocked pane, and the slide of a notification toast | `#false` | ≥ 0.5.0 |
 
 ## `stay-in-pane-placement-mode-after-placement`
 
@@ -986,6 +1013,12 @@ mouse {
 
 copy {
     trim-trailing-whitespace #true
+}
+
+notifications {
+    toast #true
+    toast-position "top-right"
+    toast-duration-ms 3000
 }
 
 pane-clipboard-writes {

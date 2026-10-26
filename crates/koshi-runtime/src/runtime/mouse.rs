@@ -84,6 +84,23 @@ impl Server {
         self.dispatch_reporting_moved_cells(mouse_command_envelope)
     }
 
+    /// Dispatch `mouse_command` as [`Self::dispatch_mouse_command`] does. A
+    /// refused command puts one `CommandRejected` naming `command_id`, no fired
+    /// action, the reason and the hint on `client_id`'s queue
+    /// ([`Self::send_command_rejection`]).
+    fn dispatch_mouse_command_reporting_rejection(
+        &mut self,
+        client_id: ClientId,
+        command_id: CommandId,
+        mouse_command: Command,
+    ) {
+        if let (CommandResult::Rejected { reason, help, .. }, _) =
+            self.dispatch_mouse_command(client_id, command_id, mouse_command)
+        {
+            let _ = self.send_command_rejection(client_id, command_id, None, reason, help);
+        }
+    }
+
     /// Dispatch a selection command attributed to `client_id`'s mouse, through
     /// the same dispatch every other mutation takes. The result is dropped.
     pub(crate) fn dispatch_visual(&mut self, client_id: ClientId, visual_command: VisualCommand) {
@@ -257,9 +274,9 @@ impl Server {
     /// left release from `client-1` at cell `(0, 0)` writes
     /// `ESC [ < 0 ; 1 ; 1 m` under SGR encoding.
     ///
-    /// A report the pane takes also clears the session's recovery notice and
-    /// drops this client's highlight in that pane. A wheel tick leaves the
-    /// highlight standing. A report the pane refuses changes neither.
+    /// A report the pane takes also drops this client's highlight in that
+    /// pane. A wheel tick leaves the highlight standing. A report the pane
+    /// refuses leaves the highlight standing.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
@@ -301,7 +318,6 @@ impl Server {
             }
             _ => {}
         }
-        self.clear_session_recovery_notice_after_pane_input(pane_id);
         // A wheel tick leaves the highlight standing; every other forwarded
         // report — click, drag, motion, release — drops it.
         if !matches!(mouse_kind, MouseKind::Scroll(_)) {
@@ -314,7 +330,7 @@ impl Server {
     /// out at its button's last cell, pulled into the pane's grid as the grid
     /// stands at this call, with no modifier held, in the mode the pane has at
     /// this call. A mode that reports no release receives nothing. The
-    /// client's highlight and the session's recovery notice stay as they are.
+    /// client's highlight stays as it is.
     ///
     /// Example: `client-1` pressed left in `pane-7` and dragged to cell
     /// `(3, 1)`. Under SGR encoding, `pane-7` receives `ESC [ < 0 ; 4 ; 2 m`.
@@ -482,13 +498,10 @@ impl Server {
             return;
         }
         let arrow_key_bytes_to_write = arrow_key_bytes.repeat(arrow_count);
-        if !arrow_key_bytes_to_write.is_empty()
-            && self
+        if !arrow_key_bytes_to_write.is_empty() {
+            let _ = self
                 .get_pty_backend()
-                .write_pane_input(pane_id, &arrow_key_bytes_to_write)
-                .is_ok()
-        {
-            self.clear_session_recovery_notice_after_pane_input(pane_id);
+                .write_pane_input(pane_id, &arrow_key_bytes_to_write);
         }
     }
 
@@ -507,9 +520,11 @@ impl Server {
     /// A floating pane move runs under the `command_id` it carries and adds no
     /// entry to the answer. A move the session runs makes `client_id`'s next
     /// frames name `command_id` as the last applied floating pane move. A move
-    /// the session rejects puts one `PlacementCommandRejected` naming
-    /// `command_id` on the same subscriber's queue, ahead of the round's
-    /// answer.
+    /// the session rejects puts one `CommandRejected` naming `command_id`,
+    /// with no fired action, on the same subscriber's queue, ahead of the
+    /// round's answer. A command action the session rejects does the same
+    /// under the new command id it ran under. A border move the session
+    /// refuses sends no `CommandRejected`: its entry names `0` applied cells.
     pub fn run_client_mouse(
         &mut self,
         client_id: ClientId,
@@ -577,24 +592,21 @@ impl Server {
                     });
                 }
                 WireMouseAction::Command(mouse_command) => {
-                    let _ =
-                        self.dispatch_mouse_command(client_id, CommandId::new(), *mouse_command);
+                    self.dispatch_mouse_command_reporting_rejection(
+                        client_id,
+                        CommandId::new(),
+                        *mouse_command,
+                    );
                 }
                 WireMouseAction::MoveFloatingPane {
                     command_id,
                     command_args,
                 } => {
-                    let (command_result, _) = self.dispatch_mouse_command(
+                    self.dispatch_mouse_command_reporting_rejection(
                         client_id,
                         command_id,
                         Command::MoveFloatingPane(command_args),
                     );
-                    match command_result {
-                        CommandResult::Ok { .. } => {}
-                        CommandResult::Rejected { .. } => {
-                            let _ = self.send_placement_command_rejection(client_id, command_id);
-                        }
-                    }
                 }
             }
         }

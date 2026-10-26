@@ -13,6 +13,7 @@ use koshi_core::ids::SessionId;
 use koshi_core::key::{
     BindingModifierFlags, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
+use koshi_core::notification::{NotificationQueue, NotificationQueueOwner};
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_ipc::endpoint::{
     compute_socket_address, resolve_clipboard_tool_directory_path, EndpointFile,
@@ -84,6 +85,24 @@ pub fn build_test_uuid_with_suffix(suffix_number: u8) -> Uuid {
         "00000000-0000-0000-0000-0000000000{suffix_number:02}"
     ))
     .expect("literal UUID parses")
+}
+
+/// An empty notification queue of `owner` at revision 0, in the epoch
+/// `00000000-0000-0000-0000-000000000001`. Two calls with one owner give equal
+/// queues.
+///
+/// # Panics
+///
+/// Never: the queue's wire form is fixed.
+#[must_use]
+pub fn build_fixed_epoch_notification_queue(owner: NotificationQueueOwner) -> NotificationQueue {
+    serde_json::from_value(serde_json::json!({
+        "owner": owner,
+        "epoch": build_test_uuid_with_suffix(1),
+        "revision": 0,
+        "entries": []
+    }))
+    .expect("an empty queue decodes")
 }
 
 /// A `new-pane` request with nothing chosen: the focused pane splits

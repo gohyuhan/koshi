@@ -16,6 +16,7 @@ use super::*;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -96,6 +97,7 @@ use koshi_core::ids::{CommandId, PaneId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
+use koshi_core::notification::NotificationQueueOwner;
 use koshi_core::process::PtySize;
 use koshi_core::selection::{GridPosition, Selection, SelectionKind};
 use koshi_input::host::{
@@ -219,6 +221,7 @@ fn build_launch_client_with_config(client_id: ClientId, loaded_config: LoadedCon
         TEST_VIEWPORT_SIZE,
         TerminalCleanupGuard::new(),
         loaded_config,
+        &[],
         Arc::default(),
     )
 }
@@ -1920,6 +1923,109 @@ fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
         client.keymap_catalog.get_which_key_delay(),
         Duration::from_millis(40)
     );
+}
+
+/// The owner, severity and text of each entry `client`'s history holds,
+/// oldest arrival first.
+fn list_notifications(
+    client: &Client,
+) -> Vec<(NotificationQueueOwner, NotificationSeverity, String)> {
+    client
+        .get_notification_history()
+        .list_merged_entries()
+        .map(|notification_entry| {
+            (
+                notification_entry.id.owner,
+                notification_entry.severity,
+                notification_entry.text.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn each_warning_of_the_viewers_config_load_posts_one_warning_to_that_viewer() {
+    let (_server, client_id, _pane_id) = build_test_server_with_pane();
+    let config_warnings = [
+        "koshi.kdl: line 3, column 1: unknown key `frobnicate`".to_owned(),
+        "no config directory found; using built-in defaults".to_owned(),
+    ];
+
+    let client = build_client_with_loaded_config(
+        client_id,
+        TEST_VIEWPORT_SIZE,
+        TerminalCleanupGuard::new(),
+        LoadedConfig::default(),
+        &config_warnings,
+        Arc::default(),
+    );
+
+    let client_owner = NotificationQueueOwner::Client(client_id);
+    assert_eq!(
+        list_notifications(&client),
+        vec![
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                "koshi.kdl: line 3, column 1: unknown key `frobnicate`".to_owned()
+            ),
+            (
+                client_owner,
+                NotificationSeverity::Warning,
+                "no config directory found; using built-in defaults".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_keymap_with_a_fatal_finding_posts_one_warning_naming_that_finding() {
+    let (_server, client_id, _pane_id) = build_test_server_with_pane();
+    let refused_keymap_layer = koshi_config::keybinding::parse_keybindings(
+        Path::new("keybinding.kdl"),
+        "version 2\nmode \"locked\" {\n    remove \"<C-l>\"\n}\n",
+    )
+    .expect("the keymap parses");
+
+    let client = build_launch_client_with_config(
+        client_id,
+        LoadedConfig {
+            app_config_layer: None,
+            theme_config_layer: None,
+            keybindings_config_layer: Some(refused_keymap_layer),
+        },
+    );
+
+    assert_eq!(
+        list_notifications(&client),
+        vec![(
+            NotificationQueueOwner::Client(client_id),
+            NotificationSeverity::Warning,
+            "keybinding.kdl was not applied: locked mode has no binding from `<C-l>` to \
+             `core:unlock`; the unlock escape would be unreachable; `koshi keys conflicts` lists \
+             every finding"
+                .to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_keymap_that_applies_posts_nothing() {
+    let (_server, client_id, _pane_id) = build_test_server_with_pane();
+
+    let client = build_launch_client_with_config(
+        client_id,
+        LoadedConfig {
+            app_config_layer: None,
+            theme_config_layer: None,
+            keybindings_config_layer: Some(PartialKeybindingsConfig {
+                chord_timeout_ms: Some(1234),
+                ..PartialKeybindingsConfig::default()
+            }),
+        },
+    );
+
+    assert_eq!(list_notifications(&client), Vec::new());
 }
 
 #[test]
@@ -3801,6 +3907,13 @@ fn the_target_outline_stays_at_the_target_slot_of_the_tab_size_it_was_shown_at()
     );
 }
 
+/// The notification view of a viewer that holds no entry and shows no toast.
+const EMPTY_NOTIFICATION_VIEW: NotificationView<'static> = NotificationView {
+    entries: &VecDeque::new(),
+    dropped_entry_count: 0,
+    toast_content: None,
+};
+
 #[test]
 fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
     let (session_server, client_id, source_pane_id) = build_test_server_with_pane();
@@ -3881,6 +3994,7 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
         &[],
         Some(&placement_presentation),
         Some(&placement_target),
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -4629,6 +4743,7 @@ impl ListedRowPaintCheck {
                         placement_display_tab_snapshot: None,
                         placement_target: None,
                         placement_presentation: None,
+                        notification_view: EMPTY_NOTIFICATION_VIEW,
                         drawn_rows,
                     }
                     .render(render_area, frame_buffer);
@@ -5002,8 +5117,9 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
         unavailable_image_placement_keys: Vec::new(),
         terminal_size: TEST_VIEWPORT_SIZE,
         has_placement_state: false,
+        notification_revision: 0,
     };
-    let changes: [FrameInputsChange; 9] = [
+    let changes: [FrameInputsChange; 10] = [
         ("the region solve", |frame_inputs| {
             frame_inputs.committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 1);
         }),
@@ -5039,6 +5155,9 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
         }),
         ("a placement state", |frame_inputs| {
             frame_inputs.has_placement_state = true;
+        }),
+        ("the notification revision", |frame_inputs| {
+            frame_inputs.notification_revision = 1;
         }),
     ];
 

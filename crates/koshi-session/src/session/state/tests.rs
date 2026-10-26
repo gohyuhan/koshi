@@ -1586,29 +1586,6 @@ fn the_starting_lock_survives_a_serde_round_trip() {
 }
 
 #[test]
-fn recovery_notice_survives_serialization_and_absent_field_reads_as_hidden() {
-    let mut session = build_empty_session();
-    session.is_recovery_notice_visible = true;
-    let serialized_session = serde_json::to_value(&session).expect("serialize session");
-    assert_eq!(
-        serialized_session["is_recovery_notice_visible"],
-        serde_json::Value::Bool(true)
-    );
-    let restored_session: Session =
-        serde_json::from_value(serialized_session.clone()).expect("restore session");
-    assert!(restored_session.is_recovery_notice_visible);
-
-    let mut session_without_notice_field = serialized_session;
-    session_without_notice_field
-        .as_object_mut()
-        .expect("session object")
-        .remove("is_recovery_notice_visible");
-    let restored_session: Session = serde_json::from_value(session_without_notice_field)
-        .expect("restore a session without the notice field");
-    assert!(!restored_session.is_recovery_notice_visible);
-}
-
-#[test]
 fn the_starting_lock_is_stored_as_a_plain_json_bool() {
     // Pins the stored shape: the member is named `should_start_locked` and holds a
     // JSON boolean.
@@ -4639,24 +4616,6 @@ fn floating_set_changes_are_recorded_once_per_real_change() {
 
     assert!(session.remove_floating_member(floating_pane_id).is_some());
     assert!(session.take_view_changes().is_floating_set_changed);
-}
-
-#[test]
-fn set_recovery_notice_visible_records_only_a_real_change() {
-    let mut session = build_empty_session();
-
-    session.set_recovery_notice_visible(false);
-    assert_eq!(session.take_view_changes(), SessionViewChanges::default());
-
-    session.set_recovery_notice_visible(true);
-    assert!(session.is_recovery_notice_visible());
-    assert_eq!(
-        session.take_view_changes(),
-        SessionViewChanges {
-            is_recovery_notice_changed: true,
-            ..SessionViewChanges::default()
-        }
-    );
 }
 
 /// A horizontal split of the three leaves `pane_ids` whose middle leaf aims

@@ -5056,7 +5056,6 @@ pub(crate) fn add_floating_mouse_pane(
 /// The render snapshot `mouse_frame` was painted from, with no pane content.
 pub(crate) fn build_render_snapshot_from_mouse_frame(mouse_frame: &MouseFrame) -> RenderSnapshot {
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: mouse_frame.session_snapshot.clone(),
         pane_snapshots: Vec::new(),
         client_snapshot: mouse_frame.client_snapshot.clone(),
@@ -6294,7 +6293,7 @@ fn a_sent_move_stays_drawn_until_an_applied_frame_names_it() {
 
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
     assert!(
-        !client.reject_placement_command(command_id),
+        !client.reject_floating_pane_move(command_id),
         "a settled move takes no rejection"
     );
 }
@@ -6383,11 +6382,11 @@ fn a_rejected_move_is_drawn_where_the_session_places_the_pane_again() {
         Point { column: 15, row: 5 },
     );
 
-    assert!(!client.reject_placement_command(CommandId::new()));
-    assert!(client.reject_placement_command(command_id));
+    assert!(!client.reject_floating_pane_move(CommandId::new()));
+    assert!(client.reject_floating_pane_move(command_id));
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
     assert!(
-        !client.reject_placement_command(command_id),
+        !client.reject_floating_pane_move(command_id),
         "the rejected move is gone"
     );
 }

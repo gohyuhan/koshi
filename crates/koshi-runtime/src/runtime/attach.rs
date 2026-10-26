@@ -13,8 +13,9 @@ use koshi_session::session::state::Session;
 
 /// Copy `session`'s structure into the form a client attaches with.
 ///
-/// Carries the session's id and name, and every tab with its unsolved layout
-/// tree and focus history. Carries no pane content and no per-client state.
+/// Carries the session's id and name, every tab with its unsolved layout
+/// tree and focus history, and the session's notification queue. Carries no
+/// pane content and no per-client state.
 /// Tabs come out by display index.
 #[must_use]
 pub fn build_session_structure_snapshot(session: &Session) -> AttachedSessionStructureSnapshot {
@@ -35,6 +36,7 @@ pub fn build_session_structure_snapshot(session: &Session) -> AttachedSessionStr
         session_id: session.session_id,
         session_name: session.session_name.clone(),
         tabs,
+        notification_queue: session.notification_queue.clone(),
     }
 }
 

@@ -28,6 +28,7 @@ use koshi_terminal::style::Style as TerminalStyle;
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::images::ImageRenderMode;
+use crate::notification::tests::EMPTY_NOTIFICATION_VIEW;
 use crate::render::tests::{format_rendered_cells, get_pane_snapshot_mut};
 use crate::render::{build_frame_geometry, render_frame};
 use crate::snapshot::{
@@ -71,7 +72,6 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
     let tiled_pane_id = PaneId::new();
     let tiled_outer_rect = Rect::from_size_at_origin(tab_size);
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: "s".to_string(),
@@ -192,6 +192,7 @@ fn render_core_frame(
         &[],
         None,
         None,
+        EMPTY_NOTIFICATION_VIEW,
         DrawnRows::Every,
         &mut render_buffer,
     );

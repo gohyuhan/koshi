@@ -65,6 +65,7 @@ use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::ServerConfig;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId};
+use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 #[cfg(unix)]
 use koshi_host::clipboard_tool::refresh_clipboard_tool_directory;
@@ -80,7 +81,7 @@ use koshi_runtime::executable_watch::{read_first_output_line, ExecutableWatch, O
 use koshi_runtime::ipc_server::{ImageReplacement, IpcServer};
 use koshi_runtime::resume::{
     self, ResumeBody, ResumeHeader, RESUME_FORMAT, RESUME_FORMAT_MIN,
-    SESSION_NOT_RESTORED_NOTICE_BYTES,
+    SESSION_NOT_RESTORED_NOTICE_BYTES, SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
 };
 use koshi_runtime::runtime::driver::DispatchPassOutcome;
 use koshi_runtime::runtime::event::RuntimeEvent;
@@ -91,7 +92,7 @@ use koshi_runtime::server::{
 use koshi_storage::error::StorageError;
 use serde::{Deserialize, Serialize};
 
-use koshi_link::config::LoadedProfile;
+use koshi_link::config::{load_app_config_file, LoadedAppConfig, LoadedProfile};
 use koshi_link::error::CliError;
 use koshi_link::router_client::RUNTIME_DIRECTORY_FLAG;
 
@@ -347,9 +348,11 @@ enum ServeOutcome {
 /// cannot be read or deleted is written to the session log at warn level, and
 /// the session starts.
 ///
-/// `app_config_layer` is the `koshi.kdl` layer the caller read at this
-/// process's start. The session starts on it: its log settings, its first
-/// panes, and the reach of its first control socket. `config_directory` holds
+/// `loaded_app_config` is the `koshi.kdl` the caller read at this process's
+/// start. The session starts on its layer: its log settings, its first panes,
+/// and the reach of its first control socket. Each warning the read produced
+/// is written to the session log at warn level and, once the session serves,
+/// posted as a `Warning` to the session's notification queue. `config_directory` holds
 /// the profiles the session reads and the `koshi.kdl` it reads again: at every
 /// in-process rebuild, and for `allow-other-users` at each connection and each
 /// request on a shared socket. `None` runs the session on the built-in config.
@@ -357,7 +360,7 @@ enum ServeOutcome {
 pub fn run_session_server(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
-    app_config_layer: Option<PartialKoshiConfig>,
+    loaded_app_config: LoadedAppConfig,
     session_id: SessionId,
     session_name: String,
     loaded_profile: Option<LoadedProfile>,
@@ -367,6 +370,8 @@ pub fn run_session_server(
     supervisor_process_id: Option<u32>,
     config_migration_error: Option<&CliError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (app_config_layer, config_warnings) =
+        loaded_app_config.into_app_config_layer_and_warnings();
     let logging_parameters = koshi_link::config::build_logging_parameters(
         app_config_layer.as_ref(),
         LogFileOwner::Session { session_id },
@@ -386,6 +391,9 @@ pub fn run_session_server(
             %config_migration_error,
             "the config files could not be migrated; the session starts with them as they are"
         );
+    }
+    for config_warning in &config_warnings {
+        tracing::warn!("{config_warning}");
     }
     if let Err(session_log_delete_error) = delete_stale_session_log_files(session_id) {
         tracing::warn!(
@@ -482,6 +490,7 @@ pub fn run_session_server(
             return Err(start_error);
         }
     };
+    post_config_warnings(&mut session_server, session_id, &config_warnings);
     #[cfg(unix)]
     let mut runtime_file_keeper = start_session_file_keeper(&session_start, &ipc_server);
 
@@ -672,8 +681,8 @@ fn seed_initial_session(
 /// A header that does not read names no pane: every terminal this process
 /// inherited is released by [`release_panes_without_header`], and one fresh
 /// shell is seeded under the same id and name. Its screen receives
-/// [`SESSION_NOT_RESTORED_NOTICE_BYTES`], and its statusline keeps a recovery
-/// notice until input reaches a pane in that session.
+/// [`SESSION_NOT_RESTORED_NOTICE_BYTES`], and the session posts the `Error`
+/// notification [`SESSION_NOT_RESTORED_NOTIFICATION_TEXT`].
 ///
 /// The previous image let its panes go — on Unix by ending, on Windows by
 /// dropping its link. [`resume_readers_and_rebuild`] is the other path: it
@@ -743,7 +752,8 @@ fn resume_from_file(
 /// 3. A session left holding no running pane either way — or a helper process
 ///    that cannot be reached — comes back under the same id and name with one
 ///    fresh shell. Its screen receives [`SESSION_NOT_RESTORED_NOTICE_BYTES`],
-///    and its statusline shows a recovery notice. A session rebuilt with no
+///    and the session posts the `Error` notification
+///    [`SESSION_NOT_RESTORED_NOTIFICATION_TEXT`]. A session rebuilt with no
 ///    live pane starts a new event stream, unless the carried body contains a
 ///    quit request; that request remains active for returning clients.
 ///
@@ -937,7 +947,8 @@ fn seed_session_after_failed_restore(
 
 /// Seed one fresh shell on `session_server` under the id and name the router
 /// registered, and send [`SESSION_NOT_RESTORED_NOTICE_BYTES`] to its screen.
-/// Its statusline shows a recovery notice. A session `session_server` already
+/// The session posts the `Error` notification
+/// [`SESSION_NOT_RESTORED_NOTIFICATION_TEXT`]. A session `session_server` already
 /// holds under that id is replaced. `pty_owner` is the backend `session_server`
 /// drives.
 ///
@@ -958,7 +969,11 @@ fn seed_shell_after_failed_restore(
         end_every_pane(pty_owner);
         return Err(bootstrap_error.into());
     }
-    session_server.show_session_recovery_notice(session_start.session_id);
+    session_server.post_session_notification(
+        session_start.session_id,
+        NotificationSeverity::Error,
+        SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
+    );
     let fresh_pane_ids: Vec<PaneId> = session_server
         .list_sessions()
         .get(&session_start.session_id)
@@ -2168,8 +2183,10 @@ fn handle_held_runtime_event(
 /// backend.
 ///
 /// The `koshi.kdl` now on disk is read once here. The rebuilt session runs on
-/// it, and the control socket is bound again under it, with a fresh token. The
-/// caller has already withdrawn the socket the session was serving on.
+/// it, and the control socket is bound again under it, with a fresh token.
+/// Each warning the read produced posts a `Warning` to the session's
+/// notification queue ([`post_config_warnings`]). The caller has already
+/// withdrawn the socket the session was serving on.
 ///
 /// The resume file is deleted on every way out of this call.
 ///
@@ -2184,8 +2201,9 @@ fn resume_readers_and_rebuild(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
-    let app_config_layer =
-        koshi_link::config::load_app_layer(session_start.config_directory.as_deref());
+    let (app_config_layer, config_warnings) =
+        load_app_config_file(session_start.config_directory.as_deref())
+            .into_app_config_layer_and_warnings();
     let mut rebuilt_session = resume_session_readers(
         session_server,
         pty_owner,
@@ -2212,6 +2230,11 @@ fn resume_readers_and_rebuild(
         }
     };
     finish_session_resume(&mut rebuilt_session, runtime_event_sender);
+    post_config_warnings(
+        &mut rebuilt_session,
+        session_start.session_id,
+        &config_warnings,
+    );
     Ok((rebuilt_session, session_socket))
 }
 
@@ -2219,7 +2242,9 @@ fn resume_readers_and_rebuild(
 /// state it had already carried out, on the `koshi.kdl` now on disk.
 ///
 /// `session_socket` keeps its address and rotates its connection token. The panes were
-/// never released, and the resume file is deleted.
+/// never released, and the resume file is deleted. Each warning the read of
+/// `koshi.kdl` produced posts a `Warning` to the session's notification queue
+/// ([`post_config_warnings`]).
 ///
 /// # Errors
 /// Returns the failure of advertising the fresh token, after
@@ -2234,12 +2259,15 @@ fn resume_readers_and_keep_socket(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
+    let (app_config_layer, config_warnings) =
+        load_app_config_file(session_start.config_directory.as_deref())
+            .into_app_config_layer_and_warnings();
     let mut rebuilt_session = resume_session_readers(
         session_server,
         pty_owner,
         resume_header,
         resume_body,
-        koshi_link::config::load_app_layer(session_start.config_directory.as_deref()),
+        app_config_layer,
     );
 
     let token_rotation_result = session_socket.rotate_token();
@@ -2252,7 +2280,29 @@ fn resume_readers_and_keep_socket(
         return Err(token_rotation_error.into());
     }
     finish_session_resume(&mut rebuilt_session, runtime_event_sender);
+    post_config_warnings(
+        &mut rebuilt_session,
+        session_start.session_id,
+        &config_warnings,
+    );
     Ok((rebuilt_session, session_socket))
+}
+
+/// Post each of `config_warnings` as a `Warning` with its own text to session
+/// `session_id`'s notification queue, in order
+/// ([`Server::post_session_notification`]).
+fn post_config_warnings(
+    session_server: &mut Server,
+    session_id: SessionId,
+    config_warnings: &[String],
+) {
+    for config_warning in config_warnings {
+        session_server.post_session_notification(
+            session_id,
+            NotificationSeverity::Warning,
+            config_warning,
+        );
+    }
 }
 
 /// End every pane `pty_owner` holds with [`KillPolicy::Tree`]. Each pane leaves

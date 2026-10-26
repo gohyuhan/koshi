@@ -65,7 +65,6 @@ pub(crate) fn build_wire_frame_with_content_ids(
     let session_snapshot = &render_snapshot.session_snapshot;
     let client_snapshot = &render_snapshot.client_snapshot;
     PaintedFrame {
-        is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
         session_snapshot: FrameSession {
             session_id: session_snapshot.session_id,
             session_name: session_snapshot.session_name.clone(),

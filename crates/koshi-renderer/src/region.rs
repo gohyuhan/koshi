@@ -6,7 +6,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
 
-use crate::snapshot::{KeymapHints, Reconnecting, TabMetadata};
+use crate::snapshot::{KeymapHints, NotificationButton, Reconnecting, TabMetadata};
 
 /// The compiled-in region geometry, in solve order: a one-row tabline on the
 /// top edge, then a one-row statusline on the bottom edge.
@@ -27,8 +27,8 @@ pub fn solve_core_regions(viewport_size: Size) -> SolvedRegions {
     solve_region_rects(viewport_size, &CORE_REGION_GEOMETRIES)
 }
 
-/// The statusline facts needed to paint it: keybinding hints, the open key
-/// sequence, and session recovery notice.
+/// The statusline facts needed to paint it: keybinding hints and the open key
+/// sequence.
 ///
 /// This value excludes colors. [`crate::statusline_hints::draw_statusline`]
 /// takes the theme as its own argument.
@@ -40,15 +40,14 @@ pub(crate) struct StatuslineInputs<'a> {
     /// The chords already pressed of an open key sequence. `None` when no
     /// sequence is open.
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
-    /// Whether the session recovery notice takes the hint area.
-    pub(crate) is_recovery_notice_visible: bool,
 }
 
 /// The tabline facts needed to solve its geometry and paint it.
 ///
 /// This value excludes colors and pane data. A session named `work` with tabs
 /// `shell` and `logs` carries those names, their active markers, the mode
-/// values and the tray button state, but no pane slot or terminal grid.
+/// values, the tray button state and the notification button state, but no
+/// pane slot or terminal grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TablineInputs<'a> {
     /// The session display name shown in the left block.
@@ -69,6 +68,12 @@ pub(crate) struct TablineInputs<'a> {
     /// Whether the viewer's floating pane tray is open: the tray button draws
     /// in reverse video.
     pub(crate) is_floating_pane_tray_open: bool,
+    /// The notification button the tabline draws left of the tray button, or
+    /// left of the mode tag with no tray button. `None` draws none.
+    pub(crate) notification_button: Option<NotificationButton>,
+    /// Whether the viewer's notification center is open: the notification
+    /// button draws in reverse video.
+    pub(crate) is_notification_center_open: bool,
 }
 
 #[cfg(test)]

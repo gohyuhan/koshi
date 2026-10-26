@@ -33,7 +33,7 @@ use koshi_core::command::{
 use koshi_core::discovery::{PaneLifecycle, SessionOverview};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
-use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags};
+use koshi_core::notification::{NotificationQueue, NotificationSeverity};
 use koshi_core::process::SpawnSpec;
 use koshi_ipc::endpoint::{resolve_resume_file_path, EndpointFile};
 use koshi_ipc::error::IpcError;
@@ -323,6 +323,8 @@ struct AttachedClientStream {
     /// The secret the session minted at this attach, which a return after the
     /// session replaced its own image presents with `client_id`.
     resume_token: Option<ConnectionToken>,
+    /// The session's notification queue as the attach answer carried it.
+    notification_queue: NotificationQueue,
     /// Every event and every applied painted update the reading thread has
     /// read, in arrival order. The read that ends the connection arrives here
     /// too.
@@ -370,6 +372,7 @@ impl AttachedClientStream {
             client_id,
             session_id: joined_session_id,
             resume_token: minted_resume_token,
+            session_structure,
             ..
         } = ipc_response.answer_result
         else {
@@ -414,6 +417,7 @@ impl AttachedClientStream {
             AttachedClientStream {
                 client_id,
                 resume_token: minted_resume_token,
+                notification_queue: session_structure.notification_queue,
                 session_events,
                 request_writer,
             },
@@ -1067,7 +1071,10 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
     );
     attached_client_stream.send_request_while_connection_open(
         20,
-        IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+        IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(command_envelope),
+            fired_action: None,
+        },
     );
     // What a real client sends the moment it reads that frame. Requests arrive
     // in the order they were queued: the session reads the line above before
@@ -2339,7 +2346,7 @@ fn wait_until_process_is_reaped(process_id: libc::pid_t) {
 }
 
 #[test]
-fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showing_the_notice() {
+fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_and_posts_an_error() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
@@ -2369,41 +2376,28 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
         None,
         None,
     );
-    let painted_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
-        painted_frame.painted_frame.is_recovery_notice_visible
-            && painted_frame
-                .pane_views
-                .iter()
-                .any(|pane_view| pane_view.pane_id == fresh_pane_id)
-    });
-    assert!(
-        painted_frame.painted_frame.is_recovery_notice_visible,
-        "{}",
-        describe_painted_frame(&painted_frame)
-    );
-    attached_client_stream.send_session_request(
-        3,
-        IpcRequestKind::Keyboard {
-            key_inputs: vec![KeyInput {
-                key: KeyIdentity::Key(Key::Char('x')),
-                key_event_kind: KeyEventKind::Press,
-                shifted_key: None,
-                base_layout_key: None,
-                associated_text: String::new(),
-                modifier_flags: KeyModifierFlags::NONE,
-            }],
-        },
-    );
-    let cleared_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
-        !painted_frame.painted_frame.is_recovery_notice_visible
-    });
-    assert!(
-        cleared_frame
+    attached_client_stream.receive_painted_frame_when(|painted_frame| {
+        painted_frame
             .pane_views
             .iter()
-            .any(|pane_view| pane_view.pane_id == fresh_pane_id),
-        "{}",
-        describe_painted_frame(&cleared_frame)
+            .any(|pane_view| pane_view.pane_id == fresh_pane_id)
+    });
+    let notifications: Vec<(NotificationSeverity, &str)> = attached_client_stream
+        .notification_queue
+        .list_entries()
+        .map(|notification_entry| {
+            (
+                notification_entry.severity,
+                notification_entry.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        notifications,
+        vec![(
+            NotificationSeverity::Error,
+            "the session could not be restored after the restart; a new shell started"
+        )]
     );
     assert!(
         !resume_file_path.exists(),

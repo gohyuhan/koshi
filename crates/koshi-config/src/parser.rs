@@ -9,6 +9,8 @@
 //! `ParseProblems`, and [`format_unknown_key`] names the nearest allowed key
 //! for an unrecognized one.
 
+use std::fmt::Display;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use kdl::{KdlDiagnostic, KdlDocument, KdlError, KdlNode, KdlValue};
@@ -404,18 +406,24 @@ pub(crate) fn parse_integer_kdl_value(field_node: &KdlNode) -> Result<i128, Stri
         .ok_or_else(|| "expected an integer".to_string())
 }
 
-/// Reads the node's single value as a `u16`. A value outside `0..=65535`
-/// gives `must be between 0 and 65535`.
-pub(crate) fn parse_u16_kdl_value(field_node: &KdlNode) -> Result<u16, String> {
-    u16::try_from(parse_integer_kdl_value(field_node)?)
-        .map_err(|_| "must be between 0 and 65535".to_string())
-}
-
-/// Reads the node's single value as a `u32`. A value outside `0..=4294967295`
-/// gives `must be between 0 and 4294967295`.
-pub(crate) fn parse_u32_kdl_value(field_node: &KdlNode) -> Result<u32, String> {
-    u32::try_from(parse_integer_kdl_value(field_node)?)
-        .map_err(|_| "must be between 0 and 4294967295".to_string())
+/// Reads the node's single value as an integer in `allowed_range`. A value
+/// outside it gives `must be between <start> and <end>`. With `30..=120`,
+/// `x 29` gives `must be between 30 and 120`, and `x 30` yields `30`.
+pub(crate) fn parse_ranged_integer_kdl_value<Integer>(
+    field_node: &KdlNode,
+    allowed_range: RangeInclusive<Integer>,
+) -> Result<Integer, String>
+where
+    Integer: TryFrom<i128> + PartialOrd + Display,
+{
+    match Integer::try_from(parse_integer_kdl_value(field_node)?) {
+        Ok(integer_value) if allowed_range.contains(&integer_value) => Ok(integer_value),
+        _ => Err(format!(
+            "must be between {} and {}",
+            allowed_range.start(),
+            allowed_range.end()
+        )),
+    }
 }
 
 /// Reads the schema number a `version` node declares. Every config file that

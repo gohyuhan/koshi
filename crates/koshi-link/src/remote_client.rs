@@ -1686,9 +1686,10 @@ pub fn submit_remote_command(
     );
     let prepare_request = IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(Box::new(
-            command_envelope,
-        )))),
+        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(command_envelope),
+            fired_action: None,
+        })),
     };
     run_remote_session_exchange(
         saved_server_record,
