@@ -1,6 +1,8 @@
 //! Theme-derived [`Style`]s for the chrome: tab bar, borders, stack
 //! headers, and overlays.
 
+use koshi_core::notification::NotificationSeverity;
+
 use super::*;
 
 #[cfg(test)]
@@ -123,4 +125,20 @@ pub(super) fn compute_placement_hover_border_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.accent_color)
         .add_modifier(Modifier::BOLD)
+}
+
+/// The style of a notification's header, by its severity: `Info` in the
+/// theme's focused-border color, `Warning` in its hover-border color, and
+/// `Error` in its accent color in reverse video, each in bold.
+pub(super) fn compute_notification_severity_style(
+    theme: &Theme,
+    notification_severity: NotificationSeverity,
+) -> Style {
+    match notification_severity {
+        NotificationSeverity::Info => compute_focused_border_style(theme),
+        NotificationSeverity::Warning => compute_hover_border_style(theme),
+        NotificationSeverity::Error => {
+            compute_placement_hover_border_style(theme).add_modifier(Modifier::REVERSED)
+        }
+    }
 }

@@ -11,7 +11,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use koshi_core::command::{Command, CommandResult, CommandSource};
+use koshi_core::command::{Command, CommandResult, CommandSource, FocusPaneArgs, FocusTarget};
+use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::process::KillPolicy;
 
@@ -220,8 +221,13 @@ impl Server {
                 client_id,
                 cell_size,
             } => self.handle_client_cell_size(client_id, cell_size),
+            // A rejected command from a key binding goes back to that client
+            // alone, naming the action its key fired. A command whose target
+            // is a direction or the next or previous floating pane, and that
+            // found none, goes back as nothing.
             RuntimeEvent::Ipc {
                 command_envelope,
+                fired_action,
                 response_sender,
             } => {
                 if let CommandSource::KeyBinding { client_id }
@@ -229,19 +235,38 @@ impl Server {
                 {
                     self.allow_client_frame_now(client_id);
                 }
-                let placement_client_id =
-                    match (&command_envelope.command_source, &command_envelope.command) {
-                        (
-                            CommandSource::KeyBinding { client_id },
-                            Command::PlacePane(_) | Command::MoveFloatingPane(_),
-                        ) => Some(*client_id),
-                        _ => None,
-                    };
+                let key_binding_client_id = match command_envelope.command_source {
+                    CommandSource::KeyBinding { client_id } => Some(client_id),
+                    _ => None,
+                };
+                let has_directional_target = matches!(
+                    &command_envelope.command,
+                    Command::FocusPane(FocusPaneArgs {
+                        focus_target: FocusTarget::Direction(_)
+                            | FocusTarget::NextFloatingPane
+                            | FocusTarget::PreviousFloatingPane,
+                        ..
+                    })
+                );
                 let command_result = self.submit_command(*command_envelope);
-                if let (Some(client_id), CommandResult::Rejected { command_id, .. }) =
-                    (placement_client_id, &command_result)
+                if let (
+                    Some(client_id),
+                    CommandResult::Rejected {
+                        command_id,
+                        reason,
+                        help,
+                    },
+                ) = (key_binding_client_id, &command_result)
                 {
-                    let _ = self.send_placement_command_rejection(client_id, *command_id);
+                    if !(has_directional_target && *reason == RejectReason::TargetNotFound) {
+                        self.send_command_rejection(
+                            client_id,
+                            *command_id,
+                            fired_action,
+                            *reason,
+                            help.clone(),
+                        );
+                    }
                 }
                 // A closed reply channel means the connection thread is gone.
                 // The command has already applied and stays applied.
@@ -293,6 +318,7 @@ impl Server {
                 source_pane_id,
                 placement_target,
                 expected_placed_tab_layout,
+                fired_action,
             } => {
                 self.allow_client_frame_now(client_id);
                 let _ = self.confirm_pane_placement(
@@ -301,6 +327,7 @@ impl Server {
                     source_pane_id,
                     placement_target,
                     &expected_placed_tab_layout,
+                    fired_action,
                 );
             }
             // The restart is taken here, and the swap runs after the loop

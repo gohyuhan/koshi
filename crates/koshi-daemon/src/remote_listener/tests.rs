@@ -2252,7 +2252,10 @@ mod bridge_round_trip {
             &mut connection,
             IpcRequest {
                 request_id: 2,
-                request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+                request_kind: IpcRequestKind::SubmitCommand {
+                    command_envelope: Box::new(command_envelope),
+                    fired_action: None,
+                },
             },
         );
         let command_response: IpcResponse =

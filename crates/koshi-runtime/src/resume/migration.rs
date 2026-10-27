@@ -1,6 +1,8 @@
 //! Ordered conversion of released resume bodies into the current shape.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::num::NonZeroU32;
+use std::time::SystemTime;
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -9,12 +11,16 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Number, Value};
 
 use koshi_core::ids::{PaneId, SessionId};
+use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSeverity};
 use koshi_session::session::state::Session;
 use koshi_storage::error::StorageError;
 use koshi_terminal::engine::{GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport};
 use koshi_terminal::state::ResumeFormat4TerminalState;
 
-use super::{CarriedPaneState, CarriedQuit, ResumeBody, RESUME_FORMAT};
+use super::{
+    CarriedPaneState, CarriedQuit, ResumeBody, RESUME_FORMAT,
+    SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
+};
 use crate::runtime::saved_view::SavedViewStore;
 
 /// A pane state in the shape resume format 4 writes: the fields of
@@ -677,8 +683,9 @@ fn write_migrated_json(
 /// Runs the steps from `source_resume_format` up to [`RESUME_FORMAT`] on
 /// `resume_body`, in order. Step 1 converts format 1 to format 2. Step 2 adds
 /// the format-3 fields. Step 3 converts format 3 to format 4. Step 4 adds the
-/// format-5 floating fields and each tab's `solved_tab_size`, and removes each
-/// pane record's `lifecycle` and `close_policy`. A body saved at format 3 also
+/// format-5 floating fields, each session's notification queue and each
+/// tab's `solved_tab_size`, and removes each pane record's `lifecycle` and
+/// `close_policy`. A body saved at format 3 also
 /// gets the step-2 fields before step 3. Steps 2 and 4 add only the fields
 /// that are missing.
 ///
@@ -1174,7 +1181,9 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
 }
 
 /// Adds the format-5 fields that `resume_body` lacks: `floating_set`
-/// `{"members":[]}` and `starting_tab_id` `null` on each session, `solved_tab_size`
+/// `{"members":[]}`, `starting_tab_id` `null`, and `notification_queue`, a
+/// queue in a new epoch owned by the session's `session_id`, on each
+/// session, `solved_tab_size`
 /// `{"column_count":0,"row_count":0}` on each of its tabs, and
 /// `floating_pane_view_by_pane_id` `{}`, `shown_floating_pane_ids` `[]` and
 /// `focused_floating_pane_id` `null` on each of its clients. A field that is
@@ -1185,12 +1194,19 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
 /// `panes.pane_record_by_id`, and `placement_revision` from each session and
 /// each of its clients.
 ///
+/// Removes `is_recovery_notice_visible` from each session. The queue this step
+/// adds to a session whose `is_recovery_notice_visible` is `true` holds one
+/// `Error` entry, [`SESSION_NOT_RESTORED_NOTIFICATION_TEXT`]; every other
+/// queue it adds is empty.
+///
 /// # Errors
 /// Returns an invalid-resume error when `body.session_by_id`, a session's
 /// `tabs`, `clients`, `clients.client_by_id`, `panes`,
 /// `panes.pane_record_by_id` or a client's `focused_pane_id_by_tab_id` is
 /// missing, or when the body, a value on that path, a tab, a client or a pane
-/// record is not an object.
+/// record is not an object. Also when a session's `is_recovery_notice_visible`
+/// is not a boolean, or when a session that lacks `notification_queue` has no
+/// `session_id`, or one that is not a session id.
 fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageError> {
     let sessions = get_required_json_field(
         get_json_object(resume_body, "body")?,
@@ -1206,6 +1222,15 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
             .entry("starting_tab_id")
             .or_insert(Value::Null);
         session_fields.remove("placement_revision");
+        let is_recovery_notice_visible = match session_fields.remove("is_recovery_notice_visible") {
+            None => false,
+            Some(Value::Bool(is_recovery_notice_visible)) => is_recovery_notice_visible,
+            Some(_) => {
+                return Err(build_invalid_resume_error(format!(
+                    "{session_path}.is_recovery_notice_visible must be a boolean"
+                )))
+            }
+        };
         let tabs = get_required_json_field(session_fields, "tabs", session_path)?;
         migrate_json_object_members(tabs, "session.tabs", |tab, tab_path| {
             get_json_object(tab, tab_path)?
@@ -1271,7 +1296,33 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
                 pane_record_fields.remove("close_policy");
                 Ok(())
             },
-        )
+        )?;
+        if !session_fields.contains_key("notification_queue") {
+            let session_id = SessionId::deserialize(
+                get_required_json_field(session_fields, "session_id", session_path)?.clone(),
+            )
+            .map_err(|decode_error| {
+                build_invalid_resume_error(format!("{session_path}.session_id: {decode_error}"))
+            })?;
+            let mut notification_queue =
+                NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+            if is_recovery_notice_visible {
+                notification_queue.post_core_entry(
+                    NotificationSeverity::Error,
+                    SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
+                    NonZeroU32::MIN,
+                    SystemTime::now(),
+                );
+            }
+            let notification_queue_json =
+                serde_json::to_value(notification_queue).map_err(|encode_error| {
+                    build_invalid_resume_error(format!(
+                        "encode {session_path}.notification_queue: {encode_error}"
+                    ))
+                })?;
+            session_fields.insert("notification_queue".to_owned(), notification_queue_json);
+        }
+        Ok(())
     })
 }
 

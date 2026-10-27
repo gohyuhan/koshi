@@ -14,6 +14,7 @@ use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::ids::{PaneId, SubscriberId, TabId};
 
 use super::*;
+use crate::runtime::bus::tests::build_test_notification_queue;
 use crate::runtime::event::SessionEnding;
 use crate::runtime::frame::tests::build_render_snapshot;
 
@@ -82,7 +83,7 @@ fn deliveries_come_out_in_the_order_they_went_in_and_a_full_queue_drops_one() {
 
     assert_eq!(
         delivery_sender.try_send(build_tab_event(third_tab_id)),
-        Err(TrySendError::Full(()))
+        Err(TrySendError::Full(build_tab_event(third_tab_id)))
     );
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
@@ -128,7 +129,10 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
     delivery_sender
         .try_send(Delivery::Snapshot {
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+            notification_queue: build_test_notification_queue(),
             lag_report,
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })
         .expect("the resync snapshot fits");
     delivery_sender
@@ -139,7 +143,10 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
         vec![
             Delivery::Snapshot {
                 render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+                notification_queue: build_test_notification_queue(),
                 lag_report,
+                held_command_rejections: Vec::new(),
+                dropped_command_rejection_count: 0,
             },
             Delivery::Frame(build_named_frame(&base_render_snapshot, "d")),
         ]
@@ -202,7 +209,7 @@ fn a_dropped_receiver_refuses_each_delivery_sent_after_the_drop() {
 
     assert_eq!(
         delivery_sender.try_send(build_tab_event(tab_id)),
-        Err(TrySendError::Disconnected(()))
+        Err(TrySendError::Disconnected(build_tab_event(tab_id)))
     );
     assert_eq!(
         delivery_sender.try_send_frame(build_named_frame(&base_render_snapshot, "a")),
@@ -315,7 +322,10 @@ fn a_paced_receive_holds_a_resync_snapshot_as_it_holds_a_frame() {
     delivery_sender
         .try_send(Delivery::Snapshot {
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+            notification_queue: build_test_notification_queue(),
             lag_report,
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })
         .expect("the resync snapshot fits");
 
@@ -327,7 +337,10 @@ fn a_paced_receive_holds_a_resync_snapshot_as_it_holds_a_frame() {
         delivery_receiver.recv_paced(None, true, &ending_notice),
         PacedReceive::Delivery(Delivery::Snapshot {
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
+            notification_queue: build_test_notification_queue(),
             lag_report,
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         })
     );
 }

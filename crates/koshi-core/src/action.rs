@@ -343,6 +343,22 @@ pub enum ClientActionKind {
     /// Minimize the selected tray tile's floating pane when the viewer shows
     /// it, and restore it when the viewer minimized it.
     ToggleSelectedTrayTile,
+    /// Open the notification center, which then holds the viewer's keys, when
+    /// it is closed, and close it when it is open.
+    ToggleNotificationCenter,
+    /// Close the notification center and return to the base input mode.
+    CloseNotificationCenter,
+    /// Remove every entry from the viewer's notification center and close it.
+    ClearNotifications,
+    /// Select the notification center's card one entry newer than the
+    /// selected one, and scroll the center to show it.
+    SelectNewerNotification,
+    /// Select the notification center's card one entry older than the
+    /// selected one, and scroll the center to show it.
+    SelectOlderNotification,
+    /// Remove the selected card's entry from the viewer's notification
+    /// center, and select the next older card, else the next newer one.
+    DismissSelectedNotification,
 }
 
 /// Where an action's key sorts among the keys of its modifier group in the
@@ -470,13 +486,15 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `Split Pane`, `resize-pane-*` `Resize Pane`, `select-pane-target-*`
 /// `Select Pane Target`, `select-pane-insertion-*` `Select Pane Insertion`,
 /// `move-floating-pane-*` `Move Floating Pane`, `select-tray-tile-*`
-/// `Select Tray Tile`, `focus-pane-*` `Focus Pane`, and
-/// `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`. Every other action has
-/// none.
+/// `Select Tray Tile`, `focus-pane-*` `Focus Pane`,
+/// `scroll-pane-up`/`scroll-pane-down` `Scroll Pane`, and
+/// `select-newer-notification`/`select-older-notification`
+/// `Select Notification`. Every other action has none.
 ///
 /// Every `confirm-*` and `cancel-*` action, `new-pane`, `close-pane`,
-/// `close-pane-tree`, `new-tab`, `close-tab`, `lock`, `unlock` and
-/// `close-floating-pane-tray` are [`HintTier::Essential`]. The direction
+/// `close-pane-tree`, `new-tab`, `close-tab`, `lock`, `unlock`,
+/// `close-floating-pane-tray` and `close-notification-center` are
+/// [`HintTier::Essential`]. The direction
 /// families, `next-tab`, `previous-tab`, and the next and previous floating
 /// pane and placement tab actions are [`HintTier::Navigation`]. Every other
 /// action is [`HintTier::Other`].
@@ -889,6 +907,54 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::ToggleSelectedTrayTile),
         ),
         build_core_action_seed(
+            "toggle-notification-center",
+            "Toggle Notification Center",
+            "Open this client's notification center on the right side, or close it when it is open",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ToggleNotificationCenter),
+        ),
+        build_core_action_seed(
+            "close-notification-center",
+            "Close Notification Center",
+            "Close the notification center and keep its entries",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CloseNotificationCenter),
+        ),
+        build_core_action_seed(
+            "clear-notifications",
+            "Clear Notifications",
+            "Remove every entry from this client's notification center and close it",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ClearNotifications),
+        ),
+        build_core_action_seed(
+            "select-newer-notification",
+            "Select Newer Notification",
+            "Select the notification card above the selected one in the notification center",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectNewerNotification),
+        ),
+        build_core_action_seed(
+            "select-older-notification",
+            "Select Older Notification",
+            "Select the notification card below the selected one in the notification center",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectOlderNotification),
+        ),
+        build_core_action_seed(
+            "dismiss-selected-notification",
+            "Dismiss Selected Notification",
+            "Remove the selected notification card from this client's notification center",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::DismissSelectedNotification),
+        ),
+        build_core_action_seed(
             "move-pane",
             "Move Pane",
             "Swap a pane with its visible neighbor in one direction and commit the swap at once",
@@ -1236,6 +1302,9 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
                 Some("Focus Pane")
             }
             "scroll-pane-up" | "scroll-pane-down" => Some("Scroll Pane"),
+            "select-newer-notification" | "select-older-notification" => {
+                Some("Select Notification")
+            }
             _ => None,
         };
         let is_direction_family_member = action_metadata.hint_label.is_some();
@@ -1247,7 +1316,8 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             | "close-tab"
             | "lock"
             | "unlock"
-            | "close-floating-pane-tray" => HintTier::Essential,
+            | "close-floating-pane-tray"
+            | "close-notification-center" => HintTier::Essential,
             _ if action_name.starts_with("confirm-") || action_name.starts_with("cancel-") => {
                 HintTier::Essential
             }

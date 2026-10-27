@@ -512,7 +512,10 @@ fn submit_command_envelope(
         command_source,
         command_with_working_directory,
     );
-    let submit_command_kind = IpcRequestKind::SubmitCommand(Box::new(command_envelope));
+    let submit_command_kind = IpcRequestKind::SubmitCommand {
+        command_envelope: Box::new(command_envelope),
+        fired_action: None,
+    };
     let prepared_submit = exchange_prepared_session_request(
         endpoint,
         session_id,

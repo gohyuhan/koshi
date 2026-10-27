@@ -11,6 +11,9 @@
 //! process (IPC watchers, storage). Timestamps are `SystemTime`, never
 //! `Instant`. No raw OS handles and no `&mut` references.
 
+use std::num::NonZeroU32;
+
+use crate::action::ActionReference;
 use crate::command::PanePlacementTarget;
 use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
@@ -444,6 +447,30 @@ impl std::fmt::Display for RejectReason {
             RejectReason::MinimumSize => formatter.write_str("below minimum size"),
         }
     }
+}
+
+/// One run of equal command rejections that a session held for a client
+/// whose queue was full: the action the client's key fired, the reason, the
+/// session's hint, and how many rejections in a row carried them.
+///
+/// Example: three `core:resize-pane-left` rejections with
+/// [`RejectReason::MinimumSize`] and no hint make one run with
+/// `repeat_count` 3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldCommandRejection {
+    /// The action the client's key fired, or `None` when no key fired the
+    /// commands. A run without `fired_action` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub fired_action: Option<ActionReference>,
+    /// Why the session rejected the commands.
+    pub reject_reason: RejectReason,
+    /// The session's hint for resolving the rejection, or `None`. A run
+    /// without `help` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub help: Option<String>,
+    /// How many rejections in a row the run holds, from 1. Saturates at
+    /// [`u32::MAX`].
+    pub repeat_count: NonZeroU32,
 }
 
 /// A tab, pane, or client that a command names by its id.

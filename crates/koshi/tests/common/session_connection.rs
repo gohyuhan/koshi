@@ -215,7 +215,10 @@ pub fn submit_session_command(
     match send_session_request(
         connection,
         7,
-        IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+        IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(command_envelope),
+            fired_action: None,
+        },
     ) {
         IpcResult::CommandResult(CommandResult::Ok { emitted_events, .. }) => emitted_events,
         unexpected_result => panic!("the command was answered with {unexpected_result:?}"),

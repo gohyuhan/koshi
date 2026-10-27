@@ -1,4 +1,5 @@
-//! Tests for `sanitize_reported_text`, `MAX_REPORTED_TEXT_BYTE_COUNT` and
+//! Tests for `sanitize_reported_text`, `sanitize_text_to_byte_count`,
+//! `MAX_REPORTED_TEXT_BYTE_COUNT`, `remove_refused_characters` and
 //! `format_counted_noun`.
 //!
 //! Every refused character is asserted from a literal in the test.
@@ -261,5 +262,17 @@ fn removing_refused_characters_keeps_every_other_character_and_cuts_nothing() {
     assert_eq!(
         remove_refused_characters(&long_text),
         format!("[2J{}", "a".repeat(5000))
+    );
+}
+
+#[test]
+fn sanitizing_to_a_byte_count_removes_refused_characters_and_cuts_at_a_character_boundary() {
+    assert_eq!(sanitize_text_to_byte_count("ab\u{1b}cdef", 4), "abcd");
+    assert_eq!(sanitize_text_to_byte_count("日日", 4), "日");
+    assert_eq!(sanitize_text_to_byte_count("日日", 6), "日日");
+    assert_eq!(sanitize_text_to_byte_count("\u{202E}abc", 0), "");
+    assert_eq!(
+        sanitize_text_to_byte_count(&"a".repeat(5000), 4096),
+        "a".repeat(4096)
     );
 }

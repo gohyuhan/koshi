@@ -20,6 +20,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Instant, SystemTime};
 
 use koshi_core::{
+    action::ActionReference,
     command::{CommandEnvelope, CommandResult, TiledPlacementTarget},
     discovery::SessionOverview,
     geometry::{PaneArea, Size},
@@ -169,6 +170,9 @@ pub enum RuntimeEvent {
     Ipc {
         /// The command as it arrived over the socket.
         command_envelope: Box<CommandEnvelope>,
+        /// The action the attached client's key fired to build the command,
+        /// as its request named it, or `None`.
+        fired_action: Option<ActionReference>,
         /// Where the dispatcher sends the command's result.
         response_sender: Sender<CommandResult>,
     },
@@ -258,6 +262,9 @@ pub enum RuntimeEvent {
         placement_target: TiledPlacementTarget,
         /// The destination tab as the client draws it after the placement.
         expected_placed_tab_layout: Box<PlacedTabLayout>,
+        /// The action the client's key fired to confirm, or `None` when a
+        /// mouse drop confirmed.
+        fired_action: Option<ActionReference>,
     },
     /// A restart request whose restart check passed on the thread that asks:
     /// the caller asks this process to replace its own image with the binary at

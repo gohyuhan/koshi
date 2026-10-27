@@ -13,6 +13,7 @@ use std::time::SystemTime;
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId, TabId};
+use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{KillPolicy, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::template::{ProfileTemplate, TemplateError, TerminalTemplate};
 use koshi_layout::tree::LayoutNode;
@@ -22,7 +23,7 @@ use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
 
-use crate::resume::LAYOUT_NOT_RESTORED_NOTICE_BYTES;
+use crate::resume::{LAYOUT_NOT_RESTORED_NOTICE_BYTES, LAYOUT_NOT_RESTORED_NOTIFICATION_TEXT};
 use crate::runtime::command::{
     compute_pane_spawn_sizes, compute_root_pane_pty_size, generate_tab_name,
 };
@@ -105,8 +106,10 @@ impl Server {
     /// order.
     ///
     /// Each pane is recorded live at the size its entry names, gets a blank
-    /// screen, and shows [`LAYOUT_NOT_RESTORED_NOTICE_BYTES`]. Each tab is
-    /// solved at `0x0` until a client views it. The session holds no client.
+    /// screen, and shows [`LAYOUT_NOT_RESTORED_NOTICE_BYTES`]. The session
+    /// posts the `Warning` notification [`LAYOUT_NOT_RESTORED_NOTIFICATION_TEXT`].
+    /// Each tab is solved at `0x0` until a client views it. The session holds
+    /// no client.
     /// A client that attaches goes to the tab its saved view names while that
     /// tab exists, else to the tab with the lowest index.
     ///
@@ -151,6 +154,11 @@ impl Server {
         for (pane_id, _) in carried_pane_sizes {
             self.handle_pty_output(*pane_id, LAYOUT_NOT_RESTORED_NOTICE_BYTES);
         }
+        self.post_session_notification(
+            session_id,
+            NotificationSeverity::Warning,
+            LAYOUT_NOT_RESTORED_NOTIFICATION_TEXT,
+        );
     }
 
     /// Seed one session under `session_id` and `session_name` from a

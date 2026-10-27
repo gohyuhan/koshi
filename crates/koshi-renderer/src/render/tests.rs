@@ -42,6 +42,8 @@
 
 use super::*;
 
+use crate::notification::tests::build_test_notification_view;
+use crate::notification::NotificationCenterEntries;
 use std::sync::Arc;
 
 use koshi_core::action::HintTier;
@@ -129,7 +131,6 @@ fn build_render_snapshot(
         .collect();
 
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: session_name.to_string(),
@@ -247,6 +248,7 @@ fn render_frame_to_buffer(
         &[],
         None,
         None,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -313,6 +315,7 @@ fn render_placement_preview(
         &[],
         Some(placement_presentation),
         placement_target,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -2085,6 +2088,7 @@ fn reused_buffer_is_blanked_before_painting() {
         &[],
         None,
         None,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -3268,46 +3272,6 @@ fn too_small_overlay_clips_on_narrow_screen() {
 }
 
 #[test]
-fn recovery_notice_returns_after_a_too_small_viewport_gains_a_statusline() {
-    let mut too_small_snapshot = build_too_small_render_snapshot(Size {
-        column_count: 100,
-        row_count: 1,
-    });
-    too_small_snapshot.is_recovery_notice_visible = true;
-    let too_small_screen = render_test_snapshot(&too_small_snapshot, 100, 1);
-    assert_eq!(
-        format_rendered_row_text(&too_small_screen, 0),
-        format!(
-            "{}Terminal too small — enlarge window{}",
-            " ".repeat(32),
-            " ".repeat(33)
-        )
-    );
-
-    let pane_id = PaneId::new();
-    let mut resized_snapshot = build_render_snapshot(
-        "sess",
-        &[("shell", true)],
-        &[(pane_id, build_cell_rect(0, 1, 100, 38), true)],
-        Some(pane_id),
-        LockMode::Normal,
-        Size {
-            column_count: 100,
-            row_count: 40,
-        },
-    );
-    resized_snapshot.is_recovery_notice_visible = true;
-    let resized_screen = render_test_snapshot(&resized_snapshot, 100, 40);
-    assert_eq!(
-        format_rendered_row_text(&resized_screen, 39),
-        format!(
-            "{:<100}",
-            "Restore failed: new shell; previous panes unavailable. Input clears notice."
-        )
-    );
-}
-
-#[test]
 fn small_and_zero_size_areas_are_safe() {
     let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
@@ -3521,6 +3485,7 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         &[],
         None,
         None,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -3563,6 +3528,7 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
         &[],
         None,
         None,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         DrawnRows::Every,
         &mut render_buffer,
     );
@@ -5274,6 +5240,7 @@ fn render_core_frame_rows(
         &[],
         None,
         None,
+        build_test_notification_view(&NotificationCenterEntries::default()),
         drawn_rows,
         screen_buffer,
     );
@@ -5568,10 +5535,7 @@ fn a_change_drawn_outside_the_grid_rows_lists_no_rows() {
     previous_render_snapshot.pane_snapshots[0]
         .scrollback_metadata
         .retained_line_count = 30;
-    let changes: [RenderSnapshotChange; 14] = [
-        ("the recovery notice", |render_snapshot| {
-            render_snapshot.is_recovery_notice_visible = true;
-        }),
+    let changes: [RenderSnapshotChange; 13] = [
         ("the session name", |render_snapshot| {
             render_snapshot.session_snapshot.session_name = "other".to_string();
         }),

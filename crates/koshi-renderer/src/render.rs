@@ -21,7 +21,9 @@
 //!
 //! The floating panes the viewing client shows draw over the tiled panes and
 //! the letterbox, back to front, each in a box with a titlebar. They sit in
-//! the pane area at their own cells, with no letterbox offset.
+//! the pane area at their own cells, with no letterbox offset. The viewer's
+//! open notification center, its open floating pane tray and its toast draw
+//! over the floating panes, in that order.
 //!
 //! Each drawn cell takes the columns that [`compute_text_display_width`] gives
 //! its symbol, and the text of the tabline, the statusline, the borders and
@@ -51,6 +53,10 @@ use crate::images::{
     compute_floating_pane_image_placeholder_rects, compute_image_placeholder_rects,
     draw_image_placeholders, ImagePlacementKey, ImageRenderMode,
 };
+use crate::notification::{
+    find_drawn_notification_center_layout, find_drawn_notification_toast_layout,
+    NotificationCenterLayout, NotificationToastLayout, NotificationView,
+};
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, GridView, KeymapHints, PanePlacementPresentation, PaneSnapshot,
@@ -63,11 +69,13 @@ const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
 
 mod floating;
 mod floating_pane_tray;
+mod notification;
 mod placement;
 
 use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use floating_pane_tray::draw_floating_pane_tray;
+use notification::{draw_notification_center, draw_notification_toast};
 use placement::draw_pane_placement_presentation;
 
 /// The rows of the buffer that one [`render_frame`] call draws.
@@ -135,6 +143,13 @@ pub struct FrameGeometry<'a> {
     /// ([`find_drawn_floating_pane_tray_layout`]). `None` while the tray is
     /// closed or the frame has no room for it.
     pub(crate) floating_pane_tray_layout: Option<FloatingPaneTrayLayout>,
+    /// The viewer's open notification center
+    /// ([`find_drawn_notification_center_layout`]). `None` while the center
+    /// is closed or the frame has no room for it.
+    pub(crate) notification_center_layout: Option<NotificationCenterLayout>,
+    /// The viewer's toast ([`find_drawn_notification_toast_layout`]). `None`
+    /// while no toast shows or the frame draws none of its cells.
+    pub(crate) notification_toast_layout: Option<NotificationToastLayout>,
 }
 
 impl<'a> FrameGeometry<'a> {
@@ -156,12 +171,31 @@ impl<'a> FrameGeometry<'a> {
     pub(crate) fn get_layout_origin(&self) -> Point {
         get_area_origin(self.effective_layout_rect)
     }
+
+    /// The screen areas this frame draws over every floating pane, in draw
+    /// order: the cells the notification center covers
+    /// ([`NotificationCenterLayout::drawn_rect`]), the open tray's box, and
+    /// the cells the toast covers ([`NotificationToastLayout::drawn_rect`]).
+    /// Each one is listed only while it is drawn.
+    pub(crate) fn list_overlay_areas(&self) -> impl Iterator<Item = RatatuiRect> + '_ {
+        [
+            self.notification_center_layout
+                .map(|center_layout| center_layout.drawn_rect),
+            self.floating_pane_tray_layout
+                .map(|tray_layout| tray_layout.tray_rect),
+            self.notification_toast_layout
+                .map(|toast_layout| toast_layout.drawn_rect),
+        ]
+        .into_iter()
+        .flatten()
+        .map(place_screen_rect)
+    }
 }
 
 /// Solve where `render_snapshot` places its surfaces when it is painted over
 /// `viewport_area` with `committed_regions` and `viewer_chrome`: the centered
-/// tiled layout, the floating panes this viewer draws, and the open floating
-/// pane tray. Each is solved once.
+/// tiled layout, the floating panes this viewer draws, the open floating pane
+/// tray, the open notification center and the toast. Each is solved once.
 #[must_use]
 pub fn build_frame_geometry<'a>(
     render_snapshot: &'a RenderSnapshot,
@@ -188,6 +222,12 @@ pub fn build_frame_geometry<'a>(
             viewport_area,
         ),
         floating_pane_tray_layout: find_drawn_floating_pane_tray_layout(
+            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+        ),
+        notification_center_layout: find_drawn_notification_center_layout(
+            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
+        ),
+        notification_toast_layout: find_drawn_notification_toast_layout(
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
         ),
     }
@@ -224,13 +264,24 @@ pub fn build_frame_geometry<'a>(
 ///    `true`, only the placement source pane is drawn, and only while the
 ///    active tab holds no slot of it. None is drawn while every pane of the
 ///    active tab is suppressed.
-/// 9. Draws the viewer's open floating pane tray over every cell drawn before
-///    it, at `frame_geometry`'s `floating_pane_tray_layout`, while
-///    `viewer_chrome.floating_pane_tray` is `Some` and the tray fits.
-/// 10. Draws the tabline in the first committed region, over that margin. While
+/// 9. Draws the viewer's notification center, open or sliding, over every
+///    cell drawn before it, on the cells of `frame_geometry`'s
+///    `notification_center_layout` that its slide draws, while
+///    `viewer_chrome.notification_center` is `Some` and the center fits. It
+///    lists the entries of `notification_view`.
+/// 10. Draws the viewer's open floating pane tray over every cell drawn before
+///     it, at `frame_geometry`'s `floating_pane_tray_layout`, while
+///     `viewer_chrome.floating_pane_tray` is `Some` and the tray fits.
+/// 11. Draws the viewer's toast over every cell drawn before it, at
+///     `frame_geometry`'s `notification_toast_layout`, while
+///     `notification_view.shown_toast` is `Some` and the toast has a drawn
+///     cell.
+/// 12. Draws the tabline in the first committed region, over that margin. While
 ///     the session holds a floating pane, it shows the tray button ` ⧉ `.
-/// 11. Draws the statusline in the second committed region, over that margin.
-/// 12. Gives each cell of `viewport_area` whose symbol ratatui measures at
+///     While the viewer's notification center holds an entry, it shows the
+///     notification button ` ● `.
+/// 13. Draws the statusline in the second committed region, over that margin.
+/// 14. Gives each cell of `viewport_area` whose symbol ratatui measures at
 ///     another width than [`compute_text_display_width`] gives it that width as
 ///     its forced width. Example: a cell that holds `U+17D8` takes 1 column, not
 ///     the 3 that ratatui measures.
@@ -260,11 +311,11 @@ pub fn build_frame_geometry<'a>(
 ///
 /// `drawn_rows` [`DrawnRows::Every`] runs every step above over every row.
 /// [`DrawnRows::Listed`] leaves each listed row as `Every` would, and runs
-/// each step that writes whole rows (steps 1, 3, 7, 8's cells, 9 and 12) only
-/// over the listed rows. A box, strip or bar that covers no listed row is
-/// not drawn. Example: rows `[10]` of a frame whose one pane prints on row
-/// 10 redraws the 200 cells of row 10, and the pane's border cells on that
-/// row.
+/// each step that writes whole rows (steps 1, 3, 7, 8's cells, 9, 10, 11 and
+/// 14) only over the listed rows. A box, strip or bar that covers no listed
+/// row is not drawn. Example: rows `[10]` of a frame whose one pane prints on
+/// row 10 redraws the 200 cells of row 10, and the pane's border cells on
+/// that row.
 ///
 /// # Panics
 ///
@@ -280,6 +331,7 @@ pub fn render_frame(
     unavailable_image_keys: &[ImagePlacementKey],
     placement_presentation: Option<&PanePlacementPresentation>,
     placement_target: Option<&TiledPlacementTarget>,
+    notification_view: NotificationView<'_>,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
@@ -398,7 +450,24 @@ pub fn render_frame(
         draw_image_placeholders(&floating_pane_placeholder_rects, screen_buffer);
     }
 
-    // The viewer's open floating pane tray draws over the floating panes.
+    // The viewer's notification center, open or sliding, draws over the
+    // floating panes.
+    if let (Some(notification_center), Some(center_layout)) = (
+        viewer_chrome.notification_center,
+        &frame_geometry.notification_center_layout,
+    ) {
+        draw_notification_center(
+            center_layout,
+            notification_center,
+            notification_view,
+            theme,
+            drawn_rows,
+            screen_buffer,
+        );
+    }
+
+    // The viewer's open floating pane tray draws over the notification center
+    // and the floating panes.
     if let (Some(floating_pane_tray), Some(tray_layout)) = (
         viewer_chrome.floating_pane_tray,
         &frame_geometry.floating_pane_tray_layout,
@@ -411,6 +480,14 @@ pub fn render_frame(
             drawn_rows,
             screen_buffer,
         );
+    }
+
+    // The toast draws over every other part of the pane area.
+    if let (Some(shown_toast), Some(toast_layout)) = (
+        notification_view.shown_toast,
+        &frame_geometry.notification_toast_layout,
+    ) {
+        draw_notification_toast(toast_layout, shown_toast, theme, drawn_rows, screen_buffer);
     }
 
     // The tabline draws from the same tab-row facts hit-testing reads.
@@ -430,7 +507,6 @@ pub fn render_frame(
             StatuslineInputs {
                 keymap_hints,
                 pending_key_sequence,
-                is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
             },
             theme,
             statusline_rect,
@@ -466,14 +542,12 @@ pub fn list_changed_screen_rows(
 ) -> Option<Vec<u16>> {
     let viewport_area = next_frame_geometry.viewport_area;
     let RenderSnapshot {
-        is_recovery_notice_visible,
         session_snapshot,
         pane_snapshots,
         client_snapshot,
         placement_preview: _,
     } = next_frame_geometry.render_snapshot;
-    if previous_render_snapshot.is_recovery_notice_visible != *is_recovery_notice_visible
-        || previous_render_snapshot.session_snapshot != *session_snapshot
+    if previous_render_snapshot.session_snapshot != *session_snapshot
         || previous_render_snapshot.client_snapshot != *client_snapshot
         || previous_render_snapshot.pane_snapshots.len() != pane_snapshots.len()
     {
@@ -619,7 +693,8 @@ fn clear_drawn_rows(
 /// view is scrolled back into history; the application has hidden its cursor;
 /// the cursor cell of a floating pane lies outside the pane area; a floating
 /// pane drawn above the focused pane covers the cursor cell; or the viewer's
-/// open floating pane tray covers it.
+/// open floating pane tray, its open notification center or its toast covers
+/// it.
 ///
 /// A `120x40` viewport with a 20-column left region places the same pane cursor
 /// 20 columns farther right than a whole-area layout. A focused floating pane
@@ -691,10 +766,8 @@ pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Positio
             .iter()
             .any(|placed_floating_pane| placed_floating_pane.outer_area.contains(cursor_position))
         || frame_geometry
-            .floating_pane_tray_layout
-            .is_some_and(|tray_layout| {
-                place_screen_rect(tray_layout.tray_rect).contains(cursor_position)
-            })
+            .list_overlay_areas()
+            .any(|overlay_area| overlay_area.contains(cursor_position))
     {
         return None;
     }
@@ -1204,7 +1277,7 @@ fn apply_display_widths(
 /// The columns `symbol`, the text of one cell or one grapheme, takes on the
 /// screen: its [`compute_text_display_width`], at most `u16::MAX`. Example:
 /// `U+17D8` is 1, `世` is 2, and `世ﾞ` (`U+4E16` `U+FF9E`) is 3.
-fn compute_symbol_display_width(symbol: &str) -> u16 {
+pub(crate) fn compute_symbol_display_width(symbol: &str) -> u16 {
     u16::try_from(compute_text_display_width(symbol)).unwrap_or(u16::MAX)
 }
 
@@ -1401,6 +1474,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
         LockMode::DockUndock => Some("DOCK"),
         LockMode::FloatingPaneTray => Some("TRAY"),
+        LockMode::NotificationCenter => Some("NOTIFICATIONS"),
     }
 }
 
@@ -1576,6 +1650,59 @@ pub(crate) fn set_line_clipped(
         }
     }
     column_index
+}
+
+/// Write `text` in `text_style` from the top-left cell of the one-row
+/// `text_rect`, cut to its columns ([`set_line_clipped`]).
+fn write_text_clipped(screen_buffer: &mut Buffer, text_rect: Rect, text: &str, text_style: Style) {
+    set_line_clipped(
+        screen_buffer,
+        text_rect.origin.column,
+        text_rect.origin.row,
+        &Line::from(Span::styled(text, text_style)),
+        text_rect.size.column_count,
+    );
+}
+
+/// Write `text` in `text_style` from the top-left cell of the one-row
+/// `text_rect` of at least one cell, then `…`: the characters that fit before
+/// the rect's last cell, and `…` right after them. In 8 cells, `pane exited`
+/// reads `pane ex…`, and `abc` reads `abc…`.
+fn write_text_ending_in_ellipsis(
+    screen_buffer: &mut Buffer,
+    text_rect: Rect,
+    text: &str,
+    text_style: Style,
+) {
+    let column_count = text_rect.size.column_count;
+    let text_column_count = get_text_width(text).min(column_count - 1);
+    let ellipsis_column = set_line_clipped(
+        screen_buffer,
+        text_rect.origin.column,
+        text_rect.origin.row,
+        &Line::from(Span::styled(text, text_style)),
+        text_column_count,
+    );
+    set_line_clipped(
+        screen_buffer,
+        ellipsis_column,
+        text_rect.origin.row,
+        &Line::from(Span::styled("…", text_style)),
+        1,
+    );
+}
+
+/// Write `text` in `text_style` from the top-left cell of the one-row
+/// `text_rect` of at least one cell: whole when it fits
+/// ([`write_text_clipped`]), and ending in `…` when it is wider
+/// ([`write_text_ending_in_ellipsis`]). In 8 cells, `pane` reads `pane`, and
+/// `pane exited` reads `pane ex…`.
+fn write_text_fitted(screen_buffer: &mut Buffer, text_rect: Rect, text: &str, text_style: Style) {
+    if get_text_width(text) <= text_rect.size.column_count {
+        write_text_clipped(screen_buffer, text_rect, text, text_style);
+    } else {
+        write_text_ending_in_ellipsis(screen_buffer, text_rect, text, text_style);
+    }
 }
 
 /// The centered rect of the effective (solved) size within the pane area.

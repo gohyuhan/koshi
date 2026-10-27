@@ -70,6 +70,14 @@ fn default_server_and_client_configs_match_expected_settings() {
         32 * 1024 * 1024
     );
     assert!(client_config.scrollback.should_scroll_to_input);
+    assert_eq!(
+        client_config.notifications,
+        NotificationConfig {
+            should_show_toasts: true,
+            toast_position: ToastPosition::TopRight,
+            toast_duration_ms: 3_000,
+        }
+    );
 
     assert!(!server_config.should_allow_beta_features);
     assert!(!server_config.should_allow_other_users);
@@ -102,6 +110,7 @@ fn default_server_and_client_configs_match_expected_settings() {
             &ModeName::from_text("floating-pane-tray"),
             &ModeName::from_text("locked"),
             &ModeName::from_text("normal"),
+            &ModeName::from_text("notification-center"),
             &ModeName::from_text("pane-move-choice"),
             &ModeName::from_text("pane-placement")
         ]
@@ -504,7 +513,7 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
         build_default_mode_bindings(Leader::Modifiers(BindingModifierFlags::SHIFT));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 28);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 29);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
             [&build_single_chord_sequence(BindingModifierFlags::SHIFT, 'q')],
@@ -561,12 +570,12 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys:
-    // the table holds all 28 normal-mode bindings.
+    // the table holds all 29 normal-mode bindings.
     let fullscreen_key_chord = build_character_chord(BindingModifierFlags::ALT, 'f');
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 28);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 29);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(fullscreen_key_chord)],
         build_bound_action("toggle-pane-fullscreen")
@@ -1134,6 +1143,48 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "toggle-floating-pane-tray",
             ClientActionKind::ToggleFloatingPaneTray,
         ),
+        build_expected_client_binding(
+            "normal",
+            "<A-n>",
+            "toggle-notification-center",
+            ClientActionKind::ToggleNotificationCenter,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "<Up>",
+            "select-newer-notification",
+            ClientActionKind::SelectNewerNotification,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "<Down>",
+            "select-older-notification",
+            ClientActionKind::SelectOlderNotification,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "x",
+            "dismiss-selected-notification",
+            ClientActionKind::DismissSelectedNotification,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "c",
+            "clear-notifications",
+            ClientActionKind::ClearNotifications,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "<Esc>",
+            "close-notification-center",
+            ClientActionKind::CloseNotificationCenter,
+        ),
+        build_expected_client_binding(
+            "notification-center",
+            "<A-n>",
+            "toggle-notification-center",
+            ClientActionKind::ToggleNotificationCenter,
+        ),
         build_expected_binding(
             "normal",
             "<C-g>",
@@ -1241,6 +1292,7 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
             "floating-pane-move",
             "dock-undock",
             "floating-pane-tray",
+            "notification-center",
         ]
         .contains(&mode_name.get_name())
         {

@@ -49,6 +49,13 @@ pub const DEFAULT_THEME_NAME: &str = "default";
 /// The `logging.max-log-file-size-in-mb` of a `koshi.kdl` that sets none: 4.
 pub const DEFAULT_MAX_LOG_FILE_SIZE_IN_MB: u32 = 4;
 
+/// The least `notifications.toast-duration-ms` that `koshi.kdl` takes: 1000.
+pub const LOWEST_TOAST_DURATION_MS: u32 = 1_000;
+
+/// The greatest `notifications.toast-duration-ms` that `koshi.kdl` takes:
+/// 60000.
+pub const HIGHEST_TOAST_DURATION_MS: u32 = 60_000;
+
 /// The least `logging.max-log-file-size-in-mb` that `koshi.kdl` takes: 1.
 pub const LOWEST_MAX_LOG_FILE_SIZE_IN_MB: u32 = 1;
 
@@ -162,6 +169,8 @@ pub struct ClientConfig {
     pub copy: CopyConfig,
     /// How this viewer's scrollback view follows live output.
     pub scrollback: ScrollbackView,
+    /// How this viewer previews each new notification.
+    pub notifications: NotificationConfig,
     /// Color theme.
     pub theme: ThemeConfig,
     /// Log-file behavior for this process.
@@ -231,6 +240,7 @@ impl Default for ClientConfig {
             mouse: MouseConfig::default(),
             copy: CopyConfig::default(),
             scrollback: ScrollbackView::default(),
+            notifications: NotificationConfig::default(),
             theme: ThemeConfig::default(),
             logging: LoggingConfig::default(),
             update: UpdateConfig::default(),
@@ -328,6 +338,48 @@ impl Default for ScrollbackView {
             should_scroll_to_input: true,
         }
     }
+}
+
+/// How one viewer previews each new notification: the `notifications { … }`
+/// block of `koshi.kdl`. Every entry enters the viewer's notification center
+/// whatever these say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationConfig {
+    /// Whether a new notification slides in as a toast. `false` shows no toast.
+    pub should_show_toasts: bool,
+    /// The corner of the pane area the toast sits in.
+    pub toast_position: ToastPosition,
+    /// How long a toast stays in place between sliding in and sliding out,
+    /// in milliseconds, from [`LOWEST_TOAST_DURATION_MS`] to
+    /// [`HIGHEST_TOAST_DURATION_MS`]. A toast with another toast waiting
+    /// behind it stays 500 milliseconds.
+    pub toast_duration_ms: u32,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            should_show_toasts: true,
+            toast_position: ToastPosition::TopRight,
+            toast_duration_ms: 3_000,
+        }
+    }
+}
+
+/// The corner of the pane area a toast sits in. A toast in a right corner
+/// slides in from the right edge, and a toast in a left corner from the left
+/// edge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToastPosition {
+    /// `top-right`.
+    #[default]
+    TopRight,
+    /// `top-left`.
+    TopLeft,
+    /// `bottom-right`.
+    BottomRight,
+    /// `bottom-left`.
+    BottomLeft,
 }
 
 /// Keybinding timing, chord depth, leader prefix, and per-mode bindings.
@@ -445,11 +497,12 @@ pub struct ModeBindings {
 /// unlock, quit, and mouse-select in `locked` mode, the placement actions in
 /// the `pane-placement` mode, the chooser actions in the `pane-move-choice`
 /// mode, the floating pane move actions in the `floating-pane-move` mode, the
-/// dock target and dock actions in the `dock-undock` mode, and the tray actions
-/// in the `floating-pane-tray` mode.
+/// dock target and dock actions in the `dock-undock` mode, the tray actions
+/// in the `floating-pane-tray` mode, and the notification center actions in
+/// the `notification-center` mode.
 ///
 /// Sequences written with `<leader>` resolve against `leader`: rebinding the
-/// leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
+/// leader moves them. Explicit chords — `<A-f>`, `<A-n>`, the reserved unlock, and
 /// the `Tab`/`Shift+Tab` pair — are written literally and never move.
 ///
 /// Under the default `C-` leader every `normal` and `locked` sequence OPENS
@@ -465,8 +518,9 @@ pub struct ModeBindings {
 /// `<C-t>`. Placement actions live in the `pane-placement` mode, the
 /// chooser's `t`, `f`, Enter and Esc in the `pane-move-choice` mode, the
 /// floating pane move keys in the `floating-pane-move` mode, the dock keys in
-/// the `dock-undock` mode, and the tray keys in the `floating-pane-tray`
-/// mode. An action choice with a fixed set of values is part of the action
+/// the `dock-undock` mode, the tray keys in the `floating-pane-tray` mode,
+/// and the notification center keys in the `notification-center` mode. An
+/// action choice with a fixed set of values is part of the action
 /// name (`new-pane-left`, `select-pane-target-left`). Any key here can be
 /// rebound from `keybinding.kdl`.
 pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
@@ -558,6 +612,12 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         (
             parse_default_key_sequence("<A-f>"),
             build_bound_action("toggle-pane-fullscreen"),
+        ),
+        // The notification center: an explicit chord that does not move with
+        // the leader.
+        (
+            parse_default_key_sequence("<A-n>"),
+            build_bound_action("toggle-notification-center"),
         ),
         // Directional focus: arrows under the pane prefix. These fire
         // continuous actions: the prefix stays armed after each press.
@@ -823,6 +883,35 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     .into_iter()
     .collect();
 
+    let notification_center_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
+        (
+            parse_default_key_sequence("<Up>"),
+            build_bound_action("select-newer-notification"),
+        ),
+        (
+            parse_default_key_sequence("<Down>"),
+            build_bound_action("select-older-notification"),
+        ),
+        (
+            parse_default_key_sequence("x"),
+            build_bound_action("dismiss-selected-notification"),
+        ),
+        (
+            parse_default_key_sequence("c"),
+            build_bound_action("clear-notifications"),
+        ),
+        (
+            parse_default_key_sequence("<Esc>"),
+            build_bound_action("close-notification-center"),
+        ),
+        (
+            parse_default_key_sequence("<A-n>"),
+            build_bound_action("toggle-notification-center"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+
     BTreeMap::from([
         (
             ModeName::from_text(LockMode::Normal.get_keymap_name()),
@@ -870,6 +959,13 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             ModeName::from_text(LockMode::FloatingPaneTray.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: floating_pane_tray_mode_bindings,
+                removed_key_sequences: BTreeSet::new(),
+            },
+        ),
+        (
+            ModeName::from_text(LockMode::NotificationCenter.get_keymap_name()),
+            ModeBindings {
+                bound_action_by_key_sequence: notification_center_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),

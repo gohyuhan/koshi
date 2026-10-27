@@ -27,14 +27,19 @@ pub mod input;
 
 pub mod mouse;
 
+mod notification_center;
+mod notification_history;
+mod notification_toast;
+
 /// The outer terminal an attached client owns: its viewer, its input thread,
 /// and painting frames into it.
 pub(crate) mod terminal;
 
 pub mod theme;
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use koshi_config::conflict::{
     build_keymap_layers, detect_conflicts, ConflictReport, KeymapVerdict,
@@ -44,10 +49,13 @@ use koshi_config::layer::{
     ConfigLayers, PartialKeybindingsConfig, PartialKoshiConfig, PartialThemeConfig,
 };
 use koshi_config::types::ClientConfig;
+use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, TiledPlacementTarget};
+use koshi_core::event::{HeldCommandRejection, RejectReason};
 use koshi_core::geometry::Direction;
 use koshi_core::key::PendingKeySequence;
 use koshi_core::lock::LockMode;
+use koshi_core::notification::{NotificationSeverity, MAX_QUEUED_NOTIFICATION_COUNT};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::{
     geometry::{PaneArea, Point, Size},
@@ -66,6 +74,9 @@ use koshi_renderer::theme::Theme;
 
 use crate::input::InputReadClock;
 use crate::mouse::{LastPress, LeftButtonGesture, MouseCapture, SentFloatingPaneMove, TablinePeek};
+use crate::notification_history::{
+    NotificationCenterState, NotificationHistory, NotificationTakeError,
+};
 
 #[cfg(test)]
 mod tests;
@@ -276,6 +287,9 @@ pub(crate) struct ViewerRestorePoint {
     dock_undock_mode: Option<DockUndockMode>,
     /// The open floating pane tray.
     floating_pane_tray: Option<FloatingPaneTray>,
+    /// The notification center as it stood: open or sliding out, its scroll,
+    /// its selected card and its slide. `None` while it was closed.
+    notification_center_state: Option<NotificationCenterState>,
 }
 
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
@@ -452,6 +466,9 @@ pub struct Client {
     /// `None` while the tray is closed. It is `None` while any other local
     /// submode is on, and while the viewer is not [`LinkStatus::Linked`].
     floating_pane_tray: Option<FloatingPaneTray>,
+    /// This viewer's own notification queue, and every entry it took from its
+    /// session's queue, merged in one bounded history.
+    notification_history: NotificationHistory,
     /// Restores the outer terminal when the client ends or the process
     /// panics. Held to be dropped with the client; nothing reads it.
     _terminal_cleanup_guard: TerminalCleanupGuard,
@@ -507,6 +524,7 @@ impl Client {
             pane_move_mode: None,
             dock_undock_mode: None,
             floating_pane_tray: None,
+            notification_history: NotificationHistory::from_client_id(client_id),
             _terminal_cleanup_guard: terminal_cleanup_guard,
         }
     }
@@ -588,12 +606,14 @@ impl Client {
 
     /// Record `client_id`, the identifier the session minted for this viewer's
     /// current attach.
-    /// Every command this viewer submits afterwards carries it.
+    /// Every command this viewer submits afterwards carries it, and every entry
+    /// this viewer posts afterwards goes to a notification queue it owns.
     pub fn set_client_id(&mut self, client_id: ClientId) {
         if self.client_id != client_id && !self.is_placement_confirmation_pending() {
             self.clear_placement_draft();
         }
         self.client_id = client_id;
+        self.notification_history.set_client_id(client_id);
     }
 
     /// Record whether this viewer holds a link to its session. The tabline
@@ -603,14 +623,17 @@ impl Client {
     /// Dock/undock mode, pane placement mode, the move chooser, and floating
     /// pane move mode own the keyboard only while the viewer is
     /// [`LinkStatus::Linked`]. A status other than `Linked` closes the
-    /// floating pane tray. A change that moves the keyboard between one of
-    /// their keymaps and the base keymap drops an open key sequence, and no
-    /// pane receives its chords.
+    /// floating pane tray and the notification center
+    /// ([`close_notification_center`](Self::close_notification_center)). A
+    /// change that moves the
+    /// keyboard between one of their keymaps and the base keymap drops an open
+    /// key sequence, and no pane receives its chords.
     pub(crate) fn set_link_status(&mut self, link_status: LinkStatus) {
         let previous_active_input_mode = self.get_active_input_mode();
         self.link_status = link_status;
         if link_status != LinkStatus::Linked {
             self.close_floating_pane_tray();
+            self.close_notification_center();
         }
         if self.get_active_input_mode() != previous_active_input_mode {
             self.pending_key_sequence = None;
@@ -782,6 +805,7 @@ impl Client {
             sent_floating_pane_move: self.sent_floating_pane_move,
             dock_undock_mode: self.dock_undock_mode,
             floating_pane_tray: self.floating_pane_tray,
+            notification_center_state: self.notification_history.get_notification_center_state(),
         }
     }
 
@@ -802,6 +826,7 @@ impl Client {
             sent_floating_pane_move,
             dock_undock_mode,
             floating_pane_tray,
+            notification_center_state,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -817,6 +842,8 @@ impl Client {
         self.sent_floating_pane_move = sent_floating_pane_move;
         self.dock_undock_mode = dock_undock_mode;
         self.floating_pane_tray = floating_pane_tray;
+        self.notification_history
+            .set_notification_center_state(notification_center_state);
     }
 
     /// Record the view carried by the newest painted frame: its active tab,
@@ -1374,8 +1401,8 @@ impl Client {
         self.get_pending_placement_command_id() == Some(command_id)
     }
 
-    /// Drop the command `command_id` names, which the session rejected, and
-    /// return `true`: a sent floating pane move
+    /// Drop the command `command_id` names, which the session rejected: a sent
+    /// floating pane move
     /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), the
     /// undock that dock/undock mode sent
     /// ([`reject_undock_command`](Self::reject_undock_command)), or the
@@ -1384,20 +1411,113 @@ impl Client {
     /// and selects the whole destination tab
     /// ([`select_whole_tab_insertion_target`](Self::select_whole_tab_insertion_target));
     /// a mode that lasts until its drag ends closes. A held preview that is
-    /// unavailable then ends the mode. Returns `false`, changing nothing, when
-    /// `command_id` names none of them.
-    pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) -> bool {
+    /// unavailable then ends the mode. Changes nothing when `command_id` names
+    /// none of them.
+    pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) {
         if self.reject_floating_pane_move(command_id) || self.reject_undock_command(command_id) {
-            return true;
+            return;
         }
         if !self.is_pending_placement_command(command_id) {
-            return false;
+            return;
         }
         self.clear_placement_draft();
         if !self.cancel_placement_mode_if_preview_unavailable() {
             self.select_whole_tab_insertion_target();
         }
-        true
+    }
+
+    /// Post one `Warning` from koshi to this viewer's own notification queue
+    /// for `rejection_count` equal rejections in a row of commands the
+    /// session rejected, the last arriving at `created_at`: the session's
+    /// hint, or the reason when the rejection carries no hint, after the
+    /// action the key fired when `fired_action` names one. The entry's
+    /// `repeat_count` rises by `rejection_count`
+    /// ([`post_core_notification`](Self::post_core_notification)).
+    ///
+    /// Example: `core:confirm-pane-placement` with the hint `placement
+    /// preview is stale; confirm again` posts `core:confirm-pane-placement:
+    /// placement preview is stale; confirm again`, `core:resize-pane-left`
+    /// with no hint and [`RejectReason::MinimumSize`] posts
+    /// `core:resize-pane-left: below minimum size`, and a mouse command with
+    /// no hint and [`RejectReason::TargetGone`] posts `target no longer
+    /// exists`.
+    pub(crate) fn post_command_rejection(
+        &mut self,
+        fired_action: Option<&ActionReference>,
+        reject_reason: RejectReason,
+        help: Option<&str>,
+        rejection_count: NonZeroU32,
+        created_at: SystemTime,
+    ) {
+        let rejection_detail = match help {
+            Some(help) => help.to_string(),
+            None => reject_reason.to_string(),
+        };
+        let rejection_text = match fired_action {
+            Some(fired_action) => format!("{fired_action}: {rejection_detail}"),
+            None => rejection_detail,
+        };
+        self.post_core_notification(
+            NotificationSeverity::Warning,
+            &rejection_text,
+            rejection_count,
+            created_at,
+        );
+    }
+
+    /// Take the command rejections that the session held while this viewer's
+    /// queue was full, as a `Resync` carries them, arriving at `created_at`.
+    /// The history first counts `dropped_command_rejection_count` dropped
+    /// entries ([`NotificationHistory::add_dropped_entries`]). Then each run
+    /// of `held_command_rejections`, oldest first, posts one `Warning`
+    /// ([`post_command_rejection`](Self::post_command_rejection)).
+    ///
+    /// Example: the runs `core:resize-pane-left` ×3 with
+    /// [`RejectReason::MinimumSize`], then `core:resize-pane-right` ×1 with
+    /// the same reason, post `core:resize-pane-left: below minimum size` ×3,
+    /// then `core:resize-pane-right: below minimum size` ×1.
+    ///
+    /// # Errors
+    /// [`NotificationTakeError::TooManyHeldRejections`] for more than
+    /// [`MAX_QUEUED_NOTIFICATION_COUNT`] runs. The history stays as it was.
+    pub(crate) fn take_held_command_rejections(
+        &mut self,
+        held_command_rejections: &[HeldCommandRejection],
+        dropped_command_rejection_count: u64,
+        created_at: SystemTime,
+    ) -> Result<(), NotificationTakeError> {
+        if held_command_rejections.len() > MAX_QUEUED_NOTIFICATION_COUNT {
+            return Err(NotificationTakeError::TooManyHeldRejections {
+                held_rejection_count: held_command_rejections.len(),
+            });
+        }
+        self.notification_history
+            .add_dropped_entries(dropped_command_rejection_count);
+        for held_command_rejection in held_command_rejections {
+            self.post_command_rejection(
+                held_command_rejection.fired_action.as_ref(),
+                held_command_rejection.reject_reason,
+                held_command_rejection.help.as_deref(),
+                held_command_rejection.repeat_count,
+                created_at,
+            );
+        }
+        Ok(())
+    }
+
+    /// This viewer's notification history: its own queue's entries, the
+    /// entries it took from its session's queue, and what the viewer shows of
+    /// them.
+    #[must_use]
+    pub(crate) fn get_notification_history(&self) -> &NotificationHistory {
+        &self.notification_history
+    }
+
+    /// Record whether the session runs on this viewer's machine
+    /// ([`NotificationHistory::set_session_local`]).
+    pub(crate) fn set_session_local(&mut self, is_session_local: bool) {
+        self.notification_history
+            .set_session_local(is_session_local);
     }
 
     /// Whether a placement confirmation awaits the session's answer.

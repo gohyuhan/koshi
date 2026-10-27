@@ -33,9 +33,9 @@ use koshi_core::log::{LogFormat, LogLevel};
 use crate::key::Leader;
 use crate::types::{
     ClientConfig, ColorPalette, CopyConfig, KeybindingsConfig, LayoutDefaults, LoggingConfig,
-    ModeBindings, ModeName, MouseConfig, PaneClipboardWriteConfig, PaneConfig, RgbColor,
-    ScrollbackLimits, ScrollbackView, ServerConfig, TerminalConfig, ThemeConfig, UpdateConfig,
-    WheelScroll,
+    ModeBindings, ModeName, MouseConfig, NotificationConfig, PaneClipboardWriteConfig, PaneConfig,
+    RgbColor, ScrollbackLimits, ScrollbackView, ServerConfig, TerminalConfig, ThemeConfig,
+    ToastPosition, UpdateConfig, WheelScroll,
 };
 
 /// Folds `config_layers` onto `base_server_config` in order and returns the
@@ -178,6 +178,8 @@ pub struct PartialKoshiConfig {
     pub mouse: Option<PartialMouseConfig>,
     /// Copy overrides.
     pub copy: Option<PartialCopyConfig>,
+    /// Notification preview overrides.
+    pub notifications: Option<PartialNotificationConfig>,
     /// Terminal environment overrides.
     pub terminal: Option<PartialTerminalConfig>,
     /// Theme overrides.
@@ -272,6 +274,9 @@ impl PartialKoshiConfig {
         }
         if let Some(copy) = self.copy {
             copy.apply_to_copy_config(&mut client_config.copy);
+        }
+        if let Some(notifications) = self.notifications {
+            notifications.apply_to_notification_config(&mut client_config.notifications);
         }
         if let Some(scrollback) = self.scrollback {
             scrollback.apply_view_to_scrollback(&mut client_config.scrollback);
@@ -501,6 +506,31 @@ impl PartialMouseConfig {
 pub struct PartialCopyConfig {
     /// Whether trailing whitespace is trimmed from copied text.
     pub should_trim_trailing_whitespace: Option<bool>,
+}
+
+/// Notification preview overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartialNotificationConfig {
+    /// Whether a new notification slides in as a toast.
+    pub should_show_toasts: Option<bool>,
+    /// The corner of the pane area the toast sits in.
+    pub toast_position: Option<ToastPosition>,
+    /// How long a toast stays in place, in milliseconds.
+    pub toast_duration_ms: Option<u32>,
+}
+
+impl PartialNotificationConfig {
+    fn apply_to_notification_config(self, notification_config: &mut NotificationConfig) {
+        merge_override_field(
+            &mut notification_config.should_show_toasts,
+            self.should_show_toasts,
+        );
+        merge_override_field(&mut notification_config.toast_position, self.toast_position);
+        merge_override_field(
+            &mut notification_config.toast_duration_ms,
+            self.toast_duration_ms,
+        );
+    }
 }
 
 impl PartialCopyConfig {

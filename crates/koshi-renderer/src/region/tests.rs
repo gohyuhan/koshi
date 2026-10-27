@@ -20,7 +20,6 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
     let tab_id = TabId::new();
 
     RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: "one".to_string(),
@@ -235,7 +234,7 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
             }),
             tabline_offset: Some(2),
             has_floating_panes: false,
-            is_floating_pane_tray_open: false,
+            notification_button: None,
         }
     );
     assert!(

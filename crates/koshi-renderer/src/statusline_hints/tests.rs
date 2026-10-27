@@ -21,6 +21,7 @@ use koshi_core::key::{BindingModifierFlags, Key, KeySequence, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
 use ratatui::buffer::Cell;
+use ratatui::style::Color;
 
 use crate::snapshot::HintBinding;
 
@@ -94,46 +95,11 @@ fn paint_statusline(
         StatuslineInputs {
             keymap_hints,
             pending_key_sequence,
-            is_recovery_notice_visible: false,
         },
         theme,
         render_area,
         render_buffer,
     );
-}
-
-#[test]
-fn recovery_notice_replaces_other_statusline_content_at_full_and_narrow_widths() {
-    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new());
-    for (column_count, expected_text) in [
-        (
-            80,
-            "Restore failed: new shell; previous panes unavailable. Input clears notice.",
-        ),
-        (15, "Restore failed:"),
-        (1, "R"),
-    ] {
-        let statusline_area = RatatuiRect {
-            x: 0,
-            y: 0,
-            width: column_count,
-            height: 1,
-        };
-        let mut screen_buffer = Buffer::empty(statusline_area);
-        draw_statusline(
-            StatuslineInputs {
-                keymap_hints: &keymap_hints,
-                pending_key_sequence: None,
-                is_recovery_notice_visible: true,
-            },
-            &Theme::default(),
-            statusline_area,
-            &mut screen_buffer,
-        );
-        assert_eq!(format_rendered_row(&screen_buffer), expected_text);
-        assert_eq!(screen_buffer[(0, 0)].fg, Color::White);
-        assert_eq!(screen_buffer[(0, 0)].bg, Color::Red);
-    }
 }
 
 /// Draw the bar into a fresh one-row buffer of `column_count` cells, in
@@ -1582,15 +1548,16 @@ fn the_shipped_normal_row_at_80_columns_leads_with_lock_and_the_new_and_close_pr
 }
 
 #[test]
-fn the_shipped_normal_row_at_120_columns_puts_the_bare_tab_ahead_of_shift_tab() {
+fn the_shipped_normal_row_at_151_columns_puts_the_bare_tab_ahead_of_shift_tab() {
     assert_eq!(
         format_rendered_row(&render_statusline(
             &build_shipped_keymap_hints(LockMode::Normal),
-            120
+            151
         )),
         concat!(
             " Ctrl +  l  Lock  p  PANE  t  TAB  s  RESIZE  g  Mouse Select  q  Quit ",
-            " Alt +  f  Toggle Pane Fullscreen  Tab  Next Tab…"
+            " Alt +  f  Toggle Pane Fullscreen  n  Toggle Notification Center ",
+            " Tab  Next Tab…"
         )
     );
 }

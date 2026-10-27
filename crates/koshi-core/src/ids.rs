@@ -152,6 +152,16 @@ impl PaneId {
     pub fn get_uuid(&self) -> &Uuid {
         &self.0
     }
+
+    /// The pane's label in a notification: `pane …` and the last four hex
+    /// digits of its UUID. `0194f3c2-7a10-7c4e-9b2d-5e8f0c13a1b2` gives
+    /// `pane …a1b2`.
+    #[must_use]
+    pub fn format_short_label(&self) -> String {
+        let uuid_hex_digits = self.0.simple().to_string();
+        let last_four_hex_digits = &uuid_hex_digits[uuid_hex_digits.len() - 4..];
+        format!("pane …{last_four_hex_digits}")
+    }
 }
 
 impl Default for PaneId {

@@ -4,6 +4,51 @@
 
 use super::*;
 
+/// The least exit code, read as an unsigned 32-bit number, that is a Windows
+/// NTSTATUS of error severity: `0xC0000000`, whose top two bits, the severity
+/// field, are `0b11` ([MS-ERREF] section 2.3).
+const MINIMUM_WINDOWS_ERROR_STATUS: u32 = 0xC000_0000;
+
+/// The text the session posts as an `Error` when pane `pane_id`'s child ends
+/// with `exit_status`, or `None` when the exit posts nothing.
+/// `is_command_pane` is whether the pane runs a named command (its record
+/// holds a spawn specification) rather than the default shell.
+///
+/// The first rule that matches decides:
+/// 1. [`UNOBSERVED_EXIT`]: `pane …a1b2 ended; its exit status was not
+///    received`.
+/// 2. An exit code at or above [`MINIMUM_WINDOWS_ERROR_STATUS`] as an
+///    unsigned 32-bit number: `pane …a1b2 exited 0xC0000005`.
+/// 3. A signal: `pane …a1b2 killed by signal 9`.
+/// 4. A non-zero exit code of a command pane: `pane …a1b2 exited 101`.
+/// 5. Any other exit, such as exit code `0`, or exit code `1` of a shell
+///    pane: `None`.
+fn format_pane_exit_notice(
+    pane_id: PaneId,
+    exit_status: ExitStatus,
+    is_command_pane: bool,
+) -> Option<String> {
+    let pane_label = pane_id.format_short_label();
+    match exit_status {
+        UNOBSERVED_EXIT => Some(format!(
+            "{pane_label} ended; its exit status was not received"
+        )),
+        ExitStatus::ExitCode(exit_code)
+            if exit_code.cast_unsigned() >= MINIMUM_WINDOWS_ERROR_STATUS =>
+        {
+            Some(format!(
+                "{pane_label} exited 0x{:08X}",
+                exit_code.cast_unsigned()
+            ))
+        }
+        ExitStatus::Signaled(signal) => Some(format!("{pane_label} killed by signal {signal}")),
+        ExitStatus::ExitCode(exit_code) if exit_code != 0 && is_command_pane => {
+            Some(format!("{pane_label} exited {exit_code}"))
+        }
+        ExitStatus::ExitCode(_) => None,
+    }
+}
+
 impl Server {
     /// Handle [`Command::NewPane`]: grow the command source pane's tab by one pane —
     /// stacked onto the command source or split from it — and spawn it, in
@@ -643,6 +688,13 @@ impl Server {
     /// and closes the terminal master; a supervisor backend sends a kill request
     /// to the helper. An absent pane returns `UnknownPane` without a kill
     /// request. A local child that ended receives no leader signal.
+    ///
+    /// When the removal leaves the session running, the exit posts the text
+    /// `format_pane_exit_notice` gives as one `Error` to the session's
+    /// notification queue ([`Self::post_session_notification`]), such as
+    /// `pane …a1b2 killed by signal 9`. An exit that quits the session posts
+    /// nothing, and neither does an exit for a pane no session holds, such as
+    /// a pane a command already closed.
     pub fn handle_child_exit(&mut self, pane_id: PaneId, exit_status: ExitStatus) -> Vec<Event> {
         // Exactly one of `exit_code` and `signal` is `Some`.
         let pane_exit = match exit_status {
@@ -676,6 +728,11 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .expect("session located above");
+        let is_command_pane = session
+            .panes
+            .get_pane_record_by_id(pane_id)
+            .is_some_and(|pane_record| pane_record.spawn_spec.is_some());
+        let pane_exit_notice = format_pane_exit_notice(pane_id, exit_status, is_command_pane);
         let tab_id = match Self::resolve_pane_tab_id(session, pane_id) {
             Ok(Some(tab_id)) => tab_id,
             // A floating pane leaves at once: `PaneProcessExited`, then its
@@ -687,6 +744,13 @@ impl Server {
                 emitted_events.extend(remove_floating_pane(session, pane_id));
                 self.release_pane_bookkeeping(session_id, pane_id);
                 let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
+                if let Some(pane_exit_notice) = pane_exit_notice {
+                    self.post_session_notification(
+                        session_id,
+                        NotificationSeverity::Error,
+                        &pane_exit_notice,
+                    );
+                }
                 return emitted_events;
             }
             // No tab's layout holds the pane and it does not float: its record
@@ -721,6 +785,18 @@ impl Server {
             floating_pane_ids,
             compute_pane_kill_policy(false, false),
         );
+        let has_quit_session = emitted_events
+            .iter()
+            .any(|emitted_event| matches!(emitted_event, Event::Quit(_)));
+        if !has_quit_session {
+            if let Some(pane_exit_notice) = pane_exit_notice {
+                self.post_session_notification(
+                    session_id,
+                    NotificationSeverity::Error,
+                    &pane_exit_notice,
+                );
+            }
+        }
 
         emitted_events
     }
@@ -947,9 +1023,11 @@ impl Server {
     /// An applied placement records `command_id` as the client's last applied
     /// placement ([`Client::set_last_applied_placement_command_id`]). A
     /// refused placement changes nothing, and a
-    /// [`PlacementCommandRejected`](koshi_ipc::event::SessionEvent::PlacementCommandRejected)
-    /// naming `command_id` goes on the client's queue
-    /// ([`Self::send_placement_command_rejection`]).
+    /// [`CommandRejected`](koshi_ipc::event::SessionEvent::CommandRejected)
+    /// naming `command_id`, `fired_action`, the reason and the hint is
+    /// delivered to the client ([`Self::send_command_rejection`]). `fired_action`
+    /// is the action the client's key fired to confirm, or `None` for a mouse
+    /// drop.
     pub(crate) fn confirm_pane_placement(
         &mut self,
         client_id: ClientId,
@@ -957,6 +1035,7 @@ impl Server {
         source_pane_id: PaneId,
         tiled_placement_target: TiledPlacementTarget,
         expected_placed_tab_layout: &PlacedTabLayout,
+        fired_action: Option<ActionReference>,
     ) -> CommandResult {
         let command_source = CommandSource::from_key_binding(client_id);
         let place_pane_args = PlacePaneArgs {
@@ -984,7 +1063,13 @@ impl Server {
                 command_result
             }
             Err(rejection) => {
-                let _ = self.send_placement_command_rejection(client_id, command_id);
+                self.send_command_rejection(
+                    client_id,
+                    command_id,
+                    fired_action,
+                    rejection.reason,
+                    rejection.help.clone(),
+                );
                 Self::reject_command(command_id, rejection)
             }
         }
@@ -2075,8 +2160,6 @@ impl Server {
         if !command_args.pane_input_bytes.is_empty() {
             if let Some(client_id) = command_source.get_client_id() {
                 self.handle_input_reached_pane(client_id, pane_target.pane_id);
-            } else {
-                self.clear_session_recovery_notice_after_pane_input(pane_target.pane_id);
             }
         }
         Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))

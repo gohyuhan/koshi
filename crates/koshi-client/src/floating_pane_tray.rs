@@ -21,7 +21,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 
-use crate::mouse::{build_frame_layout_without_tray, MouseAction};
+use crate::mouse::{build_frame_layout_without_overlays, MouseAction};
 use crate::{Client, PlacementInputAction};
 
 #[cfg(test)]
@@ -182,7 +182,10 @@ impl Client {
                 .hovered_tile_index
                 .filter(|&hovered_tile_index| hovered_tile_index < floating_pane_count),
         });
-        let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+        let viewer_chrome = self.build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            committed_regions,
+        );
         let frame_layout =
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
         let floating_pane_tray_layout = compute_floating_pane_tray_layout(frame_layout);
@@ -218,7 +221,10 @@ impl Client {
                 }
             });
         }
-        let viewer_chrome = self.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+        let viewer_chrome = self.build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            committed_regions,
+        );
         let glyph_cell = find_floating_pane_tray_glyph_cell(
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
         )?;
@@ -245,15 +251,16 @@ impl Client {
     /// The event is placed against the tray as this viewer holds it, where a
     /// frame with the tray open draws it ([`build_tray_frame_layout`]). A
     /// press off the tray is placed against `mouse_frame` as it was painted,
-    /// with no tray ([`build_frame_layout_without_tray`]):
+    /// with no tray ([`build_frame_layout_without_overlays`]):
     ///
     /// - A pointer motion sets the hovered tile to the tile under the pointer,
     ///   or to none. Over the tray it also clears the hovered pane and the
     ///   placement handle hover, and sends nothing.
     /// - A left press on a tile selects it and sends its
-    ///   [`build_tray_tile_toggle_command`]. A left press on the header label
-    ///   sends `ToggleAllFloatingPanesMinimized`. A left press on any other
-    ///   cell of the tray sends nothing.
+    ///   [`build_tray_tile_toggle_command`]. A left press on the titlebar
+    ///   label sends `ToggleAllFloatingPanesMinimized`. A left press on the
+    ///   close button `✕` closes the tray and sends nothing. A left press on
+    ///   any other cell of the tray sends nothing.
     /// - A press on the tray button `mouse_frame` shows closes the tray and
     ///   sends nothing. Two left presses on that button in one read, before a
     ///   paint, open the tray and close it.
@@ -275,6 +282,7 @@ impl Client {
             hit_region,
             HitRegion::FloatingPaneTrayTile { .. }
                 | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTrayClose
                 | HitRegion::FloatingPaneTray
         );
         match (mouse_input.mouse_kind, hit_region) {
@@ -312,10 +320,14 @@ impl Client {
                     Command::ToggleAllFloatingPanesMinimized,
                 ))])
             }
+            (MouseKind::Press(MouseButton::Left), HitRegion::FloatingPaneTrayClose) => {
+                self.close_floating_pane_tray();
+                Some(Vec::new())
+            }
             (MouseKind::Press(_), _) if !is_on_tray => {
                 self.close_floating_pane_tray();
                 let painted_hit_region = resolve_hit_region(
-                    build_frame_layout_without_tray(mouse_frame),
+                    build_frame_layout_without_overlays(mouse_frame),
                     mouse_input.position,
                 );
                 (painted_hit_region == HitRegion::FloatingPaneTrayButton).then(Vec::new)

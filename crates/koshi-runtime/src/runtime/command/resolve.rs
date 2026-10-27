@@ -1125,7 +1125,7 @@ impl Server {
     ///   solved against the shared floating viewport; with no shared floating
     ///   viewport the pane takes the floating minimum
     ///   ([`Session::compute_new_floating_pane_size`]).
-    /// - The PTY takes [`compute_floating_pane_content_size`] of the solved
+    /// - The PTY takes [`compute_floating_content_size`] of the solved
     ///   outer size.
     /// - The designated client's position is `Moved(top_left_cell)`,
     ///   `Pinned(top_left_cell)` when `is_pinned`, the drawn default placement
@@ -1169,7 +1169,7 @@ impl Server {
         let desired_size = size.unwrap_or(DEFAULT_FLOATING_PANE_SIZE);
         let solved_size = session
             .compute_new_floating_pane_size(desired_size, self.get_pane_sizing().minimum_size);
-        let content_size = compute_floating_pane_content_size(solved_size);
+        let content_size = compute_floating_content_size(solved_size);
         let designated_position = match (top_left_cell, is_pinned, designated_client_id) {
             (None, false, _) => FloatingPanePosition::Default,
             (Some(_), _, None) | (None, true, None) => {

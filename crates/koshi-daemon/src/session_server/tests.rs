@@ -130,6 +130,7 @@ fn queue_command(
                 CommandSource::from_key_binding(client_id),
                 command,
             )),
+            fired_action: None,
             response_sender: mpsc::channel().0,
         })
         .expect("the command is queued");
@@ -249,6 +250,7 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
                 },
                 Command::Quit,
             )),
+            fired_action: None,
             response_sender: command_response_sender,
         })
         .expect("the quit command is queued");
@@ -471,6 +473,7 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
                 },
                 Command::Quit,
             )),
+            fired_action: None,
             response_sender: mpsc::channel().0,
         })
         .expect("the quit command is queued");
@@ -1821,6 +1824,75 @@ fn a_rebuild_binds_the_address_again_and_takes_the_resume_file_away() {
 
 #[cfg(unix)]
 #[test]
+fn each_rebuild_posts_the_config_warnings_of_the_koshi_kdl_it_reads_again() {
+    // The session start names no config directory, so each read of
+    // `koshi.kdl` gives one warning. The carried session's one pane is not
+    // driven after the swap, so its exit ends the session and posts nothing.
+    let runtime_directory_fixture = build_short_runtime_directory();
+    let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+    let (mut previous_server, _, _) = build_test_server();
+    previous_server
+        .bootstrap_session(
+            session_start.session_id,
+            session_start.session_name.clone(),
+            STARTING_VIEWPORT,
+            SystemTime::now(),
+        )
+        .expect("the previous session has one pane");
+    let (_, first_resume_body) = previous_server
+        .carry_out(&[])
+        .expect("the previous session can be carried");
+    let (resume_header, _) = build_empty_carried_state(&session_start);
+    let (server, _, runtime_event_sender) = build_test_server();
+    let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+
+    let (mut first_rebuilt_server, first_session_socket) = resume_readers_and_rebuild(
+        server,
+        &portable_pty_backend,
+        &resume_header,
+        first_resume_body,
+        &session_start,
+        &runtime_event_sender,
+    )
+    .expect("nothing holds the address, so the rebuild binds it");
+    assert_eq!(
+        list_session_notifications(&first_rebuilt_server, session_start.session_id),
+        vec![(
+            NotificationSeverity::Warning,
+            "no config directory found; using built-in defaults".to_owned(),
+            1
+        )]
+    );
+
+    first_session_socket.shutdown();
+    let (_, second_resume_body) = first_rebuilt_server
+        .carry_out(&[])
+        .expect("the rebuilt session can be carried");
+    let (server, _, runtime_event_sender) = build_test_server();
+    let (second_rebuilt_server, _second_session_socket) = resume_readers_and_rebuild(
+        server,
+        &portable_pty_backend,
+        &resume_header,
+        second_resume_body,
+        &session_start,
+        &runtime_event_sender,
+    )
+    .expect("the first socket is gone, so the rebuild binds the address");
+
+    assert_eq!(
+        list_session_notifications(&second_rebuilt_server, session_start.session_id),
+        vec![(
+            NotificationSeverity::Warning,
+            "no config directory found; using built-in defaults".to_owned(),
+            2
+        )]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token() {
     // The rebuild binds the same address under a fresh connection token.
     let runtime_directory_fixture = build_short_runtime_directory();
@@ -2180,11 +2252,14 @@ fn start_session_with_a_prepared_request(
 /// A `SubmitCommand` carrying `core:quit` from the `koshi` command line.
 #[cfg(unix)]
 fn build_quit_submit_request_kind() -> IpcRequestKind {
-    IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
-        CommandId::new(),
-        CommandSource::from_external_cli(None, None),
-        Command::Quit,
-    )))
+    IpcRequestKind::SubmitCommand {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            CommandId::new(),
+            CommandSource::from_external_cli(None, None),
+            Command::Quit,
+        )),
+        fired_action: None,
+    }
 }
 
 #[cfg(unix)]
@@ -2417,14 +2492,17 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
     frame_writer
         .send(&IpcRequest {
             request_id: 3,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
-                CommandId::new(),
-                CommandSource::from_key_binding(client_id),
-                Command::WriteToPane(WriteToPaneArgs {
-                    pane_id: Some(pane_id),
-                    pane_input_bytes: vec![b'\r'],
-                }),
-            ))),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(CommandEnvelope::from_parts(
+                    CommandId::new(),
+                    CommandSource::from_key_binding(client_id),
+                    Command::WriteToPane(WriteToPaneArgs {
+                        pane_id: Some(pane_id),
+                        pane_input_bytes: vec![b'\r'],
+                    }),
+                )),
+                fired_action: None,
+            },
         })
         .expect("send the line");
     frame_writer
@@ -3454,6 +3532,7 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
                 },
                 Command::Quit,
             )),
+            fired_action: None,
             response_sender: mpsc::channel().0,
         })
         .expect("the quit command is queued");
@@ -3562,6 +3641,26 @@ fn get_joined_screen_text(session_server: &Server, pane_id: PaneId) -> String {
     screen_text.trim_end().to_owned()
 }
 
+/// The severity, text and repeat count of each entry in the queue of the
+/// session `session_id` names on `session_server`, oldest first.
+#[cfg(unix)]
+fn list_session_notifications(
+    session_server: &Server,
+    session_id: SessionId,
+) -> Vec<(NotificationSeverity, String, u32)> {
+    session_server.list_sessions()[&session_id]
+        .notification_queue
+        .list_queued_entries()
+        .map(|notification_entry| {
+            (
+                notification_entry.severity,
+                notification_entry.text.clone(),
+                notification_entry.repeat_count,
+            )
+        })
+        .collect()
+}
+
 /// The `koshi.kdl` layer that makes `/bin/sh` the shell a fresh pane runs.
 #[cfg(unix)]
 fn build_plain_shell_config() -> PartialKoshiConfig {
@@ -3627,6 +3726,15 @@ fn a_body_that_does_not_read_brings_each_carried_pane_back_in_a_tab_of_its_own()
         screen_text,
         "[koshi] The session's layout could not be restored after the restart. Each pane now has its own tab, and the program in it is still running."
     );
+    assert_eq!(
+        list_session_notifications(&session_server, session_start.session_id),
+        vec![(
+            NotificationSeverity::Warning,
+            "the layout could not be restored after the restart; each pane now has its own tab"
+                .to_owned(),
+            1
+        )]
+    );
 }
 
 #[cfg(unix)]
@@ -3658,12 +3766,13 @@ fn a_carried_state_that_brings_no_pane_back_comes_back_as_one_fresh_shell_showin
     assert_eq!(restored_session.session_name, session_start.session_name);
     let screen_text = get_joined_screen_text(&session_server, fresh_pane_ids[0]);
     session_server.handle_pty_output(fresh_pane_ids[0], b"\x1b[2J\x1b[H");
-    let attached_client = attach_test_client(&mut session_server);
-    assert!(
-        session_server
-            .build_snapshot(attached_client.client_id)
-            .expect("the new shell has a frame")
-            .is_recovery_notice_visible
+    assert_eq!(
+        list_session_notifications(&session_server, session_start.session_id),
+        vec![(
+            NotificationSeverity::Error,
+            "the session could not be restored after the restart; a new shell started".to_owned(),
+            1
+        )]
     );
     assert_eq!(
         get_joined_screen_text(&session_server, fresh_pane_ids[0]),

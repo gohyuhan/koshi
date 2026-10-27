@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use koshi_core::{
     constant::{
-        FLOATING_PANE_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
+        FLOATING_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
     },
     event::Event,
     geometry::{
@@ -15,6 +15,7 @@ use koshi_core::{
         PixelCellSize, Rect, Size,
     },
     ids::{ClientId, PaneId, SessionId, TabId},
+    notification::{NotificationQueue, NotificationQueueOwner},
     process::PtySize,
 };
 use koshi_layout::{
@@ -180,7 +181,7 @@ pub struct FloatingMember {
     /// The size the pane asks for, per axis.
     pub desired_size: FloatingPaneSize,
     /// The pane's outer size in cells from its last size solve, chrome
-    /// included. Its PTY is this size less [`FLOATING_PANE_CHROME_SIZE`].
+    /// included. Its PTY is this size less [`FLOATING_CHROME_SIZE`].
     pub solved_size: Size,
 }
 
@@ -301,17 +302,17 @@ impl FloatingSet {
 }
 
 /// The floating minimum: `pane_minimum_size` plus
-/// [`FLOATING_PANE_CHROME_SIZE`], each axis capped at `u16::MAX`. `20x6` →
+/// [`FLOATING_CHROME_SIZE`], each axis capped at `u16::MAX`. `20x6` →
 /// `22x10`; `65534x6` → `65535x10`.
 #[must_use]
 pub fn compute_floating_pane_minimum_size(pane_minimum_size: Size) -> Size {
     Size {
         column_count: pane_minimum_size
             .column_count
-            .saturating_add(FLOATING_PANE_CHROME_SIZE.column_count),
+            .saturating_add(FLOATING_CHROME_SIZE.column_count),
         row_count: pane_minimum_size
             .row_count
-            .saturating_add(FLOATING_PANE_CHROME_SIZE.row_count),
+            .saturating_add(FLOATING_CHROME_SIZE.row_count),
     }
 }
 
@@ -397,9 +398,6 @@ pub struct SessionViewChanges {
     pub is_floating_set_changed: bool,
     /// The pane sizing changed ([`Session::update_pane_sizing`]).
     pub is_pane_sizing_changed: bool,
-    /// The recovery notice was shown or cleared
-    /// ([`Session::set_recovery_notice_visible`]).
-    pub is_recovery_notice_changed: bool,
 }
 
 impl SessionViewChanges {
@@ -455,11 +453,11 @@ pub struct Session {
     /// ([`Tab::list_focus_mru`]). A session seeded without a profile holds
     /// `None`.
     pub starting_tab_id: Option<TabId>,
-
-    /// A restart seeded a new shell after the carried session could not be
-    /// restored. The statusline shows the notice until input reaches a pane.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    is_recovery_notice_visible: bool,
+    /// The session's notification queue, owned by
+    /// [`NotificationQueueOwner::Session`] naming `session_id`. Every client
+    /// attached to the session shows its entries. The resume file carries it,
+    /// so a process image swap keeps its epoch, revision and entries.
+    pub notification_queue: NotificationQueue,
 
     /// The pane sizing every tab is solved with ([`Session::get_pane_sizing`]).
     /// The resume file does not carry it.
@@ -468,8 +466,8 @@ pub struct Session {
 
     lifecycle: SessionLifecycle,
 
-    /// The changes to tabs, the tab bar, the floating set, the pane sizing and
-    /// the recovery notice since the last [`Session::take_view_changes`]. The
+    /// The changes to tabs, the tab bar, the floating set and the pane sizing
+    /// since the last [`Session::take_view_changes`]. The
     /// clients' changes live on [`Session::clients`]. The resume file does not
     /// carry it.
     #[serde(skip)]
@@ -478,8 +476,9 @@ pub struct Session {
 
 impl Session {
     /// A session with no tabs and no panes, holding the supplied client
-    /// registry. Starts in `Starting` with `should_start_locked` `false` and
-    /// no `starting_tab_id`. `created_at` is supplied by the caller at the
+    /// registry. Starts in `Starting` with `should_start_locked` `false`, no
+    /// `starting_tab_id`, and an empty notification queue in a new epoch.
+    /// `created_at` is supplied by the caller at the
     /// creation boundary, never read from the clock here.
     #[must_use]
     pub fn from_identity_and_client_registry(
@@ -498,26 +497,13 @@ impl Session {
             clients: client_registry,
             should_start_locked: false,
             starting_tab_id: None,
-            is_recovery_notice_visible: false,
+            notification_queue: NotificationQueue::from_owner(NotificationQueueOwner::Session(
+                session_id,
+            )),
             pane_sizing: PaneSizing::default(),
             lifecycle: SessionLifecycle::Starting,
             view_changes: SessionViewChanges::default(),
         }
-    }
-
-    /// Whether the recovery notice shows: a restart seeded a new shell after
-    /// the carried session could not be restored.
-    #[must_use]
-    pub fn is_recovery_notice_visible(&self) -> bool {
-        self.is_recovery_notice_visible
-    }
-
-    /// Show or clear the recovery notice. A change records
-    /// [`SessionViewChanges::is_recovery_notice_changed`].
-    pub fn set_recovery_notice_visible(&mut self, is_recovery_notice_visible: bool) {
-        self.view_changes.is_recovery_notice_changed |=
-            self.is_recovery_notice_visible != is_recovery_notice_visible;
-        self.is_recovery_notice_visible = is_recovery_notice_visible;
     }
 
     /// Add `tab` under its own id, replacing a tab of that id, and record a

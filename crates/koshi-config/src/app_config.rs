@@ -51,17 +51,18 @@ use koshi_core::log::{LogFormat, LogLevel};
 use crate::error::ConfigError;
 use crate::layer::{
     PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig,
-    PartialMouseConfig, PartialPaneClipboardWriteConfig, PartialPaneConfig,
-    PartialScrollbackConfig, PartialTerminalConfig, PartialUpdateConfig,
+    PartialMouseConfig, PartialNotificationConfig, PartialPaneClipboardWriteConfig,
+    PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig, PartialUpdateConfig,
 };
 use crate::parser::{
     find_newer_version_error, find_section_block, format_unknown_key, parse_boolean_kdl_value,
-    parse_integer_kdl_value, parse_kdl, parse_nonempty_string_kdl_value, parse_string_kdl_value,
-    parse_supported_schema_version, parse_u16_kdl_value, parse_u32_kdl_value, set_parsed_field,
-    ParseProblems,
+    parse_integer_kdl_value, parse_kdl, parse_nonempty_string_kdl_value,
+    parse_ranged_integer_kdl_value, parse_string_kdl_value, parse_supported_schema_version,
+    set_parsed_field, ParseProblems,
 };
 use crate::types::{
-    WheelScroll, HIGHEST_MAX_LOG_FILE_SIZE_IN_MB, LOWEST_MAX_LOG_FILE_SIZE_IN_MB, SCHEMA_VERSION,
+    ToastPosition, WheelScroll, HIGHEST_MAX_LOG_FILE_SIZE_IN_MB, HIGHEST_TOAST_DURATION_MS,
+    LOWEST_MAX_LOG_FILE_SIZE_IN_MB, LOWEST_TOAST_DURATION_MS, SCHEMA_VERSION,
 };
 
 /// The top-level node names. Each may appear at most once; an unknown name is
@@ -75,6 +76,7 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
     "layout",
     "mouse",
     "copy",
+    "notifications",
     "terminal",
     "logging",
     "image-support",
@@ -217,6 +219,10 @@ pub(crate) fn parse_app_config_from_document(
                 partial_koshi_config.copy =
                     Some(parse_copy_config(config_node, &mut parse_problems));
             }
+            "notifications" => {
+                partial_koshi_config.notifications =
+                    Some(parse_notification_config(config_node, &mut parse_problems));
+            }
             "terminal" => {
                 partial_koshi_config.terminal =
                     Some(parse_terminal_config(config_node, &mut parse_problems));
@@ -257,7 +263,10 @@ pub(crate) fn parse_app_config_from_document(
             ),
             "max-frames-per-second" => set_top_level_field(
                 &mut partial_koshi_config.max_frames_per_second,
-                parse_max_frames_per_second(config_node),
+                parse_ranged_integer_kdl_value(
+                    config_node,
+                    LOWEST_MAX_FRAMES_PER_SECOND..=HIGHEST_MAX_FRAMES_PER_SECOND,
+                ),
                 config_node,
                 &mut parse_problems,
             ),
@@ -380,7 +389,7 @@ fn parse_update_config(
             ),
             "check-interval-days" => set_required_update_field(
                 &mut partial_update_config.check_interval_days,
-                parse_u32_kdl_value(field_node),
+                parse_ranged_integer_kdl_value(field_node, 0..=u32::MAX),
                 field_node,
                 parse_problems,
             ),
@@ -423,21 +432,21 @@ fn parse_pane_config(
         match field_name {
             "min-cols" => set_parsed_field(
                 &mut partial_pane_config.minimum_column_count,
-                parse_u16_kdl_value(field_node),
+                parse_ranged_integer_kdl_value(field_node, 0..=u16::MAX),
                 "pane",
                 field_node,
                 parse_problems,
             ),
             "min-rows" => set_parsed_field(
                 &mut partial_pane_config.minimum_row_count,
-                parse_u16_kdl_value(field_node),
+                parse_ranged_integer_kdl_value(field_node, 0..=u16::MAX),
                 "pane",
                 field_node,
                 parse_problems,
             ),
             "gap" => set_parsed_field(
                 &mut partial_pane_config.gap_cell_count,
-                parse_u16_kdl_value(field_node),
+                parse_ranged_integer_kdl_value(field_node, 0..=u16::MAX),
                 "pane",
                 field_node,
                 parse_problems,
@@ -564,7 +573,7 @@ fn parse_mouse_config(
             ),
             "scroll-lines" => set_parsed_field(
                 &mut partial_mouse_config.scroll_line_count,
-                parse_u16_kdl_value(field_node),
+                parse_ranged_integer_kdl_value(field_node, 0..=u16::MAX),
                 "mouse",
                 field_node,
                 parse_problems,
@@ -623,6 +632,75 @@ fn parse_copy_config(
         }
     }
     partial_copy_config
+}
+
+/// Reads the `notifications { … }` block.
+fn parse_notification_config(
+    config_node: &KdlNode,
+    parse_problems: &mut ParseProblems,
+) -> PartialNotificationConfig {
+    let mut partial_notification_config = PartialNotificationConfig::default();
+    let Some(section_children) = find_section_block(config_node, parse_problems) else {
+        return partial_notification_config;
+    };
+    for field_node in section_children.nodes() {
+        let field_name = field_node.name().value();
+        match field_name {
+            "toast" => set_parsed_field(
+                &mut partial_notification_config.should_show_toasts,
+                parse_boolean_kdl_value(field_node),
+                "notifications",
+                field_node,
+                parse_problems,
+            ),
+            "toast-position" => set_parsed_field(
+                &mut partial_notification_config.toast_position,
+                parse_toast_position(field_node),
+                "notifications",
+                field_node,
+                parse_problems,
+            ),
+            "toast-duration-ms" => set_parsed_field(
+                &mut partial_notification_config.toast_duration_ms,
+                parse_ranged_integer_kdl_value(
+                    field_node,
+                    LOWEST_TOAST_DURATION_MS..=HIGHEST_TOAST_DURATION_MS,
+                ),
+                "notifications",
+                field_node,
+                parse_problems,
+            ),
+            unknown_field_name => parse_problems.record_warning(
+                field_node.span(),
+                format!(
+                    "ignored {}",
+                    format_unknown_key(
+                        &format!("notifications.{unknown_field_name}"),
+                        &[
+                            "notifications.toast",
+                            "notifications.toast-position",
+                            "notifications.toast-duration-ms",
+                        ],
+                    )
+                ),
+            ),
+        }
+    }
+    partial_notification_config
+}
+
+/// Reads the node's single value as a [`ToastPosition`]: `"top-right"`,
+/// `"top-left"`, `"bottom-right"` or `"bottom-left"`.
+fn parse_toast_position(field_node: &KdlNode) -> Result<ToastPosition, String> {
+    match parse_string_kdl_value(field_node)? {
+        "top-right" => Ok(ToastPosition::TopRight),
+        "top-left" => Ok(ToastPosition::TopLeft),
+        "bottom-right" => Ok(ToastPosition::BottomRight),
+        "bottom-left" => Ok(ToastPosition::BottomLeft),
+        _ => {
+            Err(r#"expected "top-right", "top-left", "bottom-right", or "bottom-left""#.to_string())
+        }
+    }
 }
 
 /// Reads the `terminal { … }` block.
@@ -727,7 +805,10 @@ fn parse_logging_config(
             ),
             "max-log-file-size-in-mb" => set_parsed_field(
                 &mut partial_logging_config.max_log_file_size_in_mb,
-                parse_max_log_file_size_in_mb(field_node),
+                parse_ranged_integer_kdl_value(
+                    field_node,
+                    LOWEST_MAX_LOG_FILE_SIZE_IN_MB..=HIGHEST_MAX_LOG_FILE_SIZE_IN_MB,
+                ),
                 "logging",
                 field_node,
                 parse_problems,
@@ -821,25 +902,6 @@ fn parse_remote_link_timeout_ms(config_node: &KdlNode) -> Result<u32, String> {
     u32::try_from(remote_link_timeout_ms).map_err(|_| "must be at most 4294967295".to_string())
 }
 
-/// Reads the most frames a second the session may send this viewer. A value
-/// outside [`LOWEST_MAX_FRAMES_PER_SECOND`]..=[`HIGHEST_MAX_FRAMES_PER_SECOND`]
-/// gives `must be between 30 and 120`. `max-frames-per-second 29` is an
-/// error, and `max-frames-per-second 30` yields `30`.
-fn parse_max_frames_per_second(config_node: &KdlNode) -> Result<u16, String> {
-    let max_frames_per_second = parse_integer_kdl_value(config_node)?;
-    match u16::try_from(max_frames_per_second) {
-        Ok(max_frames_per_second)
-            if (LOWEST_MAX_FRAMES_PER_SECOND..=HIGHEST_MAX_FRAMES_PER_SECOND)
-                .contains(&max_frames_per_second) =>
-        {
-            Ok(max_frames_per_second)
-        }
-        _ => Err(format!(
-            "must be between {LOWEST_MAX_FRAMES_PER_SECOND} and {HIGHEST_MAX_FRAMES_PER_SECOND}"
-        )),
-    }
-}
-
 /// Reads a scrollback cap. A negative value becomes `0` (no scrollback); a
 /// value above `usize::MAX` becomes `usize::MAX`. `max-lines -5` yields `0`.
 fn parse_scrollback_limit(field_node: &KdlNode) -> Result<usize, String> {
@@ -854,25 +916,6 @@ fn parse_direction(field_node: &KdlNode) -> Result<Direction, String> {
         "up" => Ok(Direction::Up),
         "down" => Ok(Direction::Down),
         _ => Err(r#"expected "left", "right", "up", or "down""#.to_string()),
-    }
-}
-
-/// Reads the size in mebibytes a log file may reach. A value outside
-/// [`LOWEST_MAX_LOG_FILE_SIZE_IN_MB`]..=[`HIGHEST_MAX_LOG_FILE_SIZE_IN_MB`]
-/// gives `must be between 1 and 1024`. `max-log-file-size-in-mb 0` is an
-/// error, and `max-log-file-size-in-mb 1` yields `1`.
-fn parse_max_log_file_size_in_mb(field_node: &KdlNode) -> Result<u32, String> {
-    let max_log_file_size_in_mb = parse_integer_kdl_value(field_node)?;
-    match u32::try_from(max_log_file_size_in_mb) {
-        Ok(max_log_file_size_in_mb)
-            if (LOWEST_MAX_LOG_FILE_SIZE_IN_MB..=HIGHEST_MAX_LOG_FILE_SIZE_IN_MB)
-                .contains(&max_log_file_size_in_mb) =>
-        {
-            Ok(max_log_file_size_in_mb)
-        }
-        _ => Err(format!(
-            "must be between {LOWEST_MAX_LOG_FILE_SIZE_IN_MB} and {HIGHEST_MAX_LOG_FILE_SIZE_IN_MB}"
-        )),
     }
 }
 

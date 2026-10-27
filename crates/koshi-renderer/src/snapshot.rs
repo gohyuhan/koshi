@@ -31,11 +31,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use koshi_core::event::{Event, SubscriberLagged};
+use koshi_config::types::ToastPosition;
+use koshi_core::action::ActionReference;
+use koshi_core::event::{Event, HeldCommandRejection, RejectReason, SubscriberLagged};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
+use koshi_core::notification::{NotificationEntry, NotificationId, NotificationQueue};
 use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
@@ -50,8 +53,9 @@ use koshi_terminal::grid::row_snapshot::RowSnapshot;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
-use crate::floating_pane_chrome::compute_floating_pane_content_rect;
+use crate::floating_chrome::compute_floating_content_rect;
 use crate::hit_test::{compute_frame_pane_area, compute_viewport_area};
+use crate::notification::NotificationCardRow;
 use crate::region::{solve_core_regions, TablineInputs};
 
 /// The statusline data the renderer draws, re-exported from the keymap crate
@@ -66,9 +70,6 @@ pub use koshi_config::hints::{HintBinding, KeymapHints};
 /// sits, and its [`PaneSnapshot`] says what is inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSnapshot {
-    /// Whether a failed session restore opened a new shell whose recovery
-    /// notice remains visible on the statusline.
-    pub is_recovery_notice_visible: bool,
     /// The session being viewed: its identity, active tab, tab list, and the
     /// floating panes the viewing client shows.
     pub session_snapshot: SessionSnapshot,
@@ -322,9 +323,10 @@ impl CommittedRegions {
 
 /// One item on a subscriber's queue: a live event, the frame composed for the
 /// subscriber's client, a fresh frame that resyncs a subscriber whose queue
-/// overflowed, the answers to one round of mouse actions, a wake-up for the bytes that wait for the
-/// subscriber's own terminal, the session its client moves to, or a pane
-/// placement command or floating pane move the session rejected.
+/// overflowed, one post the session's notification queue took, the answers to
+/// one round of mouse actions, a wake-up for the bytes that wait for the
+/// subscriber's own terminal, the session its client moves to, or a command
+/// from the subscriber's client that the session rejected.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
@@ -343,6 +345,22 @@ pub enum Delivery {
         /// Which subscriber lagged, how many events were dropped, and their
         /// class.
         lag_report: SubscriberLagged,
+        /// The session's notification queue as it stands.
+        notification_queue: Box<NotificationQueue>,
+        /// The rejections of the subscriber's commands held since it paused,
+        /// oldest first, each run of equal rejections in a row as one
+        /// [`HeldCommandRejection`].
+        held_command_rejections: Vec<HeldCommandRejection>,
+        /// How many runs of held rejections were dropped for room, oldest
+        /// first.
+        dropped_command_rejection_count: u64,
+    },
+    /// One post the session's notification queue took, for every subscriber.
+    NotificationPosted {
+        /// The queue's revision after the post.
+        revision: u64,
+        /// The entry the post added, or the newest entry the post merged into.
+        posted_entry: Box<NotificationEntry>,
     },
     /// What one round of mouse actions did, for the client that asked for the
     /// round.
@@ -367,17 +385,28 @@ pub enum Delivery {
         /// alone.
         owner_user_id: Option<u32>,
     },
-    /// A pane placement command from the subscriber's key binding, or a
-    /// floating pane move from its key binding or its mouse round, was
-    /// rejected.
-    PlacementCommandRejected(CommandId),
+    /// The session rejected a command from the subscriber's key binding, a
+    /// pane placement its client confirmed, or a floating pane move from its
+    /// client's mouse round.
+    CommandRejected {
+        /// The rejected command.
+        command_id: CommandId,
+        /// The action the client's key fired, or `None` when no key fired the
+        /// command.
+        fired_action: Option<ActionReference>,
+        /// Why the session rejected the command.
+        reject_reason: RejectReason,
+        /// The session's hint for resolving the rejection, or `None`.
+        help: Option<String>,
+    },
 }
 
 /// The viewer-owned frame state: which pane the pointer is over, which pane
 /// shows its placement handle and whether the pointer rests on that handle,
 /// which input mode owns the keymap, where the tab strip is scrolled, whether
 /// the viewer holds a link to its session, where it draws a floating pane it
-/// is moving, and its floating pane tray. While pane placement is shown,
+/// is moving, its floating pane tray, its notification center, its toast and
+/// its tabline notification button. While pane placement is shown,
 /// including while a confirmation waits, the viewer clears the pointer and
 /// handle fields before hit-testing and painting, and the renderer ignores the
 /// pointer field: hovering `pane-123` leaves its border color unchanged.
@@ -423,6 +452,57 @@ pub struct ViewerChrome {
     /// button and hit-tested over the floating panes. `None` while the tray
     /// is closed.
     pub floating_pane_tray: Option<FloatingPaneTray>,
+    /// The viewer's notification center, drawn on the right side of the pane
+    /// area under the tray and hit-tested after it, while it is open and
+    /// while it slides out. `None` while the center is closed.
+    pub notification_center: Option<NotificationCenter>,
+    /// The tabline's notification button `●`, drawn while the viewer's
+    /// notification center holds at least one entry. `None` while it holds
+    /// none.
+    pub notification_button: Option<NotificationButton>,
+    /// The viewer's toast as this frame draws it, over every other part of
+    /// the pane area. `None` while no toast shows.
+    pub notification_toast: Option<NotificationToast>,
+}
+
+/// One viewer's notification center as one frame draws it: where its body
+/// is scrolled, the card its keys act on, and how far it has slid in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationCenter {
+    /// The body row drawn on the center's first body row, counted from `0`,
+    /// the first row of the newest entry's card. `3` draws the body from its
+    /// fourth row.
+    pub scroll_row_offset: usize,
+    /// The entry whose card the center's keys act on, drawn with the hover
+    /// border. `None` while the center lists no entry.
+    pub selected_notification_id: Option<NotificationId>,
+    /// How much of the center's width lies past the pane area's right edge,
+    /// in thousandths: `0` in place, `1000` fully past the edge, and `500`
+    /// half past it.
+    pub hidden_per_mille: u16,
+}
+
+/// The tabline's notification button: ` ● ` while every entry of the viewer's
+/// notification center is read, and ` ●3 ` with 3 unread entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationButton {
+    /// How many entries arrived since the viewer last opened its notification
+    /// center.
+    pub unread_entry_count: usize,
+}
+
+/// One viewer's toast as one frame draws it: its corner, its height and how
+/// far it has slid in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationToast {
+    /// The corner of the pane area the toast sits in.
+    pub toast_position: ToastPosition,
+    /// The rows of text under the toast's header row, from `0` to
+    /// [`MAX_TOAST_TEXT_ROW_COUNT`](crate::notification::MAX_TOAST_TEXT_ROW_COUNT).
+    pub text_row_count: u16,
+    /// How much of the toast's width lies past its side edge, in thousandths:
+    /// `0` in place, `1000` fully past the edge, and `500` half past it.
+    pub hidden_per_mille: u16,
 }
 
 /// One viewer's open floating pane tray: the tile its keys act on, and the
@@ -456,11 +536,12 @@ pub struct FloatingPaneTray {
 ///   [`Linked`](LinkStatus::Linked), it is `None`.
 /// - A [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) or
 ///   [`TiledHandle`](PlacementHandleHover::TiledHandle) hover shows in
-///   `Normal`, `Locked`, `PaneMoveChoice` and `FloatingPaneTray`, and in
-///   `DockUndock` while `is_dock_undock_command_pending` is `false`.
+///   `Normal`, `Locked`, `PaneMoveChoice`, `FloatingPaneTray` and
+///   `NotificationCenter`, and in `DockUndock` while
+///   `is_dock_undock_command_pending` is `false`.
 /// - A [`FloatingHandle`](PlacementHandleHover::FloatingHandle) hover of an
 ///   unpinned pane shows in `Normal`, `Locked`, `PaneMoveChoice`,
-///   `FloatingPaneMove` and `FloatingPaneTray` while
+///   `FloatingPaneMove`, `FloatingPaneTray` and `NotificationCenter` while
 ///   `is_floating_pane_move_waiting` is `false`. In
 ///   `DockUndock`, a pinned or unpinned pane's hover shows while
 ///   `is_dock_undock_command_pending` and `is_floating_pane_move_waiting` are
@@ -488,7 +569,8 @@ pub fn find_shown_placement_handle_hover(
                 LockMode::Normal
                 | LockMode::Locked
                 | LockMode::PaneMoveChoice
-                | LockMode::FloatingPaneTray => true,
+                | LockMode::FloatingPaneTray
+                | LockMode::NotificationCenter => true,
                 LockMode::DockUndock => !is_dock_undock_command_pending,
                 LockMode::PanePlacement | LockMode::FloatingPaneMove => false,
             }
@@ -498,7 +580,8 @@ pub fn find_shown_placement_handle_hover(
             | LockMode::Locked
             | LockMode::PaneMoveChoice
             | LockMode::FloatingPaneMove
-            | LockMode::FloatingPaneTray => !is_pinned && !is_floating_pane_move_waiting,
+            | LockMode::FloatingPaneTray
+            | LockMode::NotificationCenter => !is_pinned && !is_floating_pane_move_waiting,
             LockMode::DockUndock => {
                 !is_dock_undock_command_pending && !is_floating_pane_move_waiting
             }
@@ -630,8 +713,8 @@ impl<'a> FrameLayout<'a> {
     /// their tab state, but it does not yield a pane slot or terminal grid.
     /// The lock mode is the viewer's `active_input_mode` when one is set, and
     /// the client's `lock_mode` otherwise. The tray button shows while the
-    /// session holds a floating pane, highlighted while the viewer's tray is
-    /// open.
+    /// session holds a floating pane, and is highlighted while the lock mode
+    /// is `FloatingPaneTray`.
     #[must_use]
     pub(crate) fn get_tabline_inputs(&self) -> TablineInputs<'a> {
         TablineInputs {
@@ -648,7 +731,7 @@ impl<'a> FrameLayout<'a> {
             },
             tabline_offset: self.viewer_chrome.tabline_offset,
             has_floating_panes: !self.session_snapshot.floating_panes.is_empty(),
-            is_floating_pane_tray_open: self.viewer_chrome.floating_pane_tray.is_some(),
+            notification_button: self.viewer_chrome.notification_button,
         }
     }
 
@@ -735,8 +818,9 @@ impl<'a> FrameLayout<'a> {
 
 /// A painted frame cut down to what answering a mouse event reads: where the
 /// surfaces sit, the committed region solve, the viewer chrome it was painted
-/// with, and the few per-pane fields that say which line each pane's top row
-/// shows and where an event over it goes.
+/// with, the notification cards and the toast it drew, and the few per-pane
+/// fields that say which line each pane's top row shows and where an event
+/// over it goes.
 ///
 /// It carries no cells, no cursor and no pane content titles, so a viewer
 /// holding one between paints holds no pane's rows. The session's floating
@@ -757,6 +841,22 @@ pub struct MouseFrame {
     /// reconnect tags, the pane placement preview, the floating pane move
     /// draft, and the floating pane tray.
     pub viewer_chrome: ViewerChrome,
+    /// The notification cards and the toast this frame drew.
+    pub drawn_notifications: DrawnNotifications,
+}
+
+/// The notification cards and the toast one painted frame drew, as a click on
+/// that frame names them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DrawnNotifications {
+    /// The card each body row of the notification center drew, top first
+    /// ([`NotificationCenterBodyRows::card_rows`](crate::notification::NotificationCenterBodyRows::card_rows)),
+    /// shared with the rows the center keeps. Empty while the frame drew no
+    /// center.
+    pub center_card_rows: Arc<[Option<NotificationCardRow>]>,
+    /// The number of the toast the frame drew: the count of toasts the
+    /// viewer showed before it. `None` while the frame drew no toast.
+    pub toast_number: Option<u64>,
 }
 
 impl MouseFrame {
@@ -773,7 +873,8 @@ impl MouseFrame {
     }
 
     /// Build a mouse frame from a borrowed render snapshot, the regions it was
-    /// painted with, and the viewer chrome it was painted with.
+    /// painted with, the viewer chrome it was painted with, and the
+    /// notification cards and the toast it drew.
     ///
     /// The mouse frame copies session, client, and per-pane input data. It does
     /// not copy pane grids.
@@ -782,6 +883,7 @@ impl MouseFrame {
         render_snapshot: &RenderSnapshot,
         committed_regions: CommittedRegions,
         viewer_chrome: ViewerChrome,
+        drawn_notifications: DrawnNotifications,
     ) -> Self {
         Self {
             mouse_panes: render_snapshot
@@ -793,6 +895,7 @@ impl MouseFrame {
             client_snapshot: render_snapshot.client_snapshot.clone(),
             committed_regions,
             viewer_chrome,
+            drawn_notifications,
         }
     }
 }
@@ -1091,7 +1194,7 @@ pub struct FloatingPaneSlot {
     /// the separator row.
     pub outer_rect: Rect,
     /// The cells inside the chrome, the size of the pane's PTY
-    /// ([`compute_floating_pane_content_rect`]). The renderer draws cells and
+    /// ([`compute_floating_content_rect`]). The renderer draws cells and
     /// places the cursor here.
     pub content_rect: Rect,
     /// Whether the viewing client pinned the pane at its cell.
@@ -1101,14 +1204,14 @@ pub struct FloatingPaneSlot {
 impl FloatingPaneSlot {
     /// The slot of the floating pane `pane_id` drawn in the box `outer_rect`,
     /// its content rect taken from that box
-    /// ([`compute_floating_pane_content_rect`]). Outer `(24, 8)` `72x22` gives
+    /// ([`compute_floating_content_rect`]). Outer `(24, 8)` `72x22` gives
     /// content `(25, 11)` `70x18`.
     #[must_use]
     pub fn from_outer_rect(pane_id: PaneId, outer_rect: Rect, is_pinned: bool) -> Self {
         Self {
             pane_id,
             outer_rect,
-            content_rect: compute_floating_pane_content_rect(outer_rect),
+            content_rect: compute_floating_content_rect(outer_rect),
             is_pinned,
         }
     }

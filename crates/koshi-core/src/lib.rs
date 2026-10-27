@@ -13,6 +13,8 @@
 //! - [`key`] — keyboard chords, [`lock`] — a client's modal input state,
 //!   [`mouse`] — mouse events and the reporting level a pane's program asked
 //!   for.
+//! - [`notification`] — the entries koshi posts to tell a person something,
+//!   and the bounded queue each client and session keeps them in.
 //! - [`process`] — spawn, kill, and exit types; [`naming`] — generated names
 //!   for sessions, tabs, and clients; [`client`] — where a client connected
 //!   from; [`clipboard`] — the targets of a clipboard copy that a program in
@@ -49,6 +51,7 @@ pub mod lock;
 pub mod log;
 pub mod mouse;
 pub mod naming;
+pub mod notification;
 pub mod process;
 pub mod random;
 pub mod recent_event;

@@ -4,7 +4,7 @@ use super::*;
 
 use std::net::Ipv6Addr;
 
-use crate::types::{ClientConfig, LoggingConfig};
+use crate::types::{ClientConfig, LoggingConfig, NotificationConfig};
 
 /// Parses `config_source_text` as `koshi.kdl`, panicking on error, and drops
 /// warnings.
@@ -2180,5 +2180,115 @@ fn a_repeated_image_support_line_keeps_the_first_and_warns() {
     assert_eq!(
         parse_warnings,
         vec!["line 3, column 1: ignored duplicate `image-support` section".to_string()]
+    );
+}
+
+#[test]
+fn the_notifications_section_records_each_key() {
+    let (app_config_layer, parse_warnings) = parse_with_warnings(
+        "notifications {\n    toast #false\n    toast-position \"bottom-left\"\n    toast-duration-ms 5000\n}",
+    );
+    assert_eq!(
+        app_config_layer.notifications,
+        Some(PartialNotificationConfig {
+            should_show_toasts: Some(false),
+            toast_position: Some(ToastPosition::BottomLeft),
+            toast_duration_ms: Some(5_000),
+        })
+    );
+    assert_eq!(parse_warnings, Vec::<String>::new());
+}
+
+#[test]
+fn each_toast_position_names_its_corner() {
+    for (position_text, expected_toast_position) in [
+        ("top-right", ToastPosition::TopRight),
+        ("top-left", ToastPosition::TopLeft),
+        ("bottom-right", ToastPosition::BottomRight),
+        ("bottom-left", ToastPosition::BottomLeft),
+    ] {
+        assert_eq!(
+            parse_config(&format!(
+                "notifications {{\n    toast-position \"{position_text}\"\n}}"
+            ))
+            .notifications
+            .and_then(|notifications| notifications.toast_position),
+            Some(expected_toast_position)
+        );
+    }
+}
+
+#[test]
+fn a_toast_duration_at_each_end_of_its_range_is_taken() {
+    for toast_duration_ms in [1_000, 60_000] {
+        assert_eq!(
+            parse_config(&format!(
+                "notifications {{\n    toast-duration-ms {toast_duration_ms}\n}}"
+            ))
+            .notifications
+            .and_then(|notifications| notifications.toast_duration_ms),
+            Some(toast_duration_ms)
+        );
+    }
+}
+
+#[test]
+fn an_invalid_notifications_value_is_skipped_with_a_warning_and_the_others_apply() {
+    let (app_config_layer, parse_warnings) = parse_with_warnings(
+        "notifications {\n    toast \"yes\"\n    toast-position \"middle\"\n    toast-duration-ms 999\n    toast-durations 5000\n}\nnotifications {\n    toast-duration-ms 60001\n}",
+    );
+    assert_eq!(
+        app_config_layer.notifications,
+        Some(PartialNotificationConfig::default())
+    );
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "line 3, column 5: ignored `notifications.toast`: expected a boolean (#true or #false)"
+                .to_string(),
+            "line 4, column 5: ignored `notifications.toast-position`: expected \"top-right\", \
+             \"top-left\", \"bottom-right\", or \"bottom-left\""
+                .to_string(),
+            "line 5, column 5: ignored `notifications.toast-duration-ms`: must be between 1000 \
+             and 60000"
+                .to_string(),
+            "line 6, column 5: ignored unknown key `notifications.toast-durations`; did you mean \
+             `notifications.toast-duration-ms`?"
+                .to_string(),
+            "line 8, column 1: ignored duplicate `notifications` section".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_toast_duration_past_its_range_is_skipped_with_a_warning() {
+    let (app_config_layer, parse_warnings) =
+        parse_with_warnings("notifications {\n    toast-duration-ms 60001\n}");
+    assert_eq!(
+        app_config_layer.notifications,
+        Some(PartialNotificationConfig::default())
+    );
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "line 3, column 5: ignored `notifications.toast-duration-ms`: must be between 1000 \
+             and 60000"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_file_without_the_notifications_section_reads_the_defaults() {
+    let app_config_file = parse_file("reduced-motion #true");
+    assert_eq!(app_config_file.layer.notifications, None);
+    assert_eq!(app_config_file.schema_version, 1);
+    assert_eq!(
+        ClientConfig::default().notifications,
+        NotificationConfig {
+            should_show_toasts: true,
+            toast_position: ToastPosition::TopRight,
+            toast_duration_ms: 3_000,
+        }
     );
 }

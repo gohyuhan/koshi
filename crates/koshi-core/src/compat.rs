@@ -173,6 +173,31 @@ pub struct Surface {
 /// - A `Layout` answer carries `floating_panes`: each floating pane's desired
 ///   size, solved size, and every attached client's stored position and what
 ///   that client draws for it. The field is required, and 4 has no such field.
+/// - The attach answer's session structure and the `Resync` event carry
+///   `notification_queue`: the session's whole notification queue. The
+///   `NotificationPosted` event exists in 5 only: one entry the queue took,
+///   with the queue's `revision` after it. 4 has no notification queue.
+/// - The `Resync` event carries `held_command_rejections`, the rejections of
+///   the client's commands since its queue overflowed: each run of equal
+///   rejections in a row as `fired_action`, `reject_reason`, `help` and
+///   `repeat_count`, at least 1. It also carries
+///   `dropped_command_rejection_count`, the runs dropped for room. Both fields
+///   are required. 4 dropped a rejection that found the queue full.
+/// - The `CommandRejected` event names a command from the client's key
+///   binding, its pane placement confirmation, or a floating pane move from
+///   its mouse round, that the session refused. It carries `command_id`,
+///   `fired_action`, the action the key fired or `null`, `reject_reason`, and
+///   `help`, the session's hint or `null`. 4 sent `PlacementCommandRejected`
+///   with `command_id` alone, for a pane placement only.
+/// - A `SubmitCommand` request is an object with `command_envelope` and
+///   `fired_action`, and a `ConfirmPanePlacement` request carries
+///   `fired_action`: the action the client's key fired, or `null`. The field
+///   is required in both. 4 carried the command envelope as the whole
+///   `SubmitCommand` value, and has no `fired_action`.
+/// - A frame carries no `is_recovery_notice_visible`. A session that cannot
+///   restore its saved state after a restart posts the `Error` notification
+///   `the session could not be restored after the restart; a new shell
+///   started`. 4 carried the field, and left it out while it was `false`.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -316,6 +341,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// carries. A tab whose sizes give back the rect it was last drawn at keeps
 /// every pane's size. In every other tab, the resize delta of each child with
 /// a `preferred` target moves onto its trailing-most flexible sibling.
+/// Format 5 also adds each session's notification queue, and drops each
+/// session's `is_recovery_notice_visible`. A format 4 session gets a queue in a
+/// new epoch, which holds one `Error` entry when its
+/// `is_recovery_notice_visible` was `true`, and is empty otherwise.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.
 ///

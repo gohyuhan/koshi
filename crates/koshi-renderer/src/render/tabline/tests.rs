@@ -1,13 +1,16 @@
 //! Tests for the tabline solve and paint: which blocks anchor the two edges,
 //! which tabs fit the middle window, where the scroll arrows land, the floating
-//! pane tray button and its one-cell glyph, and the exact cells and styles
+//! pane tray button and the notification button and their one-cell glyphs, and
+//! the exact cells and styles
 //! `draw_tabline` writes — including tab widths measured by display width for
 //! wide (CJK), emoji, and combining-mark titles.
 
 use super::*;
 
 use crate::render::tests::{compute_version_badge_column_count, format_rendered_cells};
-use crate::snapshot::{LinkStatus, Reconnecting, ViewerChrome};
+use crate::snapshot::{
+    LinkStatus, NotificationButton, NotificationCenter, Reconnecting, ViewerChrome,
+};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -43,7 +46,6 @@ fn build_tabline_frame(
         row_count: 1,
     };
     let render_snapshot = RenderSnapshot {
-        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_name: session_name.to_string(),
@@ -1470,4 +1472,164 @@ fn a_session_with_a_floating_pane_puts_the_tray_button_left_of_the_mode_tag_and_
         ),
         " ⧉  BASE "
     );
+}
+
+#[test]
+fn the_notification_button_glyph_takes_one_cell() {
+    use unicode_width::UnicodeWidthStr;
+
+    assert_eq!(
+        get_text_width(&format_notification_button_text(NotificationButton {
+            unread_entry_count: 0
+        })),
+        3
+    );
+    assert_eq!(UnicodeWidthStr::width("●"), 1);
+}
+
+#[test]
+fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there() {
+    let mut tabline_test_frame = build_tabline_frame(
+        "s",
+        &[("one", true), ("two", false)],
+        None,
+        LockMode::Normal,
+        false,
+    );
+    tabline_test_frame
+        .render_snapshot
+        .session_snapshot
+        .floating_panes
+        .push(FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: None,
+        });
+    tabline_test_frame.viewer_chrome.notification_button = Some(NotificationButton {
+        unread_entry_count: 3,
+    });
+    let badge_column_count = compute_version_badge_column_count();
+    let tabline_column_count = 31 + badge_column_count;
+
+    let tabline_layout = solve_tabline_layout(
+        &tabline_test_frame,
+        build_tabline_area(tabline_column_count),
+    );
+
+    // ` BASE ` starts at 25 + badge, ` ⧉ ` at 22 + badge, and ` ●3 ` takes the
+    // 4 columns before it. Only the first tab fits before the right arrow.
+    assert_eq!(
+        tabline_layout.floating_pane_tray_button_column,
+        Some(22 + badge_column_count)
+    );
+    assert_eq!(
+        tabline_layout.notification_button_columns,
+        Some((18 + badge_column_count)..(22 + badge_column_count))
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 18 + badge_column_count);
+    assert_eq!(
+        tabline_layout.visible_tab_spans,
+        vec![build_visible_tab_span(0, 5 + badge_column_count, 9)]
+    );
+    assert_eq!(
+        tabline_layout.right_scroll_arrow_column,
+        Some(17 + badge_column_count)
+    );
+    assert_eq!(
+        format_rendered_cells(
+            &render_tabline(&tabline_test_frame, tabline_column_count),
+            0,
+            18 + badge_column_count..tabline_column_count
+        ),
+        " ●3  ⧉  BASE "
+    );
+}
+
+#[test]
+fn the_notification_button_is_reversed_only_while_the_lock_mode_is_notification_center() {
+    let mut tabline_test_frame =
+        build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
+    tabline_test_frame.viewer_chrome.notification_button = Some(NotificationButton {
+        unread_entry_count: 0,
+    });
+    let tabline_column_count = 40 + compute_version_badge_column_count();
+    let mode_style = compute_mode_style(&Theme::default());
+    let find_button_glyph_modifier = |render_buffer: &Buffer| {
+        let glyph_column = (0..tabline_column_count)
+            .find(|column| render_buffer[(*column, 0)].symbol() == "●")
+            .expect("the notification button is drawn");
+        render_buffer[(glyph_column, 0)].modifier
+    };
+
+    let closed_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+    tabline_test_frame.viewer_chrome.notification_center = Some(NotificationCenter {
+        scroll_row_offset: 0,
+        selected_notification_id: None,
+        hidden_per_mille: 500,
+    });
+    let sliding_out_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+    tabline_test_frame.viewer_chrome.active_input_mode = Some(LockMode::NotificationCenter);
+    let open_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+
+    assert_eq!(
+        find_button_glyph_modifier(&closed_render_buffer),
+        mode_style.add_modifier
+    );
+    assert_eq!(
+        find_button_glyph_modifier(&sliding_out_render_buffer),
+        mode_style.add_modifier
+    );
+    assert_eq!(
+        find_button_glyph_modifier(&open_render_buffer),
+        mode_style.add_modifier | Modifier::REVERSED
+    );
+}
+
+#[test]
+fn the_tray_button_is_reversed_only_while_the_lock_mode_is_floating_pane_tray() {
+    let mut tabline_test_frame =
+        build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
+    tabline_test_frame
+        .render_snapshot
+        .session_snapshot
+        .floating_panes
+        .push(FloatingPane::Minimized {
+            pane_id: PaneId::new(),
+            pane_title: None,
+        });
+    let tabline_column_count = 40 + compute_version_badge_column_count();
+    let mode_style = compute_mode_style(&Theme::default());
+    let find_button_glyph_modifier = |render_buffer: &Buffer| {
+        let glyph_column = (0..tabline_column_count)
+            .find(|column| render_buffer[(*column, 0)].symbol() == "⧉")
+            .expect("the tray button is drawn");
+        render_buffer[(glyph_column, 0)].modifier
+    };
+
+    let closed_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+    tabline_test_frame.viewer_chrome.active_input_mode = Some(LockMode::FloatingPaneTray);
+    let open_render_buffer = render_tabline(&tabline_test_frame, tabline_column_count);
+
+    assert_eq!(
+        find_button_glyph_modifier(&closed_render_buffer),
+        mode_style.add_modifier
+    );
+    assert_eq!(
+        find_button_glyph_modifier(&open_render_buffer),
+        mode_style.add_modifier | Modifier::REVERSED
+    );
+}
+
+#[test]
+fn a_viewer_with_no_notification_shows_no_button() {
+    let tabline_test_frame =
+        build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
+    let badge_column_count = compute_version_badge_column_count();
+
+    let tabline_layout = solve_tabline_layout(
+        &tabline_test_frame,
+        build_tabline_area(31 + badge_column_count),
+    );
+
+    assert_eq!(tabline_layout.notification_button_columns, None);
+    assert_eq!(tabline_layout.tab_strip_end_column, 25 + badge_column_count);
 }

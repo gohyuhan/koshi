@@ -55,13 +55,22 @@ fn is_refused_character(character: char) -> bool {
 /// - `"日"` repeated 1000 times → 510 bytes, 170 characters
 #[must_use]
 pub fn sanitize_reported_text(raw_reported_text: &str) -> String {
-    let mut sanitized_text =
-        String::with_capacity(raw_reported_text.len().min(MAX_REPORTED_TEXT_BYTE_COUNT));
-    for character in raw_reported_text
+    sanitize_text_to_byte_count(raw_reported_text, MAX_REPORTED_TEXT_BYTE_COUNT)
+}
+
+/// `raw_text` with every character [`sanitize_reported_text`] removes removed,
+/// cut to `max_byte_count` bytes at the last character boundary that fits.
+///
+/// A removed character consumes none of the byte budget. Example — with a
+/// `max_byte_count` of 4, `"ab\u{1b}cdef"` → `"abcd"`, and `"日日"` → `"日"`.
+#[must_use]
+pub fn sanitize_text_to_byte_count(raw_text: &str, max_byte_count: usize) -> String {
+    let mut sanitized_text = String::with_capacity(raw_text.len().min(max_byte_count));
+    for character in raw_text
         .chars()
         .filter(|character| !is_refused_character(*character))
     {
-        if sanitized_text.len() + character.len_utf8() > MAX_REPORTED_TEXT_BYTE_COUNT {
+        if sanitized_text.len() + character.len_utf8() > max_byte_count {
             break;
         }
         sanitized_text.push(character);

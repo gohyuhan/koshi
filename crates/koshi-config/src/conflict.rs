@@ -15,8 +15,9 @@
 //!   action becomes unbound.
 //! - **A fatal finding** — the locked-mode unlock escape is shadowed, missing,
 //!   or typeable, or the `pane-placement`, `pane-move-choice`,
-//!   `floating-pane-move`, `dock-undock` or `floating-pane-tray` mode has no
-//!   live cancellation binding — refuses the keymap outright
+//!   `floating-pane-move`, `dock-undock`, `floating-pane-tray` or
+//!   `notification-center` mode has no live cancellation binding — refuses
+//!   the keymap outright
 //!   ([`KeymapVerdict::Reject`]).
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
@@ -182,8 +183,9 @@ pub enum ConflictDiagnostic {
     /// cancellation. Checked for `pane-placement` (`core:cancel-pane-placement`),
     /// `pane-move-choice` (`core:cancel-pane-move-choice`),
     /// `floating-pane-move` (`core:cancel-floating-pane-move`),
-    /// `dock-undock` (`core:cancel-dock-undock`) and `floating-pane-tray`
-    /// (`core:close-floating-pane-tray`).
+    /// `dock-undock` (`core:cancel-dock-undock`), `floating-pane-tray`
+    /// (`core:close-floating-pane-tray`) and `notification-center`
+    /// (`core:close-notification-center`).
     ModeCancelBindingMissing {
         /// The viewer-local mode with no cancellation key.
         mode_name: ModeName,
@@ -839,12 +841,13 @@ fn validate_reserved_unlock_binding(
 
 /// The viewer-local modes that own the keyboard until cancelled, each with
 /// the action that cancels it.
-const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 5] = [
+const CANCEL_ACTION_NAME_BY_MODE: [(LockMode, &str); 6] = [
     (LockMode::PanePlacement, "cancel-pane-placement"),
     (LockMode::PaneMoveChoice, "cancel-pane-move-choice"),
     (LockMode::FloatingPaneMove, "cancel-floating-pane-move"),
     (LockMode::DockUndock, "cancel-dock-undock"),
     (LockMode::FloatingPaneTray, "close-floating-pane-tray"),
+    (LockMode::NotificationCenter, "close-notification-center"),
 ];
 
 /// Push one [`ConflictDiagnostic::ModeCancelBindingMissing`] for each mode in

@@ -1,8 +1,9 @@
 //! What the server sends a client when it attaches: the session's structure.
 //!
 //! [`crate::attach::AttachedSessionStructureSnapshot`] names which tabs exist,
-//! how each tab's panes are arranged, and which pane each tab focused. It
-//! travels once, in the handshake reply. Everything after it arrives as events.
+//! how each tab's panes are arranged, which pane each tab focused, and the
+//! session's notification queue. It travels once, in the handshake reply.
+//! Everything after it arrives as events.
 //!
 //! Layout trees travel unsolved: each client solves the tree against its own
 //! terminal size. Two attached clients of different sizes place the same panes
@@ -14,6 +15,7 @@
 //! server assigns those and reports them through events and painted frames.
 
 use koshi_core::ids::{PaneId, SessionId, TabId};
+use koshi_core::notification::NotificationQueue;
 use koshi_layout::tree::LayoutNode;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,8 @@ pub struct AttachedSessionStructureSnapshot {
     pub session_name: String,
     /// Every tab in the session, in display order.
     pub tabs: Vec<TabStructure>,
+    /// The session's notification queue as it stands.
+    pub notification_queue: NotificationQueue,
 }
 
 /// One tab: what to label it in the tab bar, how its panes are arranged, and

@@ -101,6 +101,7 @@ fn list_builtin_mode_names_returns_every_lock_mode() {
             "floating-pane-move",
             "dock-undock",
             "floating-pane-tray",
+            "notification-center",
         ]
         .map(ModeName::from_text),
     );
@@ -438,6 +439,7 @@ fn no_layers_report_missing_required_bindings() {
             build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move"),
             build_mode_cancel_binding_missing("dock-undock", "cancel-dock-undock"),
             build_mode_cancel_binding_missing("floating-pane-tray", "close-floating-pane-tray"),
+            build_mode_cancel_binding_missing("notification-center", "close-notification-center"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
@@ -1135,6 +1137,31 @@ fn removing_the_locked_unlock_binding_is_fatal() {
 }
 
 #[test]
+fn removing_the_notification_center_close_binding_is_fatal_while_its_toggle_stays() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let report = detect_test_conflicts(&[
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed_key_sequences(
+            LayerOrigin::User,
+            "notification-center",
+            Vec::new(),
+            vec![escape_sequence],
+        ),
+    ]);
+    assert_eq!(
+        report.diagnostics,
+        vec![build_mode_cancel_binding_missing(
+            "notification-center",
+            "close-notification-center"
+        )]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
 fn removing_the_pane_placement_cancel_binding_is_fatal() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
         BindingModifierFlags::NONE,
@@ -1510,8 +1537,8 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
     // With every sequence at least one chord, a cap of 0 makes the whole
     // keymap unreachable — including the locked-mode unlock binding and the
     // cancel binding of `pane-placement`, `pane-move-choice`,
-    // `floating-pane-move`, `dock-undock`, and `floating-pane-tray`, which
-    // the guarantee checks report as missing.
+    // `floating-pane-move`, `dock-undock`, `floating-pane-tray`, and
+    // `notification-center`, which the guarantee checks report as missing.
     let report = detect_conflicts(
         &[build_default_keymap_layer()],
         Leader::default(),
@@ -1530,6 +1557,7 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
             build_mode_cancel_binding_missing("floating-pane-move", "cancel-floating-pane-move"),
             build_mode_cancel_binding_missing("dock-undock", "cancel-dock-undock"),
             build_mode_cancel_binding_missing("floating-pane-tray", "close-floating-pane-tray"),
+            build_mode_cancel_binding_missing("notification-center", "close-notification-center"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);

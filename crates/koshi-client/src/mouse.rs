@@ -68,8 +68,8 @@ use koshi_core::mouse::{
 };
 use koshi_layout::placement::PlacementDestinations;
 use koshi_renderer::snapshot::{
-    find_shown_placement_handle_hover, FloatingPaneMoveDraft, FrameLayout, MouseFrame, MousePane,
-    PlacementHandleHover, TabSnapshot, ViewerChrome,
+    find_shown_placement_handle_hover, CommittedRegions, FloatingPaneMoveDraft, FrameLayout,
+    MouseFrame, MousePane, PlacementHandleHover, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
@@ -159,7 +159,7 @@ pub enum MouseAction {
     /// session validates them as it validates a command typed at the CLI.
     Command(Box<Command>),
     /// Move this client's view of a floating pane under `command_id`. The
-    /// session names `command_id` in a `PlacementCommandRejected` when it
+    /// session names `command_id` in a `CommandRejected` when it
     /// refuses the move.
     MoveFloatingPane {
         /// The id the move command carries.
@@ -375,7 +375,11 @@ impl Client {
     /// ([`note_active_tab`](Self::note_active_tab)), so switching back does not
     /// bring it out again.
     #[must_use]
-    pub fn build_viewer_chrome(&self, active_tab_id: TabId) -> ViewerChrome {
+    pub fn build_viewer_chrome(
+        &self,
+        active_tab_id: TabId,
+        committed_regions: &CommittedRegions,
+    ) -> ViewerChrome {
         let is_pane_placement_visible = self.is_pane_placement_visible();
         let active_input_mode = self.get_active_input_mode();
         ViewerChrome {
@@ -432,6 +436,9 @@ impl Client {
                 (_, _, None) => None,
             },
             floating_pane_tray: self.floating_pane_tray,
+            notification_center: self.notification_history.get_notification_center(),
+            notification_button: self.build_notification_button(),
+            notification_toast: self.build_notification_toast(committed_regions),
         }
     }
 
@@ -488,7 +495,7 @@ impl Client {
             self.end_placement_drag();
             return Some(PlacementInputAction::Consumed);
         }
-        let frame_layout = build_frame_layout_without_tray(mouse_frame);
+        let frame_layout = build_frame_layout_without_overlays(mouse_frame);
         if !self.is_placement_mode_active() {
             if mouse_input.mouse_kind != MouseKind::Press(MouseButton::Left)
                 || mouse_input
@@ -553,7 +560,14 @@ impl Client {
                 | HitRegion::FloatingPaneTrayButton
                 | HitRegion::FloatingPaneTrayTile { .. }
                 | HitRegion::FloatingPaneTrayToggleMinimizeAll
+                | HitRegion::FloatingPaneTrayClose
                 | HitRegion::FloatingPaneTray
+                | HitRegion::NotificationButton
+                | HitRegion::NotificationCenterClose
+                | HitRegion::NotificationCenterClearAll
+                | HitRegion::NotificationCenterBody
+                | HitRegion::NotificationCenter
+                | HitRegion::NotificationToastClose
                 | HitRegion::Statusline
                 | HitRegion::None => PlacementInputAction::Consumed,
             },
@@ -658,7 +672,7 @@ impl Client {
         current_time: Instant,
     ) -> PlacementInputAction {
         let hit_region = resolve_hit_region(
-            build_frame_layout_without_tray(mouse_frame),
+            build_frame_layout_without_overlays(mouse_frame),
             mouse_input.position,
         );
         self.update_placement_hovers(mouse_frame, mouse_input, hit_region, current_time);
@@ -1108,7 +1122,7 @@ impl Client {
             }
             MouseKind::Motion => {
                 let hit_region = resolve_hit_region(
-                    build_frame_layout_without_tray(mouse_frame),
+                    build_frame_layout_without_overlays(mouse_frame),
                     mouse_input.position,
                 );
                 self.update_pointer_hover(mouse_frame, mouse_input, hit_region);
@@ -1456,7 +1470,7 @@ impl Client {
         let MouseKind::Scroll(scroll_direction) = mouse_input.mouse_kind else {
             return None;
         };
-        let frame_layout = build_frame_layout_without_tray(mouse_frame);
+        let frame_layout = build_frame_layout_without_overlays(mouse_frame);
         let hit_region = resolve_hit_region(frame_layout, mouse_input.position);
         if is_tab_strip_region(hit_region) {
             self.step_tabline_peek(mouse_frame, scroll_direction);
@@ -1527,7 +1541,7 @@ impl Client {
         mouse_frame: &MouseFrame,
         current_time: Instant,
     ) -> Vec<MouseAction> {
-        let frame_layout = build_frame_layout_without_tray(mouse_frame);
+        let frame_layout = build_frame_layout_without_overlays(mouse_frame);
         match resolve_hit_region(frame_layout, mouse_input.position) {
             HitRegion::Tab { tab_id } => {
                 // The click reveals the tab it names, so any peek is over.
@@ -1645,9 +1659,19 @@ impl Client {
                 self.open_floating_pane_tray(Some(mouse_frame));
                 Vec::new()
             }
+            HitRegion::NotificationButton => {
+                self.toggle_notification_center(Some(mouse_frame));
+                Vec::new()
+            }
             HitRegion::FloatingPaneTrayTile { .. }
             | HitRegion::FloatingPaneTrayToggleMinimizeAll
+            | HitRegion::FloatingPaneTrayClose
             | HitRegion::FloatingPaneTray
+            | HitRegion::NotificationCenterClose
+            | HitRegion::NotificationCenterClearAll
+            | HitRegion::NotificationCenterBody
+            | HitRegion::NotificationCenter
+            | HitRegion::NotificationToastClose
             | HitRegion::Statusline
             | HitRegion::None => Vec::new(),
         }
@@ -2073,7 +2097,7 @@ impl Client {
         mouse_input: MouseInput,
         mouse_frame: &MouseFrame,
     ) -> Vec<MouseAction> {
-        let frame_layout = build_frame_layout_without_tray(mouse_frame);
+        let frame_layout = build_frame_layout_without_overlays(mouse_frame);
         if let MouseKind::Release(_) = mouse_input.mouse_kind {
             let Some(mouse_capture) = self.mouse_capture.take() else {
                 return Vec::new();
@@ -2634,19 +2658,23 @@ impl Client {
         mouse_frame: &'a MouseFrame,
     ) -> FrameLayout<'a> {
         let mut frame_layout = mouse_frame.build_frame_layout();
-        frame_layout.viewer_chrome =
-            self.build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id);
+        frame_layout.viewer_chrome = self.build_viewer_chrome(
+            mouse_frame.client_snapshot.active_tab_id,
+            &mouse_frame.committed_regions,
+        );
         frame_layout
     }
 }
 
 /// `mouse_frame`'s frame layout with the chrome it was painted with, and no
-/// floating pane tray. Escape and a left press on a painted tray tile at
-/// `(8, 3)` in one read, before a paint, place the press on the pane under
-/// that cell.
-pub(crate) fn build_frame_layout_without_tray(mouse_frame: &MouseFrame) -> FrameLayout<'_> {
+/// floating pane tray, notification center or toast. Escape and a left press
+/// on a painted tray tile at `(8, 3)` in one read, before a paint, place the
+/// press on the pane under that cell.
+pub(crate) fn build_frame_layout_without_overlays(mouse_frame: &MouseFrame) -> FrameLayout<'_> {
     let mut frame_layout = mouse_frame.build_frame_layout();
     frame_layout.viewer_chrome.floating_pane_tray = None;
+    frame_layout.viewer_chrome.notification_center = None;
+    frame_layout.viewer_chrome.notification_toast = None;
     frame_layout
 }
 
@@ -2660,12 +2688,13 @@ fn build_focus_pane_action(client_id: ClientId, pane_id: PaneId) -> MouseAction 
 }
 
 /// Whether `hit_region` is on the tab strip: the tabline row, the floating
-/// pane tray button, a tab, or a scroll arrow.
+/// pane tray button, the notification button, a tab, or a scroll arrow.
 fn is_tab_strip_region(hit_region: HitRegion) -> bool {
     matches!(
         hit_region,
         HitRegion::Tabline
             | HitRegion::FloatingPaneTrayButton
+            | HitRegion::NotificationButton
             | HitRegion::Tab { .. }
             | HitRegion::TablineScrollLeft
             | HitRegion::TablineScrollRight

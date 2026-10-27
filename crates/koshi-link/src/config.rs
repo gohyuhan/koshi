@@ -126,6 +126,16 @@ impl LoadedAppConfig {
             | AppConfigOutcome::Refused { .. } => None,
         }
     }
+
+    /// [`into_app_config_layer`](Self::into_app_config_layer), and the
+    /// warnings the read produced, in file order.
+    #[must_use]
+    pub fn into_app_config_layer_and_warnings(
+        mut self,
+    ) -> (Option<PartialKoshiConfig>, Vec<String>) {
+        let config_warnings = std::mem::take(&mut self.config_warnings);
+        (self.into_app_config_layer(), config_warnings)
+    }
 }
 
 /// Read and parse `koshi.kdl` in `config_directory`. A file that is absent
@@ -273,22 +283,6 @@ pub fn load_config_files_on_app_config(
         ),
     };
     (loaded_config, config_warnings)
-}
-
-/// Read and parse `koshi.kdl` in `config_directory` alone, skipping the theme
-/// and the keymap.
-///
-/// `koshi.kdl` is the only file carrying the top-level `allow-beta-features`
-/// and `layout.new-pane-direction`: a `koshi new-pane` reads that file and
-/// nothing else. A `config_directory` of `None`, and a file that is absent,
-/// unreadable, or unparseable, yield `None`, which folds to the built-in
-/// defaults. Warnings are dropped.
-#[must_use]
-pub fn load_app_layer(config_directory: Option<&Path>) -> Option<PartialKoshiConfig> {
-    let config_directory = config_directory?;
-    load_app_config_at(&config_directory.join("koshi.kdl"))
-        .0
-        .into_app_config_layer()
 }
 
 /// The tracing subscriber's settings for the process `log_file_owner` names:

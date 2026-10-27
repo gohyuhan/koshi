@@ -77,6 +77,16 @@ pub const LAYOUT_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session's layo
 /// back.
 pub const SESSION_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session could not be restored after the restart. This is a new shell; the previous panes are unavailable.\r\n";
 
+/// The `Warning` notification a session posts when it came back without its
+/// tabs and splits.
+pub const LAYOUT_NOT_RESTORED_NOTIFICATION_TEXT: &str =
+    "the layout could not be restored after the restart; each pane now has its own tab";
+
+/// The `Error` notification a session posts when none of its panes came back
+/// and one fresh shell started.
+pub const SESSION_NOT_RESTORED_NOTIFICATION_TEXT: &str =
+    "the session could not be restored after the restart; a new shell started";
+
 /// One live pane, as the header names it: what the next image needs to take
 /// the pane back, or to shut it down when the body is unreadable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

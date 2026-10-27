@@ -10,8 +10,13 @@ use std::sync::mpsc;
 use std::time::SystemTime;
 
 use crate::runtime::pty_inbox::InboxSink;
-use koshi_core::command::{Command, CommandEnvelope, CommandSource, ToggleLockModeArgs};
-use koshi_core::geometry::{Point, Size};
+use koshi_core::action::ActionReference;
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget, MoveFloatingPaneArgs,
+    ToggleLockModeArgs,
+};
+use koshi_core::event::RejectReason;
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
@@ -337,6 +342,7 @@ fn an_ipc_command_still_applies_when_its_reply_channel_is_gone() {
             CommandSource::from_key_binding(client_id),
             Command::ToggleLockMode(ToggleLockModeArgs::default()),
         )),
+        fired_action: None,
         response_sender,
     });
 
@@ -725,6 +731,7 @@ fn build_toggle_lock_mode_event(
                 client_id: Some(client_id),
             }),
         )),
+        fired_action: None,
         response_sender,
     }
 }
@@ -1483,4 +1490,122 @@ fn list_floating_solved_sizes(server: &Server, session_id: SessionId) -> Vec<(Pa
         .iter()
         .map(|floating_member| (floating_member.pane_id, floating_member.solved_size))
         .collect()
+}
+
+/// An IPC event that runs `command` under `command_id` from `command_source`,
+/// naming `fired_action`. Its reply channel is closed.
+fn build_fired_command_event(
+    command_id: CommandId,
+    command_source: CommandSource,
+    command: Command,
+    fired_action: &str,
+) -> RuntimeEvent {
+    let (response_sender, _response_receiver) = mpsc::channel();
+    RuntimeEvent::Ipc {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            command_id,
+            command_source,
+            command,
+        )),
+        fired_action: Some(
+            ActionReference::from_core_action_name(fired_action).expect("the action name is valid"),
+        ),
+        response_sender,
+    }
+}
+
+#[test]
+fn a_refused_key_binding_command_goes_back_to_the_pressing_client_alone_with_its_action_and_help() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (other_delivery_receiver, _) = server.subscribe(other_client_id, 60);
+    let command_id = CommandId::new();
+
+    let control_flow = server.handle_runtime_event(build_fired_command_event(
+        command_id,
+        CommandSource::from_key_binding(client_id),
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id,
+            top_left_cell: Point { column: 2, row: 3 },
+        }),
+        "confirm-floating-pane-move",
+    ));
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::CommandRejected {
+            command_id,
+            fired_action: Some(
+                ActionReference::from_core_action_name("confirm-floating-pane-move")
+                    .expect("the action name is valid"),
+            ),
+            reject_reason: RejectReason::InvalidState,
+            help: Some(format!(
+                "{pane_id} is tiled; only a floating pane moves this way"
+            )),
+        }]
+    );
+    assert_eq!(
+        other_delivery_receiver
+            .try_iter()
+            .collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_key_that_finds_no_pane_in_its_direction_or_no_floating_pane_goes_back_as_nothing() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+
+    for (focus_target, fired_action) in [
+        (FocusTarget::Direction(Direction::Left), "focus-pane-left"),
+        (FocusTarget::NextFloatingPane, "focus-next-floating-pane"),
+        (
+            FocusTarget::PreviousFloatingPane,
+            "focus-previous-floating-pane",
+        ),
+    ] {
+        let _ = server.handle_runtime_event(build_fired_command_event(
+            CommandId::new(),
+            CommandSource::from_key_binding(client_id),
+            Command::FocusPane(FocusPaneArgs {
+                focus_target,
+                client_id: None,
+            }),
+            fired_action,
+        ));
+    }
+
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_refused_command_from_the_command_line_goes_back_to_no_client() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let session_id = SessionId::new();
+    let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
+        Command::MoveFloatingPane(MoveFloatingPaneArgs {
+            pane_id,
+            top_left_cell: Point { column: 2, row: 3 },
+        }),
+        "confirm-floating-pane-move",
+    ));
+
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
 }

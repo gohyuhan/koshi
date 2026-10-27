@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::runtime::delivery_queue::DeliveryReceiver;
+use koshi_core::event::RejectReason;
 use koshi_test_support::fixtures::build_new_pane_args;
 
 use std::num::NonZeroU16;
@@ -36,7 +37,7 @@ use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_layout::mode::LayoutMode;
 use koshi_pty::error::PtyError;
-use koshi_renderer::snapshot::{Delivery, ViewerChrome};
+use koshi_renderer::snapshot::{CommittedRegions, Delivery, ViewerChrome};
 use koshi_renderer::{compute_clamped_pane_cell, resolve_hit_region, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -225,7 +226,10 @@ fn find_tabline_pointer_column(
     let render_snapshot = server
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
-    let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
+    let viewer_chrome = viewer.build_viewer_chrome(
+        render_snapshot.client_snapshot.active_tab_id,
+        &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+    );
     (minimum_column..render_snapshot.client_snapshot.viewport_size.column_count)
         .find(|&pointer_column| {
             region_predicate(resolve_hit_region(
@@ -245,7 +249,10 @@ fn get_tabline_offset(server: &Server, viewer: &ViewerClient) -> Option<usize> {
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
     viewer
-        .build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id)
+        .build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        )
         .tabline_offset
 }
 
@@ -1287,14 +1294,9 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
 }
 
 #[test]
-fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
+fn a_forwarded_press_is_written_only_to_a_pane_that_asked_for_the_mouse() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_pane(pane_id)
-        .expect("session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
     let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     // The program asked for no mouse: nothing is written.
@@ -1316,7 +1318,6 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         Vec::<Vec<u8>>::new(),
         "a pane in no mouse mode receives nothing"
     );
-    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     // Normal tracking with SGR encoding: the press is written.
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
@@ -1334,10 +1335,8 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the press reached the program"
     );
-    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     // The pane refuses the bytes: nothing is recorded.
-    server.show_session_recovery_notice(session_id);
     fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
     server.forward_mouse_to_pane(
         client_id,
@@ -1353,7 +1352,6 @@ fn a_forwarded_report_clears_the_recovery_notice_only_when_the_pane_takes_it() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the refused press left no record"
     );
-    assert!(server.list_sessions()[&session_id].is_recovery_notice_visible());
 }
 
 /// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
@@ -1658,7 +1656,10 @@ fn find_hovered_pane_id(server: &Server, viewer: &ViewerClient) -> Option<PaneId
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
     viewer
-        .build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id)
+        .build_viewer_chrome(
+            render_snapshot.client_snapshot.active_tab_id,
+            &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
+        )
         .hovered_pane_id
 }
 
@@ -1811,11 +1812,6 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
 fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_pane(pane_id)
-        .expect("session")
-        .session_id;
-    server.show_session_recovery_notice(session_id);
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
@@ -1833,7 +1829,6 @@ fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
         vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
         "wheel up becomes three up-arrows under default cursor keys"
     );
-    assert!(!server.list_sessions()[&session_id].is_recovery_notice_visible());
 
     dispatch_mouse_input(
         &mut server,
@@ -3253,14 +3248,19 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
         .filter(|delivery| {
             matches!(
                 delivery,
-                Delivery::PlacementCommandRejected(_) | Delivery::MouseAnswer { .. }
+                Delivery::CommandRejected { .. } | Delivery::MouseAnswer { .. }
             )
         })
         .collect();
     assert_eq!(
         rejections_and_answers,
         vec![
-            Delivery::PlacementCommandRejected(command_id),
+            Delivery::CommandRejected {
+                command_id,
+                fired_action: None,
+                reject_reason: RejectReason::InvalidState,
+                help: Some(format!("{floating_pane_id} is pinned; unpin it to move it")),
+            },
             Delivery::MouseAnswer {
                 request_id: 6,
                 mouse_answers: Vec::new(),
@@ -3274,6 +3274,102 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
     assert_eq!(
         get_frame_floating_pane_move_command_id(&server, client_id),
         None
+    );
+}
+
+#[test]
+fn a_refused_command_a_mouse_round_carries_is_rejected_to_that_client_ahead_of_the_answer() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    let floating_pane_id = create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 10, row: 4 },
+        true,
+    );
+
+    server.run_client_mouse(
+        client_id,
+        8,
+        vec![WireMouseAction::Command(Box::new(
+            Command::MoveFloatingPane(MoveFloatingPaneArgs {
+                pane_id: floating_pane_id,
+                top_left_cell: Point { column: 2, row: 3 },
+            }),
+        ))],
+    );
+
+    let rejections_and_answers: Vec<Delivery> = mouse_event_queue
+        .try_iter()
+        .filter(|delivery| {
+            matches!(
+                delivery,
+                Delivery::CommandRejected { .. } | Delivery::MouseAnswer { .. }
+            )
+        })
+        .collect();
+    let [Delivery::CommandRejected {
+        command_id: _,
+        fired_action,
+        reject_reason,
+        help,
+    }, mouse_answer] = rejections_and_answers.as_slice()
+    else {
+        panic!("expected one rejection, then the answer, got {rejections_and_answers:?}");
+    };
+    assert_eq!(*fired_action, None);
+    assert_eq!(*reject_reason, RejectReason::InvalidState);
+    assert_eq!(
+        *help,
+        Some(format!("{floating_pane_id} is pinned; unpin it to move it"))
+    );
+    assert_eq!(
+        *mouse_answer,
+        Delivery::MouseAnswer {
+            request_id: 8,
+            mouse_answers: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn a_refused_border_drag_answers_zero_cells_and_sends_no_rejection() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    let pane_id = get_only_pane_id(&server);
+
+    // The only pane of the tab has no neighbor on its right to take cells from.
+    server.run_client_mouse(
+        client_id,
+        9,
+        vec![WireMouseAction::Resize {
+            pane_id,
+            border_side: Direction::Right,
+            resize_step: 1,
+            requested_cell_count: 3,
+        }],
+    );
+
+    let rejections_and_answers: Vec<Delivery> = mouse_event_queue
+        .try_iter()
+        .filter(|delivery| {
+            matches!(
+                delivery,
+                Delivery::CommandRejected { .. } | Delivery::MouseAnswer { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        rejections_and_answers,
+        vec![Delivery::MouseAnswer {
+            request_id: 9,
+            mouse_answers: vec![MouseAnswer::Resized {
+                pane_id,
+                border_side: Direction::Right,
+                resize_step: 1,
+                applied_cell_count: 0,
+            }],
+        }]
     );
 }
 
@@ -3803,10 +3899,6 @@ fn a_release_is_written_only_for_a_button_the_client_holds_in_that_pane() {
 fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    let session_id = server
-        .get_session_for_pane(pane_id)
-        .expect("session")
-        .session_id;
     server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
     let other_client_id = ClientId::new();
     forward_mouse_at(
@@ -3830,8 +3922,6 @@ fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
         MouseKind::Press(MouseButton::Right),
         Point { column: 5, row: 5 },
     );
-    server.show_session_recovery_notice(session_id);
-
     let _ = server.handle_returning_client_detach(client_id);
 
     assert_eq!(
@@ -3845,10 +3935,6 @@ fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
             b"\x1b[<0;4;2m".to_vec(),
         ],
         "the left release goes out at the cell of the last drag"
-    );
-    assert!(
-        server.list_sessions()[&session_id].is_recovery_notice_visible(),
-        "the release koshi writes itself leaves the recovery notice up"
     );
 
     // The other client still holds its right button.

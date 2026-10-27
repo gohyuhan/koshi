@@ -1185,7 +1185,6 @@ fn no_config_directory_reads_no_file_and_keeps_every_default() {
         config_warnings,
         vec!["no config directory found; using built-in defaults".to_string()]
     );
-    assert_eq!(load_app_layer(None), None);
     assert_eq!(find_shared_sessions_base_directory(None), None);
 }
 
@@ -1463,7 +1462,7 @@ fn a_switch_left_to_the_file_is_read_from_the_config_directory_on_every_call() {
         "version 2\nallow-other-users #true\nshared-sessions-dir \"/var/run/koshi\"\n",
     );
     let other_users_policy = resolve_other_users_policy(
-        load_app_layer(Some(config_directory.path())).as_ref(),
+        load_app_config_file(Some(config_directory.path())).find_app_config_layer(),
         false,
         Some(config_directory.path()),
     )

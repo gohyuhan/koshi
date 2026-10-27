@@ -43,7 +43,10 @@ fn submit_session_command(connection: &mut Connection, client_id: ClientId, comm
     );
     let submit_request = IpcRequest {
         request_id: 3,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(command_envelope),
+            fired_action: None,
+        },
     };
     connection
         .send(&submit_request)

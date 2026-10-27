@@ -30,6 +30,9 @@ use koshi_core::event::{
 use koshi_core::geometry::{Direction, FloatingPanePosition, PaneArea, Point};
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::lock::LockMode;
+use koshi_core::notification::{
+    NotificationEntry, NotificationQueue, NotificationQueueOwner, NotificationSeverity,
+};
 use koshi_core::process::PtySize;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_layout::mode::LayoutMode;
@@ -133,8 +136,7 @@ fn close_undriven_panes_uses_reported_exit_status_and_unobserved_fallback() {
             .map(|exit_status| HashMap::from([(pane_id, exit_status)]))
             .unwrap_or_default();
 
-        let exit_events =
-            server.close_undriven_panes(HashSet::from([pane_id]), exit_status_by_pane_id);
+        let exit_events = server.close_undriven_panes([pane_id], exit_status_by_pane_id);
 
         assert_eq!(
             exit_events.first(),
@@ -170,8 +172,7 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
         .expect("the booted client focuses the tab's pane");
     server.live_pane_ids.remove(&floating_pane_id);
 
-    let exit_events =
-        server.close_undriven_panes(HashSet::from([floating_pane_id]), HashMap::new());
+    let exit_events = server.close_undriven_panes([floating_pane_id], HashMap::new());
 
     // The floating pane took the client's input when it opened; its removal
     // returns the input to the tiled pane.
@@ -242,6 +243,18 @@ fn list_subscription_pairs(server: &Server) -> Vec<(SubscriberId, ClientId)> {
             )
         })
         .collect()
+}
+
+/// A copy of the notification queue of `server`'s one session, boxed as a
+/// [`Delivery::Snapshot`] carries it.
+fn build_sole_session_notification_queue(server: &Server) -> Box<NotificationQueue> {
+    Box::new(
+        server
+            .get_sole_session()
+            .expect("the session")
+            .notification_queue
+            .clone(),
+    )
 }
 
 /// Publish critical events until every subscriber's queue overflows and pauses
@@ -589,6 +602,24 @@ fn a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
 }
 
 #[test]
+fn a_session_post_to_a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
+    let (mut server, client_id) = boot_server();
+    let session_id = *server.list_sessions().keys().next().expect("session");
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
+    drop(delivery_receiver);
+
+    server.post_session_notification(
+        session_id,
+        NotificationSeverity::Error,
+        "pane …a1b2 killed by signal 9",
+    );
+
+    assert!(!server.event_bus.has_subscriber(subscriber_id));
+    assert_eq!(list_subscription_pairs(&server), Vec::new());
+}
+
+#[test]
 fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
     let (mut server, client_id) = boot_server();
     let (delivery_receiver, _) = server.subscribe(client_id, 60);
@@ -609,10 +640,13 @@ fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
         delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
+            notification_queue: build_sole_session_notification_queue(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
     assert_eq!(
@@ -670,10 +704,13 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
         delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
+            notification_queue: build_sole_session_notification_queue(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -737,10 +774,13 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
         delivery_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
+            notification_queue: build_sole_session_notification_queue(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 2,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
 }
@@ -767,10 +807,13 @@ fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
         kept_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
+            notification_queue: build_sole_session_notification_queue(&server),
             lag_report: SubscriberLagged {
                 subscriber_id: kept_subscriber_id,
                 dropped_event_count: 1,
             },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
         }]
     );
     assert!(!server.event_bus.has_subscriber(orphan_subscriber_id));
@@ -1021,10 +1064,13 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
         vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
     expected_deliveries.push(Delivery::Snapshot {
         render_snapshot: Box::new(server.build_snapshot(client_id).expect("frame")),
+        notification_queue: build_sole_session_notification_queue(&server),
         lag_report: SubscriberLagged {
             subscriber_id,
             dropped_event_count: 1,
         },
+        held_command_rejections: Vec::new(),
+        dropped_command_rejection_count: 0,
     });
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -1157,10 +1203,13 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
         vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
     expected_deliveries.push(Delivery::Snapshot {
         render_snapshot: Box::new(expected_render_snapshot),
+        notification_queue: build_sole_session_notification_queue(&server),
         lag_report: SubscriberLagged {
             subscriber_id,
             dropped_event_count: 1,
         },
+        held_command_rejections: Vec::new(),
+        dropped_command_rejection_count: 0,
     });
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -3960,4 +4009,139 @@ fn a_take_over_keeps_the_session_running_under_auto_close() {
         Some(booted_tab_id)
     );
     assert!(!server.is_quit_requested());
+}
+
+#[test]
+fn a_session_post_reaches_every_attached_client_once_and_stays_in_the_session_queue() {
+    let (mut server, first_client_id) = boot_server();
+    let session_id = *server.list_sessions().keys().next().expect("session");
+    let second_client_id =
+        attach_client_through_server(&mut server, first_client_id, TEST_VIEWPORT_SIZE, None);
+    let (first_delivery_receiver, _) = server.subscribe(first_client_id, 60);
+    let (second_delivery_receiver, _) = server.subscribe(second_client_id, 60);
+
+    server.post_session_notification(
+        session_id,
+        NotificationSeverity::Error,
+        "pane …a1b2 killed by signal 9",
+    );
+
+    let notification_queue = &server.list_sessions()[&session_id].notification_queue;
+    let queued_entries: Vec<NotificationEntry> =
+        notification_queue.list_queued_entries().cloned().collect();
+    let [posted_entry] = queued_entries.as_slice() else {
+        panic!("the session queue holds the one post, not {queued_entries:?}");
+    };
+    assert_eq!(
+        posted_entry.notification_id.owner,
+        NotificationQueueOwner::Session(session_id)
+    );
+    assert_eq!(posted_entry.notification_id.sequence, 0);
+    assert_eq!(posted_entry.severity, NotificationSeverity::Error);
+    assert_eq!(posted_entry.text, "pane …a1b2 killed by signal 9");
+    assert_eq!(notification_queue.get_revision(), 1);
+    let expected_deliveries = vec![Delivery::NotificationPosted {
+        revision: 1,
+        posted_entry: Box::new(posted_entry.clone()),
+    }];
+    assert_eq!(
+        first_delivery_receiver
+            .try_iter()
+            .collect::<Vec<Delivery>>(),
+        expected_deliveries
+    );
+    assert_eq!(
+        second_delivery_receiver
+            .try_iter()
+            .collect::<Vec<Delivery>>(),
+        expected_deliveries
+    );
+}
+
+#[test]
+fn a_killed_pane_the_session_survives_posts_one_error_to_each_attached_client() {
+    let (mut server, first_client_id) = boot_server();
+    let (session_id, _, root_pane_id) = get_booted_parts(&server, first_client_id);
+    let second_client_id =
+        attach_client_through_server(&mut server, first_client_id, TEST_VIEWPORT_SIZE, None);
+    let split_pane_id = split_booted_pane(&mut server, first_client_id, root_pane_id);
+    let (first_delivery_receiver, _) = server.subscribe(first_client_id, 60);
+    let (second_delivery_receiver, _) = server.subscribe(second_client_id, 60);
+
+    let exit_events = server.handle_child_exit(split_pane_id, ExitStatus::Signaled(9));
+    server.publish_events(&exit_events);
+
+    let expected_text = format!("{} killed by signal 9", split_pane_id.format_short_label());
+    for delivery_receiver in [first_delivery_receiver, second_delivery_receiver] {
+        let posted_texts: Vec<String> = delivery_receiver
+            .try_iter()
+            .filter_map(|delivery| match delivery {
+                Delivery::NotificationPosted { posted_entry, .. } => Some(posted_entry.text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(posted_texts, vec![expected_text.clone()]);
+    }
+    let session = &server.list_sessions()[&session_id];
+    assert_eq!(session.notification_queue.list_queued_entries().count(), 1);
+}
+
+#[test]
+fn a_post_to_a_session_this_process_does_not_hold_changes_nothing() {
+    let (mut server, client_id) = boot_server();
+    let session_id = *server.list_sessions().keys().next().expect("session");
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let queue_before = server.list_sessions()[&session_id]
+        .notification_queue
+        .clone();
+
+    server.post_session_notification(SessionId::new(), NotificationSeverity::Error, "lost");
+
+    assert_eq!(
+        server.list_sessions()[&session_id].notification_queue,
+        queue_before
+    );
+    assert_eq!(delivery_receiver.try_iter().count(), 0);
+}
+
+#[test]
+fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
+    let (mut server, client_id) = boot_server();
+    let session_id = *server.list_sessions().keys().next().expect("session");
+    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let subscriber_id = server.subscriptions[0].subscriber_id;
+    pause_subscribers(&mut server);
+    server.post_session_notification(
+        session_id,
+        NotificationSeverity::Warning,
+        "koshi.kdl: unknown key `tab-bar`",
+    );
+    let _delivery_backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
+    let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
+    let expected_notification_queue = server.list_sessions()[&session_id]
+        .notification_queue
+        .clone();
+
+    server.resync_lagged(Instant::now());
+
+    assert_eq!(
+        expected_notification_queue
+            .list_queued_entries()
+            .map(|queued_entry| queued_entry.text.as_str())
+            .collect::<Vec<&str>>(),
+        vec!["koshi.kdl: unknown key `tab-bar`"]
+    );
+    assert_eq!(
+        delivery_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            render_snapshot: Box::new(expected_render_snapshot),
+            notification_queue: Box::new(expected_notification_queue),
+            lag_report: SubscriberLagged {
+                subscriber_id,
+                dropped_event_count: 2,
+            },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
+        }]
+    );
 }

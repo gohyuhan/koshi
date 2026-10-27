@@ -299,68 +299,62 @@ fn parse_integer_kdl_value_rejects_a_non_integer() {
 }
 
 #[test]
-fn parse_u16_kdl_value_reads_an_in_range_number() {
+fn parse_ranged_integer_kdl_value_reads_an_in_range_number() {
     assert_eq!(
-        parse_u16_kdl_value(&parse_test_kdl_node("x 80")).unwrap(),
-        80
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 80"), 0..=u16::MAX),
+        Ok(80)
     );
 }
 
 #[test]
-fn parse_u16_kdl_value_rejects_out_of_range_values() {
+fn parse_ranged_integer_kdl_value_accepts_both_ends_of_its_range() {
     assert_eq!(
-        parse_u16_kdl_value(&parse_test_kdl_node("x 70000")).unwrap_err(),
-        "must be between 0 and 65535"
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 30"), 30..=120),
+        Ok(30_u16)
     );
     assert_eq!(
-        parse_u16_kdl_value(&parse_test_kdl_node("x -1")).unwrap_err(),
-        "must be between 0 and 65535"
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 120"), 30..=120),
+        Ok(120_u16)
     );
-}
-
-#[test]
-fn parse_u16_kdl_value_accepts_both_ends_of_its_range() {
-    assert_eq!(parse_u16_kdl_value(&parse_test_kdl_node("x 0")).unwrap(), 0);
     assert_eq!(
-        parse_u16_kdl_value(&parse_test_kdl_node("x 65535")).unwrap(),
-        u16::MAX
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 0"), 0..=u32::MAX),
+        Ok(0)
     );
-}
-
-#[test]
-fn parse_u16_kdl_value_reports_the_integer_reason_for_a_non_integer() {
     assert_eq!(
-        parse_u16_kdl_value(&parse_test_kdl_node("x \"80\"")).unwrap_err(),
-        "expected an integer"
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 4294967295"), 0..=u32::MAX),
+        Ok(u32::MAX)
     );
 }
 
 #[test]
-fn parse_u32_kdl_value_reads_an_in_range_number() {
+fn parse_ranged_integer_kdl_value_names_the_range_for_a_value_outside_it() {
     assert_eq!(
-        parse_u32_kdl_value(&parse_test_kdl_node("x 100")).unwrap(),
-        100
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 29"), 30_u16..=120),
+        Err(String::from("must be between 30 and 120"))
+    );
+    assert_eq!(
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 121"), 30_u16..=120),
+        Err(String::from("must be between 30 and 120"))
+    );
+    assert_eq!(
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 70000"), 0..=u16::MAX),
+        Err(String::from("must be between 0 and 65535"))
+    );
+    assert_eq!(
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x -1"), 0..=u16::MAX),
+        Err(String::from("must be between 0 and 65535"))
+    );
+    assert_eq!(
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x 5000000000"), 0..=u32::MAX),
+        Err(String::from("must be between 0 and 4294967295"))
     );
 }
 
 #[test]
-fn parse_u32_kdl_value_accepts_both_ends_of_its_range() {
-    assert_eq!(parse_u32_kdl_value(&parse_test_kdl_node("x 0")).unwrap(), 0);
+fn parse_ranged_integer_kdl_value_reports_the_integer_reason_for_a_non_integer() {
     assert_eq!(
-        parse_u32_kdl_value(&parse_test_kdl_node("x 4294967295")).unwrap(),
-        u32::MAX
-    );
-}
-
-#[test]
-fn parse_u32_kdl_value_rejects_an_out_of_range_value() {
-    assert_eq!(
-        parse_u32_kdl_value(&parse_test_kdl_node("x 5000000000")).unwrap_err(),
-        "must be between 0 and 4294967295"
-    );
-    assert_eq!(
-        parse_u32_kdl_value(&parse_test_kdl_node("x -1")).unwrap_err(),
-        "must be between 0 and 4294967295"
+        parse_ranged_integer_kdl_value(&parse_test_kdl_node("x \"80\""), 0..=u16::MAX),
+        Err(String::from("expected an integer"))
     );
 }
 

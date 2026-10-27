@@ -3,7 +3,8 @@
 //! [`LockMode`] is the interaction mode a single client is in — whether
 //! keystrokes drive the focused pane, are held verbatim for the pane, or are
 //! interpreted by one of Koshi's modal layers (pane placement, the pane move
-//! chooser, floating pane move, dock/undock, the floating pane tray).
+//! chooser, floating pane move, dock/undock, the floating pane tray, the
+//! notification center).
 //! It is client-scoped: two clients attached to the same session hold
 //! independent modes. The command layer's `SetLockMode` carries a `bool` and
 //! moves a client only into or out of [`LockMode::Locked`].
@@ -79,21 +80,36 @@ pub enum LockMode {
     ///   The tray stays open after each.
     /// - `core:close-floating-pane-tray` sends nothing and ends the mode.
     FloatingPaneTray,
+    /// The notification center, opened by `core:toggle-notification-center`
+    /// or a click on the tabline's notification button `●`, while it is
+    /// open.
+    ///
+    /// - The viewer overlays the mode on Normal or Locked without changing the
+    ///   stored base mode. The center's actions send no command.
+    /// - `core:select-newer-notification` and
+    ///   `core:select-older-notification` select the card above or below the
+    ///   selected one. `core:dismiss-selected-notification` removes the
+    ///   selected card's entry. `core:clear-notifications` removes every
+    ///   entry from this viewer's center and closes it.
+    /// - `core:close-notification-center` and
+    ///   `core:toggle-notification-center` close the center and end the mode.
+    /// - A press outside the center closes it and ends the mode.
+    NotificationCenter,
 }
 
 impl LockMode {
     /// Whether input that binds nothing reaches the pane in this mode.
     /// `Normal` and `Locked` pass what they do not bind; the modal layers
     /// (`PanePlacement`, `PaneMoveChoice`, `FloatingPaneMove`, `DockUndock`,
-    /// `FloatingPaneTray`) own the keyboard while they are held and discard
-    /// it.
+    /// `FloatingPaneTray`, `NotificationCenter`) own the keyboard while they
+    /// are held and discard it.
     #[must_use]
     pub fn should_pass_unbound_input_to_pane(self) -> bool {
         matches!(self, LockMode::Normal | LockMode::Locked)
     }
 
     /// Every built-in mode, in declaration order.
-    pub const ALL: [LockMode; 7] = [
+    pub const ALL: [LockMode; 8] = [
         LockMode::Normal,
         LockMode::Locked,
         LockMode::PanePlacement,
@@ -101,6 +117,7 @@ impl LockMode {
         LockMode::FloatingPaneMove,
         LockMode::DockUndock,
         LockMode::FloatingPaneTray,
+        LockMode::NotificationCenter,
     ];
 
     /// The mode's canonical keymap name — the string the keybinding config
@@ -115,6 +132,7 @@ impl LockMode {
             LockMode::FloatingPaneMove => "floating-pane-move",
             LockMode::DockUndock => "dock-undock",
             LockMode::FloatingPaneTray => "floating-pane-tray",
+            LockMode::NotificationCenter => "notification-center",
         }
     }
 }

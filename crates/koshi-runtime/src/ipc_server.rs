@@ -1016,7 +1016,7 @@ fn serve_connection(
                 request_id,
                 "no request waits for a Commit on this connection".to_owned(),
             ),
-            uncommitted_request_kind @ (IpcRequestKind::SubmitCommand(_)
+            uncommitted_request_kind @ (IpcRequestKind::SubmitCommand { .. }
             | IpcRequestKind::Attach { .. }
             | IpcRequestKind::ClipboardCopy { .. }
             | IpcRequestKind::Restart)
@@ -1080,7 +1080,7 @@ fn serve_connection(
                         answer_result,
                     }
                 }
-                preparable_request_kind @ (IpcRequestKind::SubmitCommand(_)
+                preparable_request_kind @ (IpcRequestKind::SubmitCommand { .. }
                 | IpcRequestKind::Attach { .. }
                 | IpcRequestKind::Restart) => {
                     let dispatch_response = request_dispatcher_response(
@@ -1109,7 +1109,9 @@ fn serve_connection(
                     ),
                 ),
             },
-            IpcRequestKind::SubmitCommand(command_envelope) => {
+            IpcRequestKind::SubmitCommand {
+                command_envelope, ..
+            } => {
                 let stamped_command_envelope =
                     Box::new(stamp_cli_command_source(*command_envelope));
                 let dispatch_response = request_dispatcher_response(
@@ -1119,6 +1121,7 @@ fn serve_connection(
                     request_id,
                     |response_sender| RuntimeEvent::Ipc {
                         command_envelope: stamped_command_envelope,
+                        fired_action: None,
                         response_sender,
                     },
                 );
@@ -1438,13 +1441,15 @@ fn serve_connection(
 /// `Resize`, a `Paste`, a `SubmitCommand` and a `Mouse` round all cross to the
 /// dispatcher over the inbox, and this half writes nothing back for any of
 /// them: keyboard, resize, and paste requests are reflected by the next painted
-/// frame; a submitted command is reflected by the next painted frame or, for a
-/// rejected pane placement command, one
-/// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and a
-/// `Mouse` round is answered on the writing half by exactly one
+/// frame; a submitted command is reflected by the next painted frame and, for
+/// a command from the client's key binding that the session rejected, one
+/// [`SessionEvent::CommandRejected`] carrying its `command_id`; and a `Mouse`
+/// round is answered on the writing half by exactly one
 /// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`, after one
-/// [`SessionEvent::PlacementCommandRejected`] for each floating pane move in
-/// the round that the session rejected. A `Resize` whose viewport holds more
+/// [`SessionEvent::CommandRejected`] for each floating pane move in the round
+/// that the session rejected. A client whose queue is full reads those
+/// rejections in the next [`SessionEvent::Resync`] instead. A `Resize` whose
+/// viewport holds more
 /// than [`MAX_VIEWPORT_CELL_COUNT`] cells is read and dropped, and the client
 /// keeps the viewport it had. A `Ping` is read and dropped: nothing crosses for
 /// it, and nothing answers it. A `PaintedUpdate` reaches the writing thread as
@@ -1868,7 +1873,10 @@ fn stream_events(
                 request_id: incoming_request.request_id,
                 mouse_actions,
             },
-            IpcRequestKind::SubmitCommand(command_envelope) => {
+            IpcRequestKind::SubmitCommand {
+                command_envelope,
+                fired_action,
+            } => {
                 // The result is answered by the next painted frame. The reply
                 // channel's receiving end drops here, and the dispatcher's send
                 // into it fails.
@@ -1878,6 +1886,7 @@ fn stream_events(
                         *command_envelope,
                         client_id,
                     )),
+                    fired_action,
                     response_sender,
                 }
             }
@@ -1892,12 +1901,14 @@ fn stream_events(
                 source_pane_id,
                 placement_target,
                 expected_placed_tab_layout,
+                fired_action,
             } => RuntimeEvent::ConfirmPanePlacement {
                 client_id,
                 command_id,
                 source_pane_id,
                 placement_target,
                 expected_placed_tab_layout: Box::new(expected_placed_tab_layout),
+                fired_action,
             },
             IpcRequestKind::Ping => continue,
             IpcRequestKind::PaintedUpdate { update_sequence } => {

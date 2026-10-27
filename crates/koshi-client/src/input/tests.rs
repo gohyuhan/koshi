@@ -57,7 +57,7 @@ fn build_keymap_for_mode(
 
 /// A resolved keymap holding exactly the supplied bindings in each named mode,
 /// with the chord timeout and which-key delay of `keybindings_config`.
-fn build_keymap_for_modes(
+pub(crate) fn build_keymap_for_modes(
     mode_binding_sets: &[(&str, &[(KeySequence, &str)])],
     keybindings_config: &KeybindingsConfig,
 ) -> KeymapHintCatalog {
@@ -749,7 +749,7 @@ fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again() {
         .get_pending_placement_command_id()
         .expect("Enter recorded a pending placement command");
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
 
     assert!(!client.is_placement_confirmation_pending());
     assert_eq!(
@@ -2180,7 +2180,10 @@ fn begin_pane_placement_opens_the_move_chooser_while_an_unpinned_floating_pane_i
     assert_eq!(client.get_active_input_mode(), LockMode::PaneMoveChoice);
     assert_eq!(
         client
-            .build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id)
+            .build_viewer_chrome(
+                mouse_frame.client_snapshot.active_tab_id,
+                &mouse_frame.committed_regions
+            )
             .active_input_mode,
         Some(LockMode::PaneMoveChoice)
     );
@@ -2517,7 +2520,10 @@ fn begin_floating_pane_move_selects_the_focused_floating_pane() {
     assert_eq!(client.get_active_input_mode(), LockMode::FloatingPaneMove);
     assert_eq!(
         client
-            .build_viewer_chrome(mouse_frame.client_snapshot.active_tab_id)
+            .build_viewer_chrome(
+                mouse_frame.client_snapshot.active_tab_id,
+                &mouse_frame.committed_regions
+            )
             .active_input_mode,
         Some(LockMode::FloatingPaneMove)
     );
@@ -2875,7 +2881,7 @@ fn enter_sends_exactly_one_move_to_the_cell_the_arrows_reached() {
         "a second Enter sends nothing"
     );
 
-    assert!(client.reject_placement_command(command_id));
+    client.reject_placement_command(command_id);
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
 }
 
@@ -2950,7 +2956,7 @@ fn a_rejected_floating_pane_move_keeps_the_mode_on_with_either_stay_setting() {
             Some(Point { column: 10, row: 5 })
         );
 
-        assert!(client.reject_placement_command(command_id));
+        client.reject_placement_command(command_id);
 
         assert_eq!(
             client.pane_move_mode,
@@ -4171,8 +4177,8 @@ fn a_rejected_undock_keeps_the_tiled_pane_selected_and_enter_sends_it_again() {
     assert!(client.is_dock_undock_command_pending());
     assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
 
-    assert!(!client.reject_placement_command(CommandId::new()));
-    assert!(client.reject_placement_command(command_id));
+    assert!(!client.reject_undock_command(CommandId::new()));
+    assert!(client.reject_undock_command(command_id));
     assert_eq!(
         client.dock_undock_mode,
         Some(DockUndockMode {

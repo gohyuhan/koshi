@@ -19,9 +19,7 @@ use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
 use koshi_terminal::style::Style as CellStyle;
 
-use crate::render::{
-    list_visible_tiled_panes, place_screen_rect, FrameGeometry, PlacedFloatingPane,
-};
+use crate::render::{list_visible_tiled_panes, FrameGeometry, PlacedFloatingPane};
 use crate::snapshot::{
     ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot, RenderSnapshot,
 };
@@ -335,7 +333,8 @@ impl ImagePaint {
 /// that are drawn: a tiled pane's content rect, or a floating pane's content
 /// rect inside the pane area, each cut to the viewport area. An image whose
 /// cut rectangle meets the outer rect of a floating pane drawn above its pane,
-/// or the viewer's open floating pane tray, is left out.
+/// the viewer's open floating pane tray, its open notification center, or the
+/// drawn cells of its toast is left out.
 ///
 /// A placement at `(row: 1, column: 2)` with `column_count: 4` and `row_count: 3` in a
 /// pane whose content starts at `(10, 5)` targets `(12, 6)` through
@@ -386,10 +385,12 @@ pub fn build_image_paints(frame_geometry: &FrameGeometry<'_>) -> Vec<ImagePaint>
         );
     }
 
-    if let Some(tray_layout) = frame_geometry.floating_pane_tray_layout {
-        let tray_area = place_screen_rect(tray_layout.tray_rect);
-        image_paints
-            .retain(|image_paint| tray_area.intersection(image_paint.target_area).is_empty());
+    for covering_overlay_area in frame_geometry.list_overlay_areas() {
+        image_paints.retain(|image_paint| {
+            covering_overlay_area
+                .intersection(image_paint.target_area)
+                .is_empty()
+        });
     }
     image_paints.sort_by_key(|image_paint| {
         (

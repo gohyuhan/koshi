@@ -1,5 +1,5 @@
-//! The viewer's open floating pane tray: its box, its header, and one tile per
-//! slot, drawn over the floating panes.
+//! The viewer's open floating pane tray: its floating chrome, its titlebar,
+//! and one tile per slot, drawn over the floating panes.
 
 use ratatui::buffer::Buffer;
 use ratatui::style::Style;
@@ -11,24 +11,29 @@ use crate::floating_pane_tray::{select_toggle_minimize_all_label_text, FloatingP
 use crate::snapshot::{FloatingPane, FloatingPaneTray, RenderSnapshot};
 use crate::theme::Theme;
 
-use super::floating::clear_overlay_area;
+use crate::floating_chrome::FloatingTitlebarControls;
+
+use super::floating::draw_floating_frame;
 use super::style::{
     compute_focused_border_style, compute_hover_border_style, compute_placement_hover_border_style,
     compute_unfocused_border_style,
 };
-use super::{draw_pane_border, get_text_width, place_screen_rect, set_line_clipped, DrawnRows};
+use super::{
+    draw_pane_border, get_text_width, place_screen_rect, set_line_clipped, write_text_clipped,
+    write_text_fitted, DrawnRows,
+};
 
 /// Draw the open tray `tray_layout` over every cell drawn before it, in this
 /// order:
 ///
-/// 1. Blanks the tray's box ([`clear_overlay_area`]) and draws its border ring
-///    in the focused border style.
+/// 1. Draws the floating chrome ([`draw_floating_frame`]) with the close
+///    button only, in the focused border style.
 /// 2. Writes the title of the tile under the pointer
 ///    (`floating_pane_tray.hovered_tile_index`), else of the selected tile
-///    ([`find_floating_pane_title`]), in the header's title cells
-///    ([`write_pane_title_clipped`]), and the header label
-///    ([`select_toggle_minimize_all_label_text`]) in the header's label cells.
-///    Both take the focused border style.
+///    ([`find_floating_pane_title`]), in the titlebar's tile title cells, and
+///    the label ([`select_toggle_minimize_all_label_text`]) in the label's
+///    cells, each fitted to its cells ([`write_text_fitted`]) in the focused
+///    border style.
 /// 3. Draws each slot's border ring. Slot `i` shows the session's floating
 ///    pane `i`: its number `i + 1` on the top border as ` <number> `, and its
 ///    title on the row under it ([`write_pane_title_clipped`]), each in the
@@ -44,7 +49,7 @@ use super::{draw_pane_border, get_text_width, place_screen_rect, set_line_clippe
 /// Every step runs only over the rows `drawn_rows` draws. A tray on no drawn
 /// row is not drawn.
 ///
-/// Example: tile `0` of `htop`, lit and selected, at `(7, 2)` reads
+/// Example: tile `0` of `htop`, lit and selected, at `(7, 4)` reads
 /// `┌ 1 ─────┐`, `│ htop   │` and `└────────┘`. Tile `1` of `logserver`
 /// reads `┌ 2 ─────┐`, `│ logser…│` and `└────────┘`.
 pub(super) fn draw_floating_pane_tray(
@@ -61,27 +66,29 @@ pub(super) fn draw_floating_pane_tray(
     }
     let session_snapshot = &render_snapshot.session_snapshot;
     let tray_style = compute_focused_border_style(theme);
-    clear_overlay_area(tray_area, drawn_rows, screen_buffer);
-    draw_pane_border(tray_area, tray_style, drawn_rows, screen_buffer);
+    draw_floating_frame(
+        tray_area,
+        FloatingTitlebarControls::CLOSE_BUTTON_ONLY,
+        tray_style,
+        drawn_rows,
+        screen_buffer,
+    );
 
-    if drawn_rows.is_row_drawn(tray_area.y) {
+    if drawn_rows.is_row_drawn(tray_area.y.saturating_add(1)) {
         let header_tile_index = floating_pane_tray
             .hovered_tile_index
             .unwrap_or(floating_pane_tray.selected_tile_index);
-        if let Some(pane_title) = session_snapshot
-            .floating_panes
-            .get(header_tile_index)
-            .and_then(|floating_pane| find_floating_pane_title(render_snapshot, floating_pane))
-        {
-            write_pane_title_clipped(
-                screen_buffer,
-                tray_layout.header_title_rect,
-                pane_title,
-                tray_style,
-            );
+        if let (Some(tile_title_rect), Some(pane_title)) = (
+            tray_layout.tile_title_rect,
+            session_snapshot
+                .floating_panes
+                .get(header_tile_index)
+                .and_then(|floating_pane| find_floating_pane_title(render_snapshot, floating_pane)),
+        ) {
+            write_text_fitted(screen_buffer, tile_title_rect, pane_title, tray_style);
         }
         if let Some(toggle_minimize_all_rect) = tray_layout.toggle_minimize_all_rect {
-            write_text_clipped(
+            write_text_fitted(
                 screen_buffer,
                 toggle_minimize_all_rect,
                 select_toggle_minimize_all_label_text(session_snapshot),
@@ -202,18 +209,6 @@ fn write_pane_title_clipped(
         text_rect.origin.row,
         &Line::from(Span::styled("…", text_style)),
         1,
-    );
-}
-
-/// Write `text` in `text_style` from the top-left cell of the one-row
-/// `text_rect`, cut to its columns ([`set_line_clipped`]).
-fn write_text_clipped(screen_buffer: &mut Buffer, text_rect: Rect, text: &str, text_style: Style) {
-    set_line_clipped(
-        screen_buffer,
-        text_rect.origin.column,
-        text_rect.origin.row,
-        &Line::from(Span::styled(text, text_style)),
-        text_rect.size.column_count,
     );
 }
 

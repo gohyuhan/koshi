@@ -35,7 +35,7 @@ const CLI_ONLY: [&str; 12] = [
 ];
 
 /// The viewer-local actions: each resolves to [`DispatchPlan::ClientAction`].
-const CLIENT_ACTIONS: [&str; 37] = [
+const CLIENT_ACTIONS: [&str; 43] = [
     "begin-pane-placement",
     "begin-dock-undock",
     "select-pane-target-left",
@@ -73,6 +73,12 @@ const CLIENT_ACTIONS: [&str; 37] = [
     "select-tray-tile-up",
     "select-tray-tile-right",
     "toggle-selected-tray-tile",
+    "toggle-notification-center",
+    "close-notification-center",
+    "clear-notifications",
+    "select-newer-notification",
+    "select-older-notification",
+    "dismiss-selected-notification",
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this

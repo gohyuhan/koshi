@@ -34,6 +34,7 @@ use koshi_core::key::{
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseKind};
+use koshi_core::notification::{NotificationEntry, NotificationQueue};
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
@@ -249,6 +250,7 @@ fn build_populated_structure() -> AttachedSessionStructureSnapshot {
             layout: LayoutNode::Pane(pane_id),
             focus_mru: vec![pane_id],
         }],
+        notification_queue: build_fixed_session_notification_queue(),
     }
 }
 
@@ -330,7 +332,10 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             pasted_text: "hello\nworld".to_string(),
         },
         IpcRequestKind::Mouse(list_every_mouse_action()),
-        IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
+        IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_test_command_envelope()),
+            fired_action: None,
+        },
         IpcRequestKind::Discovery,
         IpcRequestKind::Layout { tab_id: None },
         IpcRequestKind::SetPanePlacementPreview {
@@ -394,6 +399,47 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
 /// `00000000-0000-0000-0000-000000000001`.
 pub(crate) fn build_fixed_test_uuid() -> uuid::Uuid {
     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
+}
+
+/// The wire form of one session notification entry at fixed ids: sequence 0
+/// of the session queue, an `Error` that reads `pane …a1b2 killed by signal
+/// 9`, at the Unix epoch, posted once.
+pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
+    let wire_identifier = "00000000-0000-0000-0000-000000000001";
+    json!({
+        "notification_id": {
+            "owner": { "Session": wire_identifier },
+            "epoch": wire_identifier,
+            "sequence": 0
+        },
+        "source": "Core",
+        "severity": "Error",
+        "text": "pane …a1b2 killed by signal 9",
+        "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "repeat_count": 1
+    })
+}
+
+/// The wire form of a session notification queue at fixed ids, at revision
+/// 1, holding the one entry of [`build_fixed_notification_entry_json`].
+pub(crate) fn build_fixed_notification_queue_json() -> serde_json::Value {
+    let wire_identifier = "00000000-0000-0000-0000-000000000001";
+    json!({
+        "owner": { "Session": wire_identifier },
+        "epoch": wire_identifier,
+        "revision": 1,
+        "queued_entries": [build_fixed_notification_entry_json()]
+    })
+}
+
+/// The entry of [`build_fixed_notification_entry_json`].
+pub(crate) fn build_fixed_notification_entry() -> NotificationEntry {
+    serde_json::from_value(build_fixed_notification_entry_json()).expect("the fixed entry decodes")
+}
+
+/// The queue of [`build_fixed_notification_queue_json`].
+pub(crate) fn build_fixed_session_notification_queue() -> NotificationQueue {
+    serde_json::from_value(build_fixed_notification_queue_json()).expect("the fixed queue decodes")
 }
 
 /// The process image id built from [`build_fixed_test_uuid`].
@@ -635,9 +681,10 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
     // `koshi_core::compat`.
     let ipc_request = IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(
-            build_populated_test_command_envelope(),
-        )),
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_populated_test_command_envelope()),
+            fired_action: None,
+        },
     };
 
     assert_eq!(
@@ -646,39 +693,86 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
             "request_id": 2,
             "request_kind": {
                 "SubmitCommand": {
-                    "command_id": "00000000-0000-0000-0000-000000000001",
-                    "command_source": {
-                        "InSessionCli": {
-                            "session_id": "00000000-0000-0000-0000-000000000001",
-                            "client_id": "00000000-0000-0000-0000-000000000001",
-                            "pane_id": "00000000-0000-0000-0000-000000000001",
-                            "socket_path": "/run/koshi.sock"
+                    "command_envelope": {
+                        "command_id": "00000000-0000-0000-0000-000000000001",
+                        "command_source": {
+                            "InSessionCli": {
+                                "session_id": "00000000-0000-0000-0000-000000000001",
+                                "client_id": "00000000-0000-0000-0000-000000000001",
+                                "pane_id": "00000000-0000-0000-0000-000000000001",
+                                "socket_path": "/run/koshi.sock"
+                            }
+                        },
+                        "client_id": "00000000-0000-0000-0000-000000000001",
+                        "command": {
+                            "NewPane": {
+                                "placement": {
+                                    "Stacked": {
+                                        "source_pane_id": "00000000-0000-0000-0000-000000000001",
+                                        "tab_id": "00000000-0000-0000-0000-000000000001"
+                                    }
+                                },
+                                "working_directory": "/home/user",
+                                "spawn_spec": {
+                                    "program": "/bin/zsh",
+                                    "arguments": ["-l"],
+                                    "working_directory": "/home/user",
+                                    "environment_variables": { "KOSHI_PANE_ID": "pane-1" },
+                                    "shell_kind": "Zsh"
+                                },
+                                "client_id": "00000000-0000-0000-0000-000000000001"
+                            }
                         }
                     },
-                    "client_id": "00000000-0000-0000-0000-000000000001",
-                    "command": {
-                        "NewPane": {
-                            "placement": {
-                                "Stacked": {
-                                    "source_pane_id": "00000000-0000-0000-0000-000000000001",
-                                    "tab_id": "00000000-0000-0000-0000-000000000001"
-                                }
-                            },
-                            "working_directory": "/home/user",
-                            "spawn_spec": {
-                                "program": "/bin/zsh",
-                                "arguments": ["-l"],
-                                "working_directory": "/home/user",
-                                "environment_variables": { "KOSHI_PANE_ID": "pane-1" },
-                                "shell_kind": "Zsh"
-                            },
-                            "client_id": "00000000-0000-0000-0000-000000000001"
-                        }
-                    }
+                    "fired_action": null
                 }
             }
         })
     );
+}
+
+#[test]
+fn a_command_a_key_fired_carries_the_action_and_a_request_without_it_is_refused() {
+    let ipc_request = IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_test_command_envelope()),
+            fired_action: Some(
+                ActionReference::from_core_action_name("new-pane")
+                    .expect("the action name is valid"),
+            ),
+        },
+    };
+    let mut encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
+
+    assert_eq!(
+        encoded_request["request_kind"]["SubmitCommand"]["fired_action"],
+        json!("core:new-pane")
+    );
+    assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+
+    encoded_request["request_kind"]["SubmitCommand"]
+        .as_object_mut()
+        .expect("the request kind encodes as an object")
+        .remove("fired_action");
+    let decode_error = serde_json::from_value::<IpcRequest>(encoded_request)
+        .expect_err("a submit without the fired action decoded instead of failing");
+    assert_eq!(decode_error.to_string(), "missing field `fired_action`");
+}
+
+#[test]
+fn a_placement_confirm_without_its_fired_action_is_refused() {
+    let mut encoded_json =
+        serde_json::to_value(build_test_confirm_pane_placement()).expect("request kind encodes");
+    encoded_json["ConfirmPanePlacement"]
+        .as_object_mut()
+        .expect("the confirm encodes as an object")
+        .remove("fired_action");
+
+    let decode_error = serde_json::from_value::<IpcRequestKind>(encoded_json)
+        .expect_err("a confirm without the fired action decoded instead of failing");
+
+    assert_eq!(decode_error.to_string(), "missing field `fired_action`");
 }
 
 #[test]
@@ -725,14 +819,15 @@ fn the_new_pane_placement_wire_shapes_belong_to_this_protocol_version() {
 fn the_place_pane_command_wire_shape_belongs_to_this_protocol_version() {
     let ipc_request = IpcRequest {
         request_id: 5,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(
-            build_populated_place_pane_command_envelope(),
-        )),
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_populated_place_pane_command_envelope()),
+            fired_action: None,
+        },
     };
     let encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
 
     assert_eq!(
-        encoded_request["request_kind"]["SubmitCommand"]["command"],
+        encoded_request["request_kind"]["SubmitCommand"]["command_envelope"]["command"],
         json!({
             "PlacePane": {
                 "source_pane_id": "00000000-0000-0000-0000-000000000001",
@@ -754,21 +849,22 @@ fn the_place_pane_command_wire_shape_belongs_to_this_protocol_version() {
 fn the_undock_command_wire_shape_belongs_to_this_protocol_version() {
     let ipc_request = IpcRequest {
         request_id: 6,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(
-            build_command_envelope_with_fixed_in_session_source(Command::PlacePane(
-                PlacePaneArgs {
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_command_envelope_with_fixed_in_session_source(
+                Command::PlacePane(PlacePaneArgs {
                     source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
                     placement_target: PanePlacementTarget::Floating {
                         top_left_cell: Some(Point { column: 7, row: 3 }),
                     },
-                },
+                }),
             )),
-        )),
+            fired_action: None,
+        },
     };
     let encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
 
     assert_eq!(
-        encoded_request["request_kind"]["SubmitCommand"]["command"],
+        encoded_request["request_kind"]["SubmitCommand"]["command_envelope"]["command"],
         json!({
             "PlacePane": {
                 "source_pane_id": "00000000-0000-0000-0000-000000000001",
@@ -790,9 +886,12 @@ fn the_stack_dock_command_wire_shape_belongs_to_this_protocol_version() {
     });
     let ipc_request = IpcRequest {
         request_id: 7,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(
-            build_command_envelope_with_fixed_in_session_source(stack_dock_command.clone()),
-        )),
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_command_envelope_with_fixed_in_session_source(
+                stack_dock_command.clone(),
+            )),
+            fired_action: None,
+        },
     };
     let encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
     let expected_command_json = json!({
@@ -807,7 +906,7 @@ fn the_stack_dock_command_wire_shape_belongs_to_this_protocol_version() {
     });
 
     assert_eq!(
-        encoded_request["request_kind"]["SubmitCommand"]["command"],
+        encoded_request["request_kind"]["SubmitCommand"]["command_envelope"]["command"],
         expected_command_json
     );
     assert_eq!(
@@ -885,7 +984,8 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                             "tab_index": 0,
                             "layout": { "Pane": "00000000-0000-0000-0000-000000000001" },
                             "focus_mru": ["00000000-0000-0000-0000-000000000001"]
-                        }]
+                        }],
+                        "notification_queue": build_fixed_notification_queue_json()
                     },
                     "resume_token": null,
                     "pane_area": null
@@ -1517,7 +1617,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[]}}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"queued_entries":[]}}}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
 
@@ -1532,6 +1632,13 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
                     session_id: SessionId::from_uuid(build_fixed_test_uuid()),
                     session_name: "quiet-lake".to_string(),
                     tabs: Vec::new(),
+                    notification_queue: serde_json::from_value(json!({
+                        "owner": { "Session": "00000000-0000-0000-0000-000000000001" },
+                        "epoch": "00000000-0000-0000-0000-000000000001",
+                        "revision": 0,
+                        "queued_entries": []
+                    }))
+                    .expect("an empty queue decodes"),
                 },
                 resume_token: None,
                 pane_area: None,
@@ -1840,14 +1947,17 @@ fn pane_commands_round_trip_inside_a_submit_command_request() {
     for (request_id, pane_command) in pane_commands.into_iter().enumerate() {
         let ipc_request = IpcRequest {
             request_id: request_id as u64,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
-                CommandId::from_uuid(build_fixed_test_uuid()),
-                CommandSource::ExternalCli {
-                    session_id: None,
-                    target_client_id: None,
-                },
-                pane_command,
-            ))),
+            request_kind: IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(CommandEnvelope::from_parts(
+                    CommandId::from_uuid(build_fixed_test_uuid()),
+                    CommandSource::ExternalCli {
+                        session_id: None,
+                        target_client_id: None,
+                    },
+                    pane_command,
+                )),
+                fired_action: None,
+            },
         };
         assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
     }
@@ -1857,7 +1967,10 @@ fn pane_commands_round_trip_inside_a_submit_command_request() {
 fn submit_command_request_round_trips() {
     let ipc_request = IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
+        request_kind: IpcRequestKind::SubmitCommand {
+            command_envelope: Box::new(build_test_command_envelope()),
+            fired_action: None,
+        },
     };
 
     assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
@@ -2388,6 +2501,10 @@ fn build_test_confirm_pane_placement() -> IpcRequestKind {
             },
             layout_solve: koshi_layout::solver::LayoutSolve::default(),
         },
+        fired_action: Some(
+            ActionReference::from_core_action_name("confirm-pane-placement")
+                .expect("the action name is valid"),
+        ),
     }
 }
 
@@ -2436,6 +2553,7 @@ fn a_placement_confirm_uses_the_declared_wire_field_names_and_round_trips() {
         [
             "command_id",
             "expected_placed_tab_layout",
+            "fired_action",
             "placement_target",
             "source_pane_id"
         ]
@@ -2443,6 +2561,10 @@ fn a_placement_confirm_uses_the_declared_wire_field_names_and_round_trips() {
     assert_eq!(
         encoded_json["ConfirmPanePlacement"]["expected_placed_tab_layout"]["tab_size"],
         json!({"column_count": 80, "row_count": 22})
+    );
+    assert_eq!(
+        encoded_json["ConfirmPanePlacement"]["fired_action"],
+        json!("core:confirm-pane-placement")
     );
     assert_eq!(
         serde_json::from_value::<IpcRequestKind>(encoded_json).expect("the confirm decodes"),
@@ -2870,9 +2992,10 @@ fn a_clipboard_copy_part_round_trips_as_base64() {
 
 #[test]
 fn a_prepare_carries_its_request_and_a_commit_and_a_prepared_answer_carry_nothing() {
-    let prepare_request_kind = IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand(
-        Box::new(build_test_command_envelope()),
-    )));
+    let prepare_request_kind = IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+        command_envelope: Box::new(build_test_command_envelope()),
+        fired_action: None,
+    }));
 
     assert_eq!(
         serde_json::to_value(IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)))
