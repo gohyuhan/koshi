@@ -18,7 +18,6 @@ use koshi_core::command::CommandResult;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
 use koshi_core::ids::{ClientId, PaneId, SessionId};
-use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcResponse, IpcResult};
@@ -218,8 +217,6 @@ fn run_session_event_loop(session_server: &mut Server) {
 pub struct AttachedClient {
     /// The client the session minted for this connection.
     pub client_id: ClientId,
-    /// The session's structure as the attach reply reported it.
-    pub session_structure: AttachedSessionStructureSnapshot,
     /// Every frame the session wrote to this client but
     /// [`SessionEvent::Painted`], in arrival order.
     pub session_events: mpsc::Receiver<SessionEvent>,
@@ -227,8 +224,7 @@ pub struct AttachedClient {
 
 /// Attach to `session` straight over its control socket — the Hello, then the
 /// Attach as a `Prepare` and its `Commit`, on one connection — and hand back
-/// the client the server minted, the structure it was given, and its event
-/// stream.
+/// the client the server minted and its event stream.
 ///
 /// The connection moves into the thread [`forward_session_events`] starts,
 /// which ends when the session closes it or the [`AttachedClient`] is dropped.
@@ -244,7 +240,6 @@ pub fn attach_test_client(session: &RunningSession) -> AttachedClient {
     let IpcResult::Attached {
         client_id,
         session_id,
-        session_structure,
         ..
     } = ipc_response.answer_result
     else {
@@ -257,7 +252,6 @@ pub fn attach_test_client(session: &RunningSession) -> AttachedClient {
 
     AttachedClient {
         client_id,
-        session_structure,
         session_events: {
             let (session_frame_reader, client_frame_writer) = connection.split();
             forward_session_events(session_frame_reader, client_frame_writer)

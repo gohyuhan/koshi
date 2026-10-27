@@ -28,6 +28,7 @@ use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, KeyInput};
 use koshi_core::mouse::MouseKind;
+use koshi_core::notification::NotificationQueue;
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
 use koshi_layout::placement::PlacedTabLayout;
@@ -36,7 +37,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::attach::AttachedSessionStructureSnapshot;
 use crate::layout::SessionLayout;
 use crate::placement::PanePlacementPreviewTarget;
 use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
@@ -894,8 +894,8 @@ pub enum IpcResult {
         client_id: ClientId,
         /// The session the client joined.
         session_id: SessionId,
-        /// What the session contains right now, built for this reply.
-        session_structure: AttachedSessionStructureSnapshot,
+        /// The session's notification queue as it stands.
+        notification_queue: NotificationQueue,
         /// The fresh secret this attach minted, presented on the next attach
         /// to get this attach's view back, and with `resume_client_id` to
         /// claim this client's record after the session replaced its own

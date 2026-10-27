@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koshi_core::client::ClientOrigin;
 
-use crate::attach::TabStructure;
 use crate::layout::{ClientFocus, SolvedPane, SolvedTab, TabLayout};
 use crate::plane::Plane;
 use crate::router::RouterRequestKind;
@@ -235,25 +234,6 @@ fn build_populated_test_session_overview() -> SessionOverview {
     }
 }
 
-/// A session structure holding one tab and the one terminal pane in it, at
-/// fixed ids. Encodes to the same bytes on every call.
-fn build_populated_structure() -> AttachedSessionStructureSnapshot {
-    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-
-    AttachedSessionStructureSnapshot {
-        session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-        session_name: "quiet-lake".to_string(),
-        tabs: vec![TabStructure {
-            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-            tab_name: "editor".to_string(),
-            tab_index: 0,
-            layout: LayoutNode::Pane(pane_id),
-            focus_mru: vec![pane_id],
-        }],
-        notification_queue: build_fixed_session_notification_queue(),
-    }
-}
-
 /// Every mouse action a round can carry, in the order the enum declares them,
 /// at fixed ids.
 fn list_every_mouse_action() -> Vec<WireMouseAction> {
@@ -371,7 +351,7 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
         IpcResult::Attached {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            session_structure: build_populated_structure(),
+            notification_queue: build_fixed_session_notification_queue(),
             resume_token: None,
             pane_area: None,
         },
@@ -920,7 +900,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
     // Both halves of the attach exchange, as this build writes them: what a
     // client sends to join the session, and what the server answers. Any
     // field added, removed, renamed or retyped below, inside
-    // `AttachedSessionStructureSnapshot` included, changes these bytes.
+    // `NotificationQueue` included, changes these bytes.
     let ipc_request = IpcRequest {
         request_id: 4,
         request_kind: IpcRequestKind::Attach {
@@ -961,7 +941,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
         answer_result: IpcResult::Attached {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            session_structure: build_populated_structure(),
+            notification_queue: build_fixed_session_notification_queue(),
             resume_token: None,
             pane_area: None,
         },
@@ -975,18 +955,7 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                 "Attached": {
                     "client_id": "00000000-0000-0000-0000-000000000001",
                     "session_id": "00000000-0000-0000-0000-000000000001",
-                    "session_structure": {
-                        "session_id": "00000000-0000-0000-0000-000000000001",
-                        "session_name": "quiet-lake",
-                        "tabs": [{
-                            "tab_id": "00000000-0000-0000-0000-000000000001",
-                            "tab_name": "editor",
-                            "tab_index": 0,
-                            "layout": { "Pane": "00000000-0000-0000-0000-000000000001" },
-                            "focus_mru": ["00000000-0000-0000-0000-000000000001"]
-                        }],
-                        "notification_queue": build_fixed_notification_queue_json()
-                    },
+                    "notification_queue": build_fixed_notification_queue_json(),
                     "resume_token": null,
                     "pane_area": null
                 }
@@ -1576,7 +1545,7 @@ fn attached_response_round_trips() {
         answer_result: IpcResult::Attached {
             client_id: ClientId::new(),
             session_id: SessionId::new(),
-            session_structure: build_populated_structure(),
+            notification_queue: build_fixed_session_notification_queue(),
             resume_token: None,
             pane_area: None,
         },
@@ -1592,7 +1561,7 @@ fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
         answer_result: IpcResult::Attached {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            session_structure: build_populated_structure(),
+            notification_queue: build_fixed_session_notification_queue(),
             resume_token: Some(build_test_connection_token()),
             pane_area: None,
         },
@@ -1617,7 +1586,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"queued_entries":[]}}}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"queued_entries":[]}}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
 
@@ -1628,18 +1597,13 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
             answer_result: IpcResult::Attached {
                 client_id: ClientId::from_uuid(build_fixed_test_uuid()),
                 session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-                session_structure: AttachedSessionStructureSnapshot {
-                    session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-                    session_name: "quiet-lake".to_string(),
-                    tabs: Vec::new(),
-                    notification_queue: serde_json::from_value(json!({
-                        "owner": { "Session": "00000000-0000-0000-0000-000000000001" },
-                        "epoch": "00000000-0000-0000-0000-000000000001",
-                        "revision": 0,
-                        "queued_entries": []
-                    }))
-                    .expect("an empty queue decodes"),
-                },
+                notification_queue: serde_json::from_value(json!({
+                    "owner": { "Session": "00000000-0000-0000-0000-000000000001" },
+                    "epoch": "00000000-0000-0000-0000-000000000001",
+                    "revision": 0,
+                    "queued_entries": []
+                }))
+                .expect("an empty queue decodes"),
                 resume_token: None,
                 pane_area: None,
             },

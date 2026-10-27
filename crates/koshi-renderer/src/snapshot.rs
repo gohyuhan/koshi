@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ActionReference;
-use koshi_core::event::{Event, HeldCommandRejection, RejectReason, SubscriberLagged};
+use koshi_core::event::{
+    HeldCommandRejection, PanePlacementCommitted, RejectReason, SubscriberLagged,
+};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -320,19 +322,26 @@ impl CommittedRegions {
     }
 }
 
-/// One item on a subscriber's queue: a live event, the frame composed for the
-/// subscriber's client, a fresh frame that resyncs a subscriber whose queue
-/// overflowed, one post the session's notification queue took, the answers to
-/// one round of mouse actions, a wake-up for the bytes that wait for the
-/// subscriber's own terminal, the session its client moves to, or a command
-/// from the subscriber's client that the session rejected.
+/// One item on a subscriber's queue: a pane placement the session committed,
+/// the end of the session, the frame composed for the subscriber's client, a
+/// fresh frame that resyncs a subscriber whose queue overflowed, one post the
+/// session's notification queue took, the answers to one round of mouse
+/// actions, a wake-up for the bytes that wait for the subscriber's own
+/// terminal, the session its client moves to, or a command from the
+/// subscriber's client that the session rejected.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
-    /// A live event, as published.
-    Event(Event),
+    /// A pane placement the session committed.
+    PanePlacementCommitted(PanePlacementCommitted),
+    /// The session is over. The client's writing thread writes it as the
+    /// stream's last frame, then stops.
+    Quit,
+    /// The session server is replacing its own process image. The client's
+    /// writing thread writes it as the stream's last frame, then stops.
+    Restarting,
     /// The frame the session composed for the subscriber's client, to be drawn
     /// whole.
     Frame(Box<RenderSnapshot>),

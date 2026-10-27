@@ -212,8 +212,9 @@ pub struct FrameFloatingPaneSlot {
     /// the separator row. The pane's cells and cursor are drawn inside the
     /// chrome, in a rect the size of the pane's PTY: the box less
     /// [`FLOATING_CHROME_SIZE`](koshi_core::constant::FLOATING_CHROME_SIZE),
-    /// one column right of the left border and three rows down from the top.
-    /// Outer `(24, 8)` `72x22` → content `(25, 11)` `70x18`.
+    /// with its top-left cell one column right of and three rows below the
+    /// box's top-left cell. Outer `(24, 8)` `72x22` → content `(25, 11)`
+    /// `70x18`.
     pub outer_rect: Rect,
     /// Whether the viewing client pinned the pane at its cell.
     pub is_pinned: bool,

@@ -24,8 +24,8 @@ use koshi_core::command::{
     PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget, ToggleLockModeArgs,
 };
 use koshi_core::event::{
-    InputModeChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, PtyResized,
-    SubscriberLagged, TabCreated,
+    InputModeChanged, PaneClosing, PaneFocused, PanePlacementCommitted, PaneProcessExited,
+    PaneRemoved, SubscriberLagged,
 };
 use koshi_core::geometry::{Direction, FloatingPanePosition, PaneArea, Point};
 use koshi_core::ids::{CommandId, TabId};
@@ -46,6 +46,7 @@ use koshi_terminal::graphics::{
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use super::*;
+use crate::runtime::bus::tests::build_test_pane_placement_committed;
 use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
 use crate::runtime::command::tests::{
     attach_client_through_server, build_floating_new_pane_args, build_tab, create_floating_pane,
@@ -519,23 +520,28 @@ fn submit_command_dispatches_against_live_state() {
 }
 
 #[test]
-fn a_subscriber_receives_the_events_a_command_emits() {
+fn a_command_event_with_no_wire_form_reaches_no_subscriber() {
     let (mut server, client_id) = boot_server();
     let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let command_id = CommandId::new();
 
-    let _ = server.submit_command(CommandEnvelope::from_parts(
-        CommandId::new(),
+    let command_result = server.submit_command(CommandEnvelope::from_parts(
+        command_id,
         CommandSource::KeyBinding { client_id },
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     ));
 
     assert_eq!(
-        delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::InputModeChanged(InputModeChanged {
-            client_id,
-            lock_mode: LockMode::Locked,
-        }))]
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::InputModeChanged(InputModeChanged {
+                client_id,
+                lock_mode: LockMode::Locked,
+            })],
+        }
     );
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
 }
 
 #[test]
@@ -548,7 +554,7 @@ fn publish_events_delivers_out_of_command_events_to_subscribers() {
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
+        vec![Delivery::Quit]
     );
 }
 
@@ -768,7 +774,8 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
 
     // The retry built a new frame: it carries the mode set after the first
     // attempt failed, not the one that was current then. The count covers the
-    // event that triggered the pause plus the withheld mode change.
+    // event that triggered the pause alone: the mode change publishes
+    // `InputModeChanged`, which reaches no subscriber.
     assert_eq!(server.event_bus.list_desynced_subscriber_ids(), Vec::new());
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -777,7 +784,7 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
             notification_queue: build_sole_session_notification_queue(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
-                dropped_event_count: 2,
+                dropped_event_count: 1,
             },
             held_command_rejections: Vec::new(),
             dropped_command_rejection_count: 0,
@@ -846,7 +853,7 @@ fn a_gone_receiver_costs_only_its_own_recorded_client() {
     );
     assert_eq!(
         kept_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
+        vec![Delivery::Quit]
     );
 }
 
@@ -1060,8 +1067,7 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
         vec![(subscriber_id, client_id)]
     );
     assert!(server.event_bus.has_subscriber(subscriber_id));
-    let mut expected_deliveries =
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
+    let mut expected_deliveries = vec![Delivery::Quit; SUBSCRIBER_QUEUE_CAPACITY - 1];
     expected_deliveries.push(Delivery::Snapshot {
         render_snapshot: Box::new(server.build_snapshot(client_id).expect("frame")),
         notification_queue: build_sole_session_notification_queue(&server),
@@ -1098,17 +1104,40 @@ fn a_paused_subscriber_whose_view_changed_sets_no_wakeup() {
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
 }
 
-/// Publish one `TabCreated` event [`SUBSCRIBER_QUEUE_CAPACITY`] times, which
-/// fills the queue of every subscriber whose queue was empty and leaves it
-/// live. Returns the event.
-fn fill_subscriber_queues(server: &mut Server) -> Event {
-    let tab_created_event = Event::TabCreated(TabCreated {
-        tab_id: TabId::new(),
-    });
+/// The (tab, pane) of each `PaneFocused` record the process-wide recent-events
+/// ring holds for `client_id`, oldest first.
+fn list_recorded_pane_focus(client_id: ClientId) -> Vec<(Option<TabId>, PaneId)> {
+    recent_events::list_recent_events()
+        .into_iter()
+        .filter(|event_record| {
+            event_record.event_name == "PaneFocused" && event_record.client_id == Some(client_id)
+        })
+        .filter_map(|event_record| Some((event_record.tab_id, event_record.pane_id?)))
+        .collect()
+}
+
+/// The pane of each `PtyResized` record the process-wide recent-events ring
+/// holds for one of `pane_ids`, oldest first.
+fn list_recorded_pty_resizes(pane_ids: &[PaneId]) -> Vec<PaneId> {
+    recent_events::list_recent_events()
+        .into_iter()
+        .filter(|event_record| event_record.event_name == "PtyResized")
+        .filter_map(|event_record| event_record.pane_id)
+        .filter(|pane_id| pane_ids.contains(pane_id))
+        .collect()
+}
+
+/// Publish one committed pane placement [`SUBSCRIBER_QUEUE_CAPACITY`] times,
+/// which fills the queue of every subscriber whose queue was empty and leaves
+/// it live. Returns the placement.
+fn fill_subscriber_queues(server: &mut Server) -> PanePlacementCommitted {
+    let pane_placement_committed = build_test_pane_placement_committed(TabId::new());
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
-        server.event_bus.publish(&tab_created_event);
+        server.event_bus.publish(&Event::PanePlacementCommitted(
+            pane_placement_committed.clone(),
+        ));
     }
-    tab_created_event
+    pane_placement_committed
 }
 
 #[test]
@@ -1118,7 +1147,7 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
         attach_client_through_server(&mut server, local_client_id, REMOTE_VIEWPORT_SIZE, None);
     let (local_receiver, local_writer_handoff) = server.subscribe(local_client_id, 60);
     let (remote_receiver, remote_writer_handoff) = server.subscribe(remote_client_id, 60);
-    let tab_created_delivery = Delivery::Event(fill_subscriber_queues(&mut server));
+    let placement_delivery = Delivery::PanePlacementCommitted(fill_subscriber_queues(&mut server));
     // The first frames find both queues full: both frames are dropped, and
     // both subscribers are owed a frame.
     let render_time = Instant::now();
@@ -1134,7 +1163,7 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
         (&local_receiver, &local_writer_handoff),
     ];
     for (pass_number, (delivery_receiver, writer_handoff)) in (1..).zip(wakes) {
-        assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
+        assert_eq!(delivery_receiver.recv(), Ok(placement_delivery.clone()));
         assert!(writer_handoff.take_owed_frame_mark());
         let control_flow = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed);
         assert_eq!(control_flow, std::ops::ControlFlow::Continue(()));
@@ -1147,13 +1176,13 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
     );
     assert!(!local_writer_handoff.take_owed_frame_mark());
     let mut expected_local_deliveries =
-        vec![tab_created_delivery.clone(); SUBSCRIBER_QUEUE_CAPACITY - 1];
+        vec![placement_delivery.clone(); SUBSCRIBER_QUEUE_CAPACITY - 1];
     expected_local_deliveries.push(Delivery::Frame(Box::new(local_frame)));
     assert_eq!(
         local_receiver.try_iter().collect::<Vec<_>>(),
         expected_local_deliveries
     );
-    let mut expected_remote_deliveries = vec![tab_created_delivery; SUBSCRIBER_QUEUE_CAPACITY - 1];
+    let mut expected_remote_deliveries = vec![placement_delivery; SUBSCRIBER_QUEUE_CAPACITY - 1];
     expected_remote_deliveries.push(Delivery::Frame(Box::new(remote_frame)));
     assert_eq!(
         remote_receiver.try_iter().collect::<Vec<_>>(),
@@ -1165,14 +1194,16 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
 fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
     let (mut server, client_id) = boot_server();
     let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
-    let tab_created_event = fill_subscriber_queues(&mut server);
-    let tab_created_delivery = Delivery::Event(tab_created_event.clone());
+    let pane_placement_committed = fill_subscriber_queues(&mut server);
+    let placement_delivery = Delivery::PanePlacementCommitted(pane_placement_committed.clone());
     let frame_time = Instant::now();
     server.push_frames(frame_time);
-    assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
+    assert_eq!(delivery_receiver.recv(), Ok(placement_delivery.clone()));
     assert!(writer_handoff.take_owed_frame_mark());
     // An event takes the freed slot before the session reads the wake.
-    server.event_bus.publish(&tab_created_event);
+    server.event_bus.publish(&Event::PanePlacementCommitted(
+        pane_placement_committed.clone(),
+    ));
 
     let _ = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed);
     server.push_due_frames(frame_time);
@@ -1180,7 +1211,7 @@ fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
     assert!(writer_handoff.take_owed_frame_mark());
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![tab_created_delivery; SUBSCRIBER_QUEUE_CAPACITY]
+        vec![placement_delivery; SUBSCRIBER_QUEUE_CAPACITY]
     );
 }
 
@@ -1199,8 +1230,7 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
     let _ = server.handle_runtime_event(RuntimeEvent::QueueRoomFreed);
     server.push_due_frames(frame_time);
 
-    let mut expected_deliveries =
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1];
+    let mut expected_deliveries = vec![Delivery::Quit; SUBSCRIBER_QUEUE_CAPACITY - 1];
     expected_deliveries.push(Delivery::Snapshot {
         render_snapshot: Box::new(expected_render_snapshot),
         notification_queue: build_sole_session_notification_queue(&server),
@@ -1222,11 +1252,11 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
 fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_mark() {
     let (mut server, client_id) = boot_server();
     let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
-    let tab_created_delivery = Delivery::Event(fill_subscriber_queues(&mut server));
+    let placement_delivery = Delivery::PanePlacementCommitted(fill_subscriber_queues(&mut server));
     let frame_time = Instant::now();
     server.push_frames(frame_time);
     // The writing thread reads one delivery and has not taken its mark yet.
-    assert_eq!(delivery_receiver.recv(), Ok(tab_created_delivery.clone()));
+    assert_eq!(delivery_receiver.recv(), Ok(placement_delivery.clone()));
 
     server.push_frames(frame_time);
     let owed_deliveries: Vec<Delivery> = delivery_receiver.try_iter().collect();
@@ -1236,7 +1266,7 @@ fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_
 
     assert_eq!(
         owed_deliveries,
-        vec![tab_created_delivery; SUBSCRIBER_QUEUE_CAPACITY - 1]
+        vec![placement_delivery; SUBSCRIBER_QUEUE_CAPACITY - 1]
     );
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
@@ -1262,7 +1292,7 @@ fn a_paused_subscriber_owed_a_frame_is_not_resynced_until_its_writer_takes_the_m
     );
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested)); SUBSCRIBER_QUEUE_CAPACITY - 1]
+        vec![Delivery::Quit; SUBSCRIBER_QUEUE_CAPACITY - 1]
     );
     assert!(writer_handoff.take_owed_frame_mark());
 }
@@ -2014,7 +2044,6 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let (watcher_receiver, _) = server.subscribe(client_id, 60);
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -2022,29 +2051,11 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
         detached_at,
     );
 
-    let pane_focused_events: Vec<PaneFocused> = watcher_receiver
-        .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::Event(Event::PaneFocused(pane_focused)) => Some(pane_focused),
-            _ => None,
-        })
-        .filter(|pane_focused| pane_focused.client_id == returning_attachment.client_id)
-        .collect();
     assert_eq!(
-        pane_focused_events,
+        list_recorded_pane_focus(returning_attachment.client_id),
         vec![
-            PaneFocused {
-                client_id: returning_attachment.client_id,
-                tab_id: Some(booted_tab_id),
-                pane_id: root_pane_id,
-                previous_pane_id: None,
-            },
-            PaneFocused {
-                client_id: returning_attachment.client_id,
-                tab_id: Some(booted_tab_id),
-                pane_id: split_pane_id,
-                previous_pane_id: Some(root_pane_id),
-            },
+            (Some(booted_tab_id), root_pane_id),
+            (Some(booted_tab_id), split_pane_id),
         ],
         "the attach lands on the tab's first leaf, then the restored view moves the focus back"
     );
@@ -2088,7 +2099,6 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let (watcher_receiver, _) = server.subscribe(client_id, 60);
 
     let returning_attachment = attach_with_token(
         &mut server,
@@ -2137,30 +2147,9 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
         server.find_typed_pane(returning_attachment.client_id),
         Some(focused_pane_id)
     );
-    let pane_focused_events: Vec<PaneFocused> = watcher_receiver
-        .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::Event(Event::PaneFocused(pane_focused)) => Some(pane_focused),
-            _ => None,
-        })
-        .filter(|pane_focused| pane_focused.client_id == returning_attachment.client_id)
-        .collect();
     assert_eq!(
-        pane_focused_events,
-        vec![
-            PaneFocused {
-                client_id: returning_attachment.client_id,
-                tab_id: Some(booted_tab_id),
-                pane_id: root_pane_id,
-                previous_pane_id: None,
-            },
-            PaneFocused {
-                client_id: returning_attachment.client_id,
-                tab_id: None,
-                pane_id: focused_pane_id,
-                previous_pane_id: Some(root_pane_id),
-            },
-        ],
+        list_recorded_pane_focus(returning_attachment.client_id),
+        vec![(Some(booted_tab_id), root_pane_id), (None, focused_pane_id),],
         "the attach lands on the tab's pane, then the restored floating pane takes the input"
     );
 }
@@ -2470,7 +2459,7 @@ fn a_view_whose_focused_pane_was_closed_while_it_stood_comes_back_unfocused_ther
 fn taking_a_zoom_back_resizes_the_tabs_panes() {
     let (mut server, client_id) = boot_server();
     let (_, booted_tab_id, root_pane_id) = get_booted_parts(&server, client_id);
-    let _split = split_booted_pane(&mut server, client_id, root_pane_id);
+    let split_pane_id = split_booted_pane(&mut server, client_id, root_pane_id);
     let leaving_attachment = attach_with_token(&mut server, None, SystemTime::now());
     // A tab's panes are solved once per viewer, and each pane takes its
     // smallest rect across them. The client whose zoom comes back is the tab's
@@ -2486,7 +2475,7 @@ fn taking_a_zoom_back_resizes_the_tabs_panes() {
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let (delivery_receiver, _) = server.subscribe(ClientId::new(), 60);
+    let resized_pane_ids_before = list_recorded_pty_resizes(&[root_pane_id, split_pane_id]);
 
     let _returning_attachment = attach_with_token(
         &mut server,
@@ -2494,24 +2483,20 @@ fn taking_a_zoom_back_resizes_the_tabs_panes() {
         detached_at,
     );
 
-    let pty_resized_events: Vec<Event> = delivery_receiver
-        .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::Event(event @ Event::PtyResized(_)) => Some(event),
-            _ => None,
-        })
-        .collect();
+    let mut expected_resized_pane_ids = resized_pane_ids_before;
+    expected_resized_pane_ids.push(root_pane_id);
+    assert_eq!(
+        list_recorded_pty_resizes(&[root_pane_id, split_pane_id]),
+        expected_resized_pane_ids
+    );
     // The zoomed pane fills the tab: 80x24 less the tabline and hint rows is
     // 80x22, less the one-cell border on each side is 78x20.
     assert_eq!(
-        pty_resized_events,
-        vec![Event::PtyResized(PtyResized {
-            pane_id: root_pane_id,
-            pty_size: PtySize {
-                column_count: 78,
-                row_count: 20
-            },
-        })]
+        server.pty_size_by_pane_id[&root_pane_id],
+        PtySize {
+            column_count: 78,
+            row_count: 20
+        }
     );
 }
 
@@ -2936,7 +2921,7 @@ fn the_quit_announcement_tells_the_clients_the_session_ended() {
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
+        vec![Delivery::Quit]
     );
     assert_eq!(
         server.get_ending_notice().get_session_ending(),
@@ -2957,7 +2942,7 @@ fn the_quit_announcement_leaves_a_published_quit_as_the_only_one() {
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
+        vec![Delivery::Quit]
     );
 }
 
@@ -2973,7 +2958,7 @@ fn a_quit_announced_after_a_restart_keeps_the_restart_as_the_last_frame() {
 
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Restarting)],
+        vec![Delivery::Restarting],
         "the restart frame must be the only one published"
     );
     assert_eq!(

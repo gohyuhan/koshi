@@ -44,8 +44,9 @@ impl TransactionScope {
     }
 
     /// Consume the scope and seal its batch: write each buffered event to the
-    /// log and the recent-events ring, deliver it to every subscriber on
-    /// `bus`, and report the same ordered events as an applied
+    /// log and the recent-events ring, publish it on `bus`
+    /// ([`EventBus::publish`] names the events that reach a subscriber), and
+    /// report the same ordered events as an applied
     /// [`CommandResult::Ok`] keyed to `command_id`.
     #[must_use]
     pub(crate) fn commit(self, command_id: CommandId, event_bus: &mut EventBus) -> CommandResult {

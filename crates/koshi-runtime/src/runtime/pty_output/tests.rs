@@ -12,11 +12,11 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
-use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::geometry::{FloatingPaneDimension, FloatingPaneSize, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_layout::tree::LayoutNode;
+use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::Delivery;
@@ -562,6 +562,10 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
     );
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
+        list_recorded_command_event_names(pane_id),
+        Vec::<String>::new()
+    );
+    assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, old_frame_time),
         None
     );
@@ -577,11 +581,10 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
             .expect("pane exists"),
         [b"\x1b[0n".to_vec()]
     );
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
-        delivery_receiver.try_iter().collect::<Vec<_>>(),
-        [Delivery::Event(Event::PaneCommandStarted(
-            PaneCommandStarted { pane_id }
-        ))]
+        list_recorded_command_event_names(pane_id),
+        ["PaneCommandStarted"]
     );
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut runtime, client_id, old_frame_time),
@@ -625,6 +628,10 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
         Vec::<Vec<u8>>::new()
     );
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(
+        list_recorded_command_event_names(pane_id),
+        Vec::<String>::new()
+    );
 
     assert_eq!(
         runtime.compute_next_render_wakeup(current_time + Duration::from_millis(150)),
@@ -646,12 +653,28 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
             .expect("pane exists"),
         [b"\x1b[0n".to_vec()]
     );
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
-        delivery_receiver.try_iter().collect::<Vec<_>>(),
-        [Delivery::Event(Event::PaneCommandStarted(
-            PaneCommandStarted { pane_id }
-        ))]
+        list_recorded_command_event_names(pane_id),
+        ["PaneCommandStarted"]
     );
+}
+
+/// The event names of the `PaneCommandStarted` and `PaneCommandFinished`
+/// records the process-wide recent-events ring holds for `pane_id`, oldest
+/// first.
+fn list_recorded_command_event_names(pane_id: PaneId) -> Vec<String> {
+    recent_events::list_recent_events()
+        .into_iter()
+        .filter(|event_record| {
+            event_record.pane_id == Some(pane_id)
+                && matches!(
+                    event_record.event_name.as_ref(),
+                    "PaneCommandStarted" | "PaneCommandFinished"
+                )
+        })
+        .map(|event_record| event_record.event_name.into_owned())
+        .collect()
 }
 
 #[test]
@@ -662,15 +685,10 @@ fn shell_markers_publish_command_events_in_order() {
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;D;137\x07");
 
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
-        delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![
-            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted { pane_id })),
-            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id,
-                exit_code: Some(137),
-            })),
-        ]
+        list_recorded_command_event_names(pane_id),
+        ["PaneCommandStarted", "PaneCommandFinished"]
     );
 }
 
@@ -682,15 +700,10 @@ fn duplicate_shell_starts_publish_one_command_pair() {
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
 
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
-        delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![
-            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted { pane_id })),
-            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id,
-                exit_code: Some(0),
-            })),
-        ]
+        list_recorded_command_event_names(pane_id),
+        ["PaneCommandStarted", "PaneCommandFinished"]
     );
 }
 
@@ -703,6 +716,10 @@ fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
     runtime.handle_pty_output(pane_id, b"\x1b]133;D;1\x07plain output");
 
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
+    assert_eq!(
+        list_recorded_command_event_names(pane_id),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -717,24 +734,14 @@ fn command_lifecycle_state_is_independent_per_pane() {
     runtime.handle_pty_output(first_pane_id, b"\x1b]133;D;0\x07");
     runtime.handle_pty_output(second_pane_id, b"\x1b]133;D\x07");
 
+    assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
-        delivery_receiver.try_iter().collect::<Vec<_>>(),
-        vec![
-            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
-                pane_id: first_pane_id,
-            })),
-            Delivery::Event(Event::PaneCommandStarted(PaneCommandStarted {
-                pane_id: second_pane_id,
-            })),
-            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id: first_pane_id,
-                exit_code: Some(0),
-            })),
-            Delivery::Event(Event::PaneCommandFinished(PaneCommandFinished {
-                pane_id: second_pane_id,
-                exit_code: None,
-            })),
-        ]
+        list_recorded_command_event_names(first_pane_id),
+        ["PaneCommandStarted", "PaneCommandFinished"]
+    );
+    assert_eq!(
+        list_recorded_command_event_names(second_pane_id),
+        ["PaneCommandStarted", "PaneCommandFinished"]
     );
 }
 

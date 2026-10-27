@@ -3502,10 +3502,9 @@ fn run_attachment<B: Backend, W: Write>(
                             let _ = terminal_writer.flush();
                             held_host_write_bytes = Vec::new();
                         }
-                        // Every other frame is a `Pong`, which carries nothing,
-                        // or reports a change to the session's structure, which
-                        // the next painted frame carries whole. Only a painted
-                        // frame is drawn.
+                        // Every other frame is a `Pong`, which carries nothing.
+                        // The frames that end the attachment leave the loop
+                        // above.
                         _ => {}
                     }
                 }
@@ -5347,7 +5346,7 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure,
+            notification_queue,
             resume_token,
             pane_area,
         } => {
@@ -5358,7 +5357,7 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
                 client_id,
                 session_id,
                 resume_token,
-                notification_queue: session_structure.notification_queue,
+                notification_queue,
             })
         }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),

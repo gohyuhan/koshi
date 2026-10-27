@@ -20,11 +20,11 @@
 //! connection carries a CLI source, and an attached client's connection
 //! carries [`CommandSource::KeyBinding`] naming that connection's own client.
 //!
-//! An `Attach` is the one request that keeps its connection: once the reply
-//! carrying the session's structure is written, the connection is split. The
-//! writing half carries that client's event stream, and the reading half
-//! carries that client's key presses, resizes, pasted text and commands to the
-//! dispatcher and writes nothing back. The peer going away detaches the client.
+//! An `Attach` is the one request that keeps its connection: once the
+//! `Attached` reply is written, the connection is split. The writing half
+//! carries that client's event stream, and the reading half carries that
+//! client's key presses, resizes, pasted text and commands to the dispatcher
+//! and writes nothing back. The peer going away detaches the client.
 //!
 //! On Linux and macOS, passing [`OtherUsers`] to [`IpcServer::start`] moves the
 //! control socket to the machine-wide shared directory and widens it: the
@@ -1222,7 +1222,7 @@ fn serve_connection(
                     answer_result: IpcResult::Attached {
                         client_id: accepted_client.client_id,
                         session_id: accepted_client.session_id,
-                        session_structure: accepted_client.session_structure,
+                        notification_queue: accepted_client.notification_queue,
                         resume_token: Some(accepted_client.resume_token),
                         pane_area: accepted_client.pane_area,
                     },

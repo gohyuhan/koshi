@@ -24,7 +24,7 @@ use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::mouse::MouseTracking;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
@@ -276,6 +276,24 @@ pub fn get_session_overview(ipc_connection: &mut Connection, request_id: u64) ->
         );
     };
     session_overview
+}
+
+/// The id of the seeded session's one tab and of its one pane, read from the
+/// session's overview over a fresh connection. Panics unless the session
+/// holds exactly one tab and one pane.
+pub fn get_seeded_tab_and_pane_ids(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> (TabId, PaneId) {
+    let mut overview_connection = open_session_connection(runtime_directory, session_id);
+    let session_overview = get_session_overview(&mut overview_connection, 2);
+    let [seeded_tab] = session_overview.tabs.as_slice() else {
+        panic!("expected one tab, got {:?}", session_overview.tabs);
+    };
+    let [seeded_pane] = session_overview.panes.as_slice() else {
+        panic!("expected one pane, got {:?}", session_overview.panes);
+    };
+    (seeded_tab.tab_id, seeded_pane.pane_id)
 }
 
 /// How many clients the session reports over `ipc_connection`.

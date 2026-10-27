@@ -61,9 +61,12 @@ pub struct Surface {
 ///   pane. 4 carried `source_pane_id`, `tab_id`, `direction` and
 ///   `should_stack` on the command itself, and had a separate run-command
 ///   command; `koshi run` sends a new-pane command with a spawn spec.
-/// - `PaneCreated`, `PaneRemoved` and `PaneFocused` carry a `tab_id` that is
-///   `null` for a floating pane, and `PanePlacementCommitted` carries a
-///   `source_tab_id` and a `destination_tab_id` that are `null` for one.
+/// - The session sends an attached client no `PaneCreated`,
+///   `PaneProcessExited`, `PaneClosing`, `PaneRemoved`, `PaneFocused`,
+///   `LayoutChanged`, `TabCreated`, `TabClosed`, `TabFocused` or `TabMoved`
+///   event; 4 sent each of them. `PanePlacementCommitted` carries a
+///   `source_tab_id` and a `destination_tab_id` that are `null` for a
+///   floating pane.
 /// - The `placement_target` of a `PlacePane` command and of a
 ///   `PanePlacementCommitted` event is `{"Tiled": {"Swap": …}}`,
 ///   `{"Tiled": {"Split": …}}`, `{"Tiled": {"Stack": …}}`, which puts the
@@ -92,8 +95,8 @@ pub struct Surface {
 ///   required. 4 read a message without them.
 /// - A frame carries `floating_pane_slots`: the floating panes its client
 ///   shows, back to front, each with its outer rect and pin state. It also
-///   carries `floating_panes`: every floating pane of the
-///   session, in the order the panes became floating, each as
+///   carries `floating_panes`: every floating pane of the session, in the
+///   order the panes became floating, each as
 ///   `{"Shown": {"pane_id": …}}` while the client shows it, or as
 ///   `{"Minimized": {"pane_id": …, "pane_title": …}}`, with its title or
 ///   `null`, while the client minimized it. Both fields are required, and 4
@@ -173,10 +176,12 @@ pub struct Surface {
 /// - A `Layout` answer carries `floating_panes`: each floating pane's desired
 ///   size, solved size, and every attached client's stored position and what
 ///   that client draws for it. The field is required, and 4 has no such field.
-/// - The attach answer's session structure and the `Resync` event carry
-///   `notification_queue`: the session's whole notification queue. The
-///   `NotificationPosted` event exists in 5 only: one entry the queue took,
-///   with the queue's `revision` after it. 4 has no notification queue.
+/// - The `Attached` answer carries no `session_structure`; 4 carried one with
+///   the session's id, name and tabs. The `Attached` answer and the `Resync`
+///   event carry `notification_queue`: the session's whole notification
+///   queue. The `NotificationPosted` event exists in 5 only: one entry the
+///   queue took, with the queue's `revision` after it. 4 has no notification
+///   queue.
 /// - The `Resync` event carries `held_command_rejections`, the rejections of
 ///   the client's commands since its queue overflowed: each run of equal
 ///   rejections in a row as `fired_action`, `reject_reason`, `help` and

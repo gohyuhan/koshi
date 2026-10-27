@@ -58,7 +58,6 @@ use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind, MouseTracking, Scro
 use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSeverity};
 use koshi_input::host::{Event, Parser};
 use koshi_input::keyboard::decode_key_event;
-use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{
     FrameClient, FrameFloatingPane, FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction,
@@ -620,42 +619,48 @@ fn a_transport_failure_ends_the_stream_as_a_death() {
 #[test]
 fn every_other_frame_keeps_the_stream_reading() {
     let tab_id = TabId::new();
+    let mut notification_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(SessionId::new()));
+    let posted_entry = notification_queue
+        .post_core_entry(
+            NotificationSeverity::Info,
+            "saved",
+            NonZeroU32::MIN,
+            SystemTime::UNIX_EPOCH,
+        )
+        .clone();
     let session_events = [
-        SessionEvent::PaneCreated {
-            pane_id: PaneId::new(),
-            tab_id: Some(tab_id),
+        SessionEvent::ImageContentReleased {
+            image_content_ids: vec![7],
         },
-        SessionEvent::PaneProcessExited {
-            pane_id: PaneId::new(),
-            exit_code: Some(0),
-            signal: None,
+        SessionEvent::PanePlacementCommitted {
+            command_id: CommandId::new(),
+            source_pane_id: PaneId::new(),
+            source_tab_id: Some(tab_id),
+            destination_tab_id: Some(tab_id),
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                destination_tab_id: tab_id,
+                anchor: PanePlacementAnchor::Tab,
+                direction: Direction::Right,
+            }),
         },
-        SessionEvent::PaneClosing {
-            pane_id: PaneId::new(),
+        SessionEvent::NotificationPosted {
+            revision: 1,
+            posted_entry,
         },
-        SessionEvent::PaneRemoved {
-            pane_id: PaneId::new(),
-            tab_id: Some(tab_id),
+        SessionEvent::HostWrite {
+            host_write_bytes: b"\x07".to_vec(),
         },
-        SessionEvent::PaneFocused {
-            client_id: ClientId::new(),
-            tab_id: Some(tab_id),
-            pane_id: PaneId::new(),
-            previous_pane_id: None,
+        SessionEvent::HostWritePart {
+            host_write_bytes: b"\x07".to_vec(),
         },
-        SessionEvent::LayoutChanged { tab_id },
-        SessionEvent::TabCreated { tab_id },
-        SessionEvent::TabClosed { tab_id },
-        SessionEvent::TabFocused {
-            client_id: ClientId::new(),
-            tab_id,
-            previous_tab_id: TabId::new(),
+        SessionEvent::CommandRejected {
+            command_id: CommandId::new(),
+            fired_action: None,
+            reject_reason: RejectReason::TargetGone,
+            help: None,
         },
-        SessionEvent::TabMoved {
-            tab_id,
-            previous_tab_index: 0,
-            new_tab_index: 1,
-        },
+        SessionEvent::Pong,
         SessionEvent::Resync {
             dropped_event_count: 3,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -1047,8 +1052,8 @@ const PREVIOUS_RESUME_TOKEN: &str = "the resume token the last attach minted";
 const MINTED_RESUME_TOKEN: &str = "the resume token the rejoin minted";
 
 /// The Attach result naming `client_id` and `session_id`, echoing `pane_area`
-/// and minting `resume_token`: a session named `session` with no tabs and the
-/// empty notification queue [`build_fixed_epoch_notification_queue`] gives.
+/// and minting `resume_token`, with the empty notification queue
+/// [`build_fixed_epoch_notification_queue`] gives.
 fn build_attached_result(
     client_id: ClientId,
     session_id: SessionId,
@@ -1058,14 +1063,9 @@ fn build_attached_result(
     IpcResult::Attached {
         client_id,
         session_id,
-        session_structure: AttachedSessionStructureSnapshot {
+        notification_queue: build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(
             session_id,
-            session_name: String::from("session"),
-            tabs: Vec::new(),
-            notification_queue: build_fixed_epoch_notification_queue(
-                NotificationQueueOwner::Session(session_id),
-            ),
-        },
+        )),
         resume_token,
         pane_area,
     }
@@ -11159,14 +11159,14 @@ fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives()
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     spawn_frame_reader(frame_reader, 4, incoming_sender);
 
-    let tab_closed_event = SessionEvent::TabClosed {
-        tab_id: TabId::new(),
+    let image_release_event = SessionEvent::ImageContentReleased {
+        image_content_ids: vec![7],
     };
     session_connection
         .send(&serde_json::json!({ "Floating": { "pane_id": 1 } }))
         .expect("write a frame this build has no name for");
     session_connection
-        .send(&tab_closed_event)
+        .send(&image_release_event)
         .expect("write the frame after it, which this build has");
 
     let Incoming::Frame {
@@ -11184,7 +11184,7 @@ fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives()
     );
     assert_eq!(
         session_event_result.expect("the frame after the unknown one decoded"),
-        tab_closed_event,
+        image_release_event,
         "the frame after the one this build cannot name is the first the loop is handed",
     );
 }
@@ -11206,8 +11206,8 @@ fn the_reader_applies_a_painted_update_and_ends_at_a_binary_frame_that_does_not_
         .build_update_frames(&render_snapshot, &painted_frame, false)
         .expect("the painted update fits the frame cap")
         .expect("the first update of a connection is sent");
-    let tab_closed_event = SessionEvent::TabClosed {
-        tab_id: TabId::new(),
+    let image_release_event = SessionEvent::ImageContentReleased {
+        image_content_ids: vec![7],
     };
 
     session_writer
@@ -11219,7 +11219,7 @@ fn the_reader_applies_a_painted_update_and_ends_at_a_binary_frame_that_does_not_
             .expect("write a part of the painted update");
     }
     session_writer
-        .send(&tab_closed_event)
+        .send(&image_release_event)
         .expect("write the JSON frame after the update");
     session_writer
         .send_binary(&[])
@@ -11251,7 +11251,7 @@ fn the_reader_applies_a_painted_update_and_ends_at_a_binary_frame_that_does_not_
     assert_eq!(connection_index, 4);
     assert_eq!(
         session_event_result.expect("the JSON frame decoded"),
-        tab_closed_event
+        image_release_event
     );
     let Incoming::Frame {
         connection_index,

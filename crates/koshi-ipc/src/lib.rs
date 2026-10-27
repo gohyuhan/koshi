@@ -20,8 +20,6 @@
 //! servers a dialling user has saved, this machine's own certificate, and the
 //! record that the operator switched remote access on.
 
-/// The session structure a client receives when it attaches.
-pub mod attach;
 /// Bytes on the wire: one base64 string per byte payload.
 pub mod bytes;
 /// Endpoint file: how a running koshi advertises its socket and token.

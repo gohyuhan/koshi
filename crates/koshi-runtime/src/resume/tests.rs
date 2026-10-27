@@ -1742,6 +1742,7 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
     let expected_shown_floating_pane_ids = first_client.list_shown_floating_pane_ids().to_vec();
     assert_eq!(expected_shown_floating_pane_ids, [pinned_pane_id]);
     let expected_focused_floating_pane_id = first_client.get_focused_floating_pane_id();
+    assert_eq!(expected_focused_floating_pane_id, Some(pinned_pane_id));
     let expected_pty_size_by_pane_id = populated_server.server.pty_size_by_pane_id.clone();
     let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
 

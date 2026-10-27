@@ -372,7 +372,7 @@ impl AttachedClientStream {
             client_id,
             session_id: joined_session_id,
             resume_token: minted_resume_token,
-            session_structure,
+            notification_queue,
             ..
         } = ipc_response.answer_result
         else {
@@ -417,7 +417,7 @@ impl AttachedClientStream {
             AttachedClientStream {
                 client_id,
                 resume_token: minted_resume_token,
-                notification_queue: session_structure.notification_queue,
+                notification_queue,
                 session_events,
                 request_writer,
             },
@@ -435,36 +435,6 @@ impl AttachedClientStream {
                 panic!("no frame arrived within {WAIT_DURATION:?}")
             }
             Err(RecvTimeoutError::Disconnected) => panic!("the event stream closed with no frame"),
-        }
-    }
-
-    /// The first event `event_predicate` accepts. Fails the test once [`WAIT_DURATION`] has
-    /// passed with none, naming every event kind that did arrive.
-    fn receive_event_when(&self, event_predicate: impl Fn(&SessionEvent) -> bool) -> SessionEvent {
-        let wait_deadline = Instant::now() + WAIT_DURATION;
-        let mut received_event_names: Vec<&'static str> = Vec::new();
-        loop {
-            let remaining_duration = wait_deadline.saturating_duration_since(Instant::now());
-            match self.session_events.recv_timeout(remaining_duration) {
-                Ok(Ok(SessionFrame::Event(session_event))) => {
-                    if event_predicate(&session_event) {
-                        return session_event;
-                    }
-                    received_event_names.push(session_event.get_event_name());
-                }
-                Ok(Ok(SessionFrame::Painted(_))) => received_event_names.push("Painted"),
-                Ok(Ok(SessionFrame::ImageChunk(_))) => received_event_names.push("ImageChunk"),
-                Ok(Err(stream_error)) => {
-                    panic!("the event stream ended before the event: {stream_error}")
-                }
-                Err(RecvTimeoutError::Timeout) => panic!(
-                    "the event the test was waiting for never arrived within {WAIT_DURATION:?}; \
-                     the stream carried {received_event_names:?}"
-                ),
-                Err(RecvTimeoutError::Disconnected) => {
-                    panic!("the event stream closed before the event")
-                }
-            }
         }
     }
 
@@ -2042,6 +2012,12 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         initial_client_stream.client_id,
         Some(build_line_then_exit_spawn_spec()),
     );
+    initial_client_stream.receive_painted_frame_when(|painted_frame| {
+        painted_frame
+            .pane_views
+            .iter()
+            .any(|pane_view| pane_view.pane_id == input_pane_id)
+    });
 
     // The line the child is waiting for. Its exit closes the pane, and the
     // swap that follows carries a session the pane has just left. The line
@@ -2053,15 +2029,16 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         input_pane_id,
         "typed",
     );
-    let mut exit_event_count = 0;
-    let exit_event = initial_client_stream.receive_event_when(|session_event| {
-        matches!(session_event, SessionEvent::PaneProcessExited { pane_id, .. } if *pane_id == input_pane_id)
+    initial_client_stream.receive_painted_frame_when(|painted_frame| {
+        painted_frame
+            .pane_views
+            .iter()
+            .all(|pane_view| pane_view.pane_id != input_pane_id)
     });
-    let SessionEvent::PaneProcessExited { exit_code, .. } = exit_event else {
-        unreachable!("the event matched above")
-    };
-    assert_eq!(exit_code, Some(0));
-    exit_event_count += 1;
+    assert_eq!(
+        count_recorded_pane_exits(runtime_directory.path(), session_id, input_pane_id),
+        1
+    );
     assert_eq!(
         list_pane_lifecycles(runtime_directory.path(), session_id),
         vec![(seeded_pane_id, PaneLifecycle::Running)]
@@ -2071,10 +2048,7 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
         IpcResult::Restarting
     );
-    exit_event_count += count_pane_exit_events(
-        &initial_client_stream.receive_events_until_restarting(),
-        input_pane_id,
-    );
+    initial_client_stream.receive_events_until_restarting();
     drop(control_connection);
 
     let restarted_endpoint = wait_for_restarted_session_endpoint(
@@ -2092,32 +2066,49 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         Some(initial_client_stream.client_id),
         initial_client_stream.resume_token.clone(),
     );
-    exit_event_count += count_pane_exit_events(
-        &attached_client_stream.drain_session_events(SETTLE_DURATION),
-        input_pane_id,
-    );
+    attached_client_stream.drain_session_events(SETTLE_DURATION);
 
-    // One report for one exit: the swap neither swallowed it nor reaped the
-    // child a second time and told the client twice.
-    assert_eq!(exit_event_count, 1);
+    // One report for one exit: the new image records no exit of its own for
+    // the pane, so the swap neither swallowed the exit nor reaped the child a
+    // second time.
+    assert_eq!(
+        count_recorded_pane_exits(runtime_directory.path(), session_id, input_pane_id),
+        0
+    );
+    // The child exited with code 0. A command pane whose child ends with any
+    // other code, a signal, or a status that was not received posts an
+    // `Error` notification naming the pane, and the resume file carries the
+    // session's notification queue across the swap.
+    let notifications: Vec<(NotificationSeverity, &str)> = attached_client_stream
+        .notification_queue
+        .list_queued_entries()
+        .map(|notification_entry| {
+            (
+                notification_entry.severity,
+                notification_entry.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(notifications, Vec::new());
     assert_eq!(
         list_pane_lifecycles(runtime_directory.path(), session_id),
         vec![(seeded_pane_id, PaneLifecycle::Running)]
     );
 }
 
-/// Count events in `session_events` that report `pane_id`'s child exiting.
-fn count_pane_exit_events(session_events: &[SessionFrame<SessionEvent>], pane_id: PaneId) -> usize {
-    session_events
+/// How many `PaneProcessExited` records naming `pane_id` the session's recent
+/// events hold. The session process keeps these records in memory: a session
+/// that replaced its own image starts with none.
+fn count_recorded_pane_exits(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    pane_id: PaneId,
+) -> usize {
+    koshi_link::ipc_client::fetch_recent_events(runtime_directory, None, session_id)
+        .expect("the session lists its recent events")
         .iter()
-        .filter(|session_frame| {
-            matches!(
-                session_frame,
-                SessionFrame::Event(SessionEvent::PaneProcessExited {
-                    pane_id: reported_pane_id,
-                    ..
-                }) if *reported_pane_id == pane_id
-            )
+        .filter(|recent_event| {
+            recent_event.event_name == "PaneProcessExited" && recent_event.pane_id == Some(pane_id)
         })
         .count()
 }

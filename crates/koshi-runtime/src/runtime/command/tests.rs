@@ -20000,7 +20000,7 @@ fn a_switch_is_refused_when_the_clients_queue_is_full() {
 
     // Nothing reads the queue: publishing its whole capacity fills it.
     let queued_events: Vec<Event> = (0..crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY)
-        .map(|_| Event::TabCreated(koshi_core::event::TabCreated { tab_id }))
+        .map(|_| crate::runtime::bus::tests::build_test_placement_event(tab_id))
         .collect();
     runtime.publish_events(&queued_events);
 

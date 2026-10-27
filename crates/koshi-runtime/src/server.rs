@@ -1077,11 +1077,12 @@ impl Server {
         self.remove_subscriptions(&removed_subscriber_ids);
     }
 
-    /// Log each of `events`, add it to the recent-events ring, then deliver it
-    /// to every subscriber. The shared tail of every handler that emits events
-    /// outside a command transaction (attach, detach, resize, child exit); a
-    /// command's events pass through the same three steps when its transaction
-    /// is sealed.
+    /// Log each of `events`, add it to the recent-events ring, then publish it
+    /// on the bus: [`EventBus::publish`](crate::runtime::bus::EventBus::publish)
+    /// names the events that reach a subscriber. The shared tail of every
+    /// handler that emits events outside a command transaction (attach,
+    /// detach, resize, child exit); a command's events pass through the same
+    /// three steps when its transaction is sealed.
     ///
     /// A subscriber the delivery removes — its receiver is gone — takes its
     /// `subscriptions` entry with it.

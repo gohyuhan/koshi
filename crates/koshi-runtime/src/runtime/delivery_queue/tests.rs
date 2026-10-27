@@ -10,11 +10,11 @@ use std::sync::mpsc::RecvError;
 use std::thread;
 use std::time::Duration;
 
-use koshi_core::event::{Event, SubscriberLagged};
+use koshi_core::event::SubscriberLagged;
 use koshi_core::ids::{PaneId, SubscriberId, TabId};
 
 use super::*;
-use crate::runtime::bus::tests::build_test_notification_queue;
+use crate::runtime::bus::tests::{build_test_notification_queue, build_test_placement_delivery};
 use crate::runtime::event::SessionEnding;
 use crate::runtime::frame::tests::build_render_snapshot;
 
@@ -64,32 +64,29 @@ fn build_named_frame(
     Box::new(render_snapshot)
 }
 
-/// An event that names `tab_id`.
-fn build_tab_event(tab_id: TabId) -> Delivery {
-    Delivery::Event(Event::TabClosed(koshi_core::event::TabClosed { tab_id }))
-}
-
 #[test]
 fn deliveries_come_out_in_the_order_they_went_in_and_a_full_queue_drops_one() {
     let (delivery_sender, delivery_receiver) = create_delivery_queue(2);
     let (first_tab_id, second_tab_id, third_tab_id) = (TabId::new(), TabId::new(), TabId::new());
 
     delivery_sender
-        .try_send(build_tab_event(first_tab_id))
+        .try_send(build_test_placement_delivery(first_tab_id))
         .expect("the first delivery fits");
     delivery_sender
-        .try_send(build_tab_event(second_tab_id))
+        .try_send(build_test_placement_delivery(second_tab_id))
         .expect("the second delivery fits");
 
     assert_eq!(
-        delivery_sender.try_send(build_tab_event(third_tab_id)),
-        Err(TrySendError::Full(build_tab_event(third_tab_id)))
+        delivery_sender.try_send(build_test_placement_delivery(third_tab_id)),
+        Err(TrySendError::Full(build_test_placement_delivery(
+            third_tab_id
+        )))
     );
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
         vec![
-            build_tab_event(first_tab_id),
-            build_tab_event(second_tab_id)
+            build_test_placement_delivery(first_tab_id),
+            build_test_placement_delivery(second_tab_id)
         ]
     );
     assert_eq!(delivery_receiver.try_recv(), Err(TryRecvError::Empty));
@@ -109,7 +106,7 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
         .try_send_frame(build_named_frame(&base_render_snapshot, "a"))
         .expect("frame a fits");
     delivery_sender
-        .try_send(build_tab_event(tab_id))
+        .try_send(build_test_placement_delivery(tab_id))
         .expect("the event fits");
     delivery_sender
         .try_send_frame(build_named_frame(&base_render_snapshot, "b"))
@@ -121,7 +118,7 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
         delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
         vec![
             Delivery::Frame(build_named_frame(&base_render_snapshot, "a")),
-            build_tab_event(tab_id),
+            build_test_placement_delivery(tab_id),
             Delivery::Frame(build_named_frame(&base_render_snapshot, "c")),
         ]
     );
@@ -186,12 +183,15 @@ fn a_dropped_sender_closes_the_queue_after_every_queued_delivery() {
     let (delivery_sender, delivery_receiver) = create_delivery_queue(2);
     let tab_id = TabId::new();
     delivery_sender
-        .try_send(build_tab_event(tab_id))
+        .try_send(build_test_placement_delivery(tab_id))
         .expect("the event fits");
 
     drop(delivery_sender);
 
-    assert_eq!(delivery_receiver.recv(), Ok(build_tab_event(tab_id)));
+    assert_eq!(
+        delivery_receiver.recv(),
+        Ok(build_test_placement_delivery(tab_id))
+    );
     assert_eq!(delivery_receiver.recv(), Err(RecvError));
     assert_eq!(
         delivery_receiver.try_recv(),
@@ -208,8 +208,10 @@ fn a_dropped_receiver_refuses_each_delivery_sent_after_the_drop() {
     drop(delivery_receiver);
 
     assert_eq!(
-        delivery_sender.try_send(build_tab_event(tab_id)),
-        Err(TrySendError::Disconnected(build_tab_event(tab_id)))
+        delivery_sender.try_send(build_test_placement_delivery(tab_id)),
+        Err(TrySendError::Disconnected(build_test_placement_delivery(
+            tab_id
+        )))
     );
     assert_eq!(
         delivery_sender.try_send_frame(build_named_frame(&base_render_snapshot, "a")),
@@ -253,18 +255,18 @@ fn a_paced_receive_holds_a_frame_and_everything_behind_it_until_a_frame_may_go()
     let ending_notice = EndingNotice::default();
     let tab_id = TabId::new();
     delivery_sender
-        .try_send(build_tab_event(tab_id))
+        .try_send(build_test_placement_delivery(tab_id))
         .expect("the event fits");
     delivery_sender
         .try_send_frame(build_named_frame(&base_render_snapshot, "a"))
         .expect("the frame fits");
     delivery_sender
-        .try_send(build_tab_event(tab_id))
+        .try_send(build_test_placement_delivery(tab_id))
         .expect("the event behind the frame fits");
 
     assert_eq!(
         delivery_receiver.recv_paced(None, false, &ending_notice),
-        PacedReceive::Delivery(build_tab_event(tab_id)),
+        PacedReceive::Delivery(build_test_placement_delivery(tab_id)),
         "an event at the head goes while no frame may go"
     );
     assert_eq!(
@@ -306,7 +308,7 @@ fn a_paced_receive_holds_a_frame_and_everything_behind_it_until_a_frame_may_go()
     );
     assert_eq!(
         delivery_receiver.recv_paced(None, false, &ending_notice),
-        PacedReceive::Delivery(build_tab_event(tab_id))
+        PacedReceive::Delivery(build_test_placement_delivery(tab_id))
     );
 }
 
@@ -384,13 +386,13 @@ fn a_paced_receive_on_an_empty_queue_takes_a_delivery_put_on_it_before_its_deadl
 
     let sending_thread = thread::spawn(move || {
         delivery_sender
-            .try_send(build_tab_event(tab_id))
+            .try_send(build_test_placement_delivery(tab_id))
             .expect("the event fits");
         delivery_sender
     });
     assert_eq!(
         delivery_receiver.recv_paced(Some(wait_deadline), false, &ending_notice),
-        PacedReceive::Delivery(build_tab_event(tab_id))
+        PacedReceive::Delivery(build_test_placement_delivery(tab_id))
     );
     assert!(
         Instant::now() < wait_deadline,

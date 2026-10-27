@@ -8,7 +8,6 @@ use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::ConnectionToken;
 
-use crate::runtime::attach::build_session_structure_snapshot;
 use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
 
@@ -54,8 +53,8 @@ impl Server {
 
     /// Serve one attach arriving over the control socket, in this single
     /// dispatcher turn: settle which client this is, register it on the tab it
-    /// views, publish what the attach emitted, subscribe it to every event the
-    /// session publishes, and read the session's structure back.
+    /// views, publish what the attach emitted, subscribe it to the session's
+    /// deliveries, and read the session's notification queue back.
     ///
     /// `resume_client_id` names the client record a caller asks to come back as, after
     /// the session replaced its own process image. The record is handed back
@@ -233,7 +232,7 @@ impl Server {
         Some(AttachAccepted {
             client_id,
             session_id,
-            session_structure: build_session_structure_snapshot(session),
+            notification_queue: session.notification_queue.clone(),
             deliveries,
             writer_handoff,
             ending_notice: Arc::clone(self.event_bus.get_ending_notice()),
