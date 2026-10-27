@@ -2375,11 +2375,11 @@ fn window_title_reads_a_focused_floating_panes_title() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            floating_outer_rect,
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: floating_outer_rect,
+            is_pinned: false,
+        });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
@@ -4202,11 +4202,11 @@ fn placement_render_snapshot_keeps_the_floating_panes_and_their_content() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            floating_outer_rect,
-            true,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: floating_outer_rect,
+            is_pinned: true,
+        });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
@@ -5223,17 +5223,17 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            CoreRect::from_origin_and_size(
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: CoreRect::from_origin_and_size(
                 Point { column: 4, row: 2 },
                 Size {
                     column_count: 30,
                     row_count: 8,
                 },
             ),
-            true,
-        ));
+            is_pinned: true,
+        });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());

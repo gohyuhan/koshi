@@ -91,8 +91,8 @@ pub struct Surface {
 ///   `should_kill_process_tree`, and a terminal-too-small event's cause are
 ///   required. 4 read a message without them.
 /// - A frame carries `floating_pane_slots`: the floating panes its client
-///   shows, back to front, each with its outer rect, content rect and pin
-///   state. It also carries `floating_panes`: every floating pane of the
+///   shows, back to front, each with its outer rect and pin state. It also
+///   carries `floating_panes`: every floating pane of the
 ///   session, in the order the panes became floating, each as
 ///   `{"Shown": {"pane_id": …}}` while the client shows it, or as
 ///   `{"Minimized": {"pane_id": …, "pane_title": …}}`, with its title or

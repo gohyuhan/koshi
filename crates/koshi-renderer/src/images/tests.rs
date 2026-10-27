@@ -1197,9 +1197,11 @@ fn push_floating_pane(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            pane_id, outer_rect, false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id,
+            outer_rect,
+            is_pinned: false,
+        });
     let mut pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     pane_snapshot.pane_id = pane_id;
     pane_snapshot.terminal_grid_view = Some(GridView::from_grid(

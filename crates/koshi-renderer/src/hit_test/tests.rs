@@ -1610,9 +1610,11 @@ fn push_floating_pane_slot(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            pane_id, outer_rect, false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id,
+            outer_rect,
+            is_pinned: false,
+        });
 }
 
 /// Float `B` over float `A` over the tiled pane `T`: each cell goes to the

@@ -1706,15 +1706,14 @@ impl<B: Backend> Screen<B> {
                     Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
                     _ => return false,
                 };
-                animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
-                    floating_pane_slot.pane_id,
-                    terminal::interpolate_rect(
+                animated_floating_pane_slots.push(FloatingPaneSlot {
+                    outer_rect: terminal::interpolate_rect(
                         floating_pane_slide_animation.from_outer_rect,
                         floating_pane_slot.outer_rect,
                         progress,
                     ),
-                    floating_pane_slot.is_pinned,
-                ));
+                    ..*floating_pane_slot
+                });
                 true
             });
         self.floating_pane_minimize_animations
@@ -1728,11 +1727,11 @@ impl<B: Backend> Screen<B> {
                 if !is_minimized || progress >= 1.0 {
                     return false;
                 }
-                animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
+                animated_floating_pane_slots.push(FloatingPaneSlot {
                     pane_id,
-                    minimize_animation.compute_outer_rect(current_time),
-                    minimize_animation.is_pinned,
-                ));
+                    outer_rect: minimize_animation.compute_outer_rect(current_time),
+                    is_pinned: minimize_animation.is_pinned,
+                });
                 true
             });
         animated_floating_pane_slots

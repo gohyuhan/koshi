@@ -257,13 +257,11 @@ impl Server {
 /// The floating panes `client` shows, back to front
 /// ([`Client::list_shown_floating_pane_ids`]), each placed for it. A slot's
 /// outer rect is the rectangle the session places the pane in for the client
-/// ([`Session::find_client_floating_pane_rect`]); its content rect comes from
-/// that outer rect ([`FloatingPaneSlot::from_outer_rect`]). Empty when the
-/// client has no floating viewport ([`Client::get_floating_viewport`]).
+/// ([`Session::find_client_floating_pane_rect`]). Empty when the client has no
+/// floating viewport ([`Client::get_floating_viewport`]).
 ///
 /// A `72x22` pane at the default position, alone in the session, on a client
-/// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`, content
-/// rect `(25, 11)` `70x18`.
+/// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`.
 fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingPaneSlot> {
     client
         .list_shown_floating_pane_ids()
@@ -271,11 +269,11 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
         .filter_map(|&pane_id| {
             let floating_pane_view = client.get_floating_pane_view(pane_id)?;
             let outer_rect = session.find_client_floating_pane_rect(client, pane_id)?;
-            Some(FloatingPaneSlot::from_outer_rect(
+            Some(FloatingPaneSlot {
                 pane_id,
                 outer_rect,
-                matches!(floating_pane_view.position, FloatingPanePosition::Pinned(_)),
-            ))
+                is_pinned: matches!(floating_pane_view.position, FloatingPanePosition::Pinned(_)),
+            })
         })
         .collect()
 }

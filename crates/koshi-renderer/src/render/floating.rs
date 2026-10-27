@@ -11,7 +11,8 @@ use koshi_core::constant::FLOATING_CHROME_SIZE;
 use koshi_core::geometry::{Rect, Size};
 
 use crate::floating_chrome::{
-    compute_floating_titlebar, FloatingTitlebar, FloatingTitlebarControls,
+    compute_floating_content_rect, compute_floating_titlebar, FloatingTitlebar,
+    FloatingTitlebarControls,
 };
 use crate::snapshot::{
     CommittedRegions, FloatingPaneSlot, PlacementHandleHover, RenderSnapshot, ViewerChrome,
@@ -75,7 +76,10 @@ pub(crate) fn list_placed_floating_panes(
         .build_painted_frame_layout(viewer_chrome, committed_regions)
         .list_drawn_floating_pane_slots()
         .map(|floating_pane_slot| {
-            let content_area = place_cell_rect(floating_pane_slot.content_rect, pane_area_origin);
+            let content_area = place_cell_rect(
+                compute_floating_content_rect(floating_pane_slot.outer_rect),
+                pane_area_origin,
+            );
             PlacedFloatingPane {
                 floating_pane_slot,
                 outer_area: place_cell_rect(floating_pane_slot.outer_rect, pane_area_origin),

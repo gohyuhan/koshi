@@ -145,9 +145,11 @@ fn push_floating_pane(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            pane_id, outer_rect, false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id,
+            outer_rect,
+            is_pinned: false,
+        });
     let mut pane_snapshot = build_pane_snapshot(pane_id);
     pane_snapshot.pane_title = (!pane_title.is_empty()).then(|| pane_title.to_string());
     render_snapshot.pane_snapshots.push(pane_snapshot);
@@ -296,11 +298,11 @@ fn a_move_draft_places_its_floating_pane_at_the_draft_cell() {
         placed_floating_panes,
         [
             PlacedFloatingPane {
-                floating_pane_slot: FloatingPaneSlot::from_outer_rect(
-                    moved_pane_id,
-                    build_cell_rect(15, 4, 20, 6),
-                    false,
-                ),
+                floating_pane_slot: FloatingPaneSlot {
+                    pane_id: moved_pane_id,
+                    outer_rect: build_cell_rect(15, 4, 20, 6),
+                    is_pinned: false
+                },
                 outer_area: RatatuiRect::new(15, 5, 20, 6),
                 content_area: RatatuiRect::new(16, 8, 18, 2),
                 visible_content_area: RatatuiRect::new(16, 8, 18, 2),
@@ -334,11 +336,11 @@ fn a_move_draft_leaves_a_pinned_floating_pane_at_its_frame_cell() {
     assert_eq!(
         placed_floating_panes,
         [PlacedFloatingPane {
-            floating_pane_slot: FloatingPaneSlot::from_outer_rect(
-                pinned_pane_id,
-                build_cell_rect(2, 1, 20, 6),
-                true,
-            ),
+            floating_pane_slot: FloatingPaneSlot {
+                pane_id: pinned_pane_id,
+                outer_rect: build_cell_rect(2, 1, 20, 6),
+                is_pinned: true
+            },
             outer_area: RatatuiRect::new(2, 2, 20, 6),
             content_area: RatatuiRect::new(3, 5, 18, 2),
             visible_content_area: RatatuiRect::new(3, 5, 18, 2),
@@ -366,11 +368,11 @@ fn a_move_draft_past_the_pane_area_places_its_floating_pane_moved_inside_the_pan
     assert_eq!(
         placed_floating_panes,
         [PlacedFloatingPane {
-            floating_pane_slot: FloatingPaneSlot::from_outer_rect(
-                moved_pane_id,
-                build_cell_rect(20, 4, 20, 6),
-                false,
-            ),
+            floating_pane_slot: FloatingPaneSlot {
+                pane_id: moved_pane_id,
+                outer_rect: build_cell_rect(20, 4, 20, 6),
+                is_pinned: false
+            },
             outer_area: RatatuiRect::new(20, 5, 20, 6),
             content_area: RatatuiRect::new(21, 8, 18, 2),
             visible_content_area: RatatuiRect::new(21, 8, 18, 2),

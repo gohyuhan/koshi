@@ -3507,17 +3507,17 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
         mouse_frame
             .session_snapshot
             .floating_pane_slots
-            .push(FloatingPaneSlot::from_outer_rect(
-                floating_pane_id,
-                Rect::from_origin_and_size(
+            .push(FloatingPaneSlot {
+                pane_id: floating_pane_id,
+                outer_rect: Rect::from_origin_and_size(
                     Point { column, row: 2 },
                     Size {
                         column_count: 20,
                         row_count: 8,
                     },
                 ),
-                false,
-            ));
+                is_pinned: false,
+            });
         mouse_frame
             .mouse_panes
             .push(build_plain_mouse_pane(floating_pane_id));
@@ -12806,17 +12806,17 @@ fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() 
     mouse_frame
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            Rect::from_origin_and_size(
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: Rect::from_origin_and_size(
                 Point { column: 10, row: 4 },
                 Size {
                     column_count: 40,
                     row_count: 12,
                 },
             ),
-            false,
-        ));
+            is_pinned: false,
+        });
     mouse_frame
         .mouse_panes
         .push(build_plain_mouse_pane(floating_pane_id));
@@ -13750,21 +13750,20 @@ fn build_undocked_pane_frames(
             },
         ),
     )];
-    let floating_pane_slot = FloatingPaneSlot::from_outer_rect(
-        undocked_pane_id,
-        Rect::from_origin_and_size(
+    let floating_pane_slot = FloatingPaneSlot {
+        pane_id: undocked_pane_id,
+        outer_rect: Rect::from_origin_and_size(
             Point { column: 16, row: 4 },
             Size {
                 column_count: 48,
                 row_count: 13,
             },
         ),
-        false,
-    );
+        is_pinned: false,
+    };
     undocked_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
         pane_id: undocked_pane_id,
         outer_rect: floating_pane_slot.outer_rect,
-        content_rect: floating_pane_slot.content_rect,
         is_pinned: false,
     }];
     undocked_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
@@ -13811,17 +13810,17 @@ fn an_undocked_pane_slides_from_its_tiled_box_to_its_floating_box() {
         .expect("the undocked frame paints");
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
-        vec![FloatingPaneSlot::from_outer_rect(
-            undocked_pane_id,
-            Rect::from_origin_and_size(
+        vec![FloatingPaneSlot {
+            pane_id: undocked_pane_id,
+            outer_rect: Rect::from_origin_and_size(
                 Point { column: 41, row: 1 },
                 Size {
                     column_count: 29,
                     row_count: 20,
                 },
             ),
-            false,
-        )],
+            is_pinned: false
+        }],
         "the slide starts at the tiled box moved by the (10, 1) letterbox offset"
     );
     assert_eq!(
@@ -13843,17 +13842,17 @@ fn an_undocked_pane_slides_from_its_tiled_box_to_its_floating_box() {
         .expect("the slide repaints without a session frame");
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
-        vec![FloatingPaneSlot::from_outer_rect(
-            undocked_pane_id,
-            Rect::from_origin_and_size(
+        vec![FloatingPaneSlot {
+            pane_id: undocked_pane_id,
+            outer_rect: Rect::from_origin_and_size(
                 Point { column: 19, row: 4 },
                 Size {
                     column_count: 46,
                     row_count: 14,
                 },
             ),
-            false,
-        )],
+            is_pinned: false
+        }],
         "80 ms into 160 ms the ease-out has covered 0.875 of the way"
     );
 
@@ -13917,22 +13916,21 @@ fn a_frame_that_floats_one_pane_and_drops_another_slides_only_the_floated_pane()
         .active_tab_snapshot
         .pane_slots[0]
         .pane_id = PaneId::new();
-    let slide_start_slot = FloatingPaneSlot::from_outer_rect(
-        undocked_pane_id,
-        Rect::from_origin_and_size(
+    let slide_start_slot = FloatingPaneSlot {
+        pane_id: undocked_pane_id,
+        outer_rect: Rect::from_origin_and_size(
             Point { column: 41, row: 1 },
             Size {
                 column_count: 29,
                 row_count: 20,
             },
         ),
-        false,
-    );
+        is_pinned: false,
+    };
     let mut slide_start_frame = undocked_frame.clone();
     slide_start_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
         pane_id: undocked_pane_id,
         outer_rect: slide_start_slot.outer_rect,
-        content_rect: slide_start_slot.content_rect,
         is_pinned: false,
     }];
     screen.pending_snapshot = Some(build_render_snapshot(&build_received_painted_frame(
@@ -13983,23 +13981,22 @@ fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
         .active_tab_snapshot
         .pane_slots[0]
         .pane_id = PaneId::new();
-    let left_floating_pane_slot = FloatingPaneSlot::from_outer_rect(
-        left_pane_id,
-        Rect::from_origin_and_size(
+    let left_floating_pane_slot = FloatingPaneSlot {
+        pane_id: left_pane_id,
+        outer_rect: Rect::from_origin_and_size(
             Point { column: 18, row: 5 },
             Size {
                 column_count: 48,
                 row_count: 13,
             },
         ),
-        false,
-    );
+        is_pinned: false,
+    };
     undocked_frame.session_snapshot.floating_pane_slots.insert(
         0,
         FrameFloatingPaneSlot {
             pane_id: left_pane_id,
             outer_rect: left_floating_pane_slot.outer_rect,
-            content_rect: left_floating_pane_slot.content_rect,
             is_pinned: false,
         },
     );
@@ -14030,16 +14027,22 @@ fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![
-            FloatingPaneSlot::from_outer_rect(
-                left_pane_id,
-                Rect::from_origin_and_size(Point { column: 10, row: 1 }, tiled_half_size),
-                false,
-            ),
-            FloatingPaneSlot::from_outer_rect(
-                undocked_pane_id,
-                Rect::from_origin_and_size(Point { column: 41, row: 1 }, tiled_half_size),
-                false,
-            ),
+            FloatingPaneSlot {
+                pane_id: left_pane_id,
+                outer_rect: Rect::from_origin_and_size(
+                    Point { column: 10, row: 1 },
+                    tiled_half_size
+                ),
+                is_pinned: false
+            },
+            FloatingPaneSlot {
+                pane_id: undocked_pane_id,
+                outer_rect: Rect::from_origin_and_size(
+                    Point { column: 41, row: 1 },
+                    tiled_half_size
+                ),
+                is_pinned: false
+            },
         ],
         "each pane starts its own slide at its tiled box moved by the (10, 1) letterbox offset"
     );
@@ -14066,17 +14069,17 @@ fn a_paint_retry_keeps_one_slide_per_floated_pane() {
 
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
-        vec![FloatingPaneSlot::from_outer_rect(
-            undocked_pane_id,
-            Rect::from_origin_and_size(
+        vec![FloatingPaneSlot {
+            pane_id: undocked_pane_id,
+            outer_rect: Rect::from_origin_and_size(
                 Point { column: 19, row: 4 },
                 Size {
                     column_count: 46,
                     row_count: 14,
                 },
             ),
-            false,
-        )],
+            is_pinned: false
+        }],
         "the slide that the rejected attempt started runs on from that attempt's time"
     );
 }
@@ -14144,17 +14147,17 @@ fn an_undock_slide_with_no_tab_slide_keeps_the_screen_waking() {
         .expect("the slide repaints without a session frame");
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
-        vec![FloatingPaneSlot::from_outer_rect(
-            undocked_pane_id,
-            Rect::from_origin_and_size(
+        vec![FloatingPaneSlot {
+            pane_id: undocked_pane_id,
+            outer_rect: Rect::from_origin_and_size(
                 Point { column: 19, row: 4 },
                 Size {
                     column_count: 46,
                     row_count: 14,
                 },
             ),
-            false,
-        )]
+            is_pinned: false
+        }]
     );
 }
 
@@ -14644,21 +14647,20 @@ fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, 
         pane_title: Some(String::from("htop")),
     }];
     let mut shown_frame = minimized_frame.clone();
-    let floating_pane_slot = FloatingPaneSlot::from_outer_rect(
-        floating_pane_id,
-        Rect::from_origin_and_size(
+    let floating_pane_slot = FloatingPaneSlot {
+        pane_id: floating_pane_id,
+        outer_rect: Rect::from_origin_and_size(
             Point { column: 16, row: 4 },
             Size {
                 column_count: 48,
                 row_count: 13,
             },
         ),
-        false,
-    );
+        is_pinned: false,
+    };
     shown_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
         pane_id: floating_pane_id,
         outer_rect: floating_pane_slot.outer_rect,
-        content_rect: floating_pane_slot.content_rect,
         is_pinned: false,
     }];
     shown_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
@@ -14698,17 +14700,17 @@ fn build_unpinned_floating_pane_slot(
     column_count: u16,
     row_count: u16,
 ) -> FloatingPaneSlot {
-    FloatingPaneSlot::from_outer_rect(
+    FloatingPaneSlot {
         pane_id,
-        Rect::from_origin_and_size(
+        outer_rect: Rect::from_origin_and_size(
             Point { column, row },
             Size {
                 column_count,
                 row_count,
             },
         ),
-        false,
-    )
+        is_pinned: false,
+    }
 }
 
 #[test]

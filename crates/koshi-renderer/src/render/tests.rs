@@ -42,6 +42,7 @@
 
 use super::*;
 
+use crate::floating_chrome::compute_floating_content_rect;
 use crate::notification::tests::build_test_notification_view;
 use crate::notification::NotificationCenterEntries;
 use std::sync::Arc;
@@ -4705,11 +4706,11 @@ fn build_focused_floating_pane_render_snapshot() -> (RenderSnapshot, PaneId) {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            floating_outer_rect,
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: floating_outer_rect,
+            is_pinned: false,
+        });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_pane_id;
     floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
@@ -4871,11 +4872,11 @@ fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell()
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            PaneId::new(),
-            covering_outer_rect,
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: PaneId::new(),
+            outer_rect: covering_outer_rect,
+            is_pinned: false,
+        });
 
     // The covering pane's outer area `(14, 5)` `10x5` holds the cursor cell
     // `(15, 6)`.
@@ -4895,8 +4896,11 @@ fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell()
 #[test]
 fn a_floating_panes_cursor_cell_past_the_pane_area_places_no_cursor() {
     let (mut render_snapshot, floating_pane_id) = build_focused_floating_pane_render_snapshot();
-    render_snapshot.session_snapshot.floating_pane_slots[0] =
-        FloatingPaneSlot::from_outer_rect(floating_pane_id, build_cell_rect(9, 4, 30, 8), false);
+    render_snapshot.session_snapshot.floating_pane_slots[0] = FloatingPaneSlot {
+        pane_id: floating_pane_id,
+        outer_rect: build_cell_rect(9, 4, 30, 8),
+        is_pinned: false,
+    };
 
     // The content starts at screen `(10, 8)` and the pane area ends after row
     // `10`: cursor row `2` lands on row `10`, inside it.
@@ -5133,9 +5137,14 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
             seeded_sequence.compute_next_in_range(3, usize::from(pane_area_row_count)) as u16,
         );
         let is_pinned = seeded_sequence.compute_next_index(2) == 0;
-        render_snapshot.session_snapshot.floating_pane_slots.push(
-            FloatingPaneSlot::from_outer_rect(floating_pane_id, outer_rect, is_pinned),
-        );
+        render_snapshot
+            .session_snapshot
+            .floating_pane_slots
+            .push(FloatingPaneSlot {
+                pane_id: floating_pane_id,
+                outer_rect,
+                is_pinned,
+            });
         let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
         floating_pane_snapshot.pane_id = floating_pane_id;
         render_snapshot.pane_snapshots.push(floating_pane_snapshot);
@@ -5158,7 +5167,7 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
                 .map(|floating_pane_slot| {
                     (
                         floating_pane_slot.pane_id,
-                        floating_pane_slot.content_rect.size,
+                        compute_floating_content_rect(floating_pane_slot.outer_rect).size,
                     )
                 }),
         )
@@ -5493,11 +5502,11 @@ fn a_floating_pane_row_lists_the_row_its_visible_content_area_shows_it_on() {
     previous_render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            build_cell_rect(2, 3, 12, 7),
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: build_cell_rect(2, 3, 12, 7),
+            is_pinned: false,
+        });
     let mut floating_pane_snapshot = previous_render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_pane_id;
     let mut floating_grid = Grid::build_blank(3, 10, TermStyle::default());
@@ -5656,11 +5665,11 @@ fn a_tiled_pane_printing_under_a_floating_pane_keeps_the_floating_cells_on_top()
     previous_render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            build_cell_rect(4, 1, 10, 6),
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: build_cell_rect(4, 1, 10, 6),
+            is_pinned: false,
+        });
     let mut floating_grid = Grid::build_blank(2, 8, TermStyle::default());
     for row_index in 0..2 {
         for column_index in 0..8 {

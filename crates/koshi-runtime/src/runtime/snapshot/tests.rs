@@ -1685,16 +1685,6 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
                     row_count: 22,
                 },
             ),
-            content_rect: Rect::from_origin_and_size(
-                Point {
-                    column: 25,
-                    row: 11,
-                },
-                Size {
-                    column_count: 70,
-                    row_count: 18,
-                },
-            ),
             is_pinned: false,
         }]
     );
@@ -2022,13 +2012,6 @@ fn a_pinned_floating_pane_is_marked_pinned_at_its_pinned_cell() {
                 Size {
                     column_count: 20,
                     row_count: 6,
-                },
-            ),
-            content_rect: Rect::from_origin_and_size(
-                Point { column: 11, row: 6 },
-                Size {
-                    column_count: 18,
-                    row_count: 2,
                 },
             ),
             is_pinned: true,

@@ -380,7 +380,8 @@ pub(crate) fn classify_floating_frame_point(
 
 /// Classify `pane_area_point`, a cell inside `floating_pane_slot`'s outer rect
 /// counted from the pane-area origin, by the part of the floating pane under
-/// it ([`classify_floating_frame_point`] with its content rect and
+/// it ([`classify_floating_frame_point`] with the content rect of its outer
+/// rect ([`compute_floating_content_rect`]) and
 /// [`FloatingTitlebarControls::FLOATING_PANE`]): its content, its grab handle
 /// ([`PlacementHandle`](HitRegion::PlacementHandle)), each control, its border
 /// ring, and [`PaneTitlebar`](HitRegion::PaneTitlebar) for every other cell.
@@ -391,7 +392,7 @@ fn classify_floating_pane_region(
     let pane_id = floating_pane_slot.pane_id;
     match classify_floating_frame_point(
         floating_pane_slot.outer_rect,
-        floating_pane_slot.content_rect,
+        compute_floating_content_rect(floating_pane_slot.outer_rect),
         FloatingTitlebarControls::FLOATING_PANE,
         pane_area_point,
     ) {
@@ -626,9 +627,10 @@ fn classify_tabline_region(
 ///
 /// This is the region a program's own grid maps onto — its cells inside the
 /// border. It reads the frame the same way [`resolve_hit_region`] does: a
-/// floating pane this viewer draws sits at its slot's content rect moved by the
-/// pane-area origin, and a tiled pane in the layout centered in the committed
-/// pane rectangle, with a letterbox margin around it.
+/// floating pane this viewer draws sits at the content rect of its slot's outer
+/// rect ([`compute_floating_content_rect`]) moved by the pane-area origin, and
+/// a tiled pane in the layout centered in the committed pane rectangle, with a
+/// letterbox margin around it.
 #[must_use]
 pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
     let viewport_area = compute_viewport_area(frame_layout);
@@ -641,7 +643,7 @@ pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) ->
     }
     let frame_pane_area = compute_frame_pane_area(frame_layout, viewport_area);
     if let Some(floating_pane_slot) = frame_layout.find_drawn_floating_pane_slot(pane_id) {
-        let content_rect = floating_pane_slot.content_rect;
+        let content_rect = compute_floating_content_rect(floating_pane_slot.outer_rect);
         return Some(Rect::from_origin_and_size(
             Point {
                 column: frame_pane_area.x.saturating_add(content_rect.origin.column),

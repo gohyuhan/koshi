@@ -516,13 +516,6 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             row_count: 5,
         },
     };
-    let lower_content_rect = Rect {
-        origin: Point { column: 3, row: 4 },
-        size: Size {
-            column_count: 6,
-            row_count: 1,
-        },
-    };
     let upper_outer_rect = Rect {
         origin: Point { column: 6, row: 0 },
         size: Size {
@@ -530,24 +523,15 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             row_count: 6,
         },
     };
-    let upper_content_rect = Rect {
-        origin: Point { column: 7, row: 3 },
-        size: Size {
-            column_count: 4,
-            row_count: 2,
-        },
-    };
     render_snapshot.session_snapshot.floating_pane_slots = vec![
         FloatingPaneSlot {
             pane_id: lower_floating_pane_id,
             outer_rect: lower_outer_rect,
-            content_rect: lower_content_rect,
             is_pinned: false,
         },
         FloatingPaneSlot {
             pane_id: upper_floating_pane_id,
             outer_rect: upper_outer_rect,
-            content_rect: upper_content_rect,
             is_pinned: true,
         },
     ];
@@ -578,13 +562,11 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             FrameFloatingPaneSlot {
                 pane_id: lower_floating_pane_id,
                 outer_rect: lower_outer_rect,
-                content_rect: lower_content_rect,
                 is_pinned: false,
             },
             FrameFloatingPaneSlot {
                 pane_id: upper_floating_pane_id,
                 outer_rect: upper_outer_rect,
-                content_rect: upper_content_rect,
                 is_pinned: true,
             },
         ]
