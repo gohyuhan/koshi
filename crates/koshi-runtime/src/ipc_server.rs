@@ -99,7 +99,7 @@ use koshi_ipc::transport::{self, Connection, FrameWriter, Listener, ReadCloser};
 use koshi_ipc::validate::validate_shared_socket_address;
 use koshi_ipc::validate::{reclaim_stale_socket, validate_socket_address};
 use koshi_ipc::wire::MaybeKnown;
-use koshi_observability::logging::recent_events;
+use koshi_observability::logging::recent_events::RecentEventRing;
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_renderer::snapshot::{Delivery, ImagePlacementSnapshot, RenderSnapshot};
 use koshi_terminal::graphics::{DecodedAnimation, DecodedImage, ImageRecord};
@@ -474,10 +474,15 @@ impl IpcServer {
     /// unwinds the bind as a failed endpoint write does. `None` writes no
     /// program file, and every `Restart` is refused with
     /// [`RestartRefusal::ImageReplacementUnsupported`].
+    ///
+    /// `recent_event_ring` is the ring the session's server records into. The
+    /// serving thread answers a `RecentEvents` request from it, without the
+    /// dispatcher.
     pub fn start(
         runtime_directory: &Path,
         session_id: SessionId,
         inbox_sender: Sender<RuntimeEvent>,
+        recent_event_ring: Arc<RecentEventRing>,
         other_users: Option<OtherUsers>,
         image_replacement: Option<ImageReplacement>,
     ) -> Result<IpcServer, IpcError> {
@@ -564,6 +569,7 @@ impl IpcServer {
                 allow_other_users_setting.as_ref(),
                 &accept_intake,
                 image_replacement.as_ref(),
+                &recent_event_ring,
             );
         });
 
@@ -753,6 +759,11 @@ impl Drop for IpcServer {
 /// Hello refused for its protocol version. When either finds another koshi
 /// version, [`restart_into_installed_version`] runs the restart check and asks
 /// the dispatcher to restart.
+// Carries the socket (`listener`, `connection_token`, `is_shutting_down`), who
+// may connect (`allow_other_users_setting`), and what every connection is
+// served with (`inbox_sender`, `connection_intake`, `image_replacement`,
+// `recent_event_ring`).
+#[allow(clippy::too_many_arguments)]
 fn run_accept_loop(
     listener: &Listener,
     connection_token: &RwLock<ConnectionToken>,
@@ -761,6 +772,7 @@ fn run_accept_loop(
     allow_other_users_setting: Option<&OtherUsersSetting>,
     connection_intake: &Arc<Intake>,
     image_replacement: Option<&Arc<ImageReplacement>>,
+    recent_event_ring: &Arc<RecentEventRing>,
 ) {
     let mut accept_failure_warning = WarningRateLimiter::new();
     transport::accept_until_shutdown(
@@ -810,6 +822,7 @@ fn run_accept_loop(
             let connection_token = connection_token.read().expect("connection token").clone();
             let inbox_sender = inbox_sender.clone();
             let image_replacement = image_replacement.cloned();
+            let recent_event_ring = Arc::clone(recent_event_ring);
             std::thread::spawn(move || {
                 serve_connection(
                     connection,
@@ -819,6 +832,7 @@ fn run_accept_loop(
                     live_setting,
                     &served_connection,
                     image_replacement.as_ref(),
+                    &recent_event_ring,
                 );
             });
         },
@@ -833,8 +847,8 @@ fn run_accept_loop(
 /// out. What is left is this session's own vocabulary: `SubmitCommand`,
 /// `Attach`, `Discovery`, `Layout`, `Restart`, `ClipboardCopyPart` and
 /// `ClipboardCopy` cross to the dispatcher over the inbox and answer with its
-/// reply. `RecentEvents` is answered on this thread, from the process-wide log
-/// ring, and reaches no dispatcher.
+/// reply. `RecentEvents` is answered on this thread, from `recent_event_ring`,
+/// and reaches no dispatcher.
 ///
 /// A `SubmitCommand`, an `Attach`, a `ClipboardCopy` and a `Restart` run only
 /// through `Prepare` and `Commit`:
@@ -940,6 +954,10 @@ fn run_accept_loop(
 /// `image_replacement` holds, which restarts the session through
 /// [`restart_into_installed_version`] when the program file holds another
 /// koshi version, and the connection keeps serving.
+// Carries one connection (`connection`, `connection_token`, `peer`,
+// `live_setting`, `served_connection`) and the session it serves
+// (`inbox_sender`, `image_replacement`, `recent_event_ring`).
+#[allow(clippy::too_many_arguments)]
 fn serve_connection(
     mut connection: Connection,
     connection_token: ConnectionToken,
@@ -948,6 +966,7 @@ fn serve_connection(
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
     image_replacement: Option<&Arc<ImageReplacement>>,
+    recent_event_ring: &RecentEventRing,
 ) {
     let mut handshake = Handshake::from_expected_token_and_peer(connection_token, peer);
     let mut held_copy_bytes: Vec<u8> = Vec::new();
@@ -1317,7 +1336,7 @@ fn serve_connection(
             }
             IpcRequestKind::RecentEvents => IpcResponse {
                 request_id,
-                answer_result: IpcResult::RecentEvents(recent_events::list_recent_events()),
+                answer_result: IpcResult::RecentEvents(recent_event_ring.list_recent_events()),
             },
             IpcRequestKind::Restart => {
                 let restart_verdict = match image_replacement {

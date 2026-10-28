@@ -927,7 +927,7 @@ impl TerminalEngine {
     /// shell-integration facts that the chunk produced. A `C` marker when the
     /// shell is not already running a command returns
     /// [`ShellIntegrationFact::CommandStarted`], and a matched `D` marker
-    /// returns [`ShellIntegrationFact::CommandFinished`] with its exit code.
+    /// returns [`ShellIntegrationFact::CommandFinished`].
     /// The facts contain no command text. `ESC ] 133 ; C` followed by
     /// `ESC ] 133 ; D ; 137` returns both facts in that order.
     #[must_use = "undelivered replies or shell facts are lost"]

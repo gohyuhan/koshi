@@ -252,11 +252,7 @@ impl Server {
             );
         }
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// The spawn specification a [`Command::NewPane`] launches: an explicit
@@ -418,11 +414,7 @@ impl Server {
             pane_id: new_pane_id,
             pty_size: new_floating_pane_target.pty_size,
         }));
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::ClosePane`]: tear the pane out of its session and
@@ -521,11 +513,7 @@ impl Server {
             compute_pane_kill_policy(false, false),
         );
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::ClosePane`] on a floating pane: remove it from the
@@ -558,11 +546,7 @@ impl Server {
 
         self.release_pane_bookkeeping(session_id, pane_id);
         self.kill_pane_off_thread(pane_id, kill_policy);
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// End each pane of `floating_pane_ids` that the session `session_id` does
@@ -914,7 +898,7 @@ impl Server {
         );
 
         Ok((
-            Self::commit_events(&mut self.event_bus, command_id, emitted_events),
+            self.commit_events(command_id, emitted_events),
             Some(moved_cell_count),
         ))
     }
@@ -958,11 +942,7 @@ impl Server {
 
         let mut emitted_events = Vec::new();
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::MovePane`]: swap the selected pane with its visible
@@ -1286,11 +1266,7 @@ impl Server {
             );
         }
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Undock the tiled or stacked pane `undock_target.source_pane_id`: make it
@@ -1396,11 +1372,7 @@ impl Server {
             undock_target.session_id,
             &mut emitted_events,
         );
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Dock the floating pane `dock_target.source_pane_id` into
@@ -1518,11 +1490,7 @@ impl Server {
                 &mut emitted_events,
             );
         }
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Apply a checked swap, insertion or stack within one tab. A swap or a
@@ -1558,7 +1526,7 @@ impl Server {
             TiledPlacementTarget::Split { .. } => false,
         };
         if is_source_pane_target && expected_placed_tab_layout.is_none() {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
         let layout_target = PlacementTarget::from_tiled_placement_target(tiled_placement_target);
         let pane_sizing = self.get_pane_sizing();
@@ -1590,7 +1558,7 @@ impl Server {
             expected_placed_tab_layout,
         )?;
         if is_source_pane_target {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
         if let Some(client) = session
             .clients
@@ -1640,11 +1608,7 @@ impl Server {
             placement_target.source_tab_id,
             &mut emitted_events,
         );
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::ScrollPane`]: move one client's view of one pane
@@ -1672,7 +1636,7 @@ impl Server {
                 scroll_line_count,
             );
         }
-        Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
+        Ok(self.commit_events(command_id, Vec::new()))
     }
 
     /// Refuse a confirmed placement whose destination tab, as the acting
@@ -1924,7 +1888,7 @@ impl Server {
             && !is_stack_member_opened
             && !is_layout_mode_retargeted
         {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
 
         // The focus, and this client's zoom with it, moves before the reflow;
@@ -1952,11 +1916,7 @@ impl Server {
         }
         emitted_events.extend(focus_events);
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Show the floating pane `floating_pane_view_target` names for its client,
@@ -1987,7 +1947,7 @@ impl Server {
         let previous_focused_pane_id =
             Self::require_client(session, client_id)?.get_active_focused_pane_id();
         if previous_focused_pane_id == Some(pane_id) {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
         let client = Self::require_client_mut(session, client_id)?;
         let is_pane_restored = client.focus_floating_pane(pane_id);
@@ -2000,11 +1960,7 @@ impl Server {
             ));
         }
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::TogglePaneFullscreen`]: switch the **target client's**
@@ -2113,11 +2069,7 @@ impl Server {
 
         emitted_events.extend(focus_events);
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
@@ -2162,7 +2114,7 @@ impl Server {
                 self.handle_input_reached_pane(client_id, pane_target.pane_id);
             }
         }
-        Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
+        Ok(self.commit_events(command_id, Vec::new()))
     }
 
     /// Choose the tab size a new split is sized against, and the *designated*

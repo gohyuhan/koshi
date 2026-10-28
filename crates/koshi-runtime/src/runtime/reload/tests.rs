@@ -46,6 +46,7 @@ fn build_test_server_without_sessions() -> Server {
             InboxSink::from_event_sender(event_sender),
         ))),
         event_receiver,
+        Arc::default(),
     )
 }
 

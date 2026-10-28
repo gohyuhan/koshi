@@ -2001,7 +2001,8 @@ mod bridge_round_trip {
         runtime_event_sender: mpsc::Sender<RuntimeEvent>,
     ) {
         let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend;
-        let mut session_server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+        let mut session_server =
+            Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
         session_server.load_startup_config(None);
         session_server
             .bootstrap_session(
@@ -2016,6 +2017,7 @@ mod bridge_round_trip {
             runtime_directory,
             session_id,
             runtime_event_sender,
+            Arc::clone(session_server.get_recent_event_ring()),
             None,
             None,
         )

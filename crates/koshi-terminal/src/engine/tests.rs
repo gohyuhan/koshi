@@ -157,15 +157,13 @@ fn process_pty_output_with_shell_integration_returns_command_facts_in_order() {
         shell_integration_facts,
         vec![
             ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished {
-                exit_code: Some(137),
-            },
+            ShellIntegrationFact::CommandFinished,
         ]
     );
 }
 
 #[test]
-fn bare_shell_integration_finish_returns_no_exit_code() {
+fn bare_shell_integration_finish_returns_the_finish() {
     let mut engine = build_test_terminal_engine();
 
     let (_, shell_integration_facts) =
@@ -175,7 +173,7 @@ fn bare_shell_integration_finish_returns_no_exit_code() {
         shell_integration_facts,
         vec![
             ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished { exit_code: None },
+            ShellIntegrationFact::CommandFinished,
         ]
     );
 }
@@ -231,9 +229,7 @@ fn split_shell_integration_command_fact_waits_for_the_terminator() {
     let (_, shell_integration_facts) = engine.process_pty_output_with_shell_integration(b"137\x07");
     assert_eq!(
         shell_integration_facts,
-        vec![ShellIntegrationFact::CommandFinished {
-            exit_code: Some(137),
-        }]
+        vec![ShellIntegrationFact::CommandFinished]
     );
 }
 

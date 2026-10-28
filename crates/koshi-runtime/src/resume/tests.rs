@@ -37,7 +37,6 @@ use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use koshi_layout::content::find_content_rect;
 use koshi_layout::solver::solve_layout_with_sizing;
 use koshi_layout::tree::LayoutNode;
-use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend};
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry, FloatingPaneView};
 use koshi_terminal::engine::GraphicsEvent;
@@ -1177,7 +1176,7 @@ fn build_populated_server() -> PopulatedServer {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender.clone()),
     )));
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
 
     let session_id = SessionId::new();
     server
@@ -1462,6 +1461,7 @@ fn build_resumed_server_with_config_and_exit_statuses(
     let server = Server::resume(
         pty_backend,
         inbox_receiver,
+        Arc::default(),
         startup_app_config,
         resume_body,
         resume_header.resume_format,
@@ -2816,6 +2816,7 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
     let resumed_server = Server::resume(
         pty_backend,
         inbox_receiver,
+        Arc::default(),
         None,
         build_resume_body_with_quit(None),
         RESUME_FORMAT,
@@ -2848,8 +2849,10 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
             .collect(),
         ..resume_header.clone()
     };
-    let count_undriven_pane_exit_events = || {
-        recent_events::list_recent_events()
+    let count_undriven_pane_exit_events = |resumed_server: &Server| {
+        resumed_server
+            .recent_event_ring
+            .list_recent_events()
             .iter()
             .filter(|event_record| {
                 event_record.pane_id == Some(undriven_pane_id)
@@ -2889,7 +2892,7 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         "the other panes stay"
     );
     assert_eq!(
-        count_undriven_pane_exit_events(),
+        count_undriven_pane_exit_events(&resumed_server),
         1,
         "the carried exit is published once"
     );
@@ -2897,7 +2900,7 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         resumed_server.handle_child_exit(undriven_pane_id, ExitStatus::ExitCode(7));
     resumed_server.publish_events(&child_exit_events);
     assert_eq!(
-        count_undriven_pane_exit_events(),
+        count_undriven_pane_exit_events(&resumed_server),
         1,
         "the queued copy of the exit does not publish again"
     );
@@ -3303,7 +3306,7 @@ fn a_profile_session_carried_before_any_attach_keeps_its_starting_tab_and_pane()
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender),
     )));
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     let session_id = SessionId::new();
     let profile_template = koshi_config::profile::parse_profile(
         Path::new("profile/test.kdl"),

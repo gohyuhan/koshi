@@ -64,7 +64,7 @@ fn build_test_runtime_with_inbox_sender(
         InboxSink::from_event_sender(event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let server = Server::from_runtime_parts(pty_backend, event_receiver);
+    let server = Server::from_runtime_parts(pty_backend, event_receiver, Arc::default());
     (server, fake_pty_backend, event_sender)
 }
 

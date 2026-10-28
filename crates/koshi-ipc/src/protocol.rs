@@ -412,7 +412,7 @@ pub enum IpcRequestKind {
         is_remote: bool,
     },
     /// Join the session as a viewing client: the server mints the client,
-    /// registers it for every event the session publishes, and answers with
+    /// subscribes it to the session's event stream, and answers with
     /// [`IpcResult::Attached`].
     ///
     /// The caller names no identity of its own. Who the client is, what it may

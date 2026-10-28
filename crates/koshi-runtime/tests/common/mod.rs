@@ -105,7 +105,7 @@ pub fn build_server_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>, Sen
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     (server, fake_pty_backend, runtime_event_sender)
 }
 
@@ -188,6 +188,7 @@ pub fn start_test_session<ExchangeResult: Send + 'static>(
         &runtime_directory,
         session_id,
         runtime_event_sender.clone(),
+        Arc::clone(server.get_recent_event_ring()),
         None,
         None,
     )

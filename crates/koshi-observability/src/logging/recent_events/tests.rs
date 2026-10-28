@@ -1,33 +1,12 @@
 //! Tests for the recent-events ring: order, the capacity bound, and what a
-//! record carries.
-//!
-//! The ring is process-wide. Every test takes [`RECENT_EVENT_TEST_LOCK`] first, then clears the
-//! ring.
-//!
-//! [`the_ring_answers_after_a_thread_died_holding_it`] poisons [`RECENT_EVENT_RING`] for the
-//! rest of the binary; every other lock taken on [`RECENT_EVENT_RING`] here recovers it.
+//! record carries. Each test records into a ring of its own.
+
+use std::sync::Arc;
 
 use super::*;
 
-/// Remove every record from the ring.
-fn clear_recent_events() {
-    lock_recent_event_ring().clear();
-}
-
 use koshi_core::event::{PaneCreated, QuitCause};
 use koshi_core::ids::{PaneId, TabId};
-
-/// Held for the length of one test; two tests never hold the ring at once.
-static RECENT_EVENT_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-/// Take the ring for this test and empty it.
-fn lock_recent_events_for_test() -> MutexGuard<'static, ()> {
-    let serialization_guard = RECENT_EVENT_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    clear_recent_events();
-    serialization_guard
-}
 
 /// A `PaneCreated` for a fresh pane in a fresh tab.
 fn build_pane_created_event() -> Event {
@@ -47,37 +26,37 @@ fn list_event_names(recent_events: &[RecentEvent]) -> Vec<&str> {
 
 #[test]
 fn an_empty_ring_reports_nothing() {
-    let _serialization_guard = lock_recent_events_for_test();
+    let recent_event_ring = RecentEventRing::default();
 
-    assert_eq!(list_recent_events(), Vec::new());
+    assert_eq!(recent_event_ring.list_recent_events(), Vec::new());
 }
 
 #[test]
 fn records_come_back_in_the_order_they_were_made() {
-    let _serialization_guard = lock_recent_events_for_test();
+    let recent_event_ring = RecentEventRing::default();
 
-    record_event(&build_pane_created_event());
-    record_event(&Event::Quit(QuitCause::Requested));
-    record_event(&Event::Restarting);
+    recent_event_ring.record_event(&build_pane_created_event());
+    recent_event_ring.record_event(&Event::Quit(QuitCause::Requested));
+    recent_event_ring.record_event(&Event::Restarting);
 
     assert_eq!(
-        list_event_names(&list_recent_events()),
+        list_event_names(&recent_event_ring.list_recent_events()),
         ["PaneCreated", "Quit", "Restarting"]
     );
 }
 
 #[test]
 fn a_record_carries_the_ids_its_event_named() {
-    let _serialization_guard = lock_recent_events_for_test();
+    let recent_event_ring = RecentEventRing::default();
     let pane_id = PaneId::new();
     let tab_id = TabId::new();
 
-    record_event(&Event::PaneCreated(PaneCreated {
+    recent_event_ring.record_event(&Event::PaneCreated(PaneCreated {
         pane_id,
         tab_id: Some(tab_id),
     }));
 
-    let recent_events = list_recent_events();
+    let recent_events = recent_event_ring.list_recent_events();
     assert_eq!(recent_events.len(), 1);
     assert_eq!(
         recent_events[0],
@@ -95,31 +74,37 @@ fn a_record_carries_the_ids_its_event_named() {
 
 #[test]
 fn a_full_ring_drops_exactly_the_oldest_record() {
-    let _serialization_guard = lock_recent_events_for_test();
+    let recent_event_ring = RecentEventRing::default();
     let oldest_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let newest_pane_id = PaneId::new();
 
-    record_event(&Event::PaneCreated(PaneCreated {
+    recent_event_ring.record_event(&Event::PaneCreated(PaneCreated {
         pane_id: oldest_pane_id,
         tab_id: Some(TabId::new()),
     }));
-    record_event(&Event::PaneCreated(PaneCreated {
+    recent_event_ring.record_event(&Event::PaneCreated(PaneCreated {
         pane_id: second_pane_id,
         tab_id: Some(TabId::new()),
     }));
     for _ in 2..MAX_RECENT_EVENT_COUNT {
-        record_event(&build_pane_created_event());
+        recent_event_ring.record_event(&build_pane_created_event());
     }
-    assert_eq!(list_recent_events().len(), MAX_RECENT_EVENT_COUNT);
-    assert_eq!(list_recent_events()[0].pane_id, Some(oldest_pane_id));
+    assert_eq!(
+        recent_event_ring.list_recent_events().len(),
+        MAX_RECENT_EVENT_COUNT
+    );
+    assert_eq!(
+        recent_event_ring.list_recent_events()[0].pane_id,
+        Some(oldest_pane_id)
+    );
 
-    record_event(&Event::PaneCreated(PaneCreated {
+    recent_event_ring.record_event(&Event::PaneCreated(PaneCreated {
         pane_id: newest_pane_id,
         tab_id: Some(TabId::new()),
     }));
 
-    let recent_events = list_recent_events();
+    let recent_events = recent_event_ring.list_recent_events();
     assert_eq!(recent_events.len(), MAX_RECENT_EVENT_COUNT);
     assert_ne!(recent_events[0].pane_id, Some(oldest_pane_id));
     assert_eq!(recent_events[0].pane_id, Some(second_pane_id));
@@ -131,13 +116,13 @@ fn a_full_ring_drops_exactly_the_oldest_record() {
 
 #[test]
 fn a_record_is_stamped_with_the_wall_clock_at_the_moment_it_was_made() {
-    let _serialization_guard = lock_recent_events_for_test();
+    let recent_event_ring = RecentEventRing::default();
 
     let before_record_time = SystemTime::now();
-    record_event(&Event::Quit(QuitCause::Requested));
+    recent_event_ring.record_event(&Event::Quit(QuitCause::Requested));
     let after_record_time = SystemTime::now();
 
-    let recent_events = list_recent_events();
+    let recent_events = recent_event_ring.list_recent_events();
     assert_eq!(recent_events.len(), 1);
     assert!(
         recent_events[0].occurred_at >= before_record_time
@@ -147,30 +132,19 @@ fn a_record_is_stamped_with_the_wall_clock_at_the_moment_it_was_made() {
     );
 }
 
-#[test]
-fn clearing_the_ring_drops_every_record_and_recording_starts_over() {
-    let _serialization_guard = lock_recent_events_for_test();
-    record_event(&build_pane_created_event());
-    record_event(&Event::Quit(QuitCause::Requested));
-
-    clear_recent_events();
-    assert_eq!(list_recent_events(), Vec::new());
-
-    record_event(&Event::Restarting);
-    assert_eq!(list_event_names(&list_recent_events()), ["Restarting"]);
-}
-
-// A thread that dies while holding the ring poisons the lock. Recording,
-// listing, and clearing recover the poisoned lock.
+// A thread that dies while holding the ring poisons the lock. Recording and
+// listing recover the poisoned lock.
 #[test]
 fn the_ring_answers_after_a_thread_died_holding_it() {
-    let _serialization_guard = lock_recent_events_for_test();
-    record_event(&Event::Quit(QuitCause::Requested));
+    let recent_event_ring = Arc::new(RecentEventRing::default());
+    recent_event_ring.record_event(&Event::Quit(QuitCause::Requested));
 
     // `resume_unwind` skips the panic hook; the guard dropped while unwinding
     // poisons the lock.
-    let ring_thread_join_result = std::thread::spawn(|| {
-        let _recent_event_ring_guard = RECENT_EVENT_RING
+    let dying_thread_ring = Arc::clone(&recent_event_ring);
+    let ring_thread_join_result = std::thread::spawn(move || {
+        let _recent_event_ring_guard = dying_thread_ring
+            .recent_event_records
             .lock()
             .expect("the ring is not poisoned yet");
         std::panic::resume_unwind(Box::new("the thread holding the ring died"));
@@ -180,39 +154,44 @@ fn the_ring_answers_after_a_thread_died_holding_it() {
         ring_thread_join_result.unwrap_err().downcast_ref::<&str>(),
         Some(&"the thread holding the ring died")
     );
-    assert!(RECENT_EVENT_RING.is_poisoned(), "the lock must be poisoned");
-
-    record_event(&Event::Restarting);
-    assert_eq!(
-        list_event_names(&list_recent_events()),
-        ["Quit", "Restarting"]
+    assert!(
+        recent_event_ring.recent_event_records.is_poisoned(),
+        "the lock must be poisoned"
     );
 
-    clear_recent_events();
-    assert_eq!(list_recent_events(), Vec::new());
+    recent_event_ring.record_event(&Event::Restarting);
+    assert_eq!(
+        list_event_names(&recent_event_ring.list_recent_events()),
+        ["Quit", "Restarting"]
+    );
 }
 
 #[test]
 fn reading_the_ring_twice_gives_the_same_records_both_times() {
-    let _serialization_guard = lock_recent_events_for_test();
-    record_event(&build_pane_created_event());
-    record_event(&Event::Quit(QuitCause::Requested));
+    let recent_event_ring = RecentEventRing::default();
+    recent_event_ring.record_event(&build_pane_created_event());
+    recent_event_ring.record_event(&Event::Quit(QuitCause::Requested));
 
-    assert_eq!(list_recent_events(), list_recent_events());
-    assert_eq!(list_recent_events().len(), 2);
+    assert_eq!(
+        recent_event_ring.list_recent_events(),
+        recent_event_ring.list_recent_events()
+    );
+    assert_eq!(recent_event_ring.list_recent_events().len(), 2);
 }
 
 #[test]
 fn two_threads_recording_at_once_both_land_and_neither_record_is_torn() {
-    let _serialization_guard = lock_recent_events_for_test();
-    let quit_thread = std::thread::spawn(|| {
+    let recent_event_ring = Arc::new(RecentEventRing::default());
+    let quit_thread_ring = Arc::clone(&recent_event_ring);
+    let quit_thread = std::thread::spawn(move || {
         for _ in 0..100 {
-            record_event(&Event::Quit(QuitCause::Requested));
+            quit_thread_ring.record_event(&Event::Quit(QuitCause::Requested));
         }
     });
-    let restart_thread = std::thread::spawn(|| {
+    let restart_thread_ring = Arc::clone(&recent_event_ring);
+    let restart_thread = std::thread::spawn(move || {
         for _ in 0..100 {
-            record_event(&Event::Restarting);
+            restart_thread_ring.record_event(&Event::Restarting);
         }
     });
     quit_thread.join().expect("the quitting thread finishes");
@@ -220,7 +199,7 @@ fn two_threads_recording_at_once_both_land_and_neither_record_is_torn() {
         .join()
         .expect("the restarting thread finishes");
 
-    let recent_events = list_recent_events();
+    let recent_events = recent_event_ring.list_recent_events();
     assert_eq!(recent_events.len(), 200);
     assert_eq!(
         recent_events

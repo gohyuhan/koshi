@@ -5,21 +5,18 @@ use std::path::Path;
 use super::*;
 
 #[test]
-fn osc133_parses_each_marker_and_exit_code() {
+fn osc133_parses_each_marker() {
     assert_eq!(parse_osc133(&[b"133", b"A"]), Some(Osc133::Prompt));
     assert_eq!(parse_osc133(&[b"133", b"B"]), Some(Osc133::Input));
     assert_eq!(parse_osc133(&[b"133", b"C"]), Some(Osc133::CommandStart));
-    assert_eq!(
-        parse_osc133(&[b"133", b"D"]),
-        Some(Osc133::CommandFinished(None))
-    );
+    assert_eq!(parse_osc133(&[b"133", b"D"]), Some(Osc133::CommandFinished));
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"0"]),
-        Some(Osc133::CommandFinished(Some(0)))
+        Some(Osc133::CommandFinished)
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"137"]),
-        Some(Osc133::CommandFinished(Some(137)))
+        Some(Osc133::CommandFinished)
     );
 }
 
@@ -27,23 +24,23 @@ fn osc133_parses_each_marker_and_exit_code() {
 fn osc133_exit_code_accepts_every_decimal_i32_form() {
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"-1"]),
-        Some(Osc133::CommandFinished(Some(-1)))
+        Some(Osc133::CommandFinished)
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"+3"]),
-        Some(Osc133::CommandFinished(Some(3)))
+        Some(Osc133::CommandFinished)
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"007"]),
-        Some(Osc133::CommandFinished(Some(7)))
+        Some(Osc133::CommandFinished)
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"2147483647"]),
-        Some(Osc133::CommandFinished(Some(i32::MAX)))
+        Some(Osc133::CommandFinished)
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"-2147483648"]),
-        Some(Osc133::CommandFinished(Some(i32::MIN)))
+        Some(Osc133::CommandFinished)
     );
 }
 
@@ -81,11 +78,11 @@ fn osc133_markers_carrying_shell_options_are_still_recognized() {
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b"0", b"aid=1"]),
-        Some(Osc133::CommandFinished(Some(0)))
+        Some(Osc133::CommandFinished)
     );
     assert_eq!(
         parse_osc133(&[b"133", b"D", b""]),
-        Some(Osc133::CommandFinished(None)),
+        Some(Osc133::CommandFinished),
         "an empty first parameter carries no code"
     );
 }

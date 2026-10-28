@@ -611,8 +611,15 @@ fn read_frames_of_ending_session(
         writer_handoff,
         Arc::clone(ending_notice),
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     let mut painted_update_receiver = PaintedUpdateReceiver::new();
@@ -997,8 +1004,15 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
             }
         }
     });
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     assert_eq!(
@@ -1114,8 +1128,15 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
         writer_handoff,
         Arc::clone(&ending_notice),
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
     assert_eq!(
         connection
@@ -1169,8 +1190,15 @@ fn start_attachable_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_runtime_events) =
         spawn_attaching_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -1269,8 +1297,15 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-cell-size");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
     connection
         .send(&build_hello_request(&runtime_directory, session_id))
@@ -1351,8 +1386,15 @@ fn a_resize_over_the_viewport_cell_limit_is_dropped_and_the_next_resize_crosses(
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("resize-cell-limit");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
     connection
         .send(&build_hello_request(&runtime_directory, session_id))
@@ -1489,8 +1531,15 @@ impl AttachedFrameStream {
         let (inbox_sender, inbox_receiver) = mpsc::channel();
         let (dispatcher_thread, delivery_sender) =
             spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving");
+        let ipc_server = IpcServer::start(
+            &runtime_directory,
+            session_id,
+            inbox_sender,
+            Arc::default(),
+            None,
+            None,
+        )
+        .expect("start serving");
         let connection = attach_test_client_with_graphics(
             &runtime_directory,
             session_id,
@@ -2656,8 +2705,15 @@ fn start_test_server(
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, session_overview);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (ipc_server, session_id, runtime_directory, dispatcher_thread)
 }
 
@@ -2678,6 +2734,7 @@ fn start_shared_test_server(
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         Some(OtherUsers {
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(move || is_other_user_access_enabled),
@@ -2739,8 +2796,15 @@ fn start_reporting_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_command_envelopes) =
         spawn_reporting_dispatcher(inbox_receiver);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -2873,8 +2937,15 @@ fn start_layout_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, requested_tab_ids) =
         spawn_layout_dispatcher(inbox_receiver, session_layout);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -3457,9 +3528,15 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
 
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let restarted_dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, None);
-    let restarted_ipc_server =
-        IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving again");
+    let restarted_ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving again");
     let restarted_endpoint_file = load_test_endpoint_file(&runtime_directory, session_id);
     assert_ne!(
         restarted_endpoint_file.connection_token, initial_endpoint_file.connection_token,
@@ -3970,12 +4047,24 @@ fn discovery_with_no_running_session_closes_the_connection() {
 
 #[test]
 fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher() {
-    let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
-        start_test_server("recent-events", None);
+    let runtime_directory = build_test_runtime_directory("recent-events");
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, None);
+    let recent_event_ring = Arc::new(RecentEventRing::default());
     let tab_id = TabId::new();
-    recent_events::record_event(&koshi_core::event::Event::LayoutChanged(
+    recent_event_ring.record_event(&koshi_core::event::Event::LayoutChanged(
         koshi_core::event::LayoutChanged { tab_id },
     ));
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::clone(&recent_event_ring),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
 
     connection
@@ -3998,13 +4087,19 @@ fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher()
             recent_events_reply.answer_result
         );
     };
-    // The ring is process-wide and shared by every test in this binary. The
-    // test finds its record by this tab's own id.
-    let layout_event_record = recent_event_records
-        .iter()
-        .find(|recent_event_record| recent_event_record.tab_id == Some(tab_id))
-        .expect("the answer carries the layout record this test made");
-    assert_eq!(layout_event_record.event_name, "LayoutChanged");
+    assert_eq!(recent_event_records, recent_event_ring.list_recent_events());
+    assert_eq!(
+        recent_event_records
+            .iter()
+            .map(|recent_event_record| {
+                (
+                    recent_event_record.event_name.as_ref(),
+                    recent_event_record.tab_id,
+                )
+            })
+            .collect::<Vec<_>>(),
+        [("LayoutChanged", Some(tab_id))]
+    );
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -4141,8 +4236,15 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     drop(inbox_receiver);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     send_prepare_request(
@@ -4255,8 +4357,15 @@ fn a_leftover_socket_file_is_reclaimed_at_start() {
     std::fs::write(&socket_address, b"").expect("plant a leftover file at the socket path");
 
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start reclaims the leftover and serves");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start reclaims the leftover and serves");
 
     ipc_server.shutdown();
     delete_test_directory(&runtime_directory);
@@ -4268,9 +4377,14 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
         start_test_server("busy", None);
 
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
-    let Err(IpcError::SocketBusy { socket_address }) =
-        IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-    else {
+    let Err(IpcError::SocketBusy { socket_address }) = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    ) else {
         panic!("the live listener must refuse a second bind");
     };
     assert_eq!(
@@ -4295,6 +4409,7 @@ fn a_runtime_directory_that_cannot_be_created_refuses_to_start() {
         &runtime_directory,
         SessionId::new(),
         inbox_sender,
+        Arc::default(),
         None,
         None,
     ) else {
@@ -4325,7 +4440,14 @@ fn a_start_whose_endpoint_file_cannot_be_written_leaves_nothing_listening() {
 
     let Err(IpcError::EndpointFileWrite {
         endpoint_file_path, ..
-    }) = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+    }) = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
     else {
         panic!("an endpoint file that cannot be written must refuse the start");
     };
@@ -4433,6 +4555,7 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         Some(OtherUsers {
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(|| true),
@@ -4500,6 +4623,7 @@ fn serve_other_user(
             })),
             &served_connection,
             None,
+            &RecentEventRing::default(),
         );
     });
     let caller_connection = Connection::connect(&socket_address).expect("connect");
@@ -4879,6 +5003,7 @@ fn start_restartable_test_server(
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(image_replacement),
     )
@@ -4927,8 +5052,15 @@ fn a_restart_to_a_session_that_cannot_replace_its_image_is_refused_without_the_d
     let (restart_report_sender, restart_report_receiver) = mpsc::channel();
     let dispatcher_thread =
         spawn_restart_reporting_dispatcher(inbox_receiver, restart_report_sender);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
 
     let (connection, restart_result) = send_restart_request(&runtime_directory, session_id);
 
@@ -5624,8 +5756,15 @@ fn start_inbox_test_server(
     let runtime_directory = build_test_runtime_directory(directory_tag);
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (ipc_server, session_id, runtime_directory, inbox_receiver)
 }
 
@@ -5668,6 +5807,7 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
         &runtime_directory,
         session_id,
         inbox_sender.clone(),
+        Arc::default(),
         None,
         None,
     )
@@ -6149,8 +6289,15 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_remote_flags) =
         spawn_origin_reporting_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
 
     let local_connection = attach_saying_remote(&runtime_directory, session_id, client_id, false);
     assert_eq!(
@@ -6222,6 +6369,7 @@ fn start_watched_test_server(
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(build_test_image_replacement(
             program_path.clone(),
@@ -6324,6 +6472,7 @@ fn a_hello_refused_for_its_version_reads_the_program_file_the_session_started_fr
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(build_test_image_replacement(
             program_path,
@@ -6445,8 +6594,15 @@ fn a_session_without_an_executable_watch_writes_no_program_file() {
     let session_id = SessionId::new();
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
 
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
 
     assert!(
         !ServerProgramFile::resolve_session_program_file_path(&runtime_directory, session_id)
@@ -6484,6 +6640,7 @@ fn a_start_whose_program_file_cannot_be_written_leaves_no_endpoint_file_and_noth
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(build_test_image_replacement(
             program_path,
@@ -6752,8 +6909,15 @@ fn start_clipboard_test_server(
         maximum_copy_byte_count,
         should_run_clipboard_tool,
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -7108,8 +7272,15 @@ fn a_clipboard_request_with_no_dispatcher_closes_the_connection() {
         let session_id = SessionId::new();
         let (inbox_sender, inbox_receiver) = mpsc::channel();
         drop(inbox_receiver);
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving");
+        let ipc_server = IpcServer::start(
+            &runtime_directory,
+            session_id,
+            inbox_sender,
+            Arc::default(),
+            None,
+            None,
+        )
+        .expect("start serving");
         let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
         connection
@@ -7195,8 +7366,15 @@ fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     for request_id in [3, 4] {
@@ -7333,8 +7511,15 @@ fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() 
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, _forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let connection = attach_test_client_over_link(
         &runtime_directory,
         session_id,
@@ -7729,8 +7914,15 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
         let session_id = SessionId::new();
         let runtime_directory = build_test_runtime_directory("attach-answer-unwritten");
         let (inbox_sender, inbox_receiver) = mpsc::channel();
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving");
+        let ipc_server = IpcServer::start(
+            &runtime_directory,
+            session_id,
+            inbox_sender,
+            Arc::default(),
+            None,
+            None,
+        )
+        .expect("start serving");
         let mut connection = connect_greeted_connection(&runtime_directory, session_id);
         send_prepare_request(
             &mut connection,
@@ -7790,8 +7982,15 @@ fn a_stream_the_session_closed_hands_over_one_detach_when_the_client_closes() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     // The closed queue ends the writing thread after its goodbye.
@@ -7841,8 +8040,15 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let connection = attach_test_client(&runtime_directory, session_id, client_id);
     // On Linux, a write to a peer that shut its read direction fails with
     // `EPIPE`. The client keeps its writing direction open.
@@ -8131,8 +8337,15 @@ fn every_held_kind_without_prepare_a_kind_that_cannot_be_held_and_a_bare_commit_
     let runtime_directory = build_test_runtime_directory("prepare-refusals");
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let (mut frame_reader, mut frame_writer) =
         connect_greeted_connection(&runtime_directory, session_id).split();
     frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));

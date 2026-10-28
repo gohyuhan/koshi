@@ -347,8 +347,9 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// every pane's size. In every other tab, the resize delta of each child with
 /// a `preferred` target moves onto its trailing-most flexible sibling.
 /// Format 5 also adds each session's notification queue, and drops each
-/// session's `is_recovery_notice_visible`. A format 4 session gets a queue in a
-/// new epoch, which holds one `Error` entry when its
+/// session's `is_recovery_notice_visible`. A pane's held shell-integration
+/// finish loses the exit code it carried in format 4. A format 4 session gets
+/// a queue in a new epoch, which holds one `Error` entry when its
 /// `is_recovery_notice_visible` was `true`, and is empty otherwise.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.

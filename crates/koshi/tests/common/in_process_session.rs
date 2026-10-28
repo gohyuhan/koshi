@@ -179,7 +179,8 @@ fn serve_session(
     inbox_sender: mpsc::Sender<RuntimeEvent>,
 ) {
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend;
-    let mut session_server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut session_server =
+        Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     session_server.load_startup_config(startup_app_config);
     session_server
         .bootstrap_session(
@@ -190,8 +191,15 @@ fn serve_session(
         )
         .expect("the session is seeded");
 
-    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_sender, None, None)
-        .expect("the control socket binds");
+    let ipc_server = IpcServer::start(
+        runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::clone(session_server.get_recent_event_ring()),
+        None,
+        None,
+    )
+    .expect("the control socket binds");
     session_server.attach_ipc_server(ipc_server);
 
     run_session_event_loop(&mut session_server);

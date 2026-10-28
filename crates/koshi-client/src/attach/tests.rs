@@ -14521,7 +14521,7 @@ fn each_read_of_keys_for_the_pane_reaches_it_in_one_write_at_every_split() {
             InboxSink::from_event_sender(event_sender),
         )));
         let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-        let mut server = Server::from_runtime_parts(pty_backend, event_receiver);
+        let mut server = Server::from_runtime_parts(pty_backend, event_receiver, Arc::default());
         let server_client_id = create_session_with_attached_client(&mut server);
         let pane_id = fake_pty_backend.list_spawned_pane_ids()[0];
         let mut client = build_test_client();

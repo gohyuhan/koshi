@@ -64,8 +64,7 @@ impl Server {
             .get_client_mut(client_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
         client.set_selection(command_args.pane_id, selection);
-        Ok(Self::commit_events(
-            &mut self.event_bus,
+        Ok(self.commit_events(
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {
                 client_id,
@@ -179,7 +178,7 @@ impl Server {
         if !copied_text.is_empty() {
             self.copy_to_clipboard(client_id, &copied_text);
         }
-        Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
+        Ok(self.commit_events(command_id, Vec::new()))
     }
 
     /// Handle [`VisualCommand::ClearSelection`]: drop the issuing client's
@@ -205,8 +204,7 @@ impl Server {
             .get_client_mut(client_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
         client.clear_selection(command_args.pane_id);
-        Ok(Self::commit_events(
-            &mut self.event_bus,
+        Ok(self.commit_events(
             command_id,
             vec![Event::SelectionChanged(SelectionChanged {
                 client_id,

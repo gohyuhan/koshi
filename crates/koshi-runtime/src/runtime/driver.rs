@@ -285,8 +285,8 @@ impl Server {
                 response_sender,
             } => {
                 // The client and its subscription are registered together here:
-                // the structure in the answer and the queue's first event
-                // describe one continuous state.
+                // the notification queue in the answer holds every post made
+                // before the subscription, and every later post reaches it.
                 let _ = response_sender.send(self.handle_ipc_attach(
                     resume_client_id,
                     resume_token,

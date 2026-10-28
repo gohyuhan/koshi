@@ -72,7 +72,7 @@ fn build_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     (runtime, runtime_event_sender)
 }
 
@@ -85,7 +85,7 @@ fn build_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<Runti
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     (runtime, fake_pty_backend, runtime_event_sender)
 }
 
@@ -11670,7 +11670,8 @@ fn close_tab_kills_every_pane_concurrently() {
     )));
     fake_pty_backend.hold_kills_at(Arc::new(Barrier::new(3)));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut runtime =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
 
     let client_id = ClientId::new();
     let first_tab_id = TabId::new();
@@ -11753,7 +11754,8 @@ fn shutdown_returns_only_after_a_pane_kill_already_started_ends() {
     let kill_barrier = Arc::new(Barrier::new(2));
     fake_pty_backend.hold_kills_at(kill_barrier.clone());
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut runtime = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut runtime =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(

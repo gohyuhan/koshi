@@ -73,6 +73,7 @@ use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
+use koshi_observability::logging::recent_events::RecentEventRing;
 use koshi_observability::logging::{
     delete_stale_session_log_files, initialize_tracing, LogFileOwner,
 };
@@ -475,6 +476,7 @@ pub fn run_session_server(
             app_config_layer.as_ref(),
             resume_file_path.is_some(),
             &runtime_event_sender,
+            session_server.get_recent_event_ring(),
             &mut std::io::stdout(),
         )?;
         Ok((session_server, pty_owner, ipc_server))
@@ -806,6 +808,7 @@ fn build_from_carried_state(
                 Ok(resume_body) => Server::resume(
                     pty_backend,
                     runtime_event_receiver,
+                    Arc::default(),
                     app_config,
                     resume_body,
                     resume_header.resume_format,
@@ -829,8 +832,11 @@ fn build_from_carried_state(
                                 .map(|pty_size| (carried_pane.pane_id, *pty_size))
                         })
                         .collect();
-                    let mut session_server =
-                        Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+                    let mut session_server = Server::from_runtime_parts(
+                        pty_backend,
+                        runtime_event_receiver,
+                        Arc::default(),
+                    );
                     session_server.load_startup_config(app_config);
                     session_server.restore_panes_without_layout(
                         session_start.session_id,
@@ -844,10 +850,14 @@ fn build_from_carried_state(
             if !session_server.has_active_panes() {
                 tracing::error!("no carried pane came back; the session comes back with one shell");
                 if !has_carried_quit {
+                    let recent_event_ring = Arc::clone(session_server.get_recent_event_ring());
                     let runtime_event_receiver = session_server.into_inbox_receiver();
                     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
-                    session_server =
-                        Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+                    session_server = Server::from_runtime_parts(
+                        pty_backend,
+                        runtime_event_receiver,
+                        recent_event_ring,
+                    );
                     session_server.load_startup_config(recovery_app_config);
                 }
                 seed_shell_after_failed_restore(&mut session_server, &pty_owner, session_start)?;
@@ -921,7 +931,8 @@ fn build_server_over_new_panes(
 ) -> Result<(Server, Arc<PtyOwner>), Box<dyn std::error::Error>> {
     let pty_owner = open_session_panes(session_start, pty_sink)?;
     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
-    let mut session_server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut session_server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     session_server.load_startup_config(app_config);
     Ok((session_server, pty_owner))
 }
@@ -1536,7 +1547,8 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 ///
 /// The socket checks the program file on each connection it takes, through
 /// `session_start.executable_watch`. When that file holds another koshi
-/// version, the session restarts into it.
+/// version, the session restarts into it. It answers `koshi debug events` from
+/// `recent_event_ring`, the ring the session's server records into.
 ///
 /// # Errors
 /// Returns the failure of an address that could not be bound or an endpoint
@@ -1546,6 +1558,7 @@ fn bind_session_socket(
     #[cfg_attr(not(unix), allow(unused_variables))] app_config_layer: Option<&PartialKoshiConfig>,
     pty_owner: &Arc<PtyOwner>,
     runtime_event_sender: &Sender<RuntimeEvent>,
+    recent_event_ring: &Arc<RecentEventRing>,
 ) -> Result<IpcServer, IpcError> {
     #[cfg(unix)]
     let other_users_policy = koshi_link::config::resolve_other_users_policy(
@@ -1559,6 +1572,7 @@ fn bind_session_socket(
         &session_start.runtime_directory,
         session_start.session_id,
         runtime_event_sender.clone(),
+        Arc::clone(recent_event_ring),
         other_users_policy,
         Some(ImageReplacement {
             executable_watch: Arc::clone(&session_start.executable_watch),
@@ -1584,6 +1598,7 @@ fn start_serving_session(
     app_config_layer: Option<&PartialKoshiConfig>,
     is_resumed: bool,
     runtime_event_sender: &Sender<RuntimeEvent>,
+    recent_event_ring: &Arc<RecentEventRing>,
     ready_output: &mut dyn Write,
 ) -> Result<IpcServer, Box<dyn std::error::Error>> {
     let ipc_server = match bind_session_socket(
@@ -1591,6 +1606,7 @@ fn start_serving_session(
         app_config_layer,
         pty_owner,
         runtime_event_sender,
+        recent_event_ring,
     ) {
         Ok(ipc_server) => ipc_server,
         Err(bind_error) => {
@@ -2217,6 +2233,7 @@ fn resume_readers_and_rebuild(
         app_config_layer.as_ref(),
         pty_owner,
         runtime_event_sender,
+        rebuilt_session.get_recent_event_ring(),
     );
     let _ = std::fs::remove_file(resolve_resume_file_path(
         &session_start.runtime_directory,
@@ -2328,9 +2345,11 @@ fn resume_session_readers(
     pty_owner.resume_readers();
 
     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
+    let recent_event_ring = Arc::clone(session_server.get_recent_event_ring());
     Server::resume(
         pty_backend,
         session_server.into_inbox_receiver(),
+        recent_event_ring,
         app_config_layer,
         resume_body,
         resume_header.resume_format,

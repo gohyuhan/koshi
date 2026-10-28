@@ -103,8 +103,9 @@ enum DeliveryState {
     /// snapshot lands, apart from the event that ends the stream.
     Desynced {
         /// How many deliveries the subscriber has missed: the one that paused
-        /// it when it was not a command rejection, plus every event published
-        /// since.
+        /// it when it was not a command rejection, plus each delivery to every
+        /// subscriber since: a pane placement commit, a notification post, or
+        /// a last frame its full queue had no room for.
         dropped_event_count: u64,
         /// The rejections of the subscriber's client's commands since the
         /// pause, oldest first, each run of equal rejections in a row as one
@@ -293,8 +294,9 @@ impl WriterHandoff {
     }
 }
 
-/// Event fan-out hub: every published event is delivered to each live
-/// subscriber, over that subscriber's own bounded queue.
+/// Fan-out hub: [`publish`](Self::publish) delivers each pane placement
+/// commit, quit and restart to every live subscriber, over that subscriber's
+/// own bounded queue. Every other event reaches no subscriber.
 #[derive(Debug)]
 pub(crate) struct EventBus {
     /// Live subscribers, in subscription order.
@@ -320,9 +322,9 @@ impl EventBus {
         &self.ending_notice
     }
 
-    /// Register a subscriber for every published event and hand back its id,
-    /// the receiving end of its queue, and its [`WriterHandoff`], with no
-    /// host write waiting and no frame owed. The subscriber starts live.
+    /// Register a subscriber and hand back its id, the receiving end of its
+    /// queue, and its [`WriterHandoff`], with no host write waiting and no
+    /// frame owed. The subscriber starts live.
     /// Dropping the receiver ends the subscription; the bus removes it on the
     /// next publish or delivery to it.
     pub(crate) fn subscribe(&mut self) -> (SubscriberId, DeliveryReceiver, Arc<WriterHandoff>) {
@@ -968,7 +970,7 @@ fn hold_command_rejection(
 /// paint images receives new RGBA records after it.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
-/// of missed events, the session's notification queue, the held command
+/// of missed deliveries, the session's notification queue, the held command
 /// rejections, and the count of held runs dropped for room. The connection
 /// writer sends the snapshot's frame right after it, as a painted update.
 ///

@@ -34,7 +34,7 @@ fn build_test_server_with_fake_pty_backend(
         InboxSink::from_event_sender(event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let runtime = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let runtime = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     (runtime, fake_pty_backend, event_sender)
 }
 
@@ -191,6 +191,7 @@ fn shutdown_stops_the_attached_control_socket_and_removes_its_endpoint_file() {
         &runtime_directory,
         session_id,
         event_sender.clone(),
+        Arc::clone(runtime.get_recent_event_ring()),
         None,
         None,
     )

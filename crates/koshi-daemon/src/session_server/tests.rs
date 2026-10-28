@@ -21,9 +21,11 @@ use koshi_core::command::{
     SelectionKind, SetSelectionArgs, VisualCommand, WriteToPaneArgs,
 };
 #[cfg(unix)]
-use koshi_core::event::{Event, PaneCreated};
+use koshi_core::event::{Event, LayoutChanged, PaneCreated};
 #[cfg(unix)]
 use koshi_core::geometry::Direction;
+#[cfg(unix)]
+use koshi_core::ids::TabId;
 use koshi_core::ids::{ClientId, CommandId};
 use koshi_core::process::ExitStatus;
 #[cfg(unix)]
@@ -67,7 +69,8 @@ fn build_test_server() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEven
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     server.load_startup_config(None);
     (server, fake_pty_backend, runtime_event_sender)
 }
@@ -146,6 +149,46 @@ fn seed_test_session(server: &mut Server) {
             SystemTime::now(),
         )
         .expect("the session is seeded");
+}
+
+/// Record a `LayoutChanged` for a fresh tab into `server`'s recent-events
+/// ring. Returns the ring and the tab.
+#[cfg(unix)]
+fn record_test_layout_change(server: &Server) -> (Arc<RecentEventRing>, TabId) {
+    let recent_event_ring = Arc::clone(server.get_recent_event_ring());
+    let tab_id = TabId::new();
+    recent_event_ring.record_event(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    (recent_event_ring, tab_id)
+}
+
+/// Assert that `rebuilt_server` records into `recent_event_ring`, that the
+/// control socket of `session_start` answers `koshi debug events` with exactly
+/// the records that ring holds, and that the oldest record is the
+/// `LayoutChanged` of `tab_id`.
+#[cfg(unix)]
+fn assert_socket_serves_carried_recent_events(
+    session_start: &SessionStart,
+    rebuilt_server: &Server,
+    recent_event_ring: &Arc<RecentEventRing>,
+    tab_id: TabId,
+) {
+    assert!(Arc::ptr_eq(
+        rebuilt_server.get_recent_event_ring(),
+        recent_event_ring
+    ));
+    let served_recent_events = koshi_link::ipc_client::fetch_recent_events(
+        &session_start.runtime_directory,
+        None,
+        session_start.session_id,
+    )
+    .expect("the socket answers the recent events");
+    assert_eq!(served_recent_events, recent_event_ring.list_recent_events());
+    assert_eq!(
+        served_recent_events
+            .first()
+            .map(|recent_event| (recent_event.event_name.as_ref(), recent_event.tab_id)),
+        Some(("LayoutChanged", Some(tab_id)))
+    );
 }
 
 /// Join the seeded session the way an attach over the control socket does, and
@@ -696,6 +739,7 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
     let resumed_server = Server::resume(
         Arc::clone(&fake_pty_backend) as Arc<dyn PtyBackend>,
         resumed_event_receiver,
+        Arc::default(),
         None,
         decoded_resume_body,
         read_resume_header.resume_format,
@@ -1735,6 +1779,7 @@ fn a_rebuild_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
         None,
         &portable_pty_backend,
         &runtime_event_sender,
+        &Arc::default(),
     )
     .expect("the address binds once");
 
@@ -1898,6 +1943,7 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
     let runtime_directory_fixture = build_short_runtime_directory();
     let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
     let (server, _, runtime_event_sender) = build_test_server();
+    let (recent_event_ring, recorded_tab_id) = record_test_layout_change(&server);
     let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
@@ -1906,6 +1952,7 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
         None,
         &portable_pty_backend,
         &runtime_event_sender,
+        &recent_event_ring,
     )
     .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
@@ -1921,7 +1968,7 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
 
     let (resume_header, resume_body) = build_empty_carried_state(&session_start);
 
-    let (_rebuilt_server, kept_session_socket) = resume_readers_and_keep_socket(
+    let (rebuilt_server, kept_session_socket) = resume_readers_and_keep_socket(
         server,
         session_socket,
         &portable_pty_backend,
@@ -1950,6 +1997,12 @@ fn a_session_that_keeps_its_socket_serves_the_same_address_under_a_fresh_token()
     assert!(
         !resume_file_path.exists(),
         "the resume file must not be left on the disk"
+    );
+    assert_socket_serves_carried_recent_events(
+        &session_start,
+        &rebuilt_server,
+        &recent_event_ring,
+        recorded_tab_id,
     );
 }
 
@@ -1982,6 +2035,7 @@ fn a_bound_socket_lies_in_the_shared_directory_the_passed_koshi_kdl_layer_names(
         Some(&sharing_config.layer),
         &portable_pty_backend,
         &runtime_event_sender,
+        &Arc::default(),
     )
     .expect("the address binds");
 
@@ -2019,7 +2073,8 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     let shell_config = koshi_config::app_config::parse_app_config(
         Path::new("koshi.kdl"),
         "version 2\nterminal {\n    default-shell \"/bin/sh\"\n}\n",
@@ -2033,11 +2088,13 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
         .next()
         .expect("the session is seeded");
     let expected_tabs = server.list_sessions()[&session_id].tabs.clone();
+    let (recent_event_ring, recorded_tab_id) = record_test_layout_change(&server);
     let session_socket = bind_session_socket(
         &session_start,
         None,
         &portable_pty_backend,
         &runtime_event_sender,
+        &recent_event_ring,
     )
     .expect("the address binds");
     let resume_file_path =
@@ -2052,6 +2109,12 @@ fn a_swap_whose_new_image_never_starts_hands_the_session_back_on_a_rebound_socke
     )
     .expect("a swap that could not start puts the session back")
     .expect("the session runs in this process, not another one");
+    assert_socket_serves_carried_recent_events(
+        &session_start,
+        &rebuilt_server,
+        &recent_event_ring,
+        recorded_tab_id,
+    );
 
     let rebuilt_tabs = rebuilt_server.list_sessions()[&session_id].tabs.clone();
     rebuilt_server.kill_all_panes();
@@ -2085,12 +2148,13 @@ fn a_swap_that_holds_no_session_to_carry_keeps_serving_under_a_fresh_token() {
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
-    let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     let session_socket = bind_session_socket(
         &session_start,
         None,
         &portable_pty_backend,
         &runtime_event_sender,
+        &Arc::default(),
     )
     .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
@@ -2225,12 +2289,14 @@ fn start_session_with_a_prepared_request(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     let session_socket = bind_session_socket(
         session_start,
         None,
         &portable_pty_backend,
         runtime_event_sender,
+        &Arc::default(),
     )
     .expect("the address binds");
     let (mut frame_reader, mut frame_writer) = connect_greeted_session(session_start);
@@ -2436,9 +2502,14 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let session_socket =
-        bind_session_socket(&session_start, None, &pty_owner, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &pty_owner,
+        &runtime_event_sender,
+        &Arc::default(),
+    )
+    .expect("the address binds");
     let (mut frame_reader, mut frame_writer) = connect_greeted_session(&session_start);
     prepare_request(
         &mut server,
@@ -2600,9 +2671,14 @@ fn assert_swap_waits_for_the_held_kill_of_a_closed_pane(session_start: SessionSt
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let session_socket =
-        bind_session_socket(&session_start, None, &pty_owner, &runtime_event_sender)
-            .expect("the address binds");
+    let session_socket = bind_session_socket(
+        &session_start,
+        None,
+        &pty_owner,
+        &runtime_event_sender,
+        &Arc::default(),
+    )
+    .expect("the address binds");
 
     let (kill_record_sender, kill_record_receiver) = mpsc::channel();
     let swap_fake_pty_backend = fake_pty_backend.clone();
@@ -2651,7 +2727,8 @@ fn a_swap_that_can_write_neither_its_state_nor_a_fresh_token_ends_every_pane() {
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     server.load_startup_config(Some(build_plain_shell_config()));
     seed_test_session(&mut server);
     let pane_child_process_id = get_only_pane_child_process_id(&portable_pty_backend);
@@ -2660,6 +2737,7 @@ fn a_swap_that_can_write_neither_its_state_nor_a_fresh_token_ends_every_pane() {
         None,
         &portable_pty_backend,
         &runtime_event_sender,
+        &Arc::default(),
     )
     .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
@@ -2717,7 +2795,8 @@ fn a_swap_that_can_neither_start_nor_bind_its_socket_again_ends_every_pane() {
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     server.load_startup_config(Some(build_plain_shell_config()));
     seed_test_session(&mut server);
     let pane_child_process_id = get_only_pane_child_process_id(&portable_pty_backend);
@@ -2726,6 +2805,7 @@ fn a_swap_that_can_neither_start_nor_bind_its_socket_again_ends_every_pane() {
         None,
         &portable_pty_backend,
         &runtime_event_sender,
+        &Arc::default(),
     )
     .expect("the address binds");
     let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
@@ -2788,6 +2868,7 @@ fn a_first_run_that_cannot_bind_its_socket_ends_every_pane() {
         None,
         false,
         &runtime_event_sender,
+        &Arc::default(),
         &mut std::io::sink(),
     ) {
         Err(start_error) => start_error,
@@ -2836,6 +2917,7 @@ fn a_resume_run_with_a_fresh_shell_that_cannot_bind_its_socket_ends_every_pane()
         None,
         true,
         &runtime_event_sender,
+        &Arc::default(),
         &mut std::io::sink(),
     ) {
         Err(start_error) => start_error,
@@ -2910,6 +2992,7 @@ fn a_resume_run_with_a_carried_pane_that_cannot_bind_its_socket_ends_every_pane(
         None,
         true,
         &runtime_event_sender,
+        &Arc::default(),
         &mut std::io::sink(),
     ) {
         Err(start_error) => start_error,
@@ -2955,6 +3038,7 @@ fn a_first_run_that_cannot_print_its_ready_line_ends_every_pane() {
         None,
         false,
         &runtime_event_sender,
+        &Arc::default(),
         &mut read_only_output,
     ) {
         Err(start_error) => start_error,
@@ -3915,7 +3999,8 @@ fn a_swap_pause_over_a_full_output_queue_loses_no_byte_and_parses_none_twice() {
     });
     let portable_pty_backend = Arc::new(PortablePtyBackend::with_pty_sink(counting_sink.clone()));
     let pty_backend: Arc<dyn PtyBackend> = portable_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     server.load_startup_config(None);
     let pane_id = PaneId::new();
     portable_pty_backend

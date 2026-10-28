@@ -7340,7 +7340,7 @@ fn osc133_command_start_reports_one_started_fact_even_when_repeated() {
 }
 
 #[test]
-fn osc133_finish_reports_the_exit_code() {
+fn osc133_finish_with_an_exit_code_reports_the_finish() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b]133;C\x07\x1b]133;D;137\x07");
     assert_eq!(
@@ -7351,15 +7351,13 @@ fn osc133_finish_reports_the_exit_code() {
         terminal_state.take_shell_integration_facts(),
         vec![
             ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished {
-                exit_code: Some(137)
-            },
+            ShellIntegrationFact::CommandFinished,
         ]
     );
 }
 
 #[test]
-fn osc133_finish_without_an_exit_code_reports_none() {
+fn osc133_finish_without_an_exit_code_reports_the_finish() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b]133;C\x07\x1b]133;D\x07");
     assert_eq!(
@@ -7370,7 +7368,7 @@ fn osc133_finish_without_an_exit_code_reports_none() {
         terminal_state.take_shell_integration_facts(),
         vec![
             ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished { exit_code: None },
+            ShellIntegrationFact::CommandFinished,
         ]
     );
 }

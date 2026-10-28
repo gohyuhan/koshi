@@ -3245,6 +3245,31 @@ fn a_resume_format_4_terminal_state_reads_back_with_insert_mode_off() {
 }
 
 #[test]
+fn a_resume_format_4_held_shell_finish_reads_back_without_its_exit_code() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    let mut terminal_state_json = write_as_resume_format_4(&terminal_state);
+    terminal_state_json["shell_integration_facts"] = serde_json::json!([
+        "CommandStarted",
+        {"CommandFinished": {"exit_code": 137}},
+        {"CommandFinished": {"exit_code": null}},
+    ]);
+
+    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+
+    assert_eq!(
+        read_terminal_state.shell_integration_facts,
+        vec![
+            ShellIntegrationFact::CommandStarted,
+            ShellIntegrationFact::CommandFinished,
+            ShellIntegrationFact::CommandFinished,
+        ]
+    );
+}
+
+#[test]
 fn a_terminal_state_in_insert_mode_round_trips_through_the_current_shape() {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 6,

@@ -35,7 +35,7 @@ fn build_selection_server() -> (Server, ClientId, PaneId) {
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(event_sender),
     )));
-    let mut server = Server::from_runtime_parts(fake_pty_backend, event_receiver);
+    let mut server = Server::from_runtime_parts(fake_pty_backend, event_receiver, Arc::default());
     let client_id = create_session_with_attached_client(
         &mut server,
         SessionId::new(),

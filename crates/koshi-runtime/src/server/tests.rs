@@ -271,7 +271,7 @@ fn build_test_server_with_event_sender() -> (Server, mpsc::Sender<RuntimeEvent>)
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
-    let server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     (server, runtime_event_sender)
 }
 
@@ -567,15 +567,18 @@ fn publish_events_remembers_out_of_command_events_in_the_recent_events_ring() {
         tab_id,
     })]);
 
-    // The ring is process-wide, and every test in this binary writes to it. The
-    // record is found by this tab's own id.
-    let recent_event_records = recent_events::list_recent_events();
+    let recent_event_records = server.recent_event_ring.list_recent_events();
     let recorded_event = recent_event_records
-        .iter()
-        .find(|event_record| event_record.tab_id == Some(tab_id))
+        .last()
         .expect("the published event is remembered");
-    assert_eq!(recorded_event.event_name, "LayoutChanged");
-    assert_eq!(recorded_event.pane_id, None);
+    assert_eq!(
+        (
+            recorded_event.event_name.as_ref(),
+            recorded_event.tab_id,
+            recorded_event.pane_id
+        ),
+        ("LayoutChanged", Some(tab_id), None)
+    );
 }
 
 #[test]
@@ -1104,10 +1107,12 @@ fn a_paused_subscriber_whose_view_changed_sets_no_wakeup() {
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
 }
 
-/// The (tab, pane) of each `PaneFocused` record the process-wide recent-events
-/// ring holds for `client_id`, oldest first.
-fn list_recorded_pane_focus(client_id: ClientId) -> Vec<(Option<TabId>, PaneId)> {
-    recent_events::list_recent_events()
+/// The (tab, pane) of each `PaneFocused` record `server`'s recent-events ring
+/// holds for `client_id`, oldest first.
+fn list_recorded_pane_focus(server: &Server, client_id: ClientId) -> Vec<(Option<TabId>, PaneId)> {
+    server
+        .recent_event_ring
+        .list_recent_events()
         .into_iter()
         .filter(|event_record| {
             event_record.event_name == "PaneFocused" && event_record.client_id == Some(client_id)
@@ -1116,10 +1121,12 @@ fn list_recorded_pane_focus(client_id: ClientId) -> Vec<(Option<TabId>, PaneId)>
         .collect()
 }
 
-/// The pane of each `PtyResized` record the process-wide recent-events ring
-/// holds for one of `pane_ids`, oldest first.
-fn list_recorded_pty_resizes(pane_ids: &[PaneId]) -> Vec<PaneId> {
-    recent_events::list_recent_events()
+/// The pane of each `PtyResized` record `server`'s recent-events ring holds
+/// for one of `pane_ids`, oldest first.
+fn list_recorded_pty_resizes(server: &Server, pane_ids: &[PaneId]) -> Vec<PaneId> {
+    server
+        .recent_event_ring
+        .list_recent_events()
         .into_iter()
         .filter(|event_record| event_record.event_name == "PtyResized")
         .filter_map(|event_record| event_record.pane_id)
@@ -1334,7 +1341,7 @@ fn constructor_starts_on_an_empty_app_layer_and_the_built_in_defaults() {
         InboxSink::from_event_sender(runtime_event_sender),
     )));
 
-    let server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
 
     // The constructor reads nothing from disk and holds no settings.
     // `load_startup_config` loads the first `koshi.kdl`.
@@ -2052,7 +2059,7 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
     );
 
     assert_eq!(
-        list_recorded_pane_focus(returning_attachment.client_id),
+        list_recorded_pane_focus(&server, returning_attachment.client_id),
         vec![
             (Some(booted_tab_id), root_pane_id),
             (Some(booted_tab_id), split_pane_id),
@@ -2148,7 +2155,7 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
         Some(focused_pane_id)
     );
     assert_eq!(
-        list_recorded_pane_focus(returning_attachment.client_id),
+        list_recorded_pane_focus(&server, returning_attachment.client_id),
         vec![(Some(booted_tab_id), root_pane_id), (None, focused_pane_id),],
         "the attach lands on the tab's pane, then the restored floating pane takes the input"
     );
@@ -2475,7 +2482,8 @@ fn taking_a_zoom_back_resizes_the_tabs_panes() {
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
     let _ = server.handle_client_detach(leaving_attachment.client_id);
-    let resized_pane_ids_before = list_recorded_pty_resizes(&[root_pane_id, split_pane_id]);
+    let resized_pane_ids_before =
+        list_recorded_pty_resizes(&server, &[root_pane_id, split_pane_id]);
 
     let _returning_attachment = attach_with_token(
         &mut server,
@@ -2486,7 +2494,7 @@ fn taking_a_zoom_back_resizes_the_tabs_panes() {
     let mut expected_resized_pane_ids = resized_pane_ids_before;
     expected_resized_pane_ids.push(root_pane_id);
     assert_eq!(
-        list_recorded_pty_resizes(&[root_pane_id, split_pane_id]),
+        list_recorded_pty_resizes(&server, &[root_pane_id, split_pane_id]),
         expected_resized_pane_ids
     );
     // The zoomed pane fills the tab: 80x24 less the tabline and hint rows is
@@ -3406,6 +3414,7 @@ fn resume_carried_server(
             InboxSink::from_event_sender(runtime_event_sender),
         ))),
         inbox_receiver,
+        Arc::default(),
         None,
         body,
         RESUME_FORMAT,

@@ -2130,10 +2130,7 @@ fn list_events_with_no_wire_form() -> Vec<Event> {
             is_enabled: true,
         }),
         Event::PaneCommandStarted(PaneCommandStarted { pane_id }),
-        Event::PaneCommandFinished(PaneCommandFinished {
-            pane_id,
-            exit_code: Some(0),
-        }),
+        Event::PaneCommandFinished(PaneCommandFinished { pane_id }),
         Event::SelectionChanged(SelectionChanged {
             client_id,
             pane_id,

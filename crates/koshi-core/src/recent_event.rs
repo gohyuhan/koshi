@@ -33,8 +33,8 @@ use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 /// [`occurred_at`](Self::occurred_at) or [`event_name`](Self::event_name) is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentEvent {
-    /// Wall-clock time supplied by the caller. `recent_events::record` in
-    /// `koshi-observability` supplies the clock reading when it runs.
+    /// Wall-clock time supplied by the caller. `RecentEventRing::record_event`
+    /// in `koshi-observability` supplies the clock reading when it runs.
     pub occurred_at: SystemTime,
     /// The event variant's name, e.g. `"PaneCreated"` — the string
     /// [`Event::get_event_name`] returns. Borrowed while the record stays in the process

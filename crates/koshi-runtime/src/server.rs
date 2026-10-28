@@ -30,7 +30,7 @@ use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
-use koshi_observability::logging::recent_events;
+use koshi_observability::logging::recent_events::RecentEventRing;
 use koshi_observability::repeated_warning::WarningRateLimiter;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, UNOBSERVED_EXIT};
 use koshi_session::client::Client;
@@ -237,9 +237,14 @@ pub struct Server {
     /// emits [`Event::PtyResized`], only for the panes whose solved size
     /// differs from this record.
     pub(crate) pty_size_by_pane_id: HashMap<PaneId, PtySize>,
-    /// Event fan-out hub: every emitted [`Event`] is delivered to each
-    /// subscriber over its own bounded queue.
+    /// Fan-out hub: [`EventBus::publish`] delivers each pane placement
+    /// commit, quit and restart to every subscriber, over its own bounded
+    /// queue.
     pub(crate) event_bus: EventBus,
+    /// The newest records of the events this server published. The threads
+    /// that serve the session's control socket hold the same ring and answer
+    /// `koshi debug events` from it.
+    pub(crate) recent_event_ring: Arc<RecentEventRing>,
     /// Which client each bus subscriber views as, and the pace of its frames,
     /// in subscription order. Each frame that is due puts the frame of the
     /// client named here on the subscriber's queue, a subscriber paused by a
@@ -325,13 +330,15 @@ pub struct Server {
 
 impl Server {
     /// Build a server with no sessions, no terminal engines, no subscribers and
-    /// no timed renders, holding the given PTY backend and event inbox.
+    /// no timed renders, holding the given PTY backend, event inbox and
+    /// recent-events ring.
     /// Both effective configs start at the built-in defaults, over an
     /// empty app layer that [`load_startup_config`](Self::load_startup_config)
     /// and every `koshi.kdl` reload replace.
     pub fn from_runtime_parts(
         pty_backend: Arc<dyn PtyBackend>,
         inbox_receiver: Receiver<RuntimeEvent>,
+        recent_event_ring: Arc<RecentEventRing>,
     ) -> Self {
         let app_layer = PartialKoshiConfig::default();
         let config = merge_app_layer_into_server_config(&app_layer);
@@ -346,6 +353,7 @@ impl Server {
             pane_kill_threads: Vec::new(),
             pty_size_by_pane_id: HashMap::new(),
             event_bus: EventBus::new(),
+            recent_event_ring,
             subscriptions: Vec::new(),
             placement_preview_by_client_id: HashMap::new(),
             held_mouse_buttons: Vec::new(),
@@ -370,9 +378,11 @@ impl Server {
     ///
     /// The event bus and the subscribers are built fresh here, and no
     /// control socket is attached: the caller attaches one with
-    /// [`attach_ipc_server`](Self::attach_ipc_server). What comes from the swap is what
-    /// [`ResumeBody`] carries, over the panes `pty_size_by_pane_id` names, plus the records of the
-    /// clients that were told to attach again.
+    /// [`attach_ipc_server`](Self::attach_ipc_server). Events are recorded
+    /// into `recent_event_ring`, after the records it already holds. What
+    /// comes from the swap is what [`ResumeBody`] carries, over the panes
+    /// `pty_size_by_pane_id` names, plus the records of the clients that were
+    /// told to attach again.
     ///
     /// `startup_app_config` is applied through [`load_startup_config`](Self::load_startup_config)
     /// before any pane is matched, so the session comes back on the `koshi.kdl` the caller read:
@@ -423,16 +433,22 @@ impl Server {
     /// After the panes are matched, every viewed tab of every carried session resizes each live
     /// PTY to the size its solve gives, and so does every floating pane: a pane whose size did
     /// not change is not resized.
+    // Carries the parts a server is built from (`pty_backend`, `inbox_receiver`,
+    // `recent_event_ring`), the config it starts on (`startup_app_config`), and
+    // what the swap carried (`body`, `source_resume_format`,
+    // `pty_size_by_pane_id`, `exit_status_by_pane_id`).
+    #[allow(clippy::too_many_arguments)]
     pub fn resume(
         pty_backend: Arc<dyn PtyBackend>,
         inbox_receiver: Receiver<RuntimeEvent>,
+        recent_event_ring: Arc<RecentEventRing>,
         startup_app_config: Option<PartialKoshiConfig>,
         body: ResumeBody,
         source_resume_format: u32,
         pty_size_by_pane_id: HashMap<PaneId, PtySize>,
         exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
     ) -> Self {
-        let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+        let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, recent_event_ring);
         server.load_startup_config(startup_app_config);
         server.client_ids_awaiting_reconnect = body
             .session_by_id
@@ -658,12 +674,11 @@ impl Server {
         self.dispatch(envelope)
     }
 
-    /// The server→client door: register a subscriber for every published
-    /// event and hand back the receiving end of its own bounded queue, with what
-    /// waits beside that queue for the thread that writes the client's
-    /// connection: the host-write bytes for `client_id`'s own terminal, and the
-    /// owed-frame mark ([`WriterHandoff`]). Dropping the receiver ends the
-    /// subscription.
+    /// The server→client door: register a subscriber and hand back the
+    /// receiving end of its own bounded queue, with what waits beside that
+    /// queue for the thread that writes the client's connection: the
+    /// host-write bytes for `client_id`'s own terminal, and the owed-frame mark
+    /// ([`WriterHandoff`]). Dropping the receiver ends the subscription.
     ///
     /// `client_id` is the client the subscriber views as: the one whose frame
     /// [`push_frames`](Self::push_frames) queues each frame that is due, and
@@ -1089,7 +1104,7 @@ impl Server {
     pub(crate) fn publish_events(&mut self, events: &[Event]) {
         for event in events {
             log_event(event);
-            recent_events::record_event(event);
+            self.recent_event_ring.record_event(event);
             let removed_subscriber_ids = self.event_bus.publish(event);
             self.remove_subscriptions(&removed_subscriber_ids);
         }
@@ -1348,6 +1363,10 @@ impl Server {
     /// Borrow the shared PTY backend.
     pub fn get_pty_backend(&self) -> &Arc<dyn PtyBackend> {
         &self.pty_backend
+    }
+    /// Borrow the ring this server records each event it publishes into.
+    pub fn get_recent_event_ring(&self) -> &Arc<RecentEventRing> {
+        &self.recent_event_ring
     }
     /// Borrow the per-pane terminal engine map.
     pub fn list_terminal_engines(&self) -> &HashMap<PaneId, TerminalEngine> {

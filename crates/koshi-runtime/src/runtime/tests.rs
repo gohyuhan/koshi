@@ -180,7 +180,8 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
         InboxSink::from_event_sender(runtime_event_sender),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+    let mut server =
+        Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
 
     assert!(!server.has_active_panes(), "a fresh server parks no pane");
 
