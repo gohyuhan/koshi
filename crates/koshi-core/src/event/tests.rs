@@ -50,7 +50,6 @@ fn event_lifecycle_variants_round_trip_through_json() {
     }));
     assert_json_roundtrip(&Event::PaneCommandFinished(PaneCommandFinished {
         pane_id: PaneId::new(),
-        exit_code: Some(1),
     }));
     assert_json_roundtrip(&Event::InputModeChanged(InputModeChanged {
         client_id: ClientId::new(),
@@ -402,7 +401,6 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 24] {
         (
             Event::PaneCommandFinished(PaneCommandFinished {
                 pane_id: PaneId::new(),
-                exit_code: None,
             }),
             "PaneCommandFinished",
         ),

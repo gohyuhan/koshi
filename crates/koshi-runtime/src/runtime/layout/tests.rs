@@ -49,7 +49,7 @@ fn build_test_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(event_sender.clone()),
     )));
-    let server = Server::from_runtime_parts(pty_backend, event_receiver);
+    let server = Server::from_runtime_parts(pty_backend, event_receiver, Arc::default());
     (server, event_sender)
 }
 

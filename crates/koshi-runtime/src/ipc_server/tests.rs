@@ -22,7 +22,6 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_core::notification::NotificationQueueOwner;
 use koshi_image::{AnimationFrame, FrameDelay, LoopPolicy};
-use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::image_chunk::IMAGE_CHUNK_FRAME_HEAD_BYTE_COUNT;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
@@ -47,6 +46,7 @@ use koshi_test_support::fixtures::{
 };
 
 use crate::executable_watch::RESTART_RETRY_INTERVAL_DURATION;
+use crate::runtime::bus::tests::{build_test_pane_placement_committed, build_test_placement_event};
 use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
 use crate::runtime::delivery_queue::{create_delivery_queue, DeliverySender};
 use crate::runtime::event::{AttachAccepted, EndingNotice, SessionEnding};
@@ -151,21 +151,21 @@ fn spawn_answering_dispatcher(
     })
 }
 
-/// The structure a stand-in attach answers with: the session, named, with
-/// nothing in it and an empty notification queue.
-fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSnapshot {
-    AttachedSessionStructureSnapshot {
-        session_id,
-        session_name: "attachable".to_string(),
-        tabs: Vec::new(),
-        notification_queue: build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(
-            session_id,
-        )),
+/// The wire frame the writing thread writes for the placement
+/// [`build_test_pane_placement_committed`] builds into `tab_id`.
+fn build_test_placement_frame(tab_id: TabId) -> SessionEvent {
+    let pane_placement_committed = build_test_pane_placement_committed(tab_id);
+    SessionEvent::PanePlacementCommitted {
+        command_id: pane_placement_committed.command_id,
+        source_pane_id: pane_placement_committed.source_pane_id,
+        source_tab_id: pane_placement_committed.source_tab_id,
+        destination_tab_id: pane_placement_committed.destination_tab_id,
+        placement_target: pane_placement_committed.placement_target,
     }
 }
 
 /// The attach answer a stand-in dispatcher sends: `client_id` in `session_id`,
-/// with the structure [`build_attached_structure`] gives, `deliveries` as the
+/// with an empty session notification queue at the fixed epoch, `deliveries` as the
 /// client's queue, `writer_handoff` as the host writes and owed-frame mark
 /// beside that queue, `ending_notice`, the [`MINTED_CONNECTION_TOKEN`] resume
 /// token, and no pane area.
@@ -179,7 +179,9 @@ fn build_attach_accepted(
     AttachAccepted {
         client_id,
         session_id,
-        session_structure: build_attached_structure(session_id),
+        notification_queue: build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(
+            session_id,
+        )),
         deliveries,
         writer_handoff,
         ending_notice,
@@ -609,8 +611,15 @@ fn read_frames_of_ending_session(
         writer_handoff,
         Arc::clone(ending_notice),
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     let mut painted_update_receiver = PaintedUpdateReceiver::new();
@@ -722,7 +731,7 @@ fn compute_painted_update_byte_count(render_snapshot: &RenderSnapshot) -> usize 
 fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
     // The queue holds its full 1024 deliveries, and the ending event finds no
     // room on it. The first frame the client reads is the ending frame.
-    use koshi_core::event::{Event, QuitCause, TabCreated};
+    use koshi_core::event::{Event, QuitCause};
 
     use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
 
@@ -744,7 +753,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
         let (_, delivery_receiver, writer_handoff) = event_bus.subscribe();
         let tab_id = TabId::new();
         for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
-            event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+            event_bus.publish(&build_test_placement_event(tab_id));
         }
         let ending_notice = Arc::clone(event_bus.get_ending_notice());
         event_bus.publish(&ending_event);
@@ -769,15 +778,13 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     // while that client's queue still holds a frame. The detach closes the
     // queue behind that frame, and the quit follows. The client reads the
     // detach.
-    use koshi_core::event::{Event, QuitCause, TabCreated};
+    use koshi_core::event::{Event, QuitCause};
 
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
-    event_bus.publish(&Event::TabCreated(TabCreated {
-        tab_id: TabId::new(),
-    }));
+    event_bus.publish(&build_test_placement_event(TabId::new()));
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     event_bus.publish(&Event::Quit(QuitCause::Requested));
@@ -800,19 +807,15 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
 
 #[test]
 fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_are_still_queued() {
-    // The pane's exit is queued ahead of the quit, and the notice is raised.
-    // The client reads the quit alone.
-    use koshi_core::event::{Event, PaneProcessExited, QuitCause};
+    // A placement is queued ahead of the quit, and the notice is raised. The
+    // client reads the quit alone.
+    use koshi_core::event::{Event, QuitCause};
 
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
     let (_, delivery_receiver, writer_handoff) = event_bus.subscribe();
-    event_bus.publish(&Event::PaneProcessExited(PaneProcessExited {
-        pane_id: PaneId::new(),
-        exit_code: Some(0),
-        signal: None,
-    }));
+    event_bus.publish(&build_test_placement_event(TabId::new()));
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     event_bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(
@@ -834,10 +837,10 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
 
 #[test]
 fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last_frame() {
-    // Both host writes wait behind one wake. The ending drops the pane's exit
+    // Both host writes wait behind one wake. The ending drops the placement
     // and the wake, writes the waiting bytes as one host write, then the last
     // frame.
-    use koshi_core::event::{Event, PaneProcessExited, QuitCause};
+    use koshi_core::event::{Event, QuitCause};
 
     use crate::runtime::bus::{EventBus, HostWrite};
 
@@ -855,11 +858,7 @@ fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last
     ] {
         let mut event_bus = EventBus::new();
         let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
-        event_bus.publish(&Event::PaneProcessExited(PaneProcessExited {
-            pane_id: PaneId::new(),
-            exit_code: Some(0),
-            signal: None,
-        }));
+        event_bus.publish(&build_test_placement_event(TabId::new()));
         assert!(
             event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one"))
         );
@@ -928,15 +927,13 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
     // The queue holds its full 1024 deliveries, so the wake is dropped. The
     // waiting bytes go out before the first delivery the writing thread
     // reads.
-    use koshi_core::event::{Event, TabCreated};
-
     use crate::runtime::bus::{EventBus, HostWrite, SUBSCRIBER_QUEUE_CAPACITY};
 
     let tab_id = TabId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
-        event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        event_bus.publish(&build_test_placement_event(tab_id));
     }
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one")));
     event_bus.unsubscribe(subscriber_id);
@@ -954,7 +951,7 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
         host_write_bytes: b"\x1b]52;c;b25l\x07".to_vec(),
     }];
     expected_frames.extend(vec![
-        SessionEvent::TabCreated { tab_id };
+        build_test_placement_frame(tab_id);
         SUBSCRIBER_QUEUE_CAPACITY
     ]);
     expected_frames.push(SessionEvent::Detached);
@@ -966,8 +963,6 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     // The queue holds its full 1024 deliveries, so the frame is dropped and the
     // writer handoff owes a frame. The writing thread takes that mark after
     // the first delivery it reads, before it writes that delivery.
-    use koshi_core::event::{Event, TabCreated};
-
     use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
 
     let client_id = ClientId::new();
@@ -976,7 +971,7 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
-        event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        event_bus.publish(&build_test_placement_event(tab_id));
     }
     assert!(!event_bus.try_send_frame(
         subscriber_id,
@@ -1009,13 +1004,20 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
             }
         }
     });
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     assert_eq!(
         connection.recv::<SessionEvent>().expect("the first event"),
-        SessionEvent::TabCreated { tab_id }
+        build_test_placement_frame(tab_id)
     );
     assert!(
         matches!(
@@ -1029,7 +1031,7 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     for _ in 1..SUBSCRIBER_QUEUE_CAPACITY {
         assert_eq!(
             connection.recv::<SessionEvent>().expect("the next event"),
-            SessionEvent::TabCreated { tab_id }
+            build_test_placement_frame(tab_id)
         );
     }
     event_bus.unsubscribe(subscriber_id);
@@ -1126,8 +1128,15 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
         writer_handoff,
         Arc::clone(&ending_notice),
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
     assert_eq!(
         connection
@@ -1181,8 +1190,15 @@ fn start_attachable_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_runtime_events) =
         spawn_attaching_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -1265,7 +1281,9 @@ fn attach_test_client_with_graphics(
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -1279,8 +1297,15 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-cell-size");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
     connection
         .send(&build_hello_request(&runtime_directory, session_id))
@@ -1361,8 +1386,15 @@ fn a_resize_over_the_viewport_cell_limit_is_dropped_and_the_next_resize_crosses(
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("resize-cell-limit");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
     connection
         .send(&build_hello_request(&runtime_directory, session_id))
@@ -1499,8 +1531,15 @@ impl AttachedFrameStream {
         let (inbox_sender, inbox_receiver) = mpsc::channel();
         let (dispatcher_thread, delivery_sender) =
             spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving");
+        let ipc_server = IpcServer::start(
+            &runtime_directory,
+            session_id,
+            inbox_sender,
+            Arc::default(),
+            None,
+            None,
+        )
+        .expect("start serving");
         let connection = attach_test_client_with_graphics(
             &runtime_directory,
             session_id,
@@ -2666,8 +2705,15 @@ fn start_test_server(
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, session_overview);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (ipc_server, session_id, runtime_directory, dispatcher_thread)
 }
 
@@ -2688,6 +2734,7 @@ fn start_shared_test_server(
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         Some(OtherUsers {
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(move || is_other_user_access_enabled),
@@ -2749,8 +2796,15 @@ fn start_reporting_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_command_envelopes) =
         spawn_reporting_dispatcher(inbox_receiver);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -2883,8 +2937,15 @@ fn start_layout_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, requested_tab_ids) =
         spawn_layout_dispatcher(inbox_receiver, session_layout);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -3467,9 +3528,15 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
 
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let restarted_dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, None);
-    let restarted_ipc_server =
-        IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving again");
+    let restarted_ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving again");
     let restarted_endpoint_file = load_test_endpoint_file(&runtime_directory, session_id);
     assert_ne!(
         restarted_endpoint_file.connection_token, initial_endpoint_file.connection_token,
@@ -3980,12 +4047,24 @@ fn discovery_with_no_running_session_closes_the_connection() {
 
 #[test]
 fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher() {
-    let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
-        start_test_server("recent-events", None);
+    let runtime_directory = build_test_runtime_directory("recent-events");
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, None);
+    let recent_event_ring = Arc::new(RecentEventRing::default());
     let tab_id = TabId::new();
-    recent_events::record_event(&koshi_core::event::Event::LayoutChanged(
+    recent_event_ring.record_event(&koshi_core::event::Event::LayoutChanged(
         koshi_core::event::LayoutChanged { tab_id },
     ));
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::clone(&recent_event_ring),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
 
     connection
@@ -4008,13 +4087,19 @@ fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher()
             recent_events_reply.answer_result
         );
     };
-    // The ring is process-wide and shared by every test in this binary. The
-    // test finds its record by this tab's own id.
-    let layout_event_record = recent_event_records
-        .iter()
-        .find(|recent_event_record| recent_event_record.tab_id == Some(tab_id))
-        .expect("the answer carries the layout record this test made");
-    assert_eq!(layout_event_record.event_name, "LayoutChanged");
+    assert_eq!(recent_event_records, recent_event_ring.list_recent_events());
+    assert_eq!(
+        recent_event_records
+            .iter()
+            .map(|recent_event_record| {
+                (
+                    recent_event_record.event_name.as_ref(),
+                    recent_event_record.tab_id,
+                )
+            })
+            .collect::<Vec<_>>(),
+        [("LayoutChanged", Some(tab_id))]
+    );
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -4151,8 +4236,15 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     drop(inbox_receiver);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
     send_prepare_request(
@@ -4265,8 +4357,15 @@ fn a_leftover_socket_file_is_reclaimed_at_start() {
     std::fs::write(&socket_address, b"").expect("plant a leftover file at the socket path");
 
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start reclaims the leftover and serves");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start reclaims the leftover and serves");
 
     ipc_server.shutdown();
     delete_test_directory(&runtime_directory);
@@ -4278,9 +4377,14 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
         start_test_server("busy", None);
 
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
-    let Err(IpcError::SocketBusy { socket_address }) =
-        IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-    else {
+    let Err(IpcError::SocketBusy { socket_address }) = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    ) else {
         panic!("the live listener must refuse a second bind");
     };
     assert_eq!(
@@ -4305,6 +4409,7 @@ fn a_runtime_directory_that_cannot_be_created_refuses_to_start() {
         &runtime_directory,
         SessionId::new(),
         inbox_sender,
+        Arc::default(),
         None,
         None,
     ) else {
@@ -4335,7 +4440,14 @@ fn a_start_whose_endpoint_file_cannot_be_written_leaves_nothing_listening() {
 
     let Err(IpcError::EndpointFileWrite {
         endpoint_file_path, ..
-    }) = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+    }) = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
     else {
         panic!("an endpoint file that cannot be written must refuse the start");
     };
@@ -4443,6 +4555,7 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         Some(OtherUsers {
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(|| true),
@@ -4510,6 +4623,7 @@ fn serve_other_user(
             })),
             &served_connection,
             None,
+            &RecentEventRing::default(),
         );
     });
     let caller_connection = Connection::connect(&socket_address).expect("connect");
@@ -4550,7 +4664,9 @@ fn attach_as_other_user(
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         }
@@ -4887,6 +5003,7 @@ fn start_restartable_test_server(
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(image_replacement),
     )
@@ -4935,8 +5052,15 @@ fn a_restart_to_a_session_that_cannot_replace_its_image_is_refused_without_the_d
     let (restart_report_sender, restart_report_receiver) = mpsc::channel();
     let dispatcher_thread =
         spawn_restart_reporting_dispatcher(inbox_receiver, restart_report_sender);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
 
     let (connection, restart_result) = send_restart_request(&runtime_directory, session_id);
 
@@ -5632,8 +5756,15 @@ fn start_inbox_test_server(
     let runtime_directory = build_test_runtime_directory(directory_tag);
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (ipc_server, session_id, runtime_directory, inbox_receiver)
 }
 
@@ -5676,6 +5807,7 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
         &runtime_directory,
         session_id,
         inbox_sender.clone(),
+        Arc::default(),
         None,
         None,
     )
@@ -6137,7 +6269,9 @@ fn attach_saying_remote(
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -6155,8 +6289,15 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_remote_flags) =
         spawn_origin_reporting_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
 
     let local_connection = attach_saying_remote(&runtime_directory, session_id, client_id, false);
     assert_eq!(
@@ -6228,6 +6369,7 @@ fn start_watched_test_server(
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(build_test_image_replacement(
             program_path.clone(),
@@ -6330,6 +6472,7 @@ fn a_hello_refused_for_its_version_reads_the_program_file_the_session_started_fr
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(build_test_image_replacement(
             program_path,
@@ -6451,8 +6594,15 @@ fn a_session_without_an_executable_watch_writes_no_program_file() {
     let session_id = SessionId::new();
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
 
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
 
     assert!(
         !ServerProgramFile::resolve_session_program_file_path(&runtime_directory, session_id)
@@ -6490,6 +6640,7 @@ fn a_start_whose_program_file_cannot_be_written_leaves_no_endpoint_file_and_noth
         &runtime_directory,
         session_id,
         inbox_sender,
+        Arc::default(),
         None,
         Some(build_test_image_replacement(
             program_path,
@@ -6758,8 +6909,15 @@ fn start_clipboard_test_server(
         maximum_copy_byte_count,
         should_run_clipboard_tool,
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     (
         ipc_server,
         session_id,
@@ -7114,8 +7272,15 @@ fn a_clipboard_request_with_no_dispatcher_closes_the_connection() {
         let session_id = SessionId::new();
         let (inbox_sender, inbox_receiver) = mpsc::channel();
         drop(inbox_receiver);
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving");
+        let ipc_server = IpcServer::start(
+            &runtime_directory,
+            session_id,
+            inbox_sender,
+            Arc::default(),
+            None,
+            None,
+        )
+        .expect("start serving");
         let mut connection = connect_greeted_connection(&runtime_directory, session_id);
 
         connection
@@ -7176,7 +7341,9 @@ fn attach_test_client_over_link(
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -7199,8 +7366,15 @@ fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     for request_id in [3, 4] {
@@ -7337,8 +7511,15 @@ fn a_frame_that_goes_out_puts_off_the_next_pong_by_a_whole_heartbeat_interval() 
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, _forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let connection = attach_test_client_over_link(
         &runtime_directory,
         session_id,
@@ -7437,7 +7618,9 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -7518,7 +7701,9 @@ fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_k
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -7578,7 +7763,9 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: build_attached_structure(session_id),
+            notification_queue: build_fixed_epoch_notification_queue(
+                NotificationQueueOwner::Session(session_id),
+            ),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -7727,8 +7914,15 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
         let session_id = SessionId::new();
         let runtime_directory = build_test_runtime_directory("attach-answer-unwritten");
         let (inbox_sender, inbox_receiver) = mpsc::channel();
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-            .expect("start serving");
+        let ipc_server = IpcServer::start(
+            &runtime_directory,
+            session_id,
+            inbox_sender,
+            Arc::default(),
+            None,
+            None,
+        )
+        .expect("start serving");
         let mut connection = connect_greeted_connection(&runtime_directory, session_id);
         send_prepare_request(
             &mut connection,
@@ -7743,19 +7937,18 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
             panic!("the attach reaches the dispatcher");
         };
 
-        // The answer names a session whose name alone is as long as the frame
-        // cap: the session cannot write it.
+        // The client closes its connection before the answer: the session
+        // cannot write it.
+        drop(connection);
         let (_delivery_sender, delivery_receiver) =
             create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
-        let mut attach_accepted = build_attach_accepted(
+        let attach_accepted = build_attach_accepted(
             client_id,
             session_id,
             delivery_receiver,
             Arc::new(WriterHandoff::default()),
             Arc::new(EndingNotice::default()),
         );
-        attach_accepted.session_structure.session_name =
-            "a".repeat(transport::MAX_FRAME_BYTE_COUNT as usize);
         response_sender
             .send(Some(attach_accepted))
             .expect("the session waits for the answer");
@@ -7776,7 +7969,6 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
             "resume_client_id {resume_client_id:?}"
         );
 
-        drop(connection);
         ipc_server.shutdown();
         delete_test_directory(&runtime_directory);
     }
@@ -7790,8 +7982,15 @@ fn a_stream_the_session_closed_hands_over_one_detach_when_the_client_closes() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
     // The closed queue ends the writing thread after its goodbye.
@@ -7841,8 +8040,15 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
         spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let connection = attach_test_client(&runtime_directory, session_id, client_id);
     // On Linux, a write to a peer that shut its read direction fails with
     // `EPIPE`. The client keeps its writing direction open.
@@ -7875,15 +8081,13 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
 fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
     // The queue holds its full 1024 deliveries, so one more event pauses the
     // subscriber. The backlog is read, and the resync queues its snapshot.
-    use koshi_core::event::{Event, TabCreated};
-
     use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
 
     let tab_id = TabId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     for _ in 0..=SUBSCRIBER_QUEUE_CAPACITY {
-        event_bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        event_bus.publish(&build_test_placement_event(tab_id));
     }
     assert_eq!(
         delivery_receiver.try_iter().count(),
@@ -8133,8 +8337,15 @@ fn every_held_kind_without_prepare_a_kind_that_cannot_be_held_and_a_bare_commit_
     let runtime_directory = build_test_runtime_directory("prepare-refusals");
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let (mut frame_reader, mut frame_writer) =
         connect_greeted_connection(&runtime_directory, session_id).split();
     frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));

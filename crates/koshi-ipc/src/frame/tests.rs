@@ -66,13 +66,6 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                         row_count: 5,
                     },
                 },
-                content_rect: Rect {
-                    origin: Point { column: 1, row: 3 },
-                    size: Size {
-                        column_count: 2,
-                        row_count: 1,
-                    },
-                },
                 is_pinned: true,
             }],
             floating_panes: vec![
@@ -409,10 +402,6 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     "outer_rect": {
                         "origin": { "column": 0, "row": 0 },
                         "size": { "column_count": 4, "row_count": 5 }
-                    },
-                    "content_rect": {
-                        "origin": { "column": 1, "row": 3 },
-                        "size": { "column_count": 2, "row_count": 1 }
                     },
                     "is_pinned": true
                 }],

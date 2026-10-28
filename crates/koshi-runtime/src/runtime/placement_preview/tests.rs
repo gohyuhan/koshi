@@ -48,7 +48,7 @@ fn build_test_server() -> Server {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender),
     )));
-    Server::from_runtime_parts(pty_backend, inbox_receiver)
+    Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default())
 }
 
 /// A session with no tab, no pane and no client.

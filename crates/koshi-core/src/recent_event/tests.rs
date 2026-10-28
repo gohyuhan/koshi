@@ -259,14 +259,11 @@ fn a_tab_focused_records_its_client_and_tab_but_not_the_tab_it_left() {
 }
 
 #[test]
-fn a_finished_command_records_its_pane_and_no_exit_code() {
+fn a_finished_command_records_its_pane() {
     let pane_id = PaneId::new();
 
     let recorded_event = record_event(
-        &Event::PaneCommandFinished(PaneCommandFinished {
-            pane_id,
-            exit_code: Some(127),
-        }),
+        &Event::PaneCommandFinished(PaneCommandFinished { pane_id }),
         build_occurred_at(),
     );
 

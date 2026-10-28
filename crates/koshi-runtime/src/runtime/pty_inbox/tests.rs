@@ -134,7 +134,7 @@ fn build_test_server_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>) {
         InboxSink::from_event_sender(event_sender),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let runtime = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let runtime = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     (runtime, fake_pty_backend)
 }
 
@@ -516,7 +516,7 @@ fn build_server_with_parked_panes(
     ));
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(inbox_sink.clone()));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     let pane_ids: Vec<PaneId> = (0..pane_count).map(|_| PaneId::new()).collect();
     for pane_id in &pane_ids {
         spawn_test_pane(&fake_pty_backend, *pane_id);
@@ -533,7 +533,7 @@ fn build_server_with_seeded_session() -> (Server, Arc<InboxSink>, Arc<FakePtyBac
     let inbox_sink = Arc::new(InboxSink::from_event_sender(event_sender));
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(inbox_sink.clone()));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     server
         .bootstrap_session(
             koshi_core::ids::SessionId::new(),
@@ -819,7 +819,7 @@ fn a_wake_that_arrives_during_a_turn_is_served_before_the_busy_pane_again() {
         echo_bytes: Mutex::new(Some(b"marker".to_vec())),
     });
     let pty_backend: Arc<dyn PtyBackend> = echoing_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     for pane_id in [busy_pane_id, quiet_pane_id] {
         echoing_pty_backend
             .spawn_pane(

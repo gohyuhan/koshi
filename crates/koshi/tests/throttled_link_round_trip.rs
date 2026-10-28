@@ -16,13 +16,13 @@
 //!    throttle, whose reader thread drains everything the session writes.
 //!
 //! The session then gets a burst it cannot deliver: pane output, which reaches
-//! each client in its painted frames, and thousands of tab focus changes, each
-//! one an event. The throttled client's queue fills. A frame that does not fit
-//! is dropped and leaves the client live. The first event that does not fit
-//! marks the client desynced, and the serve loop resyncs it with a
-//! [`SessionEvent::Resync`] naming how many events went missing. Nothing in
-//! this file reaches into the bus to make that happen. A focus change
-//! submitted after that resync must arrive on the throttled connection
+//! each client in its painted frames, and thousands of pane swaps, each one a
+//! [`SessionEvent::PanePlacementCommitted`] event. The throttled client's queue
+//! fills. A frame that does not fit is dropped and leaves the client live. The
+//! first event that does not fit marks the client desynced, and the serve loop
+//! resyncs it with a [`SessionEvent::Resync`] naming how many events went
+//! missing. Nothing in this file reaches into the bus to make that happen. A
+//! swap submitted after that resync must arrive on the throttled connection
 //! itself.
 //!
 //! Every wait here is bounded. A queue read waits for the time left until its
@@ -37,11 +37,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, FocusTabArgs, NewTabArgs, TabTarget,
+    Command, CommandEnvelope, CommandResult, CommandSource, MovePaneArgs, NewPaneArgs,
+    NewPanePlacement,
 };
-use koshi_core::event::{Event, TabFocused};
-use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
-use koshi_ipc::attach::AttachedSessionStructureSnapshot;
+use koshi_core::event::Event;
+use koshi_core::geometry::Direction;
+use koshi_core::ids::{ClientId, CommandId, PaneId};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
@@ -60,8 +61,9 @@ use common::session_connection::{
 /// throttled link before the test calls it a failure: 60 seconds.
 const THROTTLED_LINK_WAIT_DURATION: Duration = Duration::from_secs(60);
 
-/// How long a poll pauses between attempts.
-const ROUND_TRIP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
+/// How long one read on the relay's client stream waits before the pump checks
+/// its deadline: 10 ms.
+const RELAY_READ_TIMEOUT_DURATION: Duration = Duration::from_millis(10);
 
 /// The span one slice of a relay pump covers.
 const RELAY_SLICE_DURATION: Duration = Duration::from_millis(10);
@@ -83,9 +85,9 @@ const PANE_OUTPUT_CHUNK_COUNT: usize = 400;
 const PANE_OUTPUT_CHUNK_BYTES: &[u8] =
     b"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\r\n";
 
-/// How many tab focus changes the burst submits. Each one puts one event on
-/// every subscriber's queue: several times the 1024 entries one queue holds.
-const TAB_FOCUS_COMMAND_COUNT: usize = 6000;
+/// How many pane swaps the burst submits. Each one puts one event on every
+/// subscriber's queue: several times the 1024 entries one queue holds.
+const PANE_SWAP_COMMAND_COUNT: usize = 6000;
 
 /// One loopback stream half, as a framed connection reads or writes it.
 ///
@@ -133,10 +135,10 @@ fn start_throttled_relay(endpoint_file: EndpointFile, deadline: Instant) -> Stri
         let (accepted_client_stream, _) = relay_listener
             .accept()
             .expect("the relay accepts one client");
-        // A read on this stream returns within the poll interval, and the pump
-        // checks its deadline after each one.
+        // A read on this stream returns within `RELAY_READ_TIMEOUT_DURATION`,
+        // and the pump checks its deadline after each one.
         accepted_client_stream
-            .set_read_timeout(Some(ROUND_TRIP_POLL_INTERVAL_DURATION))
+            .set_read_timeout(Some(RELAY_READ_TIMEOUT_DURATION))
             .expect("set the relay's read timeout");
         let client_reader_stream = accepted_client_stream
             .try_clone()
@@ -277,42 +279,46 @@ fn submit_session_command(
     }
 }
 
-/// Attach once more over the control socket, as a `Prepare` and its `Commit`,
-/// and hand back only the structure the reply carried, with the connection
-/// closed again.
-fn get_reattached_structure(session: &RunningSession) -> AttachedSessionStructureSnapshot {
-    let mut connection = open_session_connection(&session.load_session_endpoint());
-    send_committed_request(&mut connection, build_attach_request());
-    let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
-    let IpcResult::Attached {
-        session_structure, ..
-    } = ipc_response.answer_result
-    else {
-        panic!(
-            "expected an attach reply, got {:?}",
-            ipc_response.answer_result
-        );
-    };
-    session_structure
-}
-
-/// Wait until the session reports exactly `tab_count` tabs.
+/// Swap `pane_id` with its neighbor in `direction` over `connection`, as the
+/// CLI running inside `pane_id` on behalf of `client_id`, and hand back the
+/// event the swap puts on every subscriber's queue, as a client reads it.
 ///
 /// # Panics
-/// When [`THROTTLED_LINK_WAIT_DURATION`] passes first.
-fn wait_for_tab_count(session: &RunningSession, tab_count: usize) {
-    let deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
-    loop {
-        let session_overview = session.fetch_session_overview();
-        if session_overview.tabs.len() == tab_count {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the session settled at {} tabs, not {tab_count}",
-            session_overview.tabs.len()
-        );
-        std::thread::sleep(ROUND_TRIP_POLL_INTERVAL_DURATION);
+/// When the swap is rejected, or commits no pane placement.
+fn submit_pane_swap(
+    connection: &mut Connection,
+    session: &RunningSession,
+    client_id: ClientId,
+    pane_id: PaneId,
+    working_directory_path: &str,
+    direction: Direction,
+) -> SessionEvent {
+    let swap_result = submit_session_command(
+        connection,
+        session,
+        client_id,
+        pane_id,
+        working_directory_path,
+        Command::MovePane(MovePaneArgs {
+            pane_id: Some(pane_id),
+            direction,
+        }),
+    );
+    let pane_placement_committed = list_emitted_events(&swap_result)
+        .iter()
+        .find_map(|emitted_event| match emitted_event {
+            Event::PanePlacementCommitted(pane_placement_committed) => {
+                Some(pane_placement_committed.clone())
+            }
+            _ => None,
+        })
+        .expect("the swap commits one pane placement");
+    SessionEvent::PanePlacementCommitted {
+        command_id: pane_placement_committed.command_id,
+        source_pane_id: pane_placement_committed.source_pane_id,
+        source_tab_id: pane_placement_committed.source_tab_id,
+        destination_tab_id: pane_placement_committed.destination_tab_id,
+        placement_target: pane_placement_committed.placement_target,
     }
 }
 
@@ -341,25 +347,41 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     let throttled_client = attach_client_through_relay(&session, &relay_socket_address);
     let control_client = attach_test_client(&session);
 
-    // A second tab: each focus change below moves focus between the two and
-    // emits one event.
-    let first_tab_id = session.fetch_session_overview().tabs[0].tab_id;
+    // A second pane right of the root pane: each swap below trades the two
+    // places and emits one event.
     let mut control_connection = open_session_connection(&session.load_session_endpoint());
-    let create_tab_result = submit_session_command(
+    let split_result = submit_session_command(
         &mut control_connection,
         &session,
         control_client.client_id,
         root_pane_id,
         &session_socket_address,
-        Command::NewTab(NewTabArgs::default()),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(root_pane_id),
+                tab_id: None,
+                direction: Direction::Right,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: Some(control_client.client_id),
+        }),
     );
-    let second_tab_id = match list_emitted_events(&create_tab_result) {
-        [Event::TabCreated(created_tab), ..] => created_tab.tab_id,
+    let split_pane_id = match list_emitted_events(&split_result) {
+        [Event::PaneCreated(created_pane), ..] => created_pane.pane_id,
         unexpected_events => {
-            panic!("expected a tab to be created, got {unexpected_events:?}")
+            panic!("expected a pane to be created, got {unexpected_events:?}")
         }
     };
-    assert_eq!(session.fetch_session_overview().tabs.len(), 2);
+    assert_eq!(
+        session
+            .fetch_session_overview()
+            .panes
+            .iter()
+            .map(|pane_discovery| pane_discovery.pane_id)
+            .collect::<Vec<PaneId>>(),
+        vec![root_pane_id, split_pane_id]
+    );
 
     // The first half of the burst: pane output, which reaches each client in
     // its painted frames.
@@ -370,37 +392,33 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
             .expect("the fake backend takes the pane's output");
     }
 
-    // The second half: tab focus changes. Nothing reads the throttled
-    // client's stream while this runs: its queue fills, then overflows. The
-    // control client is on the new tab: the first `Next` wraps back to the
-    // first tab, and every turn after it swaps the two.
-    for command_index in 0..TAB_FOCUS_COMMAND_COUNT {
-        let focus_tab_result = submit_session_command(
+    // The second half: pane swaps. Nothing reads the throttled client's
+    // stream while this runs: its queue fills, then overflows. The root pane
+    // starts on the left: each even turn moves it right, and each odd turn
+    // moves it back.
+    let first_swap_event = submit_pane_swap(
+        &mut control_connection,
+        &session,
+        control_client.client_id,
+        root_pane_id,
+        &session_socket_address,
+        Direction::Right,
+    );
+    for command_index in 1..PANE_SWAP_COMMAND_COUNT {
+        let direction = if command_index % 2 == 0 {
+            Direction::Right
+        } else {
+            Direction::Left
+        };
+        submit_pane_swap(
             &mut control_connection,
             &session,
             control_client.client_id,
             root_pane_id,
             &session_socket_address,
-            Command::FocusTab(FocusTabArgs {
-                focus_target: TabTarget::Next,
-                client_id: Some(control_client.client_id),
-            }),
-        );
-        let (focused_tab_id, previous_tab_id) = if command_index % 2 == 0 {
-            (first_tab_id, second_tab_id)
-        } else {
-            (second_tab_id, first_tab_id)
-        };
-        assert_eq!(
-            list_emitted_events(&focus_tab_result),
-            [Event::TabFocused(TabFocused {
-                client_id: control_client.client_id,
-                tab_id: focused_tab_id,
-                previous_tab_id,
-            })]
+            direction,
         );
     }
-    wait_for_tab_count(&session, 2);
 
     // Only now does the throttled client start reading. Its queue holds the
     // backlog, and the resync the serve loop owes it lands after that backlog.
@@ -444,76 +462,42 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
         Some(throttled_client.client_id)
     );
 
-    // A focus change submitted after the resync must reach the throttled
-    // client through the relay, as the exact event the dispatcher emitted.
-    // Frames still in flight from the burst — and any further resync among
-    // them — are read past.
-    let focus_tab_result = submit_session_command(
+    // A swap submitted after the resync must reach the throttled client
+    // through the relay, as the exact event the dispatcher emitted. Frames
+    // still in flight from the burst — and any further resync among them —
+    // are read past. The burst made an even count of swaps, so the root pane
+    // is on the left again.
+    let probe_swap_event = submit_pane_swap(
         &mut control_connection,
         &session,
         control_client.client_id,
         root_pane_id,
         &session_socket_address,
-        Command::FocusTab(FocusTabArgs {
-            focus_target: TabTarget::Next,
-            client_id: Some(control_client.client_id),
-        }),
+        Direction::Right,
     );
-    let focus_event = match list_emitted_events(&focus_tab_result) {
-        [Event::TabFocused(tab_focused)] => *tab_focused,
-        unexpected_events => panic!("expected one focus change, got {unexpected_events:?}"),
-    };
     let probe_deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
     loop {
         assert!(
             Instant::now() < probe_deadline,
-            "the focus change submitted after the resync never reached the throttled client"
+            "the swap submitted after the resync never reached the throttled client"
         );
         let session_event = throttled_events
             .recv_timeout(probe_deadline.saturating_duration_since(Instant::now()))
             .expect("the session keeps writing to the throttled client");
         assert!(
             Instant::now() < probe_deadline,
-            "the focus change submitted after the resync never reached the throttled client"
+            "the swap submitted after the resync never reached the throttled client"
         );
-        if session_event
-            == (SessionEvent::TabFocused {
-                client_id: focus_event.client_id,
-                tab_id: focus_event.tab_id,
-                previous_tab_id: focus_event.previous_tab_id,
-            })
-        {
+        if session_event == probe_swap_event {
             break;
         }
     }
 
-    // The session the throttled client caught up to is the session an
-    // unthrottled client sees. Both reads are fresh attaches over the control
-    // socket on the settled session, and every id in them matches.
-    let settled_structure = get_reattached_structure(&session);
-    let repeated_structure = get_reattached_structure(&session);
-    assert_eq!(settled_structure, repeated_structure);
-    assert_eq!(settled_structure.session_id, session.session_id);
-    assert_eq!(
-        settled_structure
-            .tabs
-            .iter()
-            .map(|tab_discovery| tab_discovery.tab_id)
-            .collect::<Vec<TabId>>(),
-        vec![first_tab_id, second_tab_id]
-    );
-
-    // The control client's own stream never stopped: it read the tab creation
-    // the burst opened with.
+    // The control client's own stream never stopped: it read the first swap
+    // the burst submitted.
     let first_control_event = control_client
         .session_events
         .recv_timeout(THROTTLED_LINK_WAIT_DURATION)
         .expect("the control client is told the session changed");
-    assert_eq!(
-        first_control_event,
-        SessionEvent::TabCreated {
-            tab_id: second_tab_id
-        }
-    );
-    assert_eq!(control_client.session_structure.tabs.len(), 1);
+    assert_eq!(first_control_event, first_swap_event);
 }

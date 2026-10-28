@@ -917,11 +917,11 @@ impl vte::Perform for TerminalState {
                             .push(ShellIntegrationFact::CommandStarted);
                     }
                 }
-                Osc133::CommandFinished(exit_code) => {
+                Osc133::CommandFinished => {
                     if self.shell_integration_state == ShellIntegrationState::Running {
                         self.shell_integration_state = ShellIntegrationState::Prompt;
                         self.shell_integration_facts
-                            .push(ShellIntegrationFact::CommandFinished { exit_code });
+                            .push(ShellIntegrationFact::CommandFinished);
                     }
                 }
             }

@@ -37,7 +37,7 @@ fn build_runtime_with_pane() -> (Server, PaneId, ClientId) {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender),
     )));
-    let mut runtime = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut runtime = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     let (pane_id, client_id) = attach_test_session_with_pane(&mut runtime);
     (runtime, pane_id, client_id)
 }

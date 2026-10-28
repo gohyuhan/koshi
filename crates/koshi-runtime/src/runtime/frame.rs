@@ -80,7 +80,6 @@ pub(crate) fn build_wire_frame_with_content_ids(
                 .map(|floating_pane_slot| FrameFloatingPaneSlot {
                     pane_id: floating_pane_slot.pane_id,
                     outer_rect: floating_pane_slot.outer_rect,
-                    content_rect: floating_pane_slot.content_rect,
                     is_pinned: floating_pane_slot.is_pinned,
                 })
                 .collect(),

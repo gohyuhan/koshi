@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::geometry::Direction;
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::mouse::MouseAnswer;
 use serde_json::json;
 
@@ -44,7 +44,6 @@ fn build_test_image_transfer() -> FrameImageTransfer {
 /// order the enum declares them. Frames with larger payloads have their own
 /// tests below.
 fn list_test_events() -> Vec<SessionEvent> {
-    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
     let command_id = CommandId::from_uuid(build_fixed_test_uuid());
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let tab_id = TabId::from_uuid(build_fixed_test_uuid());
@@ -54,27 +53,6 @@ fn list_test_events() -> Vec<SessionEvent> {
         SessionEvent::ImageContentReleased {
             image_content_ids: vec![3, 1, 4],
         },
-        SessionEvent::PaneCreated {
-            pane_id,
-            tab_id: Some(tab_id),
-        },
-        SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: Some(130),
-            signal: None,
-        },
-        SessionEvent::PaneClosing { pane_id },
-        SessionEvent::PaneRemoved {
-            pane_id,
-            tab_id: Some(tab_id),
-        },
-        SessionEvent::PaneFocused {
-            client_id,
-            tab_id: Some(tab_id),
-            pane_id,
-            previous_pane_id: Some(pane_id),
-        },
-        SessionEvent::LayoutChanged { tab_id },
         SessionEvent::PanePlacementCommitted {
             command_id,
             source_pane_id: pane_id,
@@ -85,18 +63,6 @@ fn list_test_events() -> Vec<SessionEvent> {
                 anchor: PanePlacementAnchor::Pane(pane_id),
                 direction: Direction::Right,
             }),
-        },
-        SessionEvent::TabCreated { tab_id },
-        SessionEvent::TabClosed { tab_id },
-        SessionEvent::TabFocused {
-            client_id,
-            tab_id,
-            previous_tab_id: tab_id,
-        },
-        SessionEvent::TabMoved {
-            tab_id,
-            previous_tab_index: 2,
-            new_tab_index: 0,
         },
         SessionEvent::Quit,
         SessionEvent::Restarting,
@@ -323,18 +289,16 @@ fn a_host_write_survives_a_round_trip() {
 
 #[test]
 fn an_absent_optional_field_round_trips_as_absent() {
-    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let sent_events = [
-        SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: None,
-            signal: None,
+        SessionEvent::SwitchTo {
+            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            owner_user_id: None,
         },
-        SessionEvent::PaneFocused {
-            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-            pane_id,
-            previous_pane_id: None,
+        SessionEvent::CommandRejected {
+            command_id: CommandId::from_uuid(build_fixed_test_uuid()),
+            fired_action: None,
+            reject_reason: RejectReason::TargetGone,
+            help: None,
         },
     ];
 
@@ -361,17 +325,6 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
         vec![
             json!("ImageCacheReset"),
             json!({ "ImageContentReleased": { "image_content_ids": [3, 1, 4] } }),
-            json!({ "PaneCreated": { "pane_id": wire_identifier, "tab_id": wire_identifier } }),
-            json!({ "PaneProcessExited": { "pane_id": wire_identifier, "exit_code": 130, "signal": null } }),
-            json!({ "PaneClosing": { "pane_id": wire_identifier } }),
-            json!({ "PaneRemoved": { "pane_id": wire_identifier, "tab_id": wire_identifier } }),
-            json!({ "PaneFocused": {
-                "client_id": wire_identifier,
-                "tab_id": wire_identifier,
-                "pane_id": wire_identifier,
-                "previous_pane_id": wire_identifier
-            } }),
-            json!({ "LayoutChanged": { "tab_id": wire_identifier } }),
             json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
                 "source_pane_id": wire_identifier,
@@ -387,10 +340,6 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
                     }
                 }
             } }),
-            json!({ "TabCreated": { "tab_id": wire_identifier } }),
-            json!({ "TabClosed": { "tab_id": wire_identifier } }),
-            json!({ "TabFocused": { "client_id": wire_identifier, "tab_id": wire_identifier, "previous_tab_id": wire_identifier } }),
-            json!({ "TabMoved": { "tab_id": wire_identifier, "previous_tab_index": 2, "new_tab_index": 0 } }),
             json!("Quit"),
             json!("Restarting"),
             json!("Detached"),
@@ -424,28 +373,25 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
 #[test]
 fn an_event_carrying_an_unknown_field_ignores_it() {
     let decoded_event_with_unknown_field: SessionEvent = serde_json::from_str(
-        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","previous_tab_index":2,"new_tab_index":0,"pinned":true}}"#,
+        r#"{"ImageContentReleased":{"image_content_ids":[3,1,4],"pinned":true}}"#,
     )
     .expect("a field this build does not know is ignored");
 
-    let decoded_event_without_unknown_field: SessionEvent = serde_json::from_str(
-        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","previous_tab_index":2,"new_tab_index":0}}"#,
-    )
-    .expect("the same frame without the extra field decodes");
+    let decoded_event_without_unknown_field: SessionEvent =
+        serde_json::from_str(r#"{"ImageContentReleased":{"image_content_ids":[3,1,4]}}"#)
+            .expect("the same frame without the extra field decodes");
 
-    let expected_tab_moved_event = SessionEvent::TabMoved {
-        tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-        previous_tab_index: 2,
-        new_tab_index: 0,
+    let expected_image_content_released_event = SessionEvent::ImageContentReleased {
+        image_content_ids: vec![3, 1, 4],
     };
 
     assert_eq!(
-        decoded_event_with_unknown_field, expected_tab_moved_event,
+        decoded_event_with_unknown_field, expected_image_content_released_event,
         "the extra field left nothing behind in the decoded event"
     );
     assert_eq!(
         decoded_event_without_unknown_field,
-        expected_tab_moved_event
+        expected_image_content_released_event
     );
 }
 
@@ -481,15 +427,14 @@ fn a_switch_without_its_user_id_is_refused() {
 
 #[test]
 fn an_event_missing_a_field_this_version_needs_is_refused() {
-    let decoded_event_result: Result<SessionEvent, _> = serde_json::from_str(
-        r#"{"PaneCreated":{"pane_id":"00000000-0000-0000-0000-000000000001"}}"#,
-    );
+    let decoded_event_result: Result<SessionEvent, _> =
+        serde_json::from_str(r#"{"ImageContentReleased":{}}"#);
 
-    let decode_error =
-        decoded_event_result.expect_err("a frame without its tab decoded instead of failing");
+    let decode_error = decoded_event_result
+        .expect_err("a frame without its image content ids decoded instead of failing");
     assert_eq!(
         decode_error.to_string(),
-        "missing field `tab_id` at line 1 column 65"
+        "missing field `image_content_ids` at line 1 column 26"
     );
 }
 
@@ -640,23 +585,7 @@ fn a_host_write_carrying_text_that_is_not_base64_is_refused() {
 
 #[test]
 fn numeric_fields_round_trip_at_their_extremes() {
-    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let expected_events = [
-        SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: Some(i32::MIN),
-            signal: None,
-        },
-        SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: Some(i32::MAX),
-            signal: None,
-        },
-        SessionEvent::TabMoved {
-            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-            previous_tab_index: usize::MAX,
-            new_tab_index: 0,
-        },
         SessionEvent::Resync {
             dropped_event_count: u64::MAX,
             notification_queue: build_fixed_session_notification_queue(),
@@ -690,12 +619,11 @@ fn numeric_fields_round_trip_at_their_extremes() {
 }
 
 #[test]
-fn an_event_whose_count_is_negative_is_refused() {
+fn an_event_whose_unsigned_number_is_negative_is_refused() {
     let dropped_event: Result<SessionEvent, _> =
         serde_json::from_str(r#"{"Resync":{"dropped_event_count":-4}}"#);
-    let malformed_tab_move_event: Result<SessionEvent, _> = serde_json::from_str(
-        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","previous_tab_index":-1,"new_tab_index":0}}"#,
-    );
+    let malformed_image_release_event: Result<SessionEvent, _> =
+        serde_json::from_str(r#"{"ImageContentReleased":{"image_content_ids":[-1]}}"#);
 
     assert_eq!(
         dropped_event
@@ -704,10 +632,10 @@ fn an_event_whose_count_is_negative_is_refused() {
         "invalid value: integer `-4`, expected u64 at line 1 column 35"
     );
     assert_eq!(
-        malformed_tab_move_event
-            .expect_err("a negative index decoded instead of failing")
+        malformed_image_release_event
+            .expect_err("a negative image content id decoded instead of failing")
             .to_string(),
-        "invalid value: integer `-1`, expected usize at line 1 column 84"
+        "invalid value: integer `-1`, expected u64 at line 1 column 48"
     );
 }
 
@@ -736,11 +664,11 @@ fn a_held_rejection_that_repeats_zero_times_or_names_no_fired_action_is_refused(
 #[test]
 fn an_event_whose_id_is_not_a_uuid_is_refused() {
     let decoded_event: Result<SessionEvent, _> =
-        serde_json::from_str(r#"{"PaneClosing":{"pane_id":"not-a-uuid"}}"#);
+        serde_json::from_str(r#"{"SwitchTo":{"session_id":"not-a-uuid","owner_user_id":null}}"#);
 
     assert_eq!(
         decoded_event
-            .expect_err("a pane id that is not a UUID decoded instead of failing")
+            .expect_err("a session id that is not a UUID decoded instead of failing")
             .to_string(),
         "UUID parsing failed: invalid character: found `n` at 0 at line 1 column 38"
     );
@@ -761,14 +689,14 @@ fn quit_serializes_as_the_bare_name() {
 fn a_frame_this_build_has_reads_as_known() {
     let bare_event: IncomingEvent = serde_json::from_str(r#""Quit""#).expect("a bare name decodes");
     let event_with_fields: IncomingEvent =
-        serde_json::from_str(r#"{"TabClosed":{"tab_id":"00000000-0000-0000-0000-000000000001"}}"#)
+        serde_json::from_str(r#"{"ImageContentReleased":{"image_content_ids":[7]}}"#)
             .expect("a frame decodes");
 
     assert_eq!(bare_event, MaybeKnown::Known(SessionEvent::Quit));
     assert_eq!(
         event_with_fields,
-        MaybeKnown::Known(SessionEvent::TabClosed {
-            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+        MaybeKnown::Known(SessionEvent::ImageContentReleased {
+            image_content_ids: vec![7],
         })
     );
 }
@@ -810,100 +738,49 @@ fn a_command_rejection_without_its_fired_action_or_help_is_refused() {
 }
 
 #[test]
-fn a_floating_pane_event_writes_a_null_tab_id_and_reads_it_back() {
+fn a_placement_of_a_floating_pane_writes_a_null_source_tab_id_and_reads_it_back() {
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
-    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-    let floating_pane_events = [
-        (
-            SessionEvent::PaneCreated {
-                pane_id,
-                tab_id: None,
-            },
-            json!({ "PaneCreated": { "pane_id": wire_identifier, "tab_id": null } }),
-        ),
-        (
-            SessionEvent::PaneRemoved {
-                pane_id,
-                tab_id: None,
-            },
-            json!({ "PaneRemoved": { "pane_id": wire_identifier, "tab_id": null } }),
-        ),
-        (
-            SessionEvent::PaneFocused {
-                client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-                tab_id: None,
-                pane_id,
-                previous_pane_id: None,
-            },
-            json!({ "PaneFocused": {
-                "client_id": wire_identifier,
-                "tab_id": null,
-                "pane_id": wire_identifier,
-                "previous_pane_id": null
-            } }),
-        ),
-        (
-            SessionEvent::PanePlacementCommitted {
-                command_id: CommandId::from_uuid(build_fixed_test_uuid()),
-                source_pane_id: pane_id,
-                source_tab_id: None,
-                destination_tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-                placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
-                    destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-                    anchor: PanePlacementAnchor::Tab,
-                    direction: Direction::Right,
-                }),
-            },
-            json!({ "PanePlacementCommitted": {
-                "command_id": wire_identifier,
-                "source_pane_id": wire_identifier,
-                "source_tab_id": null,
-                "destination_tab_id": wire_identifier,
-                "placement_target": {
-                    "Tiled": {
-                        "Split": {
-                            "destination_tab_id": wire_identifier,
-                            "anchor": "Tab",
-                            "direction": "Right"
-                        }
-                    }
+    let placement_event = SessionEvent::PanePlacementCommitted {
+        command_id: CommandId::from_uuid(build_fixed_test_uuid()),
+        source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        source_tab_id: None,
+        destination_tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+            destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            anchor: PanePlacementAnchor::Tab,
+            direction: Direction::Right,
+        }),
+    };
+    let expected_json = json!({ "PanePlacementCommitted": {
+        "command_id": wire_identifier,
+        "source_pane_id": wire_identifier,
+        "source_tab_id": null,
+        "destination_tab_id": wire_identifier,
+        "placement_target": {
+            "Tiled": {
+                "Split": {
+                    "destination_tab_id": wire_identifier,
+                    "anchor": "Tab",
+                    "direction": "Right"
                 }
-            } }),
-        ),
-    ];
+            }
+        }
+    } });
 
-    for (event, expected_json) in floating_pane_events {
-        assert_eq!(
-            serde_json::to_value(&event).expect("event encodes"),
-            expected_json
-        );
-        assert_eq!(
-            serde_json::from_value::<SessionEvent>(expected_json).expect("event decodes"),
-            event
-        );
-    }
+    assert_eq!(
+        serde_json::to_value(&placement_event).expect("event encodes"),
+        expected_json
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionEvent>(expected_json).expect("event decodes"),
+        placement_event
+    );
 }
 
 #[test]
 fn an_event_missing_a_tab_id_field_is_refused() {
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
     let incomplete_events = [
-        (
-            json!({ "PaneCreated": { "pane_id": wire_identifier } }),
-            "tab_id",
-        ),
-        (
-            json!({ "PaneRemoved": { "pane_id": wire_identifier } }),
-            "tab_id",
-        ),
-        (
-            json!({ "PaneFocused": {
-                "client_id": wire_identifier,
-                "pane_id": wire_identifier,
-                "previous_pane_id": null
-            } }),
-            "tab_id",
-        ),
         (
             json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,

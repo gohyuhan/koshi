@@ -1702,9 +1702,9 @@ mod admission_answers {
 mod bridge_round_trip {
     //! One remote client served by [`serve_remote_connection`] over real TLS on
     //! loopback, bridged to a real session server, held open while the session
-    //! keeps emitting events. Every event reaches the remote client inside
-    //! `EVENT_DELIVERY_TIMEOUT_DURATION`, and the connection stays up the whole
-    //! time.
+    //! keeps changing. The painted update that shows each change reaches the
+    //! remote client inside `EVENT_DELIVERY_TIMEOUT_DURATION`, and the
+    //! connection stays up the whole time.
     //!
     //! Also the time limits on a served connection: an admitted client that
     //! sends nothing is cut after `ADMITTED_FRAME_TIMEOUT_DURATION`, and a
@@ -1766,7 +1766,7 @@ mod bridge_round_trip {
     /// How long the link is held open and driven: 4 s.
     const LINK_HOLD_DURATION: Duration = Duration::from_secs(4);
 
-    /// How long one emitted event has to reach the remote client: 3 s.
+    /// How long one frame the session sends has to reach the remote client: 3 s.
     const EVENT_DELIVERY_TIMEOUT_DURATION: Duration = Duration::from_secs(3);
 
     /// How long the pane's writes stay unchanged before they are read: 300 ms.
@@ -2001,7 +2001,8 @@ mod bridge_round_trip {
         runtime_event_sender: mpsc::Sender<RuntimeEvent>,
     ) {
         let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend;
-        let mut session_server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+        let mut session_server =
+            Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
         session_server.load_startup_config(None);
         session_server
             .bootstrap_session(
@@ -2016,6 +2017,7 @@ mod bridge_round_trip {
             runtime_directory,
             session_id,
             runtime_event_sender,
+            Arc::clone(session_server.get_recent_event_ring()),
             None,
             None,
         )
@@ -2430,7 +2432,7 @@ mod bridge_round_trip {
     }
 
     #[test]
-    fn a_bridged_client_keeps_receiving_events_while_the_link_is_held_open() {
+    fn a_bridged_client_keeps_receiving_updates_while_the_link_is_held_open() {
         let running_session = RunningSession::start_running_session();
         let test_remote_listener =
             start_test_remote_listener(running_session.get_located_session());
@@ -2468,8 +2470,8 @@ mod bridge_round_trip {
             );
         };
 
-        // A second tab: each focus change below moves focus and emits a
-        // critical event.
+        // A second tab: each focus change below moves the client to the other
+        // tab, and the client's next painted update shows that tab.
         let new_tab_command_response =
             submit_session_command(&running_session, Command::NewTab(NewTabArgs::default()));
         let CommandResult::Ok { .. } = new_tab_command_response else {
@@ -2477,9 +2479,10 @@ mod bridge_round_trip {
         };
 
         // Drive the session for the whole hold, one focus change at a time,
-        // and read each one's event off the remote connection inside
-        // `EVENT_DELIVERY_TIMEOUT_DURATION`. Each painted update is applied and
-        // reported painted, as a viewer reports each update it paints.
+        // and read the painted update that shows each one off the remote
+        // connection inside `EVENT_DELIVERY_TIMEOUT_DURATION`. Each painted
+        // update is applied and reported painted, as a viewer reports each
+        // update it paints.
         let mut painted_update_receiver = PaintedUpdateReceiver::new();
         let hold_end_time = Instant::now() + LINK_HOLD_DURATION;
         let mut focus_round_count: u32 = 0;
@@ -2503,8 +2506,8 @@ mod bridge_round_trip {
                 }
             };
 
-            // Read frames until this round's focus event arrives. Painted
-            // updates and other structure events on the way are read past.
+            // Read frames until a painted update shows this round's tab. The
+            // frames before it are read past.
             let session_event_deadline = Instant::now() + EVENT_DELIVERY_TIMEOUT_DURATION;
             loop {
                 reader.set_deadline(Some(session_event_deadline));
@@ -2519,16 +2522,19 @@ mod bridge_round_trip {
                     .accept_session_frame(received_frame)
                     .expect("a painted update part that applies")
                 {
-                    Some(SessionFrame::Event(SessionEvent::TabFocused { tab_id, .. }))
-                        if tab_id == focused_tab_id =>
-                    {
-                        break
-                    }
                     Some(SessionFrame::Painted(received_painted_frame)) => {
                         let update_sequence = received_painted_frame.update_sequence;
                         writer
                             .send(&build_paint_report_request(update_sequence))
                             .expect("the paint report is written");
+                        if received_painted_frame
+                            .painted_frame
+                            .client_snapshot
+                            .active_tab_id
+                            == focused_tab_id
+                        {
+                            break;
+                        }
                     }
                     Some(SessionFrame::Event(_) | SessionFrame::ImageChunk(_)) | None => {}
                 }

@@ -61,9 +61,12 @@ pub struct Surface {
 ///   pane. 4 carried `source_pane_id`, `tab_id`, `direction` and
 ///   `should_stack` on the command itself, and had a separate run-command
 ///   command; `koshi run` sends a new-pane command with a spawn spec.
-/// - `PaneCreated`, `PaneRemoved` and `PaneFocused` carry a `tab_id` that is
-///   `null` for a floating pane, and `PanePlacementCommitted` carries a
-///   `source_tab_id` and a `destination_tab_id` that are `null` for one.
+/// - The session sends an attached client no `PaneCreated`,
+///   `PaneProcessExited`, `PaneClosing`, `PaneRemoved`, `PaneFocused`,
+///   `LayoutChanged`, `TabCreated`, `TabClosed`, `TabFocused` or `TabMoved`
+///   event; 4 sent each of them. `PanePlacementCommitted` carries a
+///   `source_tab_id` and a `destination_tab_id` that are `null` for a
+///   floating pane.
 /// - The `placement_target` of a `PlacePane` command and of a
 ///   `PanePlacementCommitted` event is `{"Tiled": {"Swap": …}}`,
 ///   `{"Tiled": {"Split": …}}`, `{"Tiled": {"Stack": …}}`, which puts the
@@ -91,9 +94,9 @@ pub struct Surface {
 ///   `should_kill_process_tree`, and a terminal-too-small event's cause are
 ///   required. 4 read a message without them.
 /// - A frame carries `floating_pane_slots`: the floating panes its client
-///   shows, back to front, each with its outer rect, content rect and pin
-///   state. It also carries `floating_panes`: every floating pane of the
-///   session, in the order the panes became floating, each as
+///   shows, back to front, each with its outer rect and pin state. It also
+///   carries `floating_panes`: every floating pane of the session, in the
+///   order the panes became floating, each as
 ///   `{"Shown": {"pane_id": …}}` while the client shows it, or as
 ///   `{"Minimized": {"pane_id": …, "pane_title": …}}`, with its title or
 ///   `null`, while the client minimized it. Both fields are required, and 4
@@ -173,10 +176,12 @@ pub struct Surface {
 /// - A `Layout` answer carries `floating_panes`: each floating pane's desired
 ///   size, solved size, and every attached client's stored position and what
 ///   that client draws for it. The field is required, and 4 has no such field.
-/// - The attach answer's session structure and the `Resync` event carry
-///   `notification_queue`: the session's whole notification queue. The
-///   `NotificationPosted` event exists in 5 only: one entry the queue took,
-///   with the queue's `revision` after it. 4 has no notification queue.
+/// - The `Attached` answer carries no `session_structure`; 4 carried one with
+///   the session's id, name and tabs. The `Attached` answer and the `Resync`
+///   event carry `notification_queue`: the session's whole notification
+///   queue. The `NotificationPosted` event exists in 5 only: one entry the
+///   queue took, with the queue's `revision` after it. 4 has no notification
+///   queue.
 /// - The `Resync` event carries `held_command_rejections`, the rejections of
 ///   the client's commands since its queue overflowed: each run of equal
 ///   rejections in a row as `fired_action`, `reject_reason`, `help` and
@@ -342,8 +347,9 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// every pane's size. In every other tab, the resize delta of each child with
 /// a `preferred` target moves onto its trailing-most flexible sibling.
 /// Format 5 also adds each session's notification queue, and drops each
-/// session's `is_recovery_notice_visible`. A format 4 session gets a queue in a
-/// new epoch, which holds one `Error` entry when its
+/// session's `is_recovery_notice_visible`. A pane's held shell-integration
+/// finish loses the exit code it carried in format 4. A format 4 session gets
+/// a queue in a new epoch, which holds one `Error` entry when its
 /// `is_recovery_notice_visible` was `true`, and is empty otherwise.
 /// Formats 4 and 5 use the declared field names in the saved records. Formats 1
 /// through 4 pass through the ordered migration steps before they are restored.

@@ -9,12 +9,14 @@
 //! existing file and a write into a directory that is not there each do.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
 
-use crate::runtime::command::tests::attach_client_to_only_tab;
+use crate::runtime::command::tests::{
+    attach_client_to_only_tab, build_floating_new_pane_args, create_floating_pane,
+};
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::saved_view::SavedView;
@@ -25,16 +27,18 @@ use koshi_core::command::{
     GridPosition, NewPaneArgs, NewPanePlacement, NewTabArgs, Selection, SelectionKind,
 };
 use koshi_core::geometry::Rect;
-use koshi_core::geometry::{Direction, PixelCellSize, Size};
+use koshi_core::geometry::{
+    AxisPercent, Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize,
+    PixelCellSize, Point, Size,
+};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use koshi_layout::content::find_content_rect;
 use koshi_layout::solver::solve_layout_with_sizing;
 use koshi_layout::tree::LayoutNode;
-use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend};
-use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
+use koshi_session::client::{Client, ClientOrigin, ClientRegistry, FloatingPaneView};
 use koshi_terminal::engine::GraphicsEvent;
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
@@ -1172,7 +1176,7 @@ fn build_populated_server() -> PopulatedServer {
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender.clone()),
     )));
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
 
     let session_id = SessionId::new();
     server
@@ -1364,12 +1368,15 @@ fn list_tab_pane_ids(server: &Server, session_id: SessionId, tab_id: TabId) -> V
         .list_leaf_pane_ids()
 }
 
-/// Return every pane id of `session_id`, in tab order then layout order.
+/// Return every pane id of `session_id`: the tiled panes in tab order then
+/// layout order, then the floating panes in the order they became floating.
 fn list_session_pane_ids(server: &Server, session_id: SessionId) -> Vec<PaneId> {
-    server.session_by_id[&session_id]
+    let session = &server.session_by_id[&session_id];
+    session
         .tabs
         .values()
         .flat_map(|tab| tab.get_layout_tree().list_leaf_pane_ids())
+        .chain(session.floating_set.list_pane_ids())
         .collect()
 }
 
@@ -1454,6 +1461,7 @@ fn build_resumed_server_with_config_and_exit_statuses(
     let server = Server::resume(
         pty_backend,
         inbox_receiver,
+        Arc::default(),
         startup_app_config,
         resume_body,
         resume_header.resume_format,
@@ -1645,6 +1653,152 @@ fn list_carried_pty_pane_ids(carried_pty_panes: &[CarriedPtyPane]) -> HashSet<Pa
         .iter()
         .map(|carried_pty_pane| carried_pty_pane.pane_id)
         .collect()
+}
+
+/// A `60%x100%` floating pane the first client pinned at `(10, 3)` and a
+/// `40x10` floating pane it minimized cross the resume file. Both come back as
+/// members at their desired sizes, in the order they became floating, live at
+/// their carried PTY sizes with their screens. The first client's pin,
+/// minimize, shown order and floating focus come back as they went out.
+#[test]
+fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_file() {
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
+    let mut populated_server = build_populated_server();
+    let session_id = populated_server.session_id;
+    let first_client_id = populated_server.first_client_id;
+    let percent_floating_pane_size = FloatingPaneSize {
+        width: FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("60 is a percent")),
+        height: FloatingPaneDimension::Percent(
+            AxisPercent::try_from(100).expect("100 is a percent"),
+        ),
+    };
+    let cells_floating_pane_size = FloatingPaneSize {
+        width: FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero")),
+        height: FloatingPaneDimension::Cells(NonZeroU16::new(10).expect("10 is nonzero")),
+    };
+    let pinned_pane_id = create_floating_pane(
+        &mut populated_server.server,
+        CommandSource::from_key_binding(first_client_id),
+        build_floating_new_pane_args(Some(percent_floating_pane_size), None, false),
+    );
+    let minimized_pane_id = create_floating_pane(
+        &mut populated_server.server,
+        CommandSource::from_key_binding(first_client_id),
+        build_floating_new_pane_args(Some(cells_floating_pane_size), None, false),
+    );
+    {
+        let first_client = populated_server
+            .server
+            .get_client_mut(first_client_id)
+            .expect("the first client");
+        first_client.pin_floating_pane(pinned_pane_id, Point { column: 10, row: 3 });
+        assert!(first_client.minimize_floating_pane(minimized_pane_id));
+    }
+    populated_server
+        .server
+        .handle_pty_output(pinned_pane_id, b"pinned output");
+    populated_server
+        .server
+        .handle_pty_output(minimized_pane_id, b"minimized output");
+    let expected_floating_members = populated_server.server.session_by_id[&session_id]
+        .floating_set
+        .list_members()
+        .to_vec();
+    assert_eq!(
+        expected_floating_members
+            .iter()
+            .map(|floating_member| (floating_member.pane_id, floating_member.desired_size))
+            .collect::<Vec<_>>(),
+        [
+            (pinned_pane_id, percent_floating_pane_size),
+            (minimized_pane_id, cells_floating_pane_size),
+        ]
+    );
+    let first_client = populated_server.server.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(first_client_id)
+        .expect("the first client");
+    let expected_floating_pane_views = first_client.list_floating_pane_views().clone();
+    assert_eq!(
+        expected_floating_pane_views,
+        HashMap::from([
+            (
+                pinned_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Pinned(Point { column: 10, row: 3 }),
+                    is_minimized: false,
+                },
+            ),
+            (
+                minimized_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                },
+            ),
+        ])
+    );
+    let expected_shown_floating_pane_ids = first_client.list_shown_floating_pane_ids().to_vec();
+    assert_eq!(expected_shown_floating_pane_ids, [pinned_pane_id]);
+    let expected_focused_floating_pane_id = first_client.get_focused_floating_pane_id();
+    assert_eq!(expected_focused_floating_pane_id, Some(pinned_pane_id));
+    let expected_pty_size_by_pane_id = populated_server.server.pty_size_by_pane_id.clone();
+    let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
+
+    let (resume_header, resume_body) = populated_server
+        .server
+        .carry_out(&carried_pty_panes)
+        .expect("a session to carry");
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    let (read_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
+    let read_body =
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
+    let (resumed_server, _inbox_sender) = build_resumed_server(&read_header, read_body);
+
+    let resumed_session = &resumed_server.session_by_id[&session_id];
+    assert_eq!(
+        resumed_session.floating_set.list_members(),
+        expected_floating_members.as_slice()
+    );
+    let resumed_first_client = resumed_session
+        .clients
+        .get_client_by_id(first_client_id)
+        .expect("the first client");
+    assert_eq!(
+        resumed_first_client.list_floating_pane_views(),
+        &expected_floating_pane_views
+    );
+    assert_eq!(
+        resumed_first_client.list_shown_floating_pane_ids(),
+        expected_shown_floating_pane_ids
+    );
+    assert_eq!(
+        resumed_first_client.get_focused_floating_pane_id(),
+        expected_focused_floating_pane_id
+    );
+    assert_eq!(resumed_session.validate_session_consistency(), Ok(()));
+    assert_eq!(
+        resumed_server.pty_size_by_pane_id, expected_pty_size_by_pane_id,
+        "every pane's size, the floating panes' included"
+    );
+    assert!(resumed_server.live_pane_ids.contains(&pinned_pane_id));
+    assert!(resumed_server.live_pane_ids.contains(&minimized_pane_id));
+    for (pane_id, expected_row_text) in [
+        (pinned_pane_id, "pinned output"),
+        (minimized_pane_id, "minimized output"),
+    ] {
+        assert_eq!(
+            get_terminal_row(
+                resumed_server.terminal_engine_by_pane_id[&pane_id].get_terminal_state(),
+                0
+            )
+            .trim_end(),
+            expected_row_text
+        );
+    }
 }
 
 #[test]
@@ -2662,6 +2816,7 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
     let resumed_server = Server::resume(
         pty_backend,
         inbox_receiver,
+        Arc::default(),
         None,
         build_resume_body_with_quit(None),
         RESUME_FORMAT,
@@ -2694,8 +2849,10 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
             .collect(),
         ..resume_header.clone()
     };
-    let count_undriven_pane_exit_events = || {
-        recent_events::list_recent_events()
+    let count_undriven_pane_exit_events = |resumed_server: &Server| {
+        resumed_server
+            .recent_event_ring
+            .list_recent_events()
             .iter()
             .filter(|event_record| {
                 event_record.pane_id == Some(undriven_pane_id)
@@ -2735,7 +2892,7 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         "the other panes stay"
     );
     assert_eq!(
-        count_undriven_pane_exit_events(),
+        count_undriven_pane_exit_events(&resumed_server),
         1,
         "the carried exit is published once"
     );
@@ -2743,7 +2900,7 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         resumed_server.handle_child_exit(undriven_pane_id, ExitStatus::ExitCode(7));
     resumed_server.publish_events(&child_exit_events);
     assert_eq!(
-        count_undriven_pane_exit_events(),
+        count_undriven_pane_exit_events(&resumed_server),
         1,
         "the queued copy of the exit does not publish again"
     );
@@ -3149,7 +3306,7 @@ fn a_profile_session_carried_before_any_attach_keeps_its_starting_tab_and_pane()
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender),
     )));
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver, Arc::default());
     let session_id = SessionId::new();
     let profile_template = koshi_config::profile::parse_profile(
         Path::new("profile/test.kdl"),

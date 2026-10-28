@@ -70,8 +70,8 @@ pub enum Event {
     // Shell integration (OSC 133 semantic prompts).
     /// A command began running in a pane (OSC 133;C). Carries no command text.
     PaneCommandStarted(PaneCommandStarted),
-    /// A command finished in a pane (OSC 133;D), with the exit code when the
-    /// shell reports one. Carries no command text.
+    /// A command finished in a pane (OSC 133;D). Carries no command text and
+    /// no exit code.
     PaneCommandFinished(PaneCommandFinished),
 
     // Selection.
@@ -392,12 +392,12 @@ pub struct PaneCommandStarted {
 }
 
 /// Payload for [`Event::PaneCommandFinished`].
+///
+/// Emitted when a shell reports that a command finished, via OSC 133;D.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneCommandFinished {
     /// The pane whose shell reported the command ending.
     pub pane_id: PaneId,
-    /// The command's exit code, when the shell reports one.
-    pub exit_code: Option<i32>,
 }
 
 // ============================================================================

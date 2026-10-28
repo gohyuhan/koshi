@@ -171,11 +171,7 @@ impl Server {
             );
         }
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::CloseTab`]: tear the tab and every pane in it out of
@@ -252,11 +248,7 @@ impl Server {
         }
         self.end_removed_floating_panes(session_id, floating_pane_ids, kill_policy);
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::FocusTab`]: switch the designated client's view to
@@ -292,7 +284,7 @@ impl Server {
 
         // Already viewing it: nothing changes, and no event is emitted.
         if previous_tab_id == tab_target.tab_id {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
 
         let mut emitted_events = tab_ops::focus_tab(
@@ -313,11 +305,7 @@ impl Server {
             );
         }
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::MoveTab`]: reorder the target tab to a new display
@@ -342,10 +330,6 @@ impl Server {
 
         let emitted_events = tab_ops::move_tab(session, tab_id, command_args.target_tab_index);
 
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 }

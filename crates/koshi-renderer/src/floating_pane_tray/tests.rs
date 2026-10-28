@@ -105,9 +105,11 @@ pub(crate) fn show_tray_test_floating_pane(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            pane_id, outer_rect, false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id,
+            outer_rect,
+            is_pinned: false,
+        });
     render_snapshot.pane_snapshots.push(PaneSnapshot {
         pane_title,
         ..PaneSnapshot::from_empty_pane(pane_id)

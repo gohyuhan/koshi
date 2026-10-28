@@ -711,7 +711,7 @@ fn sample_supervisor_events() -> Vec<SupervisorEvent> {
 fn sample_events() -> Vec<SessionEvent> {
     use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
     use koshi_core::geometry::Direction;
-    use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+    use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
@@ -748,47 +748,6 @@ fn sample_events() -> Vec<SessionEvent> {
                 anchor: PanePlacementAnchor::Pane(target_pane_id),
                 direction: Direction::Right,
             }),
-        },
-        SessionEvent::PaneCreated {
-            pane_id: PaneId::new(),
-            tab_id: Some(TabId::new()),
-        },
-        SessionEvent::PaneProcessExited {
-            pane_id: PaneId::new(),
-            exit_code: None,
-            signal: None,
-        },
-        SessionEvent::PaneClosing {
-            pane_id: PaneId::new(),
-        },
-        SessionEvent::PaneRemoved {
-            pane_id: PaneId::new(),
-            tab_id: Some(TabId::new()),
-        },
-        SessionEvent::PaneFocused {
-            client_id: ClientId::new(),
-            tab_id: Some(TabId::new()),
-            pane_id: PaneId::new(),
-            previous_pane_id: None,
-        },
-        SessionEvent::LayoutChanged {
-            tab_id: TabId::new(),
-        },
-        SessionEvent::TabCreated {
-            tab_id: TabId::new(),
-        },
-        SessionEvent::TabClosed {
-            tab_id: TabId::new(),
-        },
-        SessionEvent::TabFocused {
-            client_id: ClientId::new(),
-            tab_id: TabId::new(),
-            previous_tab_id: TabId::new(),
-        },
-        SessionEvent::TabMoved {
-            tab_id: TabId::new(),
-            previous_tab_index: 0,
-            new_tab_index: 1,
         },
         SessionEvent::Quit,
         SessionEvent::Restarting,

@@ -13,8 +13,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use common::{
-    count_attached_clients, get_last_painted_frame, open_session_connection,
-    read_session_frames_to_detached, read_session_frames_to_mouse_answer,
+    count_attached_clients, get_last_painted_frame, get_seeded_tab_and_pane_ids,
+    open_session_connection, read_session_frames_to_detached, read_session_frames_to_mouse_answer,
     read_session_frames_until, read_session_frames_until_painted_frame, serve_test_session,
     start_test_session, submit_test_command, wait_for_client_count, wait_for_mouse_tracking,
     ViewerConnection, TEST_WAIT_TIMEOUT_DURATION,
@@ -30,7 +30,6 @@ use koshi_core::key::BindingModifierFlags;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::process::PtySize;
-use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::FrameSlot;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction};
@@ -78,31 +77,26 @@ const SHORT_VIEWPORT_SIZE: Size = Size {
 };
 
 /// Attach on `ipc_connection` reporting `viewport_size` and no pane area, and return
-/// what the reply carried. The IPC connection carries only the client's event
-/// stream afterwards.
+/// the client id and the session id the reply carried. The IPC connection
+/// carries only the client's event stream afterwards.
 fn attach_test_client_with_viewport_size(
     ipc_connection: &mut Connection,
     request_id: u64,
     viewport_size: Size,
-) -> (ClientId, SessionId, AttachedSessionStructureSnapshot) {
-    let (client_id, session_id, session_structure, _) =
+) -> (ClientId, SessionId) {
+    let (client_id, session_id, _) =
         attach_test_client_with_pane_area(ipc_connection, request_id, viewport_size, None);
-    (client_id, session_id, session_structure)
+    (client_id, session_id)
 }
 
-/// Attach on `ipc_connection` reporting `viewport_size` and `pane_area`, and return what
-/// the reply carried, including the pane area the reply echoed.
+/// Attach on `ipc_connection` reporting `viewport_size` and `pane_area`, and return
+/// the client id, the session id and the pane area the reply carried.
 fn attach_test_client_with_pane_area(
     ipc_connection: &mut Connection,
     request_id: u64,
     viewport_size: Size,
     pane_area: Option<PaneArea>,
-) -> (
-    ClientId,
-    SessionId,
-    AttachedSessionStructureSnapshot,
-    Option<PaneArea>,
-) {
+) -> (ClientId, SessionId, Option<PaneArea>) {
     send_committed_request(
         ipc_connection,
         IpcRequest {
@@ -125,7 +119,6 @@ fn attach_test_client_with_pane_area(
     let IpcResult::Attached {
         client_id,
         session_id,
-        session_structure,
         pane_area,
         ..
     } = attach_response.answer_result
@@ -135,7 +128,7 @@ fn attach_test_client_with_pane_area(
             attach_response.answer_result
         );
     };
-    (client_id, session_id, session_structure, pane_area)
+    (client_id, session_id, pane_area)
 }
 
 /// The tab and the pane the [`Command::NewTab`] in `emitted_events` created. Panics
@@ -162,12 +155,12 @@ fn two_clients_on_one_tab_size_the_pty_to_the_per_axis_minimum() {
             // 38 rows, and the pane's PTY is that region minus its 1-cell border.
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport_size(
+            attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // The small client joins the same tab. It is narrower and shorter: it
             // takes both axes, and the pane's PTY shrinks on both.
@@ -226,13 +219,13 @@ fn a_client_reporting_a_pane_area_sizes_the_pty_to_that_area() {
                 row_count: 20,
             });
             let mut client_connection = open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure, echoed_pane_area) = attach_test_client_with_pane_area(
+            let (_, _, echoed_pane_area) = attach_test_client_with_pane_area(
                 &mut client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
                 Some(reported_pane_area),
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             assert_eq!(echoed_pane_area, Some(reported_pane_area));
 
             (vec![client_connection], pane_id)
@@ -264,17 +257,17 @@ fn a_starving_client_does_not_shrink_the_tab() {
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure, _) = attach_test_client_with_pane_area(
+            attach_test_client_with_pane_area(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
                 None,
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut starving_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, _, echoed_pane_area) = attach_test_client_with_pane_area(
+            let (_, _, echoed_pane_area) = attach_test_client_with_pane_area(
                 &mut starving_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
@@ -323,13 +316,13 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut starving_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure, echoed_pane_area) = attach_test_client_with_pane_area(
+            let (_, _, echoed_pane_area) = attach_test_client_with_pane_area(
                 &mut starving_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
                 Some(PaneArea::Starving),
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             assert_eq!(echoed_pane_area, Some(PaneArea::Starving));
 
             // The served loop renders between the two attaches, with the tab's
@@ -421,7 +414,7 @@ fn an_attach_without_a_pane_area_echoes_none() {
         "echoes-none",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut client_connection = open_session_connection(&runtime_directory, session_id);
-            let (_, _, _, echoed_pane_area) = attach_test_client_with_pane_area(
+            let (_, _, echoed_pane_area) = attach_test_client_with_pane_area(
                 &mut client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
@@ -442,19 +435,19 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
             // The narrow client alone: 70 columns by 38 rows of pane region.
             let mut narrow_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport_size(
+            attach_test_client_with_viewport_size(
                 &mut narrow_client_connection,
                 2,
                 NARROW_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // The short client joins the same tab. It is wider but shorter: the
             // columns stay pinned by the narrow client and the rows drop to this
             // one's. Each axis takes its minimum from a different client.
             let mut short_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (short_client_id, _, _) = attach_test_client_with_viewport_size(
+            let (short_client_id, _) = attach_test_client_with_viewport_size(
                 &mut short_client_connection,
                 2,
                 SHORT_VIEWPORT_SIZE,
@@ -537,13 +530,13 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
             // The large client attaches to the seeded tab.
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (large_client_id, _, session_structure) = attach_test_client_with_viewport_size(
+            let (large_client_id, _) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let first_tab_id = session_structure.tabs[0].tab_id;
-            let first_pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (first_tab_id, first_pane_id) =
+                get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // A second tab, created for the large client, which moves onto it.
             // Its root pane spawns at the large client's own region.
@@ -576,7 +569,7 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
             // it, and the small one takes both axes.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (small_client_id, _, _) = attach_test_client_with_viewport_size(
+            let (small_client_id, _) = attach_test_client_with_viewport_size(
                 &mut small_client_connection,
                 2,
                 SMALL_VIEWPORT_SIZE,
@@ -658,13 +651,12 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (large_client_id, _, session_structure) = attach_test_client_with_viewport_size(
+            let (large_client_id, _) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
-            let tab_id = session_structure.tabs[0].tab_id;
+            let (tab_id, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // The small client joins the same tab and invalidates the layout. The
             // large client is sent a fresh frame at the size the two now share.
@@ -748,7 +740,7 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (large_client_id, _, _) = attach_test_client_with_viewport_size(
+            let (large_client_id, _) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
@@ -756,7 +748,7 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
 
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (small_client_id, _, _) = attach_test_client_with_viewport_size(
+            let (small_client_id, _) = attach_test_client_with_viewport_size(
                 &mut small_client_connection,
                 2,
                 SMALL_VIEWPORT_SIZE,
@@ -822,7 +814,7 @@ fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
         "repeat-lock",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut client_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _) = attach_test_client_with_viewport_size(
+            let (client_id, _) = attach_test_client_with_viewport_size(
                 &mut client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
@@ -946,12 +938,12 @@ fn a_mouse_press_from_each_client_reaches_the_pane_cell_it_names() {
         |runtime_directory, session_id, fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport_size(
+            attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
@@ -1004,12 +996,8 @@ fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
         "mouse-before-tracking",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut client_connection = open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport_size(
-                &mut client_connection,
-                2,
-                LARGE_VIEWPORT_SIZE,
-            );
-            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            attach_test_client_with_viewport_size(&mut client_connection, 2, LARGE_VIEWPORT_SIZE);
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // The client is the tab's only viewer, and it presses the pane's
             // 0-based cell (1, 2).
@@ -1063,20 +1051,17 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                 // it: open this session's socket and attach there.
                 let mut joining_connection =
                     open_session_connection(&runtime_directory, session_id);
-                let (joined_client_id, joined_session_id, session_structure) =
-                    attach_test_client_with_viewport_size(
-                        &mut joining_connection,
-                        2,
-                        SMALL_VIEWPORT_SIZE,
-                    );
+                let (joined_client_id, joined_session_id) = attach_test_client_with_viewport_size(
+                    &mut joining_connection,
+                    2,
+                    SMALL_VIEWPORT_SIZE,
+                );
                 assert_eq!(joined_session_id, session_id);
+                let (_, joined_pane_id) =
+                    get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
                 (
                     vec![joining_connection],
-                    (
-                        session_id,
-                        joined_client_id,
-                        session_structure.tabs[0].layout.list_leaf_pane_ids()[0],
-                    ),
+                    (session_id, joined_client_id, joined_pane_id),
                 )
             },
         );
@@ -1121,16 +1106,16 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
 
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport_size(
+            attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let source_pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
+            let (_, source_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (small_client_id, _, _) = attach_test_client_with_viewport_size(
+            let (small_client_id, _) = attach_test_client_with_viewport_size(
                 &mut small_client_connection,
                 2,
                 SMALL_VIEWPORT_SIZE,
@@ -1306,7 +1291,7 @@ fn move_the_only_client_away(runtime_directory: PathBuf, session_id: SessionId) 
     let destination_session_id = SessionId::new();
 
     let mut client_connection = open_session_connection(&runtime_directory, session_id);
-    let (client_id, _, _) =
+    let (client_id, _) =
         attach_test_client_with_viewport_size(&mut client_connection, 2, SMALL_VIEWPORT_SIZE);
 
     let mut caller_connection = open_session_connection(&runtime_directory, session_id);

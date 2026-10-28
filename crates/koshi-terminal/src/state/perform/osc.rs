@@ -15,20 +15,21 @@ pub(super) enum Osc133 {
     Input,
     /// The shell started executing the command.
     CommandStart,
-    /// The shell finished the command and may have reported an exit code.
-    CommandFinished(Option<i32>),
+    /// The shell finished the command.
+    CommandFinished,
 }
 
 /// Parse an OSC 133 payload, split on `;` by `vte`, into its marker.
 ///
 /// Accepts `133;A`, `133;B`, `133;C`, `133;D`, and `133;D;<code>` where
-/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`).
+/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`). The code is checked
+/// and not kept: `133;D;137` and `133;D` give the same finish.
 ///
 /// Parameters after the marker are options the shell adds (`cl=m`, `aid=1`)
 /// and are skipped: `133;A;cl=m;aid=1` is the prompt mark and `133;D;0;aid=1`
-/// is the finish carrying `0`. A `D` whose first following parameter is empty
-/// carries no code. Anything else — another command number, a marker other
-/// than `A`–`D`, a `D` code that is not a decimal `i32` — yields `None`.
+/// is a finish. A `D` whose first following parameter is empty carries no
+/// code. Anything else — another command number, a marker other than
+/// `A`–`D`, a `D` code that is not a decimal `i32` — yields `None`.
 pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
     let [osc_command_number, shell_integration_marker, remaining_parameters @ ..] = osc_parameters
     else {
@@ -43,10 +44,12 @@ pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
         (b"C", _) => Some(Osc133::CommandStart),
         (b"D", [exit_code_bytes, ..]) if !exit_code_bytes.is_empty() => {
             let exit_code_text = std::str::from_utf8(exit_code_bytes).ok()?;
-            let exit_code = exit_code_text.parse().ok()?;
-            Some(Osc133::CommandFinished(Some(exit_code)))
+            match exit_code_text.parse::<i32>() {
+                Ok(_) => Some(Osc133::CommandFinished),
+                Err(_) => None,
+            }
         }
-        (b"D", _) => Some(Osc133::CommandFinished(None)),
+        (b"D", _) => Some(Osc133::CommandFinished),
         _ => None,
     }
 }

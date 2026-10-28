@@ -201,7 +201,7 @@ pub struct FrameSlot {
 
 /// One floating pane the viewing client shows, placed for that client.
 ///
-/// Both rects count cells from the client's pane-area origin, with no
+/// The outer rect counts cells from the client's pane-area origin, with no
 /// letterbox offset: an outer rect at column `150` draws at pane-area column
 /// `150`, also when the client's tiled layout starts at column `60`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,11 +209,13 @@ pub struct FrameFloatingPaneSlot {
     /// The floating pane this slot places.
     pub pane_id: PaneId,
     /// The pane's box with its chrome: the border ring, the titlebar row and
-    /// the separator row.
+    /// the separator row. The pane's cells and cursor are drawn inside the
+    /// chrome, in a rect the size of the pane's PTY: the box less
+    /// [`FLOATING_CHROME_SIZE`](koshi_core::constant::FLOATING_CHROME_SIZE),
+    /// with its top-left cell one column right of and three rows below the
+    /// box's top-left cell. Outer `(24, 8)` `72x22` → content `(25, 11)`
+    /// `70x18`.
     pub outer_rect: Rect,
-    /// The cells inside the chrome, the size of the pane's PTY. Cells and the
-    /// cursor are drawn here.
-    pub content_rect: Rect,
     /// Whether the viewing client pinned the pane at its cell.
     pub is_pinned: bool,
 }
@@ -584,8 +586,8 @@ pub struct FrameClient {
 }
 
 /// One pane's content apart from its rows, its cursor and its scroll
-/// position: what is drawn inside the matching [`FrameSlot`]'s or
-/// [`FrameFloatingPaneSlot`]'s content rect besides the cells, plus what a
+/// position: what is drawn inside the content rect of the matching
+/// [`FrameSlot`] or [`FrameFloatingPaneSlot`] besides the cells, plus what a
 /// mouse event over this pane is answered from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePane {

@@ -7,11 +7,10 @@
 //! transactions, render scheduling, the saved views a detached client can take
 //! back, per-client scrollback scrolling, staged shutdown, the render-snapshot
 //! builder, the wire-frame builder, the painted-update sender and receiver, the
-//! attach-structure builder, the discovery-overview builder, the layout-dump
-//! builder, and event transactions. The [`Server`](crate::server::Server) type
-//! these modules extend lives in [`crate::server`].
+//! discovery-overview builder, the layout-dump builder, and event transactions.
+//! The [`Server`](crate::server::Server) type these modules extend lives in
+//! [`crate::server`].
 
-pub mod attach;
 pub mod bootstrap;
 pub mod bus;
 pub mod clipboard;

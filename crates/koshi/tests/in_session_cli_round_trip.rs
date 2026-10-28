@@ -4,8 +4,7 @@
 //! Each test walks one verb the whole way: `Cli::try_parse_from` reads the real argv,
 //! [`CliCommand::build_action_command`](koshi::cli::CliCommand::build_action_command) maps it to
 //! the core command, that command crosses a real control socket inside a [`CommandEnvelope`], the
-//! dispatcher applies it, the attached client is told what changed, and the answer becomes the exit
-//! code the binary reports.
+//! dispatcher applies it, and the answer becomes the exit code the binary reports.
 //!
 //! Each test starts its own session through
 //! `common::in_process_session::RunningSession::start_session`: a session
@@ -15,10 +14,7 @@
 //! resize and kill — a recorded [`KillPolicy`], a recorded [`PtySize`] — and
 //! launches no process.
 //!
-//! Each attached client has a reader thread that forwards what it reads into a
-//! queue this thread reads with a deadline. A session that never reports the
-//! change fails the test at that deadline. Dropping the session stops its
-//! serving thread.
+//! Dropping the session stops its serving thread.
 
 mod common;
 
@@ -39,7 +35,6 @@ use koshi_core::geometry::{
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{KillPolicy, PtySize};
-use koshi_ipc::event::SessionEvent;
 use koshi_ipc::layout::{
     FloatingPaneClientView, FloatingPaneLayout, FloatingPaneVisibility, SessionLayout,
 };
@@ -57,20 +52,6 @@ use common::WAIT_DURATION;
 
 /// How long a poll pauses between attempts.
 const CLI_ROUND_TRIP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
-
-/// The next `event_count` frames the attached client is told about the session's
-/// structure, in arrival order. Fails the test once [`WAIT_DURATION`] has passed
-/// with fewer than `event_count` of them.
-fn receive_session_events(client: &AttachedClient, event_count: usize) -> Vec<SessionEvent> {
-    (0..event_count)
-        .map(|_| {
-            client
-                .session_events
-                .recv_timeout(WAIT_DURATION)
-                .expect("the session reports the change")
-        })
-        .collect()
-}
 
 /// Run one `koshi` invocation typed inside `pane_id` by `client`, and hand back
 /// what the session answered and the exit code the binary reports for that
@@ -362,22 +343,6 @@ fn new_pane_over_the_socket_splits_and_reports_success() {
             }),
         ]
     );
-    assert_eq!(
-        receive_session_events(&client, 3),
-        vec![
-            SessionEvent::PaneCreated {
-                pane_id: created_pane_id,
-                tab_id: Some(tab_id),
-            },
-            SessionEvent::LayoutChanged { tab_id },
-            SessionEvent::PaneFocused {
-                client_id: client.client_id,
-                tab_id: Some(tab_id),
-                pane_id: created_pane_id,
-                previous_pane_id: Some(root_pane_id),
-            },
-        ]
-    );
     assert_eq!(exit_code, CliExitCode::Success);
 }
 
@@ -388,8 +353,6 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
     let root_pane_id = session.list_pane_ids()[0];
     let tab_id = get_only_tab_id(&session);
     let created_pane_id = build_neighboring_pane(&session, &client, root_pane_id);
-    // The split's own frames are the previous test's subject.
-    let _ = receive_session_events(&client, 3);
 
     let (command_result, exit_code) =
         run_cli_invocation(&session, &client, created_pane_id, &["koshi", "close-pane"]);
@@ -421,25 +384,6 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
                     row_count: 20
                 },
             }),
-        ]
-    );
-    assert_eq!(
-        receive_session_events(&client, 4),
-        vec![
-            SessionEvent::PaneClosing {
-                pane_id: created_pane_id,
-            },
-            SessionEvent::PaneRemoved {
-                pane_id: created_pane_id,
-                tab_id: Some(tab_id),
-            },
-            SessionEvent::LayoutChanged { tab_id },
-            SessionEvent::PaneFocused {
-                client_id: client.client_id,
-                tab_id: Some(tab_id),
-                pane_id: root_pane_id,
-                previous_pane_id: Some(created_pane_id),
-            },
         ]
     );
     assert_eq!(exit_code, CliExitCode::Success);
@@ -537,7 +481,6 @@ fn resize_pane_over_the_socket_moves_the_border_and_resizes_the_child() {
     let root_pane_id = session.list_pane_ids()[0];
     let tab_id = get_only_tab_id(&session);
     let created_pane_id = build_neighboring_pane(&session, &client, root_pane_id);
-    let _ = receive_session_events(&client, 3);
     // The split left both children at 38 columns by 20 rows.
     assert_eq!(
         get_last_pane_size(&session, created_pane_id),
@@ -575,10 +518,6 @@ fn resize_pane_over_the_socket_moves_the_border_and_resizes_the_child() {
                 },
             }),
         ]
-    );
-    assert_eq!(
-        receive_session_events(&client, 1),
-        vec![SessionEvent::LayoutChanged { tab_id }]
     );
     assert_eq!(exit_code, CliExitCode::Success);
 

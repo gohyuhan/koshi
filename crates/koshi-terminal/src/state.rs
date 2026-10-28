@@ -77,7 +77,29 @@ pub enum ShellIntegrationFact {
     /// The shell reported that a command started.
     CommandStarted,
     /// The shell reported that a command finished.
-    CommandFinished { exit_code: Option<i32> },
+    CommandFinished,
+}
+
+/// A shell-integration fact as resume format 4 writes it. Its finish holds
+/// the `exit_code` the shell reported; reading one drops that code.
+#[derive(Deserialize)]
+enum ResumeFormat4ShellIntegrationFact {
+    CommandStarted,
+    CommandFinished {},
+}
+
+impl ResumeFormat4ShellIntegrationFact {
+    /// The same fact, without the exit code.
+    fn into_shell_integration_fact(self) -> ShellIntegrationFact {
+        match self {
+            ResumeFormat4ShellIntegrationFact::CommandStarted => {
+                ShellIntegrationFact::CommandStarted
+            }
+            ResumeFormat4ShellIntegrationFact::CommandFinished {} => {
+                ShellIntegrationFact::CommandFinished
+            }
+        }
+    }
 }
 
 /// The cells of the alternate screen.
@@ -803,7 +825,14 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     if shell_integration_facts.is_some() {
                         return Err(serde::de::Error::duplicate_field("shell_integration_facts"));
                     }
-                    shell_integration_facts = Some(map_access.next_value()?);
+                    shell_integration_facts = Some(match self.stored_state_shape {
+                        StoredStateShape::Current => map_access.next_value()?,
+                        StoredStateShape::ResumeFormat4 => map_access
+                            .next_value::<Vec<ResumeFormat4ShellIntegrationFact>>()?
+                            .into_iter()
+                            .map(ResumeFormat4ShellIntegrationFact::into_shell_integration_fact)
+                            .collect(),
+                    });
                 }
                 RawTerminalStateField::Scrollback => {
                     if scrollback.is_some() {
@@ -1071,7 +1100,8 @@ impl<'de> Deserialize<'de> for TerminalState {
 /// off. The alternate grid is freed when the primary screen is active, the
 /// alternate screen holds no image, and the grid equals a blank grid at the
 /// primary screen's size in the alternate pen's background fill. Any other
-/// alternate grid stays.
+/// alternate grid stays. A held shell-integration finish reads back without
+/// its exit code.
 #[derive(Debug)]
 pub struct ResumeFormat4TerminalState(TerminalState);
 

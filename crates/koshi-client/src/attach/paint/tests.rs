@@ -478,13 +478,6 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
                     row_count: 5,
                 },
             },
-            content_rect: Rect {
-                origin: Point { column: 3, row: 4 },
-                size: Size {
-                    column_count: 8,
-                    row_count: 1,
-                },
-            },
             is_pinned: false,
         },
         FloatingPaneSlot {
@@ -494,13 +487,6 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
                 size: Size {
                     column_count: 12,
                     row_count: 6,
-                },
-            },
-            content_rect: Rect {
-                origin: Point { column: 9, row: 3 },
-                size: Size {
-                    column_count: 10,
-                    row_count: 2,
                 },
             },
             is_pinned: true,

@@ -105,7 +105,6 @@ fn build_render_snapshot_with_images(
                 .map(|frame_floating_pane_slot| FloatingPaneSlot {
                     pane_id: frame_floating_pane_slot.pane_id,
                     outer_rect: frame_floating_pane_slot.outer_rect,
-                    content_rect: frame_floating_pane_slot.content_rect,
                     is_pinned: frame_floating_pane_slot.is_pinned,
                 })
                 .collect(),

@@ -1,14 +1,17 @@
 //! Tests for [`TransactionScope`]: the buffer accumulates events in emission
 //! order, and `commit` seals the batch into an applied result with one freshly
-//! returned event per buffered event, keyed to the command, delivering the
-//! batch to the bus's subscribers.
+//! returned event per buffered event, keyed to the command, delivering each
+//! event of the batch that has a wire form to the bus's subscribers.
 
 use koshi_core::command::CommandResult;
 use koshi_core::event::{Event, LayoutChanged, QuitCause, TabCreated, TabFocused};
 use koshi_core::ids::{ClientId, CommandId, TabId};
-use koshi_renderer::snapshot::Delivery;
 
 use super::*;
+use crate::runtime::bus::tests::{
+    build_second_test_placement_delivery, build_second_test_placement_event,
+    build_test_placement_delivery, build_test_placement_event,
+};
 
 impl TransactionScope {
     /// The buffered events, in emission order.
@@ -77,7 +80,7 @@ fn commit_returns_every_event_in_order_keyed_to_the_command() {
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
 
-    match scope.commit(command_id, &mut bus) {
+    match scope.commit(command_id, &mut bus, &RecentEventRing::default()) {
         CommandResult::Ok {
             command_id: applied,
             emitted_events,
@@ -102,7 +105,7 @@ fn committing_an_empty_scope_applies_with_no_events() {
     let scope = TransactionScope::new();
 
     assert_eq!(
-        scope.commit(command_id, &mut bus),
+        scope.commit(command_id, &mut bus, &RecentEventRing::default()),
         CommandResult::Ok {
             command_id,
             emitted_events: Vec::new(),
@@ -111,22 +114,23 @@ fn committing_an_empty_scope_applies_with_no_events() {
 }
 
 #[test]
-fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
+fn commit_delivers_the_wire_events_of_the_batch_to_a_subscriber_in_emission_order() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
     let (_id, event_receiver, _) = bus.subscribe();
     let mut scope = TransactionScope::new();
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(build_test_placement_event(tab));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
+    scope.emit(build_second_test_placement_event(tab));
 
-    let _ = scope.commit(command_id, &mut bus);
+    let _ = scope.commit(command_id, &mut bus, &RecentEventRing::default());
 
     assert_eq!(
         event_receiver.try_iter().collect::<Vec<_>>(),
         vec![
-            Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab })),
-            Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id: tab })),
+            build_test_placement_delivery(tab),
+            build_second_test_placement_delivery(tab),
         ]
     );
 }
@@ -139,21 +143,17 @@ fn commit_delivers_the_batch_to_every_subscriber() {
     let (_first_id, first_rx, _) = bus.subscribe();
     let (_second_id, second_rx, _) = bus.subscribe();
     let mut scope = TransactionScope::new();
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(build_test_placement_event(tab));
 
-    let _ = scope.commit(command_id, &mut bus);
+    let _ = scope.commit(command_id, &mut bus, &RecentEventRing::default());
 
     assert_eq!(
         first_rx.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated {
-            tab_id: tab
-        }))]
+        vec![build_test_placement_delivery(tab)]
     );
     assert_eq!(
         second_rx.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated {
-            tab_id: tab
-        }))]
+        vec![build_test_placement_delivery(tab)]
     );
 }
 
@@ -166,15 +166,15 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     let (_live_id, live_rx, _) = bus.subscribe();
     drop(gone_rx);
     let mut scope = TransactionScope::new();
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
+    scope.emit(build_test_placement_event(tab));
 
-    let transaction_result = scope.commit(command_id, &mut bus);
+    let transaction_result = scope.commit(command_id, &mut bus, &RecentEventRing::default());
 
     assert_eq!(
         transaction_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::TabCreated(TabCreated { tab_id: tab })],
+            emitted_events: vec![build_test_placement_event(tab)],
         }
     );
     // The bus dropped the subscriber whose receiver is gone, and the other one
@@ -182,9 +182,7 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(
         live_rx.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated {
-            tab_id: tab
-        }))]
+        vec![build_test_placement_delivery(tab)]
     );
 }
 
@@ -209,8 +207,8 @@ fn two_scopes_commit_independently_with_no_shared_state() {
     );
 
     let mut bus = EventBus::new();
-    let result_a = scope_a.commit(command_a, &mut bus);
-    let result_b = scope_b.commit(command_b, &mut bus);
+    let result_a = scope_a.commit(command_a, &mut bus, &RecentEventRing::default());
+    let result_b = scope_b.commit(command_b, &mut bus, &RecentEventRing::default());
 
     // Each result carries its own command id and its own event count — no
     // cross-instance bleed.
@@ -250,30 +248,23 @@ fn commit_remembers_the_batch_in_the_recent_events_ring() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
+    let recent_event_ring = RecentEventRing::default();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
 
-    let _ = scope.commit(command_id, &mut bus);
+    let _ = scope.commit(command_id, &mut bus, &recent_event_ring);
 
-    // The ring is process-wide and every test in this binary writes to it, so
-    // the two records are found by this tab's own id rather than by position.
-    let names: Vec<String> = recent_events::list_recent_events()
+    let recorded_events: Vec<(String, Option<TabId>)> = recent_event_ring
+        .list_recent_events()
         .iter()
-        .filter(|event| event.tab_id == Some(tab))
-        .map(|event| event.event_name.to_string())
+        .map(|event| (event.event_name.to_string(), event.tab_id))
         .collect();
-    assert_eq!(names, ["TabCreated", "LayoutChanged"]);
-}
-
-#[test]
-fn an_uncommitted_scope_remembers_nothing() {
-    let tab = TabId::new();
-    let mut scope = TransactionScope::new();
-    scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
-    drop(scope);
-
-    assert!(recent_events::list_recent_events()
-        .iter()
-        .all(|event| event.tab_id != Some(tab)));
+    assert_eq!(
+        recorded_events,
+        [
+            ("TabCreated".to_string(), Some(tab)),
+            ("LayoutChanged".to_string(), Some(tab)),
+        ]
+    );
 }

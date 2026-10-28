@@ -252,8 +252,8 @@ impl Server {
                     ShellIntegrationFact::CommandStarted => {
                         Event::PaneCommandStarted(PaneCommandStarted { pane_id })
                     }
-                    ShellIntegrationFact::CommandFinished { exit_code } => {
-                        Event::PaneCommandFinished(PaneCommandFinished { pane_id, exit_code })
+                    ShellIntegrationFact::CommandFinished => {
+                        Event::PaneCommandFinished(PaneCommandFinished { pane_id })
                     }
                 })
                 .collect();

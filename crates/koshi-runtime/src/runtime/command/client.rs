@@ -8,7 +8,6 @@ use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::ConnectionToken;
 
-use crate::runtime::attach::build_session_structure_snapshot;
 use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
 
@@ -54,8 +53,8 @@ impl Server {
 
     /// Serve one attach arriving over the control socket, in this single
     /// dispatcher turn: settle which client this is, register it on the tab it
-    /// views, publish what the attach emitted, subscribe it to every event the
-    /// session publishes, and read the session's structure back.
+    /// views, publish what the attach emitted, subscribe it to the session's
+    /// deliveries, and read the session's notification queue back.
     ///
     /// `resume_client_id` names the client record a caller asks to come back as, after
     /// the session replaced its own process image. The record is handed back
@@ -112,9 +111,14 @@ impl Server {
     /// terminal's measured cell size in pixels, recorded before the tab
     /// reflows; `None` records no measurement.
     ///
-    /// Registration and subscription land in the same turn, so the structure
-    /// returned here and the queue's first event describe one continuous
-    /// state: no change can slip between them. `None` when no session is
+    /// Registration, subscription, and the copy of the session's notification
+    /// queue land in the same turn. [`AttachAccepted::notification_queue`]
+    /// holds every post made before the subscription, and every later post
+    /// reaches the subscription: no post can slip between them. The
+    /// subscription also receives each pane placement commit, quit and
+    /// restart published after it
+    /// ([`EventBus::publish`](crate::runtime::bus::EventBus::publish)), and
+    /// its first frame is due at once. `None` when no session is
     /// running, or when the one running holds no tab to view — neither is
     /// something a client can attach to. `attached_at` is supplied by the
     /// caller; the handler never reads the clock itself. The subscription
@@ -233,7 +237,7 @@ impl Server {
         Some(AttachAccepted {
             client_id,
             session_id,
-            session_structure: build_session_structure_snapshot(session),
+            notification_queue: session.notification_queue.clone(),
             deliveries,
             writer_handoff,
             ending_notice: Arc::clone(self.event_bus.get_ending_notice()),
@@ -901,7 +905,7 @@ impl Server {
                 lock_mode: next_lock_mode,
             }));
         }
-        Ok(transaction_scope.commit(command_id, &mut self.event_bus))
+        Ok(transaction_scope.commit(command_id, &mut self.event_bus, &self.recent_event_ring))
     }
 
     /// The target client's mutable record, for commands that act on one
@@ -947,7 +951,7 @@ impl Server {
             client_id,
             is_enabled: is_mouse_selection_enabled,
         }));
-        Ok(transaction_scope.commit(command_id, &mut self.event_bus))
+        Ok(transaction_scope.commit(command_id, &mut self.event_bus, &self.recent_event_ring))
     }
 
     /// Handle [`Command::MoveFloatingPane`]: store `Moved(top_left_cell)` as
@@ -989,11 +993,10 @@ impl Server {
             client.set_last_applied_floating_pane_move_command_id(command_id);
         }
         if !is_position_changed {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
         let _ = client.set_floating_pane_position(pane_id, command_args.top_left_cell);
-        Ok(Self::commit_events(
-            &mut self.event_bus,
+        Ok(self.commit_events(
             command_id,
             vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id,
@@ -1029,7 +1032,7 @@ impl Server {
             pane_pin_change,
         )) = self.resolve_pane_pin_target(pane_id, pin_change, command_source, acting_session)?
         else {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         };
         let session = self
             .session_by_id
@@ -1046,8 +1049,7 @@ impl Server {
                 false
             }
         };
-        Ok(Self::commit_events(
-            &mut self.event_bus,
+        Ok(self.commit_events(
             command_id,
             vec![Event::PanePinChanged(PanePinChanged {
                 client_id,
@@ -1093,7 +1095,7 @@ impl Server {
             acting_session,
         )?
         else {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         };
         let session = self
             .session_by_id
@@ -1109,11 +1111,7 @@ impl Server {
         let mut emitted_events: Vec<Event> =
             build_pane_minimized_changed_events(client_id, &[pane_id], is_minimized).collect();
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::SetAllFloatingPanesMinimized`] and
@@ -1177,7 +1175,7 @@ impl Server {
                 .collect()
         };
         if changing_pane_ids.is_empty() {
-            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+            return Ok(self.commit_events(command_id, Vec::new()));
         }
         if !is_minimized {
             Self::require_client_drawing_floating_panes(
@@ -1199,10 +1197,6 @@ impl Server {
             build_pane_minimized_changed_events(client_id, &changing_pane_ids, is_minimized)
                 .collect();
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 }

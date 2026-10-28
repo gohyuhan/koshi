@@ -21,9 +21,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
 
-use crate::runtime::{
-    bus::EventBus, spawn_env::add_koshi_environment, transaction::TransactionScope,
-};
+use crate::runtime::{spawn_env::add_koshi_environment, transaction::TransactionScope};
 use crate::server::Server;
 use koshi_core::notification::NotificationSeverity;
 use koshi_core::{
@@ -631,11 +629,13 @@ impl Server {
         }
     }
 
-    /// Seal `events` as one committed transaction keyed to `command_id`: emit
-    /// each event into a fresh [`TransactionScope`] in order, then commit,
-    /// delivering the batch to every subscriber on `event_bus`.
+    /// Seal `emitted_events` as one committed transaction keyed to
+    /// `command_id`: emit each event into a fresh [`TransactionScope`] in
+    /// order, then commit it on the server's event bus and recent-events ring
+    /// ([`TransactionScope::commit`]). An empty `emitted_events` commits an
+    /// empty batch.
     fn commit_events(
-        event_bus: &mut EventBus,
+        &mut self,
         command_id: CommandId,
         emitted_events: Vec<Event>,
     ) -> CommandResult {
@@ -643,7 +643,7 @@ impl Server {
         for event in emitted_events {
             scope.emit(event);
         }
-        scope.commit(command_id, event_bus)
+        scope.commit(command_id, &mut self.event_bus, &self.recent_event_ring)
     }
 
     /// Launch a pane's child process, mapping a backend failure onto the shared
@@ -783,7 +783,7 @@ impl Server {
         };
 
         let emitted_events = self.handle_client_detach(client_id);
-        Self::commit_events(&mut self.event_bus, command_id, emitted_events)
+        self.commit_events(command_id, emitted_events)
     }
 
     /// Handle [`Command::Detach`]: remove the resolved client from the session
@@ -804,11 +804,7 @@ impl Server {
             Self::resolve_target_client(command_args.client_id, command_source, session)?;
 
         let emitted_events = self.handle_client_detach(client_id);
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// Handle [`Command::SwitchSession`]: move one client out of this session
@@ -886,11 +882,7 @@ impl Server {
         for client_id in client_ids {
             emitted_events.extend(self.handle_client_detach(client_id));
         }
-        Ok(Self::commit_events(
-            &mut self.event_bus,
-            command_id,
-            emitted_events,
-        ))
+        Ok(self.commit_events(command_id, emitted_events))
     }
 
     /// The session's only attached client, or a rejection saying why — none

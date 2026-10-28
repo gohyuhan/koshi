@@ -1706,15 +1706,14 @@ impl<B: Backend> Screen<B> {
                     Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
                     _ => return false,
                 };
-                animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
-                    floating_pane_slot.pane_id,
-                    terminal::interpolate_rect(
+                animated_floating_pane_slots.push(FloatingPaneSlot {
+                    outer_rect: terminal::interpolate_rect(
                         floating_pane_slide_animation.from_outer_rect,
                         floating_pane_slot.outer_rect,
                         progress,
                     ),
-                    floating_pane_slot.is_pinned,
-                ));
+                    ..*floating_pane_slot
+                });
                 true
             });
         self.floating_pane_minimize_animations
@@ -1728,11 +1727,11 @@ impl<B: Backend> Screen<B> {
                 if !is_minimized || progress >= 1.0 {
                     return false;
                 }
-                animated_floating_pane_slots.push(FloatingPaneSlot::from_outer_rect(
+                animated_floating_pane_slots.push(FloatingPaneSlot {
                     pane_id,
-                    minimize_animation.compute_outer_rect(current_time),
-                    minimize_animation.is_pinned,
-                ));
+                    outer_rect: minimize_animation.compute_outer_rect(current_time),
+                    is_pinned: minimize_animation.is_pinned,
+                });
                 true
             });
         animated_floating_pane_slots
@@ -3503,10 +3502,9 @@ fn run_attachment<B: Backend, W: Write>(
                             let _ = terminal_writer.flush();
                             held_host_write_bytes = Vec::new();
                         }
-                        // Every other frame is a `Pong`, which carries nothing,
-                        // or reports a change to the session's structure, which
-                        // the next painted frame carries whole. Only a painted
-                        // frame is drawn.
+                        // Every other frame is a `Pong`, which carries nothing.
+                        // The frames that end the attachment leave the loop
+                        // above.
                         _ => {}
                     }
                 }
@@ -5348,7 +5346,7 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure,
+            notification_queue,
             resume_token,
             pane_area,
         } => {
@@ -5359,7 +5357,7 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
                 client_id,
                 session_id,
                 resume_token,
-                notification_queue: session_structure.notification_queue,
+                notification_queue,
             })
         }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),

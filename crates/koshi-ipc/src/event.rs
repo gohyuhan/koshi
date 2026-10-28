@@ -1,12 +1,7 @@
-//! What an attached client is told after it attaches: the picture to draw, and
-//! the session's structure changing.
-//!
-//! A client is handed
-//! [`AttachedSessionStructureSnapshot`](crate::attach::AttachedSessionStructureSnapshot)
-//! once, in the attach reply. [`SessionEvent`](crate::event::SessionEvent) is
-//! every JSON frame after it: one frame per change to which tabs exist, how
-//! each tab's panes are arranged, which pane a client focused, and which panes
-//! are alive.
+//! What an attached client is told after the attach reply: the picture to
+//! draw, a pane placement the session committed, the end of the stream, and
+//! the session's notifications. [`SessionEvent`](crate::event::SessionEvent)
+//! is every JSON frame after the reply.
 //!
 //! Pane content travels in painted updates, which are binary frames
 //! ([`painted_update`](crate::painted_update)). Image placements in an
@@ -22,9 +17,9 @@
 //! RGBA bytes.
 //!
 //! [`NotificationPosted`](crate::event::SessionEvent::NotificationPosted)
-//! carries one entry the session's notification queue took. The attach
-//! structure and [`Resync`](crate::event::SessionEvent::Resync) carry the
-//! whole queue.
+//! carries one entry the session's notification queue took. The attach reply
+//! ([`IpcResult::Attached`](crate::protocol::IpcResult::Attached)) and
+//! [`Resync`](crate::event::SessionEvent::Resync) carry the whole queue.
 //!
 //! Seven frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
@@ -52,7 +47,7 @@
 use koshi_core::action::ActionReference;
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::event::{HeldCommandRejection, RejectReason};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::notification::{NotificationEntry, NotificationQueue};
 use serde::{Deserialize, Serialize};
 
@@ -104,61 +99,6 @@ pub enum SessionEvent {
         /// The identities of the records the client drops.
         image_content_ids: Vec<u64>,
     },
-    /// A pane was created and registered.
-    PaneCreated {
-        /// The new pane.
-        pane_id: PaneId,
-        /// The tab it belongs to; `None` when the pane floats. A message
-        /// without `tab_id` is refused.
-        #[serde(deserialize_with = "Option::deserialize")]
-        tab_id: Option<TabId>,
-    },
-    /// A pane's child process exited. The pane stays in its tab's layout or
-    /// the floating set until it is removed.
-    PaneProcessExited {
-        /// The pane whose process exited.
-        pane_id: PaneId,
-        /// The process exit code; `None` when a signal terminated the process.
-        exit_code: Option<i32>,
-        /// The signal number that terminated the process; `None` when the
-        /// process exited with a code. A Windows session server sends `None`.
-        signal: Option<i32>,
-    },
-    /// A pane's close transaction started.
-    PaneClosing {
-        /// The pane whose close transaction started.
-        pane_id: PaneId,
-    },
-    /// A pane left the registry, and its tab's layout or the floating set.
-    PaneRemoved {
-        /// The pane removed from the registry, and from its tab's layout or
-        /// the session's floating set.
-        pane_id: PaneId,
-        /// The tab it was removed from; `None` when the pane floated. A
-        /// message without `tab_id` is refused.
-        #[serde(deserialize_with = "Option::deserialize")]
-        tab_id: Option<TabId>,
-    },
-    /// Focus moved to a pane.
-    PaneFocused {
-        /// The client whose focus moved.
-        client_id: ClientId,
-        /// The tab the focus moved in; `None` when the newly focused pane
-        /// floats. A message without `tab_id` is refused.
-        #[serde(deserialize_with = "Option::deserialize")]
-        tab_id: Option<TabId>,
-        /// The newly focused pane.
-        pane_id: PaneId,
-        /// When the client's input moves into, out of or between floating
-        /// panes, the pane that held the input before. Otherwise, the pane
-        /// that held this client's focus in the tab before, if any.
-        previous_pane_id: Option<PaneId>,
-    },
-    /// A tab's layout tree changed.
-    LayoutChanged {
-        /// The tab whose layout tree changed.
-        tab_id: TabId,
-    },
     /// A checked pane placement committed in the session.
     PanePlacementCommitted {
         /// The command whose transaction committed this placement.
@@ -175,35 +115,6 @@ pub enum SessionEvent {
         destination_tab_id: Option<TabId>,
         /// The checked swap or insertion target used by the transaction.
         placement_target: PanePlacementTarget,
-    },
-    /// A tab was created.
-    TabCreated {
-        /// The new tab.
-        tab_id: TabId,
-    },
-    /// A tab was closed.
-    TabClosed {
-        /// The closed tab.
-        tab_id: TabId,
-    },
-    /// Focus moved to a tab.
-    TabFocused {
-        /// The client whose active tab changed.
-        client_id: ClientId,
-        /// The newly focused tab.
-        tab_id: TabId,
-        /// The tab the client was viewing before the switch. When the switch
-        /// was forced by a tab close, this is the closed tab.
-        previous_tab_id: TabId,
-    },
-    /// A tab moved to a new index.
-    TabMoved {
-        /// The moved tab.
-        tab_id: TabId,
-        /// The tab's previous zero-based index.
-        previous_tab_index: usize,
-        /// The tab's new zero-based index.
-        new_tab_index: usize,
     },
     /// The session is over: its last tab closed, a quit command was applied,
     /// or its last pane's child exited. A terminal frame — nothing follows it.
@@ -327,7 +238,7 @@ pub enum SessionEvent {
 }
 
 impl SessionEvent {
-    /// The frame's name, e.g. `"TabCreated"`, with none of its payload.
+    /// The frame's name, e.g. `"PanePlacementCommitted"`, with none of its payload.
     /// Written on log lines.
     #[must_use]
     pub fn get_event_name(&self) -> &'static str {
@@ -335,17 +246,7 @@ impl SessionEvent {
             SessionEvent::ImageCacheReset => "ImageCacheReset",
             SessionEvent::ImageContentStart { .. } => "ImageContentStart",
             SessionEvent::ImageContentReleased { .. } => "ImageContentReleased",
-            SessionEvent::PaneCreated { .. } => "PaneCreated",
-            SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
-            SessionEvent::PaneClosing { .. } => "PaneClosing",
-            SessionEvent::PaneRemoved { .. } => "PaneRemoved",
-            SessionEvent::PaneFocused { .. } => "PaneFocused",
-            SessionEvent::LayoutChanged { .. } => "LayoutChanged",
             SessionEvent::PanePlacementCommitted { .. } => "PanePlacementCommitted",
-            SessionEvent::TabCreated { .. } => "TabCreated",
-            SessionEvent::TabClosed { .. } => "TabClosed",
-            SessionEvent::TabFocused { .. } => "TabFocused",
-            SessionEvent::TabMoved { .. } => "TabMoved",
             SessionEvent::Quit => "Quit",
             SessionEvent::Restarting => "Restarting",
             SessionEvent::Detached => "Detached",
@@ -368,17 +269,7 @@ impl WireVariants for SessionEvent {
         "ImageCacheReset",
         "ImageContentStart",
         "ImageContentReleased",
-        "PaneCreated",
-        "PaneProcessExited",
-        "PaneClosing",
-        "PaneRemoved",
-        "PaneFocused",
-        "LayoutChanged",
         "PanePlacementCommitted",
-        "TabCreated",
-        "TabClosed",
-        "TabFocused",
-        "TabMoved",
         "Quit",
         "Restarting",
         "Detached",

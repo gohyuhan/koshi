@@ -22,7 +22,8 @@
 //! runs, until its resync snapshot carries them.
 //!
 //! Then the wire conversion: one queue item becomes the frame the client is
-//! sent, and one host write becomes the frames that carry its bytes.
+//! sent, and one host write becomes the frames that carry its bytes. An event
+//! with no wire form reaches no subscriber and adds to no missed count.
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
@@ -123,10 +124,68 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
     })
 }
 
-/// Fill every subscriber queue to capacity with `TabCreated` events for `tab`.
+/// A fixed pane placement into `destination_tab_id`: a split to the right of
+/// that tab, under command id `…0002`. Equal on every call with the same tab.
+pub(crate) fn build_test_pane_placement_committed(
+    destination_tab_id: TabId,
+) -> PanePlacementCommitted {
+    PanePlacementCommitted {
+        command_id: CommandId::from_uuid(build_test_uuid_with_suffix(2)),
+        source_pane_id: PaneId::from_uuid(build_test_uuid_with_suffix(3)),
+        source_tab_id: Some(destination_tab_id),
+        destination_tab_id: Some(destination_tab_id),
+        placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Tab,
+            direction: Direction::Right,
+        }),
+    }
+}
+
+/// [`build_test_pane_placement_committed`] under command id `…0004`: a second
+/// placement that compares unequal to the first.
+pub(crate) fn build_second_test_pane_placement_committed(
+    destination_tab_id: TabId,
+) -> PanePlacementCommitted {
+    PanePlacementCommitted {
+        command_id: CommandId::from_uuid(build_test_uuid_with_suffix(4)),
+        ..build_test_pane_placement_committed(destination_tab_id)
+    }
+}
+
+/// [`build_test_pane_placement_committed`] into `destination_tab_id`, as the
+/// event a command publishes.
+pub(crate) fn build_test_placement_event(destination_tab_id: TabId) -> Event {
+    Event::PanePlacementCommitted(build_test_pane_placement_committed(destination_tab_id))
+}
+
+/// [`build_second_test_pane_placement_committed`] into `destination_tab_id`,
+/// as the event a command publishes.
+pub(crate) fn build_second_test_placement_event(destination_tab_id: TabId) -> Event {
+    Event::PanePlacementCommitted(build_second_test_pane_placement_committed(
+        destination_tab_id,
+    ))
+}
+
+/// [`build_test_pane_placement_committed`] into `destination_tab_id`, as the
+/// item a subscriber's queue holds.
+pub(crate) fn build_test_placement_delivery(destination_tab_id: TabId) -> Delivery {
+    Delivery::PanePlacementCommitted(build_test_pane_placement_committed(destination_tab_id))
+}
+
+/// [`build_second_test_pane_placement_committed`] into `destination_tab_id`,
+/// as the item a subscriber's queue holds.
+pub(crate) fn build_second_test_placement_delivery(destination_tab_id: TabId) -> Delivery {
+    Delivery::PanePlacementCommitted(build_second_test_pane_placement_committed(
+        destination_tab_id,
+    ))
+}
+
+/// Fill every subscriber queue to capacity with
+/// [`build_test_pane_placement_committed`] placements into `tab_id`.
 fn fill_to_capacity(bus: &mut EventBus, tab_id: TabId) {
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
-        bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        bus.publish(&build_test_placement_event(tab_id));
     }
 }
 
@@ -147,7 +206,7 @@ fn publishing_to_a_bus_with_no_subscribers_removes_nobody() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
 
-    let removed_subscriber_ids = bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    let removed_subscriber_ids = bus.publish(&build_test_placement_event(tab_id));
 
     assert_eq!(removed_subscriber_ids, Vec::new());
     assert_eq!(bus.count_subscribers(), 0);
@@ -171,14 +230,14 @@ fn a_subscriber_receives_published_events_in_order() {
     let mut bus = EventBus::new();
     let (_subscriber_id, subscriber_receiver, _) = bus.subscribe();
 
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![
-            Delivery::Event(Event::TabCreated(TabCreated { tab_id })),
-            Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id })),
+            build_test_placement_delivery(tab_id),
+            build_second_test_placement_delivery(tab_id),
         ]
     );
 }
@@ -190,15 +249,15 @@ fn every_subscriber_receives_its_own_copy() {
     let (_first_subscriber_id, first_receiver, _) = bus.subscribe();
     let (_second_subscriber_id, second_receiver, _) = bus.subscribe();
 
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
 
     assert_eq!(
         first_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
     assert_eq!(
         second_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
 }
 
@@ -211,16 +270,16 @@ fn a_dropped_receiver_is_removed_on_the_next_publish() {
     drop(dropped_receiver);
     assert_eq!(bus.count_subscribers(), 2);
 
-    let removed_subscriber_ids = bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    let removed_subscriber_ids = bus.publish(&build_test_placement_event(tab_id));
 
     assert_eq!(removed_subscriber_ids, vec![dropped_subscriber_id]);
     assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(
         keep_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
 
-    let removed_subscriber_ids = bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    let removed_subscriber_ids = bus.publish(&build_test_placement_event(tab_id));
 
     assert_eq!(removed_subscriber_ids, Vec::new());
 }
@@ -235,7 +294,7 @@ fn every_dropped_receiver_is_returned_in_subscription_order() {
     drop(first_receiver);
     drop(third_receiver);
 
-    let removed_subscriber_ids = bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    let removed_subscriber_ids = bus.publish(&build_test_placement_event(tab_id));
 
     assert_eq!(
         removed_subscriber_ids,
@@ -245,7 +304,7 @@ fn every_dropped_receiver_is_returned_in_subscription_order() {
     assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(
         keep_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
 }
 
@@ -257,7 +316,7 @@ fn an_event_that_does_not_fit_desyncs_that_subscriber_only() {
     fill_to_capacity(&mut bus, tab_id);
     let (fresh_subscriber_id, fresh_subscriber_receiver, _) = bus.subscribe();
 
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     assert!(bus.has_desynced_subscribers());
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![full_subscriber_id]);
@@ -265,9 +324,7 @@ fn an_event_that_does_not_fit_desyncs_that_subscriber_only() {
     // The fresh subscriber is untouched and still receiving.
     assert_eq!(
         fresh_subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::LayoutChanged(LayoutChanged {
-            tab_id
-        }))]
+        vec![build_second_test_placement_delivery(tab_id)]
     );
     assert!(bus.has_subscriber(fresh_subscriber_id));
 
@@ -275,10 +332,10 @@ fn an_event_that_does_not_fit_desyncs_that_subscriber_only() {
     // until a snapshot lands.
     assert_eq!(
         full_subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(
         full_subscriber_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
@@ -293,7 +350,7 @@ fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 
     assert!(!bus.try_resync(
@@ -306,7 +363,7 @@ fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
     // Nothing was queued: the backlog is still exactly the pre-gap events.
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
 }
 
@@ -316,13 +373,13 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     // Leave two pre-gap events on the queue so the ordering is visible.
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY - 2 {
         assert_eq!(
             subscriber_receiver.recv().unwrap(),
-            Delivery::Event(Event::TabCreated(TabCreated { tab_id }))
+            build_test_placement_delivery(tab_id)
         );
     }
 
@@ -334,13 +391,13 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
     ));
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![
-            Delivery::Event(Event::TabCreated(TabCreated { tab_id })),
-            Delivery::Event(Event::TabCreated(TabCreated { tab_id })),
+            build_test_placement_delivery(tab_id),
+            build_test_placement_delivery(tab_id),
             Delivery::Snapshot {
                 render_snapshot,
                 notification_queue: build_test_notification_queue(),
@@ -351,7 +408,7 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
                 held_command_rejections: Vec::new(),
                 dropped_command_rejection_count: 0,
             },
-            Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id })),
+            build_second_test_placement_delivery(tab_id),
         ]
     );
 }
@@ -364,9 +421,9 @@ fn the_dropped_count_holds_the_trigger_plus_every_withheld_event() {
     fill_to_capacity(&mut bus, tab_id);
 
     // The trigger, then three withheld events: 1 + 3 = 4.
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     for _ in 0..3 {
-        bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        bus.publish(&build_test_placement_event(tab_id));
     }
 
     assert_eq!(
@@ -417,7 +474,7 @@ fn a_live_subscriber_whose_queue_is_full_misses_the_restart() {
     assert!(
         queued_deliveries
             .iter()
-            .all(|delivery| *delivery == Delivery::Event(Event::TabCreated(TabCreated { tab_id }))),
+            .all(|delivery| *delivery == build_test_placement_delivery(tab_id)),
         "the queue must hold its backlog and nothing else"
     );
 }
@@ -432,7 +489,7 @@ fn an_ending_that_finds_a_full_queue_wakes_a_writer_held_on_the_frame_at_its_hea
     assert!(bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
     let tab_id = TabId::new();
     for _ in 1..SUBSCRIBER_QUEUE_CAPACITY {
-        bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        bus.publish(&build_test_placement_event(tab_id));
     }
     let ending_notice = Arc::clone(bus.get_ending_notice());
     let wait_deadline = Instant::now() + Duration::from_secs(5);
@@ -469,7 +526,7 @@ fn publishing_the_quit_raises_the_ending_notice_and_delivers_it() {
     );
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
+        vec![Delivery::Quit]
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
     assert!(bus.has_subscriber(subscriber_id));
@@ -490,10 +547,7 @@ fn the_ending_notice_keeps_the_first_ending_it_was_raised_with() {
     // Both events still ride the queue; only the notice is set once.
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![
-            Delivery::Event(Event::Restarting),
-            Delivery::Event(Event::Quit(QuitCause::Requested)),
-        ]
+        vec![Delivery::Restarting, Delivery::Quit,]
     );
 }
 
@@ -503,7 +557,7 @@ fn a_desynced_subscriber_is_told_the_session_is_restarting() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     // The client drains its backlog, so the queue has room again while the
     // subscriber is still awaiting its snapshot.
@@ -516,7 +570,7 @@ fn a_desynced_subscriber_is_told_the_session_is_restarting() {
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Restarting)]
+        vec![Delivery::Restarting]
     );
 }
 
@@ -526,7 +580,7 @@ fn a_desynced_subscriber_is_told_the_session_quit() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert_eq!(
         subscriber_receiver.try_iter().count(),
@@ -537,7 +591,7 @@ fn a_desynced_subscriber_is_told_the_session_quit() {
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
+        vec![Delivery::Quit]
     );
 }
 
@@ -547,7 +601,7 @@ fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     // The queue is still full, so the restart does not fit either: the count
     // holds the event that desynced the subscriber plus this one.
@@ -585,7 +639,7 @@ fn a_desynced_subscriber_whose_receiver_is_gone_is_removed_by_the_resync() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
@@ -608,7 +662,7 @@ fn a_resync_of_a_live_or_unknown_subscriber_does_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
 
     assert!(!bus.try_resync(
         subscriber_id,
@@ -623,7 +677,7 @@ fn a_resync_of_a_live_or_unknown_subscriber_does_nothing() {
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
     assert_eq!(bus.count_subscribers(), 1);
 }
@@ -636,9 +690,9 @@ fn a_second_desync_counts_from_one_again() {
     fill_to_capacity(&mut bus, tab_id);
 
     // First gap: the trigger plus two more withheld events.
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     for _ in 0..2 {
-        bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+        bus.publish(&build_test_placement_event(tab_id));
     }
     assert_eq!(
         subscriber_receiver.try_iter().count(),
@@ -653,7 +707,7 @@ fn a_second_desync_counts_from_one_again() {
 
     // Second gap, on a queue refilled from scratch: the count restarts.
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
@@ -686,7 +740,7 @@ fn a_resync_of_a_just_resynced_subscriber_does_nothing() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
@@ -710,10 +764,10 @@ fn a_resync_of_a_just_resynced_subscriber_does_nothing() {
         Vec::<Delivery>::new()
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
 }
 
@@ -726,7 +780,7 @@ fn every_desynced_subscriber_is_listed_in_subscription_order() {
     fill_to_capacity(&mut bus, tab_id);
     let (live_subscriber_id, _live_receiver, _) = bus.subscribe();
 
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     assert_eq!(
         bus.list_desynced_subscriber_ids(),
@@ -758,12 +812,12 @@ fn a_desynced_subscriber_whose_receiver_is_gone_survives_every_publish() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     drop(subscriber_receiver);
 
     // Withholding means no send, so no publish ever learns the receiver is
     // gone: the resync is the only thing that reaps it.
-    let removed_subscriber_ids = bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    let removed_subscriber_ids = bus.publish(&build_test_placement_event(tab_id));
 
     assert_eq!(removed_subscriber_ids, Vec::new());
     assert!(bus.has_subscriber(subscriber_id));
@@ -789,10 +843,10 @@ fn unsubscribing_an_unknown_id_changes_nothing() {
 
     assert!(bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 1);
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
 }
 
@@ -802,7 +856,7 @@ fn unsubscribing_a_desynced_subscriber_clears_it_from_the_desynced_list() {
     let mut bus = EventBus::new();
     let (subscriber_id, _subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 
     bus.unsubscribe(subscriber_id);
@@ -826,14 +880,14 @@ fn unsubscribe_removes_that_subscriber_only() {
     assert!(bus.has_subscriber(keep_subscriber_id));
     assert_eq!(bus.count_subscribers(), 1);
 
-    bus.publish(&Event::TabCreated(TabCreated { tab_id }));
+    bus.publish(&build_test_placement_event(tab_id));
     assert_eq!(
         gone_receiver.try_iter().collect::<Vec<_>>(),
         Vec::<Delivery>::new()
     );
     assert_eq!(
         keep_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id }))]
+        vec![build_test_placement_delivery(tab_id)]
     );
 }
 
@@ -872,7 +926,7 @@ fn a_frame_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     // Drained, so a refusal here cannot be a full queue.
     assert_eq!(
@@ -906,7 +960,7 @@ fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
     assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
 
     let render_snapshot = build_test_render_snapshot();
@@ -940,7 +994,7 @@ fn a_resync_snapshot_that_does_not_fit_marks_one_owed_frame_and_the_dropped_even
     let mut bus = EventBus::new();
     let (subscriber_id, _subscriber_receiver, writer_handoff) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert!(!writer_handoff.take_owed_frame_mark());
 
@@ -1047,7 +1101,7 @@ fn a_mouse_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     // Drained, so a refusal here cannot be a full queue.
     assert_eq!(
@@ -1089,7 +1143,7 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
 
     // The event published next is withheld, not delivered on top of the gap,
     // and counted: 1 for the lost answer plus 1 for it.
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
@@ -1410,7 +1464,7 @@ fn a_full_queue_drops_only_the_wake_and_the_next_host_write_queues_one() {
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
     assert!(bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"next")));
     assert_eq!(
@@ -1429,7 +1483,7 @@ fn a_desynced_subscriber_with_room_on_its_queue_takes_the_wake() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
@@ -1454,11 +1508,11 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, writer_handoff) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert!(bus.queue_host_write(subscriber_id, &build_clipboard_host_write()));
     assert_eq!(
         subscriber_receiver.try_recv(),
-        Ok(Delivery::Event(Event::TabCreated(TabCreated { tab_id })))
+        Ok(build_test_placement_delivery(tab_id))
     );
 
     let render_snapshot = build_test_render_snapshot();
@@ -1670,7 +1724,7 @@ fn a_rejection_that_finds_the_queue_full_is_held_and_the_resync_carries_it() {
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
     let render_snapshot = build_test_render_snapshot();
     assert!(bus.try_resync(
@@ -1710,7 +1764,7 @@ fn a_desynced_subscriber_merges_equal_rejections_in_a_row_and_misses_none_of_the
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
     send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
@@ -1752,7 +1806,7 @@ fn a_desynced_subscriber_holding_the_most_runs_drops_the_oldest_for_a_new_one() 
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
 
     for rejection_index in 0..=MAX_HELD_COMMAND_REJECTION_COUNT {
         bus.send_command_rejection(
@@ -1893,7 +1947,7 @@ fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
     // and the desync is what puts a fresh frame on the queue.
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<Delivery>>(),
-        vec![Delivery::Event(Event::TabCreated(TabCreated { tab_id })); SUBSCRIBER_QUEUE_CAPACITY]
+        vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
 }
 
@@ -1918,7 +1972,7 @@ fn a_switch_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
-    bus.publish(&Event::LayoutChanged(LayoutChanged { tab_id }));
+    bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     // Drained, so a refusal here cannot be a full queue.
     assert_eq!(
@@ -1950,216 +2004,103 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_switch() {
 }
 
 #[test]
-fn every_structure_event_converts_to_its_wire_frame() {
-    let client_id = ClientId::new();
-    let pane_id = PaneId::new();
-    let other_pane_id = PaneId::new();
+fn each_session_event_delivery_converts_to_its_wire_frame() {
     let tab_id = TabId::new();
-    let other_tab_id = TabId::new();
+    let pane_placement_committed = build_test_pane_placement_committed(tab_id);
 
     assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneCreated(PaneCreated {
-            pane_id,
-            tab_id: Some(tab_id),
-        }))),
-        Some(SessionEvent::PaneCreated {
-            pane_id,
-            tab_id: Some(tab_id)
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneProcessExited(
-            PaneProcessExited {
-                pane_id,
-                exit_code: Some(130),
-                signal: None,
-            }
-        ))),
-        Some(SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: Some(130),
-            signal: None,
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneClosing(PaneClosing {
-            pane_id,
-        }))),
-        Some(SessionEvent::PaneClosing { pane_id })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneRemoved(PaneRemoved {
-            pane_id,
-            tab_id: Some(tab_id),
-        }))),
-        Some(SessionEvent::PaneRemoved {
-            pane_id,
-            tab_id: Some(tab_id)
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
-            client_id,
-            tab_id: Some(tab_id),
-            pane_id,
-            previous_pane_id: Some(other_pane_id),
-        }))),
-        Some(SessionEvent::PaneFocused {
-            client_id,
-            tab_id: Some(tab_id),
-            pane_id,
-            previous_pane_id: Some(other_pane_id),
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::LayoutChanged(LayoutChanged {
-            tab_id,
-        }))),
-        Some(SessionEvent::LayoutChanged { tab_id })
-    );
-    let placement_command_id = CommandId::new();
-    let placement_target = PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
-        destination_tab_id: other_tab_id,
-        anchor: PanePlacementAnchor::Pane(other_pane_id),
-        direction: Direction::Down,
-    });
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PanePlacementCommitted(
-            PanePlacementCommitted {
-                command_id: placement_command_id,
-                source_pane_id: pane_id,
-                source_tab_id: Some(tab_id),
-                destination_tab_id: Some(other_tab_id),
-                placement_target: placement_target.clone(),
-            }
-        ))),
+        build_wire_event(&Delivery::PanePlacementCommitted(
+            pane_placement_committed.clone()
+        )),
         Some(SessionEvent::PanePlacementCommitted {
-            command_id: placement_command_id,
-            source_pane_id: pane_id,
+            command_id: pane_placement_committed.command_id,
+            source_pane_id: pane_placement_committed.source_pane_id,
             source_tab_id: Some(tab_id),
-            destination_tab_id: Some(other_tab_id),
-            placement_target,
+            destination_tab_id: Some(tab_id),
+            placement_target: pane_placement_committed.placement_target,
         })
     );
+    assert_eq!(build_wire_event(&Delivery::Quit), Some(SessionEvent::Quit));
     assert_eq!(
-        build_wire_event(&Delivery::Event(Event::TabCreated(TabCreated { tab_id }))),
-        Some(SessionEvent::TabCreated { tab_id })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::TabClosed(TabClosed { tab_id }))),
-        Some(SessionEvent::TabClosed { tab_id })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::TabFocused(TabFocused {
-            client_id,
-            tab_id,
-            previous_tab_id: other_tab_id,
-        }))),
-        Some(SessionEvent::TabFocused {
-            client_id,
-            tab_id,
-            previous_tab_id: other_tab_id,
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::TabMoved(TabMoved {
-            tab_id,
-            previous_tab_index: 2,
-            new_tab_index: 0,
-        }))),
-        Some(SessionEvent::TabMoved {
-            tab_id,
-            previous_tab_index: 2,
-            new_tab_index: 0,
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::Quit(QuitCause::Requested))),
-        Some(SessionEvent::Quit)
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::Restarting)),
+        build_wire_event(&Delivery::Restarting),
         Some(SessionEvent::Restarting)
     );
 }
 
 #[test]
-fn an_absent_optional_field_stays_absent_on_the_wire() {
-    let client_id = ClientId::new();
+fn a_placement_of_a_floating_pane_writes_no_source_tab() {
+    let command_id = CommandId::new();
     let pane_id = PaneId::new();
     let tab_id = TabId::new();
+    let placement_target = PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+        destination_tab_id: tab_id,
+        anchor: PanePlacementAnchor::Tab,
+        direction: Direction::Down,
+    });
 
     assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneProcessExited(
-            PaneProcessExited {
-                pane_id,
-                exit_code: None,
-                signal: Some(9),
-            }
-        ))),
-        Some(SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: None,
-            signal: Some(9),
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
-            client_id,
-            tab_id: Some(tab_id),
-            pane_id,
-            previous_pane_id: None,
-        }))),
-        Some(SessionEvent::PaneFocused {
-            client_id,
-            tab_id: Some(tab_id),
-            pane_id,
-            previous_pane_id: None,
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneCreated(PaneCreated {
-            pane_id,
-            tab_id: None,
-        }))),
-        Some(SessionEvent::PaneCreated {
-            pane_id,
-            tab_id: None,
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneRemoved(PaneRemoved {
-            pane_id,
-            tab_id: None,
-        }))),
-        Some(SessionEvent::PaneRemoved {
-            pane_id,
-            tab_id: None,
-        })
-    );
-    assert_eq!(
-        build_wire_event(&Delivery::Event(Event::PaneFocused(PaneFocused {
-            client_id,
-            tab_id: None,
-            pane_id,
-            previous_pane_id: None,
-        }))),
-        Some(SessionEvent::PaneFocused {
-            client_id,
-            tab_id: None,
-            pane_id,
-            previous_pane_id: None,
+        build_wire_event(&Delivery::PanePlacementCommitted(PanePlacementCommitted {
+            command_id,
+            source_pane_id: pane_id,
+            source_tab_id: None,
+            destination_tab_id: Some(tab_id),
+            placement_target: placement_target.clone(),
+        })),
+        Some(SessionEvent::PanePlacementCommitted {
+            command_id,
+            source_pane_id: pane_id,
+            source_tab_id: None,
+            destination_tab_id: Some(tab_id),
+            placement_target,
         })
     );
 }
 
-#[test]
-fn every_event_with_no_wire_spelling_converts_to_nothing() {
+/// One of every [`Event`] variant that [`EventBus::publish`] delivers to no
+/// subscriber: every variant apart from `PanePlacementCommitted`, `Quit` and
+/// `Restarting`.
+fn list_events_with_no_wire_form() -> Vec<Event> {
     let client_id = ClientId::new();
     let pane_id = PaneId::new();
+    let other_pane_id = PaneId::new();
     let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let other_tab_id = TabId::new();
 
-    let non_wire_events = vec![
+    vec![
+        Event::PaneCreated(PaneCreated {
+            pane_id,
+            tab_id: Some(tab_id),
+        }),
+        Event::PaneProcessExited(PaneProcessExited {
+            pane_id,
+            exit_code: Some(130),
+            signal: None,
+        }),
+        Event::PaneClosing(PaneClosing { pane_id }),
+        Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: None,
+        }),
+        Event::PaneFocused(PaneFocused {
+            client_id,
+            tab_id: Some(tab_id),
+            pane_id,
+            previous_pane_id: Some(other_pane_id),
+        }),
+        Event::LayoutChanged(LayoutChanged { tab_id }),
+        Event::TabCreated(TabCreated { tab_id }),
+        Event::TabClosed(TabClosed { tab_id }),
+        Event::TabFocused(TabFocused {
+            client_id,
+            tab_id,
+            previous_tab_id: other_tab_id,
+        }),
+        Event::TabMoved(TabMoved {
+            tab_id,
+            previous_tab_index: 2,
+            new_tab_index: 0,
+        }),
         Event::PtyResized(PtyResized {
             pane_id,
             pty_size: PtySize {
@@ -2189,10 +2130,7 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
             is_enabled: true,
         }),
         Event::PaneCommandStarted(PaneCommandStarted { pane_id }),
-        Event::PaneCommandFinished(PaneCommandFinished {
-            pane_id,
-            exit_code: Some(0),
-        }),
+        Event::PaneCommandFinished(PaneCommandFinished { pane_id }),
         Event::SelectionChanged(SelectionChanged {
             client_id,
             pane_id,
@@ -2213,16 +2151,58 @@ fn every_event_with_no_wire_spelling_converts_to_nothing() {
             pane_id,
             is_minimized: true,
         }),
-    ];
+    ]
+}
 
-    for runtime_event in non_wire_events {
+#[test]
+fn an_event_with_no_wire_form_reaches_no_subscriber_and_adds_to_no_missed_count() {
+    let tab_id = TabId::new();
+    let mut bus = EventBus::new();
+    let (desynced_subscriber_id, desynced_subscriber_receiver, _) = bus.subscribe();
+    fill_to_capacity(&mut bus, tab_id);
+    bus.publish(&build_second_test_placement_event(tab_id));
+    assert_eq!(
+        desynced_subscriber_receiver.try_iter().count(),
+        SUBSCRIBER_QUEUE_CAPACITY
+    );
+    let (live_subscriber_id, live_subscriber_receiver, _) = bus.subscribe();
+    let (gone_subscriber_id, gone_subscriber_receiver, _) = bus.subscribe();
+    drop(gone_subscriber_receiver);
+
+    for runtime_event in list_events_with_no_wire_form() {
         let event_name = runtime_event.get_event_name();
         assert_eq!(
-            build_wire_event(&Delivery::Event(runtime_event)),
-            None,
-            "{event_name} reached the wire"
+            bus.publish(&runtime_event),
+            Vec::<SubscriberId>::new(),
+            "{event_name} removed a subscriber"
         );
     }
+
+    assert_eq!(
+        live_subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        Vec::<Delivery>::new()
+    );
+    assert!(bus.has_subscriber(live_subscriber_id));
+    assert!(bus.has_subscriber(gone_subscriber_id));
+    let render_snapshot = build_test_render_snapshot();
+    assert!(bus.try_resync(
+        desynced_subscriber_id,
+        render_snapshot.clone(),
+        build_test_notification_queue()
+    ));
+    assert_eq!(
+        desynced_subscriber_receiver.try_iter().collect::<Vec<_>>(),
+        vec![Delivery::Snapshot {
+            render_snapshot,
+            notification_queue: build_test_notification_queue(),
+            lag_report: SubscriberLagged {
+                subscriber_id: desynced_subscriber_id,
+                dropped_event_count: 1,
+            },
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
+        }]
+    );
 }
 
 #[test]

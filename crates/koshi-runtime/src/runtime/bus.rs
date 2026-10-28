@@ -3,7 +3,8 @@
 //! `EventBus::subscribe` registers a subscriber and hands back its id, the
 //! receiving end of that subscriber's own bounded queue, and its
 //! [`WriterHandoff`].
-//! `EventBus::publish` clones each event into every subscriber's queue,
+//! `EventBus::publish` clones each pane placement, quit and restart event
+//! into every subscriber's queue,
 //! `EventBus::publish_notification_post` clones one post of the session's
 //! notification queue into every subscriber's queue,
 //! `EventBus::try_send_frame` puts the frame the session composed for one
@@ -102,8 +103,9 @@ enum DeliveryState {
     /// snapshot lands, apart from the event that ends the stream.
     Desynced {
         /// How many deliveries the subscriber has missed: the one that paused
-        /// it when it was not a command rejection, plus every event published
-        /// since.
+        /// it when it was not a command rejection, plus each delivery to every
+        /// subscriber since: a pane placement commit, a notification post, or
+        /// a last frame its full queue had no room for.
         dropped_event_count: u64,
         /// The rejections of the subscriber's client's commands since the
         /// pause, oldest first, each run of equal rejections in a row as one
@@ -292,8 +294,9 @@ impl WriterHandoff {
     }
 }
 
-/// Event fan-out hub: every published event is delivered to each live
-/// subscriber, over that subscriber's own bounded queue.
+/// Fan-out hub: [`publish`](Self::publish) delivers each pane placement
+/// commit, quit and restart to every live subscriber, over that subscriber's
+/// own bounded queue. Every other event reaches no subscriber.
 #[derive(Debug)]
 pub(crate) struct EventBus {
     /// Live subscribers, in subscription order.
@@ -319,9 +322,9 @@ impl EventBus {
         &self.ending_notice
     }
 
-    /// Register a subscriber for every published event and hand back its id,
-    /// the receiving end of its queue, and its [`WriterHandoff`], with no
-    /// host write waiting and no frame owed. The subscriber starts live.
+    /// Register a subscriber and hand back its id, the receiving end of its
+    /// queue, and its [`WriterHandoff`], with no host write waiting and no
+    /// frame owed. The subscriber starts live.
     /// Dropping the receiver ends the subscription; the bus removes it on the
     /// next publish or delivery to it.
     pub(crate) fn subscribe(&mut self) -> (SubscriberId, DeliveryReceiver, Arc<WriterHandoff>) {
@@ -350,20 +353,55 @@ impl EventBus {
     /// A subscriber whose receiver is gone is removed, and its id returned so
     /// the caller can drop whatever it keeps alongside the subscription. The
     /// returned list is empty on every publish that removes nobody.
+    ///
+    /// Only [`Event::PanePlacementCommitted`], [`Event::Quit`] and
+    /// [`Event::Restarting`] reach a subscriber, as
+    /// [`Delivery::PanePlacementCommitted`], [`Delivery::Quit`] and
+    /// [`Delivery::Restarting`]. Every other event reaches no subscriber,
+    /// counts as missed by no desynced subscriber, and returns an empty list.
+    /// The match names every [`Event`] variant and takes no wildcard arm.
+    #[deny(
+        clippy::wildcard_enum_match_arm,
+        clippy::match_wildcard_for_single_variants
+    )]
     pub(crate) fn publish(&mut self, event: &Event) -> Vec<SubscriberId> {
+        let (delivery, session_ending) = match event {
+            Event::PanePlacementCommitted(pane_placement_committed) => (
+                Delivery::PanePlacementCommitted(pane_placement_committed.clone()),
+                None,
+            ),
+            Event::Quit(_) => (Delivery::Quit, Some(SessionEnding::Quit)),
+            Event::Restarting => (Delivery::Restarting, Some(SessionEnding::Restarting)),
+            Event::PaneCreated(_)
+            | Event::PaneProcessExited(_)
+            | Event::PaneClosing(_)
+            | Event::PaneRemoved(_)
+            | Event::PaneFocused(_)
+            | Event::LayoutChanged(_)
+            | Event::TabCreated(_)
+            | Event::TabClosed(_)
+            | Event::TabFocused(_)
+            | Event::TabMoved(_)
+            | Event::PtyResized(_)
+            | Event::TerminalTooSmallEntered(_)
+            | Event::ConfigReloaded(_)
+            | Event::InputModeChanged(_)
+            | Event::MouseSelectChanged(_)
+            | Event::PaneCommandStarted(_)
+            | Event::PaneCommandFinished(_)
+            | Event::SelectionChanged(_)
+            | Event::FloatingPaneMoved(_)
+            | Event::PanePinChanged(_)
+            | Event::PaneMinimizedChanged(_) => return Vec::new(),
+        };
         // The stream's last frame, delivered whatever state the subscriber is
         // in: the client reading it leaves this socket. The notice carries it
         // to a client whose queue has no room left for it.
-        let session_ending = match event {
-            Event::Quit(_) => Some(SessionEnding::Quit),
-            Event::Restarting => Some(SessionEnding::Restarting),
-            _ => None,
-        };
         if let Some(session_ending) = session_ending {
             self.ending_notice.raise_session_ending(session_ending);
         }
         self.deliver_to_every_subscriber(
-            || Delivery::Event(event.clone()),
+            || delivery.clone(),
             session_ending.is_some(),
             event.get_event_name(),
         )
@@ -932,7 +970,7 @@ fn hold_command_rejection(
 /// paint images receives new RGBA records after it.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
-/// of missed events, the session's notification queue, the held command
+/// of missed deliveries, the session's notification queue, the held command
 /// rejections, and the count of held runs dropped for room. The connection
 /// writer sends the snapshot's frame right after it, as a painted update.
 ///
@@ -954,9 +992,13 @@ fn hold_command_rejection(
 /// A [`Delivery::CommandRejected`] becomes [`SessionEvent::CommandRejected`]
 /// carrying the same command id, fired action, reason and hint.
 ///
-/// Every [`Event`] variant with no [`SessionEvent`] spelling is named here and
-/// returns `None`. The match takes no wildcard arm, so a new variant is a
-/// compile error until this function says what the wire does with it.
+/// A [`Delivery::PanePlacementCommitted`] becomes
+/// [`SessionEvent::PanePlacementCommitted`] carrying the same command id,
+/// source pane, source and destination tabs, and placement target. A
+/// [`Delivery::Quit`] becomes [`SessionEvent::Quit`], and a
+/// [`Delivery::Restarting`] becomes [`SessionEvent::Restarting`].
+///
+/// The match names every [`Delivery`] variant and takes no wildcard arm.
 #[must_use]
 #[deny(
     clippy::wildcard_enum_match_arm,
@@ -964,79 +1006,17 @@ fn hold_command_rejection(
 )]
 pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
     match delivery {
-        Delivery::Event(event) => match event {
-            Event::PaneCreated(pane_created) => Some(SessionEvent::PaneCreated {
-                pane_id: pane_created.pane_id,
-                tab_id: pane_created.tab_id,
-            }),
-            Event::PaneProcessExited(pane_process_exit) => Some(SessionEvent::PaneProcessExited {
-                pane_id: pane_process_exit.pane_id,
-                exit_code: pane_process_exit.exit_code,
-                signal: pane_process_exit.signal,
-            }),
-            Event::PaneClosing(pane_closing) => Some(SessionEvent::PaneClosing {
-                pane_id: pane_closing.pane_id,
-            }),
-            Event::PaneRemoved(pane_removed) => Some(SessionEvent::PaneRemoved {
-                pane_id: pane_removed.pane_id,
-                tab_id: pane_removed.tab_id,
-            }),
-            Event::PaneFocused(pane_focused) => Some(SessionEvent::PaneFocused {
-                client_id: pane_focused.client_id,
-                tab_id: pane_focused.tab_id,
-                pane_id: pane_focused.pane_id,
-                previous_pane_id: pane_focused.previous_pane_id,
-            }),
-            Event::LayoutChanged(layout_changed) => Some(SessionEvent::LayoutChanged {
-                tab_id: layout_changed.tab_id,
-            }),
-            Event::PanePlacementCommitted(pane_placement_committed) => {
-                Some(SessionEvent::PanePlacementCommitted {
-                    command_id: pane_placement_committed.command_id,
-                    source_pane_id: pane_placement_committed.source_pane_id,
-                    source_tab_id: pane_placement_committed.source_tab_id,
-                    destination_tab_id: pane_placement_committed.destination_tab_id,
-                    placement_target: pane_placement_committed.placement_target.clone(),
-                })
-            }
-            Event::TabCreated(tab_created) => Some(SessionEvent::TabCreated {
-                tab_id: tab_created.tab_id,
-            }),
-            Event::TabClosed(tab_closed) => Some(SessionEvent::TabClosed {
-                tab_id: tab_closed.tab_id,
-            }),
-            Event::TabFocused(tab_focused) => Some(SessionEvent::TabFocused {
-                client_id: tab_focused.client_id,
-                tab_id: tab_focused.tab_id,
-                previous_tab_id: tab_focused.previous_tab_id,
-            }),
-            Event::TabMoved(tab_moved) => Some(SessionEvent::TabMoved {
-                tab_id: tab_moved.tab_id,
-                previous_tab_index: tab_moved.previous_tab_index,
-                new_tab_index: tab_moved.new_tab_index,
-            }),
-            Event::Quit(_) => Some(SessionEvent::Quit),
-            Event::Restarting => Some(SessionEvent::Restarting),
-
-            // PTY size: the client redraws from the next painted update.
-            Event::PtyResized(_) => None,
-            // Visibility: the painted update already shows which panes have
-            // area.
-            Event::TerminalTooSmallEntered(_) => None,
-            Event::ConfigReloaded(_) => None,
-            // Per-client input state: the client holds its own mode and its
-            // own mouse-select mode.
-            Event::InputModeChanged(_) | Event::MouseSelectChanged(_) => None,
-            // A shell's OSC 133 prompt reports.
-            Event::PaneCommandStarted(_) | Event::PaneCommandFinished(_) => None,
-            // A selection is client-local.
-            Event::SelectionChanged(_) => None,
-            // One client's own view of a floating pane: its position, its
-            // pin, and its minimized state.
-            Event::FloatingPaneMoved(_)
-            | Event::PanePinChanged(_)
-            | Event::PaneMinimizedChanged(_) => None,
-        },
+        Delivery::PanePlacementCommitted(pane_placement_committed) => {
+            Some(SessionEvent::PanePlacementCommitted {
+                command_id: pane_placement_committed.command_id,
+                source_pane_id: pane_placement_committed.source_pane_id,
+                source_tab_id: pane_placement_committed.source_tab_id,
+                destination_tab_id: pane_placement_committed.destination_tab_id,
+                placement_target: pane_placement_committed.placement_target.clone(),
+            })
+        }
+        Delivery::Quit => Some(SessionEvent::Quit),
+        Delivery::Restarting => Some(SessionEvent::Restarting),
         Delivery::Frame(_) => None,
         Delivery::Snapshot {
             lag_report,

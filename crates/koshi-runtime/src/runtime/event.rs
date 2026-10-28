@@ -27,8 +27,8 @@ use koshi_core::{
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
     key::KeyInput,
     mouse::MouseInput,
+    notification::NotificationQueue,
 };
-use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
@@ -343,20 +343,21 @@ pub enum RuntimeEvent {
 }
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client
-/// record, the session it joined, the structure built for the attach reply, the
-/// receiving end of the client's own event queue, what waits beside that queue
-/// for the client's writing thread, and the session's shared ending notice.
+/// record, the session it joined, the session's notification queue for the
+/// attach reply, the receiving end of the client's own event queue, what waits
+/// beside that queue for the client's writing thread, and the session's shared
+/// ending notice.
 ///
-/// The whole of it comes out of one dispatcher turn: the structure names the
-/// same state the queue's first event follows.
+/// The whole of it comes out of one dispatcher turn: the notification queue
+/// holds every post before the queue's first event.
 #[derive(Debug)]
 pub struct AttachAccepted {
     /// The id the dispatcher minted for this client.
     pub client_id: ClientId,
     /// The session the client joined.
     pub session_id: SessionId,
-    /// What the session contains, built for this reply.
-    pub session_structure: AttachedSessionStructureSnapshot,
+    /// The session's notification queue as it stands.
+    pub notification_queue: NotificationQueue,
     /// The client's event queue. Dropping it ends the subscription.
     pub deliveries: DeliveryReceiver,
     /// Shared with the session. This client's writing thread takes the bytes

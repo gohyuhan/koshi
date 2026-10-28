@@ -4235,11 +4235,14 @@ fn a_frame_that_floats_the_selected_tiled_pane_makes_it_the_dock_source_with_no_
     floating_frame
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            undocked_pane_id,
-            Rect::from_origin_and_size(Point { column: 40, row: 0 }, SMALL_FLOATING_PANE_SIZE),
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: undocked_pane_id,
+            outer_rect: Rect::from_origin_and_size(
+                Point { column: 40, row: 0 },
+                SMALL_FLOATING_PANE_SIZE,
+            ),
+            is_pinned: false,
+        });
     floating_frame.client_snapshot.active_tab_focused_pane_id = Some(tiled_pane_id);
     client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&floating_frame));
 

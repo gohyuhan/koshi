@@ -5185,11 +5185,11 @@ pub(crate) fn add_floating_mouse_pane(
     mouse_frame
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_mouse_pane.pane_id,
+        .push(FloatingPaneSlot {
+            pane_id: floating_mouse_pane.pane_id,
             outer_rect,
             is_pinned,
-        ));
+        });
     mouse_frame.mouse_panes.push(floating_mouse_pane);
 }
 
@@ -5854,14 +5854,14 @@ fn a_handle_release_that_leaves_the_pane_drawn_where_it_was_sends_no_move() {
         floating_pane_id,
     );
     // The 40x12 pane at (40, 4) touches the right edge of the 80x22 pane area.
-    mouse_frame.session_snapshot.floating_pane_slots = vec![FloatingPaneSlot::from_outer_rect(
-        floating_pane_id,
-        Rect {
+    mouse_frame.session_snapshot.floating_pane_slots = vec![FloatingPaneSlot {
+        pane_id: floating_pane_id,
+        outer_rect: Rect {
             origin: Point { column: 40, row: 4 },
             ..FLOATING_PANE_OUTER_RECT
         },
-        false,
-    )];
+        is_pinned: false,
+    }];
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
@@ -8787,11 +8787,11 @@ fn a_pinned_selected_floating_pane_stays_at_its_cell_and_a_release_off_every_pan
         client
             .build_frame_layout_with_current_chrome(&mouse_frame)
             .find_drawn_floating_pane_slot(floating_pane_id),
-        Some(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            FLOATING_PANE_OUTER_RECT,
-            true,
-        ))
+        Some(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: FLOATING_PANE_OUTER_RECT,
+            is_pinned: true
+        })
     );
     assert_eq!(
         client.handle_placement_mouse(
@@ -9193,11 +9193,11 @@ fn a_frame_that_floats_a_dragged_tiled_pane_keeps_the_drag_from_where_the_frame_
     floating_frame
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            upper_pane_id,
-            FLOATING_PANE_OUTER_RECT,
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: upper_pane_id,
+            outer_rect: FLOATING_PANE_OUTER_RECT,
+            is_pinned: false,
+        });
     client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&floating_frame));
 
     assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));

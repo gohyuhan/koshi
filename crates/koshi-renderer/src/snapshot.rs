@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ActionReference;
-use koshi_core::event::{Event, HeldCommandRejection, RejectReason, SubscriberLagged};
+use koshi_core::event::{
+    HeldCommandRejection, PanePlacementCommitted, RejectReason, SubscriberLagged,
+};
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -53,7 +55,6 @@ use koshi_terminal::grid::row_snapshot::RowSnapshot;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 
-use crate::floating_chrome::compute_floating_content_rect;
 use crate::hit_test::{compute_frame_pane_area, compute_viewport_area};
 use crate::notification::NotificationCardRow;
 use crate::region::{solve_core_regions, TablineInputs};
@@ -321,19 +322,26 @@ impl CommittedRegions {
     }
 }
 
-/// One item on a subscriber's queue: a live event, the frame composed for the
-/// subscriber's client, a fresh frame that resyncs a subscriber whose queue
-/// overflowed, one post the session's notification queue took, the answers to
-/// one round of mouse actions, a wake-up for the bytes that wait for the
-/// subscriber's own terminal, the session its client moves to, or a command
-/// from the subscriber's client that the session rejected.
+/// One item on a subscriber's queue: a pane placement the session committed,
+/// the end of the session, the frame composed for the subscriber's client, a
+/// fresh frame that resyncs a subscriber whose queue overflowed, one post the
+/// session's notification queue took, the answers to one round of mouse
+/// actions, a wake-up for the bytes that wait for the subscriber's own
+/// terminal, the session its client moves to, or a command from the
+/// subscriber's client that the session rejected.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
-    /// A live event, as published.
-    Event(Event),
+    /// A pane placement the session committed.
+    PanePlacementCommitted(PanePlacementCommitted),
+    /// The session is over. The client's writing thread writes it as the
+    /// stream's last frame, then stops.
+    Quit,
+    /// The session server is replacing its own process image. The client's
+    /// writing thread writes it as the stream's last frame, then stops.
+    Restarting,
     /// The frame the session composed for the subscriber's client, to be drawn
     /// whole.
     Frame(Box<RenderSnapshot>),
@@ -787,9 +795,8 @@ impl<'a> FrameLayout<'a> {
                             frame_layout,
                             compute_viewport_area(frame_layout),
                         );
-                        FloatingPaneSlot::from_outer_rect(
-                            floating_pane_slot.pane_id,
-                            Rect::from_origin_and_size(
+                        FloatingPaneSlot {
+                            outer_rect: Rect::from_origin_and_size(
                                 floating_pane_move_draft.top_left_cell,
                                 floating_pane_slot.outer_rect.size,
                             )
@@ -797,8 +804,8 @@ impl<'a> FrameLayout<'a> {
                                 column_count: frame_pane_area.width,
                                 row_count: frame_pane_area.height,
                             }),
-                            floating_pane_slot.is_pinned,
-                        )
+                            ..*floating_pane_slot
+                        }
                     }
                     _ => *floating_pane_slot,
                 }
@@ -1183,7 +1190,7 @@ pub fn list_pane_slots(layout_solve: &LayoutSolve) -> Vec<PaneSlot> {
 /// One floating pane the viewing client shows, placed for that client.
 /// Paired with a [`PaneSnapshot`] by [`pane_id`](Self::pane_id).
 ///
-/// Both rects count cells from the client's pane-area origin, with no
+/// The outer rect counts cells from the client's pane-area origin, with no
 /// letterbox offset: an outer rect at column `150` draws at pane-area column
 /// `150`, also when the client's tiled layout starts at column `60`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1191,35 +1198,19 @@ pub struct FloatingPaneSlot {
     /// The floating pane this slot places.
     pub pane_id: PaneId,
     /// The pane's box with its chrome: the border ring, the titlebar row and
-    /// the separator row.
+    /// the separator row. The renderer draws the pane's cells and places its
+    /// cursor in the content rect of this box
+    /// ([`compute_floating_content_rect`](crate::floating_chrome::compute_floating_content_rect)),
+    /// the size of the pane's PTY. Outer `(24, 8)` `72x22` → content
+    /// `(25, 11)` `70x18`.
     pub outer_rect: Rect,
-    /// The cells inside the chrome, the size of the pane's PTY
-    /// ([`compute_floating_content_rect`]). The renderer draws cells and
-    /// places the cursor here.
-    pub content_rect: Rect,
     /// Whether the viewing client pinned the pane at its cell.
     pub is_pinned: bool,
 }
 
-impl FloatingPaneSlot {
-    /// The slot of the floating pane `pane_id` drawn in the box `outer_rect`,
-    /// its content rect taken from that box
-    /// ([`compute_floating_content_rect`]). Outer `(24, 8)` `72x22` gives
-    /// content `(25, 11)` `70x18`.
-    #[must_use]
-    pub fn from_outer_rect(pane_id: PaneId, outer_rect: Rect, is_pinned: bool) -> Self {
-        Self {
-            pane_id,
-            outer_rect,
-            content_rect: compute_floating_content_rect(outer_rect),
-            is_pinned,
-        }
-    }
-}
-
-/// One pane's content: what the renderer paints inside the matching
-/// [`PaneSlot`]'s or [`FloatingPaneSlot`]'s content rect, plus what a mouse
-/// event over this pane is answered from.
+/// One pane's content: what the renderer paints inside the content rect of
+/// the matching [`PaneSlot`] or [`FloatingPaneSlot`], plus what a mouse event
+/// over this pane is answered from.
 ///
 /// Those last fields are not painted. [`mouse_tracking`](Self::mouse_tracking),
 /// [`is_alternate_scroll_enabled`](Self::is_alternate_scroll_enabled),

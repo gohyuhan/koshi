@@ -520,11 +520,11 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            floating_outer_rect,
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: floating_outer_rect,
+            is_pinned: false,
+        });
     let mut floating_pane_snapshot =
         build_pane_snapshot(floating_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
     floating_pane_snapshot.pane_title = Some("htop".to_string());
@@ -612,11 +612,11 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            htop_pane_id,
-            build_cell_rect(1, 0, 24, 8),
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: htop_pane_id,
+            outer_rect: build_cell_rect(1, 0, 24, 8),
+            is_pinned: false,
+        });
     let mut htop_pane_snapshot =
         build_pane_snapshot(htop_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
     htop_pane_snapshot.pane_title = Some("htop".to_string());
@@ -897,11 +897,11 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot::from_outer_rect(
-            floating_pane_id,
-            build_cell_rect(1, 0, 24, 8),
-            false,
-        ));
+        .push(FloatingPaneSlot {
+            pane_id: floating_pane_id,
+            outer_rect: build_cell_rect(1, 0, 24, 8),
+            is_pinned: false,
+        });
     render_snapshot.pane_snapshots.push(build_pane_snapshot(
         floating_pane_id,
         Some(build_filled_grid(22, 4, 'f')),

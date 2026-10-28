@@ -895,7 +895,6 @@ fn the_remaining_silent_events_write_nothing() {
         }),
         Event::PaneCommandFinished(PaneCommandFinished {
             pane_id: PaneId::new(),
-            exit_code: Some(1),
         }),
         // One per step of a mouse drag across the screen.
         Event::SelectionChanged(SelectionChanged {
