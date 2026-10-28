@@ -2340,6 +2340,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Focus Previous Floating Pane",
             "Lock",
             "Mouse Select",
+            "New Floating Pane",
             "New Pane",
             "New Stacked Pane",
             "New Tab",
@@ -2357,6 +2358,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Toggle Floating Pane Tray",
             "Toggle Notification Center",
             "Toggle Pane Fullscreen",
+            "Toggle Pane Pinned",
         ]
         .map(|hint_label| (hint_label.to_string(), false))
     );

@@ -60,8 +60,8 @@ fn build_hint_catalog_with_config(keybindings_config: &KeybindingsConfig) -> Key
 fn normal_mode_joins_defaults_to_hint_labels_and_tiers() {
     let hints = build_default_hint_catalog().build_frame_hints(LockMode::Normal, false, false);
 
-    // All 29 shipped normal-mode bindings fire in this build.
-    assert_eq!(hints.hint_bindings.len(), 29);
+    // All 31 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.hint_bindings.len(), 31);
 
     let pane_prefix_chord = build_character_chord(BindingModifierFlags::CTRL, 'p');
     // Each case: the key, then the label and the tier its hint carries.
@@ -538,7 +538,7 @@ fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
     let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
     // The user entry replaces the default on that key rather than adding one.
-    assert_eq!(hints.hint_bindings.len(), 29);
+    assert_eq!(hints.hint_bindings.len(), 31);
     let hint_binding = hints
         .hint_bindings
         .iter()
@@ -565,7 +565,7 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 28);
+    assert_eq!(hints.hint_bindings.len(), 30);
     assert_eq!(
         hints
             .hint_bindings
@@ -602,7 +602,7 @@ fn a_binding_the_resolver_refuses_yields_no_hint() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 29);
+    assert_eq!(hints.hint_bindings.len(), 31);
     assert_eq!(
         hints
             .hint_bindings
@@ -785,7 +785,7 @@ fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
             .build_frame_hints(LockMode::Normal, false, false)
             .hint_bindings
             .len(),
-        29
+        31
     );
 }
 
@@ -830,7 +830,7 @@ fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
     );
     let hints = hint_catalog.build_frame_hints(LockMode::Normal, false, false);
 
-    assert_eq!(hints.hint_bindings.len(), 29);
+    assert_eq!(hints.hint_bindings.len(), 31);
     assert_eq!(
         *hints.removed_key_sequences,
         BTreeSet::from([unbound_key_sequence.clone()])

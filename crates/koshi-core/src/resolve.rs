@@ -34,7 +34,7 @@ use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs,
     ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs,
-    TabTarget, ToggleLockModeArgs,
+    TabTarget, ToggleLockModeArgs, TogglePanePinnedArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -164,6 +164,16 @@ fn resolve_core_action(
             spawn_spec: None,
             client_id: None,
         }),
+        "new-pane-floating" => Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Floating {
+                size: None,
+                top_left_cell: None,
+                is_pinned: false,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
+        }),
         "close-pane" => Command::ClosePane(ClosePaneArgs::default()),
         "close-pane-tree" => Command::ClosePane(ClosePaneArgs {
             pane_id: None,
@@ -197,6 +207,7 @@ fn resolve_core_action(
             pane_id: None,
             is_pinned: false,
         }),
+        "toggle-pane-pinned" => Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
         "minimize-pane" => Command::SetPaneMinimized(SetPaneMinimizedArgs {
             pane_id: None,
             is_minimized: true,

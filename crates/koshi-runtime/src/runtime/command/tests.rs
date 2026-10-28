@@ -24945,6 +24945,83 @@ fn two_pin_toggles_sent_before_a_frame_pin_the_pane_then_unpin_it_at_its_pinned_
 }
 
 #[test]
+fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let toggle_command = Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None });
+    // The focused tiled pane takes over alice's input from the new floating
+    // pane, which is minimized.
+    let focus_command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(tiled_pane_id),
+            client_id: None,
+        }),
+    ));
+    assert_eq!(
+        get_command_outcome(&focus_command_result),
+        Ok(vec!["PaneMinimizedChanged", "PaneFocused"])
+    );
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, toggle_command.clone());
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("no floating pane is focused".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+
+    assert!(runtime
+        .get_client_mut(alice_client_id)
+        .expect("alice is attached")
+        .focus_floating_pane(floating_pane_id));
+    for (is_pinned, expected_position) in [
+        (
+            true,
+            FloatingPanePosition::Pinned(Point { column: 16, row: 4 }),
+        ),
+        (
+            false,
+            FloatingPanePosition::Moved(Point { column: 16, row: 4 }),
+        ),
+    ] {
+        let (command_id, command_result) =
+            dispatch_key_binding_command(&mut runtime, alice_client_id, toggle_command.clone());
+        assert_eq!(
+            command_result,
+            CommandResult::Ok {
+                command_id,
+                emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                    client_id: alice_client_id,
+                    pane_id: floating_pane_id,
+                    is_pinned,
+                })],
+            }
+        );
+        assert_eq!(
+            get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+                .position,
+            expected_position
+        );
+    }
+}
+
+#[test]
 fn every_view_toggle_is_refused_from_the_command_line() {
     let FloatingCommandFixture {
         mut runtime,
