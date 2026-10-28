@@ -14,9 +14,10 @@
 //! token from the session's endpoint file (`EndpointFile` in `koshi-ipc`)
 //! when it connects.
 
-use koshi_core::ids::{parse_prefixed_uuid, ClientId, PaneId, SessionId};
+use koshi_core::ids::{ClientId, PaneId, SessionId};
 use uuid::Uuid;
 
+use crate::environment_variable::{parse_environment_variable_id, read_environment_variable};
 use crate::error::CliError;
 
 /// The environment variable whose presence marks a process as running inside a
@@ -48,11 +49,7 @@ impl InSessionContext {
     /// identity is missing or malformed. Presence of `KOSHI` is the marker;
     /// its value is not inspected.
     pub fn from_env() -> Result<Option<InSessionContext>, CliError> {
-        Self::from_environment_lookup(|environment_variable_name| {
-            std::env::var_os(environment_variable_name).map(|environment_variable_text| {
-                environment_variable_text.to_string_lossy().into_owned()
-            })
-        })
+        Self::from_environment_lookup(read_environment_variable)
     }
 
     /// Build the identity from one lookup per environment variable name.
@@ -99,11 +96,12 @@ fn parse_required_environment_variable_id(
         .ok_or_else(|| CliError::InSessionEnv {
             detail: format!("`KOSHI` is set but `{environment_variable_name}` is missing"),
         })?;
-    parse_environment_variable_id_text(
+    parse_environment_variable_id(
         environment_variable_name,
         &environment_variable_text,
         identifier_prefix,
     )
+    .map_err(|detail| CliError::InSessionEnv { detail })
 }
 
 /// Parse a variable the in-session identity may omit: absent is `Ok(None)`,
@@ -115,30 +113,15 @@ fn parse_optional_environment_variable_id(
 ) -> Result<Option<Uuid>, CliError> {
     lookup_environment_variable(environment_variable_name)
         .map(|environment_variable_text| {
-            parse_environment_variable_id_text(
+            parse_environment_variable_id(
                 environment_variable_name,
                 &environment_variable_text,
                 identifier_prefix,
             )
+            .map_err(|detail| CliError::InSessionEnv { detail })
         })
         .transpose()
 }
 
-/// Parse one variable's value as a `<prefix>-<uuid>` id or a bare UUID,
-/// reporting the variable name and the offending value on failure.
-fn parse_environment_variable_id_text(
-    environment_variable_name: &str,
-    environment_variable_text: &str,
-    identifier_prefix: &str,
-) -> Result<Uuid, CliError> {
-    parse_prefixed_uuid(environment_variable_text, identifier_prefix).map_err(|expected_format| {
-        CliError::InSessionEnv {
-            detail: format!(
-                "`{environment_variable_name}` is `{environment_variable_text}`: {expected_format}"
-            ),
-        }
-    })
-}
-
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

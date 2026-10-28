@@ -51,6 +51,7 @@ use koshi_runtime::runtime::saved_view::SavedViewStore;
 #[cfg(unix)]
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::hold_update_lock;
 #[cfg(unix)]
 use koshi_test_support::fixtures::{
     build_accepted_hello_result, build_restarting_refusal, BUSY_PROGRAM_RETRY_INTERVAL_DURATION,
@@ -4094,4 +4095,81 @@ fn a_swap_pause_over_a_full_output_queue_loses_no_byte_and_parses_none_twice() {
             .get_total_pushed_line_count()
     );
     let _ = portable_pty_backend.kill_pane(pane_id, KillPolicy::Tree);
+}
+
+#[test]
+fn the_unclaimed_client_grace_window_is_the_client_restart_window_plus_the_reconnect_grace() {
+    assert_eq!(
+        UNCLAIMED_CLIENT_GRACE_WINDOW_DURATION,
+        Duration::from_secs(60)
+    );
+}
+
+/// The grace window id and the deadline of the next
+/// [`RuntimeEvent::DropUnclaimedClients`] on `runtime_event_receiver`, waiting
+/// 10 seconds at most. Panics on any other event and on no event.
+fn receive_drop_unclaimed_clients(
+    runtime_event_receiver: &mpsc::Receiver<RuntimeEvent>,
+) -> (u64, SystemTime) {
+    let runtime_event = runtime_event_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the reconnect deadline fires");
+    let RuntimeEvent::DropUnclaimedClients {
+        grace_window_id,
+        unclaimed_client_deadline,
+    } = runtime_event
+    else {
+        panic!("expected DropUnclaimedClients, got another runtime event");
+    };
+    (grace_window_id, unclaimed_client_deadline)
+}
+
+#[test]
+fn the_reconnect_deadline_with_no_update_running_fires_once_the_grace_window_passes() {
+    let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
+    let (test_server, _fake_pty_backend, _inbox_sender) = build_test_server();
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+    let started_at = SystemTime::now();
+
+    start_reconnect_deadline(
+        runtime_directory_fixture.path(),
+        &test_server,
+        Duration::from_millis(50),
+        &runtime_event_sender,
+    );
+
+    let (grace_window_id, unclaimed_client_deadline) =
+        receive_drop_unclaimed_clients(&runtime_event_receiver);
+    assert_eq!(grace_window_id, test_server.get_grace_window_id());
+    assert!(unclaimed_client_deadline >= started_at + Duration::from_millis(50));
+}
+
+#[test]
+fn the_reconnect_deadline_waits_while_an_update_holds_its_lock_and_fires_the_grace_window_after_its_release(
+) {
+    let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
+    let update_lock_file = hold_update_lock(runtime_directory_fixture.path());
+    let (test_server, _fake_pty_backend, _inbox_sender) = build_test_server();
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+
+    start_reconnect_deadline(
+        runtime_directory_fixture.path(),
+        &test_server,
+        Duration::from_millis(50),
+        &runtime_event_sender,
+    );
+
+    assert!(
+        matches!(
+            runtime_event_receiver.recv_timeout(Duration::from_millis(500)),
+            Err(RecvTimeoutError::Timeout)
+        ),
+        "no client is dropped while the update holds its lock"
+    );
+    let released_at = SystemTime::now();
+    drop(update_lock_file);
+    let (grace_window_id, unclaimed_client_deadline) =
+        receive_drop_unclaimed_clients(&runtime_event_receiver);
+    assert_eq!(grace_window_id, test_server.get_grace_window_id());
+    assert!(unclaimed_client_deadline >= released_at + Duration::from_millis(50));
 }

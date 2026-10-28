@@ -2207,6 +2207,7 @@ fn a_dial_refused_for_the_old_token_joins_once_the_session_advertises_its_own() 
             owner_user_id: None,
         },
         &SessionSelector::SessionId(session_id),
+        None,
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
@@ -2225,8 +2226,42 @@ fn a_dial_refused_for_the_old_token_joins_once_the_session_advertises_its_own() 
 }
 
 #[test]
-fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_incompatible_build()
-{
+fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_incompatible_build_carrying_the_claim(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        Some(PROTOCOL_VERSION_REFUSAL_MESSAGE),
+        Ok(ClientId::new()),
+    );
+
+    let rejoin_result = rejoin_session(
+        runtime_directory.path(),
+        session_id,
+        client_id,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Some(&ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN)),
+        Instant::now() + RESTART_WINDOW_DURATION,
+        TEXT_ONLY_ATTACH_SETTINGS,
+        None,
+        None,
+    );
+    assert_eq!(
+        rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild {
+            rejoin_claim: Some(RejoinClaim {
+                client_id,
+                resume_token: ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN),
+            }),
+        })
+    );
+}
+
+#[test]
+fn a_restart_into_an_incompatible_build_with_no_resume_token_carries_no_claim() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let _recorded_attach_request = spawn_restarted_session(
@@ -2249,7 +2284,7 @@ fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_i
     );
     assert_eq!(
         rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
-        Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild { rejoin_claim: None })
     );
 }
 
@@ -2275,7 +2310,12 @@ fn a_viewer_whose_restarted_session_refuses_its_protocol_version_ends_as_a_resta
 
     assert_eq!(
         attachment_ending,
-        AttachmentEnding::RestartedIntoIncompatibleBuild
+        AttachmentEnding::RestartedIntoIncompatibleBuild {
+            rejoin_claim: Some(RejoinClaim {
+                client_id,
+                resume_token: ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN),
+            }),
+        }
     );
 }
 
@@ -2359,7 +2399,7 @@ fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts()
 
     assert_eq!(
         reconnect_result.map(|joined_session| joined_session.attach_answer.client_id),
-        Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild { rejoin_claim: None })
     );
     let router_restarted_at = router_restart.join().expect("the router restart ran");
     assert!(
@@ -2398,7 +2438,7 @@ fn a_restart_into_an_incompatible_build_with_no_router_running_returns_at_once()
 
     assert_eq!(
         reconnect_result.map(|joined_session| joined_session.attach_answer.client_id),
-        Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild { rejoin_claim: None })
     );
     assert!(
         reconnect_started_at.elapsed() < Duration::from_secs(1),
@@ -2411,7 +2451,7 @@ fn a_restart_into_an_incompatible_build_with_no_client_path_reports_the_attach_c
     let session_id = SessionId::new();
     let ending_error = report_attachment_ending(
         &build_local_home(),
-        AttachmentEnding::RestartedIntoIncompatibleBuild,
+        AttachmentEnding::RestartedIntoIncompatibleBuild { rejoin_claim: None },
         session_id,
         None,
     )
@@ -2441,7 +2481,7 @@ fn a_restart_into_an_incompatible_build_whose_client_path_cannot_start_reports_w
 
     let ending_error = report_attachment_ending(
         &build_local_home(),
-        AttachmentEnding::RestartedIntoIncompatibleBuild,
+        AttachmentEnding::RestartedIntoIncompatibleBuild { rejoin_claim: None },
         session_id,
         Some(&missing_executable_path),
     )
@@ -2462,7 +2502,7 @@ fn a_restart_into_an_incompatible_build_whose_client_path_cannot_start_reports_w
 #[test]
 fn the_attach_command_runs_the_client_executable_with_the_session_id_and_no_pane_marker() {
     let session_id = SessionId::new();
-    let attach_command = build_attach_command(Path::new("/home/user/bin/koshi"), session_id);
+    let attach_command = build_attach_command(Path::new("/home/user/bin/koshi"), session_id, None);
 
     assert_eq!(
         attach_command.get_program(),
@@ -2477,8 +2517,97 @@ fn the_attach_command_runs_the_client_executable_with_the_session_id_and_no_pane
     );
     assert_eq!(
         attach_command.get_envs().collect::<Vec<_>>(),
-        vec![(std::ffi::OsStr::new("KOSHI"), None)],
-        "the command removes the pane marker and sets no variable"
+        vec![
+            (std::ffi::OsStr::new("KOSHI"), None),
+            (std::ffi::OsStr::new("KOSHI_REJOIN_CLIENT_ID"), None),
+            (std::ffi::OsStr::new("KOSHI_REJOIN_TOKEN"), None),
+        ],
+        "the command removes the pane marker and both rejoin variables, and sets none"
+    );
+}
+
+#[test]
+fn the_attach_command_carries_the_claim_in_the_environment_and_not_in_its_arguments() {
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let rejoin_claim = RejoinClaim {
+        client_id,
+        resume_token: ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN),
+    };
+
+    let attach_command = build_attach_command(
+        Path::new("/home/user/bin/koshi"),
+        session_id,
+        Some(&rejoin_claim),
+    );
+
+    assert_eq!(
+        attach_command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<String>>(),
+        vec![String::from("attach"), session_id.to_string()]
+    );
+    let client_id_text = client_id.to_string();
+    assert_eq!(
+        attach_command.get_envs().collect::<Vec<_>>(),
+        vec![
+            (std::ffi::OsStr::new("KOSHI"), None),
+            (
+                std::ffi::OsStr::new("KOSHI_REJOIN_CLIENT_ID"),
+                Some(std::ffi::OsStr::new(&client_id_text)),
+            ),
+            (
+                std::ffi::OsStr::new("KOSHI_REJOIN_TOKEN"),
+                Some(std::ffi::OsStr::new(PREVIOUS_RESUME_TOKEN)),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_first_dial_with_a_claim_names_the_client_and_presents_its_token() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let recorded_attach_request =
+        spawn_restarted_session(runtime_directory.path(), session_id, None, Ok(client_id));
+    let rejoin_claim = RejoinClaim {
+        client_id,
+        resume_token: ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN),
+    };
+
+    let joined_session = dial_session(
+        &Home::Local {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+            owner_user_id: None,
+        },
+        &SessionSelector::SessionId(session_id),
+        Some(&rejoin_claim),
+        TEXT_ONLY_ATTACH_SETTINGS,
+        None,
+        None,
+        30_000,
+    )
+    .expect("the session accepts the attach");
+
+    assert_eq!(joined_session.attach_answer.client_id, client_id);
+    let recorded_attach_request = recorded_attach_request
+        .lock()
+        .expect("the slot outlives every panic")
+        .clone();
+    let Some(IpcRequestKind::Attach {
+        resume_client_id,
+        resume_token,
+        ..
+    }) = recorded_attach_request
+    else {
+        panic!("expected the session to record an Attach");
+    };
+    assert_eq!(resume_client_id, Some(client_id));
+    assert_eq!(
+        resume_token,
+        Some(ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN))
     );
 }
 

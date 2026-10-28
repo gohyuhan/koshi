@@ -69,7 +69,10 @@ use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 #[cfg(unix)]
 use koshi_host::clipboard_tool::refresh_clipboard_tool_directory;
-use koshi_ipc::endpoint::{resolve_clipboard_tool_directory_path, resolve_resume_file_path};
+use koshi_ipc::endpoint::{
+    resolve_clipboard_tool_directory_path, resolve_resume_file_path, wait_for_update_lock_release,
+    RESTART_WINDOW_DURATION,
+};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
@@ -155,9 +158,19 @@ const SUPERVISOR_TOKEN_FLAG: &str = "--supervisor-token";
 /// [`SUPERVISOR_TOKEN_FLAG`] to the image replacing this one; Windows only.
 const SUPERVISOR_PID_FLAG: &str = "--supervisor-pid";
 
-/// How long a client whose record came across an image swap has to attach
-/// again. A record nobody claims when the window closes is detached.
+/// The part of the grace window after [`RESTART_WINDOW_DURATION`], how long a
+/// client waits for the router once the update lock is free, before it starts
+/// `koshi attach` again: 30 seconds.
 const RECONNECT_GRACE_DURATION: Duration = Duration::from_secs(30);
+
+/// The grace window: how long the session keeps the records of the clients
+/// that came across an image swap and have not attached again,
+/// [`RESTART_WINDOW_DURATION`] plus [`RECONNECT_GRACE_DURATION`], 60 seconds.
+/// The window starts when the session comes back, or when the update lock in
+/// the runtime directory is released, whichever comes last. A record nobody
+/// claims when the window closes is detached.
+const UNCLAIMED_CLIENT_GRACE_WINDOW_DURATION: Duration =
+    RESTART_WINDOW_DURATION.saturating_add(RECONNECT_GRACE_DURATION);
 
 /// How long the newly installed binary has to say which resume formats it
 /// reads: 5 seconds. One that has not answered by then is refused.
@@ -865,7 +878,12 @@ fn build_from_carried_state(
             (session_server, pty_owner)
         }
     };
-    start_reconnect_deadline(runtime_event_sender.clone());
+    start_reconnect_deadline(
+        &session_start.runtime_directory,
+        &session_server,
+        UNCLAIMED_CLIENT_GRACE_WINDOW_DURATION,
+        runtime_event_sender,
+    );
     Ok((session_server, pty_owner))
 }
 
@@ -1757,18 +1775,59 @@ fn reads_the_format_this_build_writes(
 /// Start the one-shot timer that closes the wait for the clients whose records
 /// came across an image swap.
 ///
-/// Each of those clients that attaches again before the window closes keeps its
+/// The timer thread first waits while `koshi update` or `koshi restart-servers`
+/// holds the update lock in `runtime_directory`
+/// ([`wait_for_update_lock_release`]). Then it sleeps `grace_window_duration`
+/// and sends [`RuntimeEvent::DropUnclaimedClients`] with the
+/// [`Server::get_grace_window_id`] that `session_server` has when this is
+/// called. A server with another id drops that event. A lock file that cannot
+/// be opened, or a shared lock that cannot be taken, logs one warning, and the
+/// sleep starts at once. A timer thread that cannot start logs one warning, and
+/// the event is sent at once.
+///
+/// Each of those clients that attaches again before the timer fires keeps its
 /// focus, zoom, scroll offset and selection. Whoever is left when the timer
-/// fires is detached.
-fn start_reconnect_deadline(runtime_event_sender: Sender<RuntimeEvent>) {
-    let _ = std::thread::Builder::new()
+/// fires is detached. Example: an update that restarts this session and then
+/// holds its lock for 40 more seconds, with a `grace_window_duration` of 60
+/// seconds, detaches a client that has not come back 100 seconds after the
+/// restart.
+fn start_reconnect_deadline(
+    runtime_directory: &Path,
+    session_server: &Server,
+    grace_window_duration: Duration,
+    runtime_event_sender: &Sender<RuntimeEvent>,
+) {
+    let runtime_directory = runtime_directory.to_path_buf();
+    let grace_window_id = session_server.get_grace_window_id();
+    let timer_event_sender = runtime_event_sender.clone();
+    let timer_spawn_result = std::thread::Builder::new()
         .name("koshi-session-reconnect".to_string())
         .spawn(move || {
-            std::thread::sleep(RECONNECT_GRACE_DURATION);
-            let _ = runtime_event_sender.send(RuntimeEvent::DropUnclaimedClients {
-                unclaimed_client_deadline: SystemTime::now(),
-            });
+            if let Err(lock_error) = wait_for_update_lock_release(&runtime_directory) {
+                tracing::warn!(
+                    %lock_error,
+                    "could not wait for the update lock; the grace window of the clients that have not come back starts now"
+                );
+            }
+            std::thread::sleep(grace_window_duration);
+            send_drop_unclaimed_clients(&timer_event_sender, grace_window_id);
         });
+    if let Err(thread_spawn_error) = timer_spawn_result {
+        tracing::warn!(
+            %thread_spawn_error,
+            "the grace window timer could not start; the clients that have not come back are detached now"
+        );
+        send_drop_unclaimed_clients(runtime_event_sender, grace_window_id);
+    }
+}
+
+/// Send [`RuntimeEvent::DropUnclaimedClients`] for the grace window
+/// `grace_window_id`, closed now.
+fn send_drop_unclaimed_clients(runtime_event_sender: &Sender<RuntimeEvent>, grace_window_id: u64) {
+    let _ = runtime_event_sender.send(RuntimeEvent::DropUnclaimedClients {
+        grace_window_id,
+        unclaimed_client_deadline: SystemTime::now(),
+    });
 }
 
 /// Put the session back to serving in this process after the swap was
@@ -2246,7 +2305,11 @@ fn resume_readers_and_rebuild(
             return Err(bind_error.into());
         }
     };
-    finish_session_resume(&mut rebuilt_session, runtime_event_sender);
+    finish_session_resume(
+        &mut rebuilt_session,
+        &session_start.runtime_directory,
+        runtime_event_sender,
+    );
     post_config_warnings(
         &mut rebuilt_session,
         session_start.session_id,
@@ -2296,7 +2359,11 @@ fn resume_readers_and_keep_socket(
         end_every_pane(pty_owner);
         return Err(token_rotation_error.into());
     }
-    finish_session_resume(&mut rebuilt_session, runtime_event_sender);
+    finish_session_resume(
+        &mut rebuilt_session,
+        &session_start.runtime_directory,
+        runtime_event_sender,
+    );
     post_config_warnings(
         &mut rebuilt_session,
         session_start.session_id,
@@ -2358,17 +2425,25 @@ fn resume_session_readers(
     )
 }
 
-/// Apply what the inbox holds, taking detaches, and arm the window a carried
-/// client has to attach again in.
+/// Apply what the inbox holds, taking detaches, and arm the grace window a
+/// carried client has to attach again in ([`start_reconnect_deadline`] with
+/// [`UNCLAIMED_CLIENT_GRACE_WINDOW_DURATION`], against the update lock in
+/// `runtime_directory`).
 ///
 /// A detach for a client still awaiting its re-attach is dropped by the
 /// runtime; a client that attached again and then hung up is detached here.
 fn finish_session_resume(
     rebuilt_session: &mut Server,
+    runtime_directory: &Path,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) {
     apply_queued_runtime_events(rebuilt_session, DetachPolicy::Apply);
-    start_reconnect_deadline(runtime_event_sender.clone());
+    start_reconnect_deadline(
+        runtime_directory,
+        rebuilt_session,
+        UNCLAIMED_CLIENT_GRACE_WINDOW_DURATION,
+        runtime_event_sender,
+    );
 }
 
 /// The command that starts the image replacing this one: the same session, in

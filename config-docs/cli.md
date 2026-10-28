@@ -161,12 +161,19 @@ waits for the router to restart too: up to 30 seconds, and longer while
 `koshi update` holds the lock file `update.lock` in the runtime directory as it
 restarts servers. Then it runs
 `koshi attach <session id>` in the same terminal, with the koshi at the path the
-client was started from. A client from koshi 0.5.0-pr.1 or earlier prints the
-attach command instead. A client of a session on another machine prints the
-refusal, then the attach command. If the restarted session refuses a client for
-another reason, the client prints that refusal, then the attach command, such as
-`the session restarted and refused this client: IPC unavailable: <reason>`. For
-a session named `workspace`, start the installed build and run
+client was started from. That attach comes back as the same client, on the same
+tab with the same focus, zoom, scroll positions, selections, lock mode and
+floating panes, while the session still holds the client's record and its tab.
+The session holds the record of a client that has not come back until 60 seconds
+after it restarts. While `koshi update` or `koshi restart-servers` holds
+`update.lock`, the 60 seconds start when that command releases the lock. A
+client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. A client from
+koshi 0.5.0-pr.1 or earlier prints the attach command instead. A client of a
+session on another machine prints the refusal, then the attach command. If the
+restarted session refuses a client for another reason, the client prints that
+refusal, then the attach command, such as
+`the session restarted and refused this client: IPC unavailable: <reason>`.
+For a session named `workspace`, start the installed build and run
 `koshi attach workspace`.
 
 An update run by koshi 0.4.0 or 0.5.0-pr.1 cannot confirm the restarts.

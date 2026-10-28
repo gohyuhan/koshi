@@ -13,7 +13,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::NonZeroU32,
     path::Path,
-    sync::{mpsc::Receiver, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::Receiver,
+        Arc,
+    },
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
@@ -77,6 +81,10 @@ pub(crate) struct FrameSubscription {
 /// write — a client that stopped reading its socket — never ends, so the wait
 /// stops here and the session goes on without it.
 const CLIENT_NOTIFICATION_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
+
+/// The [`grace_window_id`](Server::get_grace_window_id) the next [`Server`]
+/// built in this process takes. Each server built takes the value and adds 1.
+static NEXT_GRACE_WINDOW_ID: AtomicU64 = AtomicU64::new(0);
 
 /// What a restart request must be able to promise before the session accepts
 /// it. `Err` carries the [`RestartRefusal`] the caller is refused with.
@@ -314,6 +322,8 @@ pub struct Server {
     /// [`handle_drop_unclaimed_clients`](Self::handle_drop_unclaimed_clients)
     /// when the grace window closes.
     pub(crate) client_ids_awaiting_reconnect: HashSet<ClientId>,
+    /// The id [`get_grace_window_id`](Self::get_grace_window_id) returns.
+    pub(crate) grace_window_id: u64,
     /// The view each dropped client left behind
     /// ([`SavedView`](crate::runtime::saved_view::SavedView)), keyed by the
     /// sha256 of the token that client's attach minted. Every attach mints one
@@ -365,6 +375,7 @@ impl Server {
             is_quit_requested: false,
             is_restart_requested: false,
             client_ids_awaiting_reconnect: HashSet::new(),
+            grace_window_id: NEXT_GRACE_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
             saved_view_store: SavedViewStore::default(),
             device_reply_failure_warning: WarningRateLimiter::new(),
             app_layer,
@@ -1172,6 +1183,15 @@ impl Server {
     #[must_use]
     pub fn is_awaiting_client(&self) -> bool {
         !self.client_ids_awaiting_reconnect.is_empty()
+    }
+
+    /// The id a [`RuntimeEvent::DropUnclaimedClients`] carries to close this
+    /// server's grace window. Every server built in one process has another
+    /// id, also one rebuilt from the same inbox, and the dispatcher drops an
+    /// event that carries another server's id.
+    #[must_use]
+    pub fn get_grace_window_id(&self) -> u64 {
+        self.grace_window_id
     }
 
     /// Tell every attached client that this session is replacing its own

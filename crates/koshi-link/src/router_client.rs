@@ -52,6 +52,7 @@ use crate::ipc_client::{
     REFUSED_SERVER_RESTART_START_WAIT_DURATION, REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
     RESTART_POLL_INTERVAL_DURATION,
 };
+use crate::rejoin_claim::{REJOIN_CLIENT_ID_VARIABLE_NAME, REJOIN_TOKEN_VARIABLE_NAME};
 use crate::server_build::{find_refusing_server_build, RefusingServerBuild};
 use crate::talk::{self, build_ipc_unavailable_error, RouterHelloAnswer};
 
@@ -971,19 +972,35 @@ fn spawn_router_detached(
             detail: format!("this binary's own path could not be read: {io_error}"),
         }
     })?;
-    let mut router_command = std::process::Command::new(program_path);
-    koshi_host::detached_process::configure_detached_process(&mut router_command)
-        .arg(ROUTER_SUBCOMMAND)
-        .arg(RUNTIME_DIRECTORY_FLAG)
-        .arg(runtime_directory);
-    if should_wait_for_lock {
-        router_command.arg(WAIT_FOR_LOCK_FLAG);
-    }
-    router_command
+    build_router_command(&program_path, runtime_directory, should_wait_for_lock)
         .spawn()
         .map_err(|io_error| CliError::IpcUnavailable {
             detail: format!("the router could not be started: {io_error}"),
         })
+}
+
+/// The command `<program_path> serve-router --runtime-dir <runtime_directory>`,
+/// with `--wait-for-lock` last when `should_wait_for_lock` holds,
+/// detached as [`spawn_router_detached`] states. It runs with this process's
+/// environment minus [`REJOIN_CLIENT_ID_VARIABLE_NAME`] and
+/// [`REJOIN_TOKEN_VARIABLE_NAME`]. No session the router starts, and no pane
+/// in it, receives them.
+fn build_router_command(
+    program_path: &Path,
+    runtime_directory: &Path,
+    should_wait_for_lock: bool,
+) -> std::process::Command {
+    let mut router_command = std::process::Command::new(program_path);
+    koshi_host::detached_process::configure_detached_process(&mut router_command)
+        .arg(ROUTER_SUBCOMMAND)
+        .arg(RUNTIME_DIRECTORY_FLAG)
+        .arg(runtime_directory)
+        .env_remove(REJOIN_CLIENT_ID_VARIABLE_NAME)
+        .env_remove(REJOIN_TOKEN_VARIABLE_NAME);
+    if should_wait_for_lock {
+        router_command.arg(WAIT_FOR_LOCK_FLAG);
+    }
+    router_command
 }
 
 /// Ask the router to make a new session and hand back its id. Starts a router

@@ -533,9 +533,11 @@ pub fn build_koshi_command_at(binary_path: &Path, home_directory: &Path) -> Comm
         .env_remove("KOSHI_CLIENT_ID")
         .env_remove("KOSHI_PANE_ID")
         .env_remove("KOSHI_SOCKET")
-        // The child gets no `KOSHI_REMOTE_SECRET` from the developer's
-        // environment.
+        // The child gets no `KOSHI_REMOTE_SECRET`, `KOSHI_REJOIN_CLIENT_ID` or
+        // `KOSHI_REJOIN_TOKEN` from the developer's environment.
         .env_remove("KOSHI_REMOTE_SECRET")
+        .env_remove("KOSHI_REJOIN_CLIENT_ID")
+        .env_remove("KOSHI_REJOIN_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
