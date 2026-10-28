@@ -307,11 +307,14 @@ The default leader is Ctrl.
 | `<C-p> n` | Open pane using configured direction |
 | `<C-p> h` / `j` / `k` / `l` | Open pane left / down / up / right |
 | `<C-p> s` | Open pane in the focused pane's stack |
+| `<C-p> f` | Open a floating pane above the tiled panes |
 | `<C-p> m` | Enter pane placement mode: pick a pane and a destination, then Enter |
 | `<C-p> u` | Enter dock/undock mode: float the selected tiled pane, or dock the selected floating pane |
 | `<C-p> x` | Close pane and its process tree |
 | `<C-p> ←` / `↓` / `↑` / `→` | Focus nearby pane |
 | `<C-p> Tab` / `Shift+Tab` | Show and focus the next / previous floating pane |
+| `<C-p> w` | Open or close the floating pane tray |
+| `<C-p> i` | Pin or unpin the focused floating pane on your screen |
 | `<C-s> ←` / `↓` / `↑` / `→` | Move pane border one cell |
 | `<C-t> n` | Open tab |
 | `<C-t> x` | Close tab |

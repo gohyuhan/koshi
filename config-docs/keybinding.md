@@ -135,11 +135,13 @@ mode "normal" {
     bind "<leader>p k" "core:new-pane-up"
     bind "<leader>p l" "core:new-pane-right"
     bind "<leader>p s" "core:new-pane-stacked"  // <C-p> s: a new pane in the focused pane's stack
+    bind "<leader>p f" "core:new-pane-floating"
     bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>p u" "core:begin-dock-undock"
     bind "<leader>p <Tab>" "core:focus-next-floating-pane"       // repeats: the prefix stays open
     bind "<leader>p <S-Tab>" "core:focus-previous-floating-pane"
     bind "<leader>p w" "core:toggle-floating-pane-tray"
+    bind "<leader>p i" "core:toggle-pane-pinned"
     bind "<leader>p x" "core:close-pane-tree"
     bind "<leader>p <Left>" "core:focus-pane-left"              // repeats: the prefix stays open
     bind "<leader>p <Down>" "core:focus-pane-down"
@@ -597,6 +599,20 @@ right, and the button changes from `●` to `●1`. `<A-n>` opens the center wit
 the notification on top, and the button changes back to `●`.
 
 ## Floating pane actions
+
+`<leader>p f` (`core:new-pane-floating`) opens a shell in a new floating pane.
+This client shows the pane above its other floating panes and gives it its
+input. Every other client holds the pane minimized, and so does a client that
+cannot draw floating panes (`cli.md`, *Floating panes*). The pane takes the
+size and the place that `koshi new-pane --floating` gives without `--cols`,
+`--rows`, `--x` and `--y`. The shell starts in the working directory of the
+pane that has this client's input. With 12 floating panes in the session, the
+key is refused with `a session holds at most 12 floating panes`.
+
+`<leader>p i` (`core:toggle-pane-pinned`) pins the focused floating pane for
+this client at the cell where it is drawn, as the titlebar's `[ ]` does. When
+this client pinned the pane, the key unpins it, as `[⚪]` does. With no
+floating pane focused, the key is refused with `no floating pane is focused`.
 
 No default key runs these actions. Bind them in `normal` or `locked`:
 

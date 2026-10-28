@@ -172,6 +172,19 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
                 client_id: None,
             }),
         ),
+        (
+            "new-pane-floating",
+            Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Floating {
+                    size: None,
+                    top_left_cell: None,
+                    is_pinned: false,
+                },
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            }),
+        ),
         ("close-pane", Command::ClosePane(ClosePaneArgs::default())),
         (
             "close-pane-tree",
@@ -292,6 +305,10 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
                 pane_id: None,
                 is_pinned: false,
             }),
+        ),
+        (
+            "toggle-pane-pinned",
+            Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
         ),
         (
             "minimize-pane",
@@ -467,14 +484,14 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::ScrollPane(_) => Some(CommandKind::ScrollPane),
         Command::MoveFloatingPane(_) => Some(CommandKind::MoveFloatingPane),
         Command::SetPanePinned(_) => Some(CommandKind::SetPanePinned),
+        Command::TogglePanePinned(_) => Some(CommandKind::TogglePanePinned),
         Command::SetPaneMinimized(_) => Some(CommandKind::SetPaneMinimized),
         Command::SetAllFloatingPanesMinimized(_) => Some(CommandKind::SetAllFloatingPanesMinimized),
         Command::ToggleAllFloatingPanesMinimized => {
             Some(CommandKind::ToggleAllFloatingPanesMinimized)
         }
         Command::Quit => Some(CommandKind::Quit),
-        Command::TogglePanePinned(_)
-        | Command::TogglePaneMinimized(_)
+        Command::TogglePaneMinimized(_)
         | Command::Visual(_)
         | Command::Detach(_)
         | Command::DetachAll

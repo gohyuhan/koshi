@@ -447,9 +447,9 @@ fn no_layers_report_missing_required_bindings() {
 
 #[test]
 fn user_prefix_of_default_sequences_warns_and_applies() {
-    // The defaults bind sixteen `<C-p>` sequences in normal mode: the four
-    // vim-letter splits, `m`, `n`, `s`, `u`, `w`, `x`, `<Tab>`, `<S-Tab>`, and
-    // the four arrow focus keys. The user binds bare `<C-p>`.
+    // The defaults bind eighteen `<C-p>` sequences in normal mode: the four
+    // vim-letter splits, `f`, `i`, `m`, `n`, `s`, `u`, `w`, `x`, `<Tab>`,
+    // `<S-Tab>`, and the four arrow focus keys. The user binds bare `<C-p>`.
     let prefix_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'p');
     let report = detect_test_conflicts(&[
         build_default_keymap_layer(),
@@ -473,7 +473,9 @@ fn user_prefix_of_default_sequences_warns_and_applies() {
     assert_eq!(
         report.diagnostics,
         vec![
+            build_ambiguous_prefix(Key::Char('f'), "new-pane-floating"),
             build_ambiguous_prefix(Key::Char('h'), "new-pane-left"),
+            build_ambiguous_prefix(Key::Char('i'), "toggle-pane-pinned"),
             build_ambiguous_prefix(Key::Char('j'), "new-pane-down"),
             build_ambiguous_prefix(Key::Char('k'), "new-pane-up"),
             build_ambiguous_prefix(Key::Char('l'), "new-pane-right"),

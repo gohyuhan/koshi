@@ -365,8 +365,9 @@ pub enum ClientActionKind {
 /// hint bar: `Essential` keys first, then `Navigation`, then `Other`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HintTier {
-    /// Confirms, cancels or closes a mode, creates or closes a pane or tab, or
-    /// locks or unlocks the client.
+    /// Confirms, cancels or closes a mode, splits the focused pane in the
+    /// configured direction, closes a pane, opens or closes a tab, or locks or
+    /// unlocks the client.
     Essential,
     /// Moves, selects, resizes or splits in one direction, or steps to the
     /// next or previous tab or floating pane.
@@ -465,13 +466,16 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// close and drive the viewer's tray.
 /// The other command-backed actions use values their NAME bakes into the command
 /// the resolver builds — `lock`/`unlock` both build `SetLockMode`; the
-/// `new-pane-*`, `focus-pane-*`, and `resize-pane-*` families each build their
-/// family's command with the named direction; `focus-next-floating-pane` and
-/// `focus-previous-floating-pane` build `FocusPane` with the floating pane
-/// target they name; `next-tab`/`previous-tab`/`focus-tab` all build
-/// `FocusTab`; `undock-pane` builds `PlacePane` with a floating target;
-/// `pin-pane`/`unpin-pane` both build `SetPanePinned`; `minimize-pane` builds
-/// `SetPaneMinimized`; `minimize-all-floating-panes` and
+/// `new-pane-<direction>`, `focus-pane-<direction>`, and
+/// `resize-pane-<direction>` families each build their family's command with
+/// the named direction; `new-pane-stacked` and `new-pane-floating` build
+/// `NewPane` with a stacked or a floating placement;
+/// `focus-next-floating-pane` and `focus-previous-floating-pane` build
+/// `FocusPane` with the floating pane target they name;
+/// `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`; `undock-pane`
+/// builds `PlacePane` with a floating target; `pin-pane`/`unpin-pane` both
+/// build `SetPanePinned`; `toggle-pane-pinned` builds `TogglePanePinned`;
+/// `minimize-pane` builds `SetPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
 /// `toggle-minimize-all-floating-panes` builds
 /// `ToggleAllFloatingPanesMinimized`.
@@ -552,6 +556,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Add a new pane to the focused pane's stack, sharing its space",
             PaneSession,
             vec![Pane],
+            CoreCommand(CommandKind::NewPane),
+        ),
+        build_core_action_seed(
+            "new-pane-floating",
+            "New Floating Pane",
+            "Open a new floating pane above the tiled panes and focus it on the issuing client's screen",
+            PaneSession,
+            vec![Session, ClientTarget],
             CoreCommand(CommandKind::NewPane),
         ),
         build_core_action_seed(
@@ -1009,6 +1021,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![Pane, ClientTarget],
             CoreCommand(CommandKind::SetPanePinned),
+        ),
+        build_core_action_seed(
+            "toggle-pane-pinned",
+            "Toggle Pane Pinned",
+            "Pin the focused floating pane at its top-left cell on the issuing client's screen, or unpin it when it is pinned there",
+            Client,
+            vec![Pane, ClientTarget],
+            CoreCommand(CommandKind::TogglePanePinned),
         ),
         build_core_action_seed(
             "minimize-pane",

@@ -1698,6 +1698,47 @@ continuous: false
 }
 
 #[test]
+fn keys_describe_of_the_floating_pane_keys_shows_their_actions_and_descriptions() {
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
+    for (key_sequence_text, expected_text) in [
+        (
+            "<C-p> f",
+            "\
+key: <C-p> f
+mode: normal
+action: core:new-pane-floating
+display_name: New Floating Pane
+description: Open a new floating pane above the tiled panes and focus it on the issuing client's screen
+scope: pane-session
+source: defaults
+displaced_by: -
+continuous: false
+",
+        ),
+        (
+            "<C-p> i",
+            "\
+key: <C-p> i
+mode: normal
+action: core:toggle-pane-pinned
+display_name: Toggle Pane Pinned
+description: Pin the focused floating pane at its top-left cell on the issuing client's screen, or unpin it when it is pinned there
+scope: client
+source: defaults
+displaced_by: -
+continuous: false
+",
+        ),
+    ] {
+        let rendered_text =
+            render_keys_describe(&keymap_view, key_sequence_text, OutputFormat::Table)
+                .expect("sequence parses")
+                .expect("a default binds the key");
+        assert_eq!(rendered_text, expected_text, "{key_sequence_text}");
+    }
+}
+
+#[test]
 fn keys_describe_lists_a_bound_prefix_first_and_each_mode_on_its_own() {
     // In `normal`, the user binds `<C-t>` itself, ahead of the two defaults
     // it opens. In `locked`, `<C-t>` binds `core:new-tab` and opens nothing.

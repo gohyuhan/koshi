@@ -6,7 +6,7 @@ use super::*;
 use koshi_core::action::{ActionReference, ClientActionKind};
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewPanePlacement, NewTabArgs, ResizePaneArgs, TabTarget,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, ResizePaneArgs, TabTarget, TogglePanePinnedArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::key::{
@@ -513,7 +513,7 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
         build_default_mode_bindings(Leader::Modifiers(BindingModifierFlags::SHIFT));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 29);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 31);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence
             [&build_single_chord_sequence(BindingModifierFlags::SHIFT, 'q')],
@@ -570,12 +570,12 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys:
-    // the table holds all 29 normal-mode bindings.
+    // the table holds all 31 normal-mode bindings.
     let fullscreen_key_chord = build_character_chord(BindingModifierFlags::ALT, 'f');
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
-    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 29);
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 31);
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(fullscreen_key_chord)],
         build_bound_action("toggle-pane-fullscreen")
@@ -712,6 +712,21 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
                 client_id: None,
             })),
         ),
+        build_expected_binding(
+            "normal",
+            "<C-p> f",
+            "new-pane-floating",
+            Ok(Command::NewPane(NewPaneArgs {
+                placement: NewPanePlacement::Floating {
+                    size: None,
+                    top_left_cell: None,
+                    is_pinned: false,
+                },
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            })),
+        ),
         build_expected_client_binding(
             "normal",
             "<C-p> m",
@@ -747,6 +762,14 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "<C-p> w",
             "toggle-floating-pane-tray",
             ClientActionKind::ToggleFloatingPaneTray,
+        ),
+        build_expected_binding(
+            "normal",
+            "<C-p> i",
+            "toggle-pane-pinned",
+            Ok(Command::TogglePanePinned(TogglePanePinnedArgs {
+                pane_id: None,
+            })),
         ),
         build_expected_binding(
             "normal",

@@ -173,6 +173,8 @@ pub enum CommandKind {
     MoveFloatingPane,
     /// Names [`Command::SetPanePinned`].
     SetPanePinned,
+    /// Names [`Command::TogglePanePinned`].
+    TogglePanePinned,
     /// Names [`Command::SetPaneMinimized`].
     SetPaneMinimized,
     /// Names [`Command::SetAllFloatingPanesMinimized`].

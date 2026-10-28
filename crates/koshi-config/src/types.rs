@@ -576,6 +576,11 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             parse_default_key_sequence("<leader>p s"),
             build_bound_action("new-pane-stacked"),
         ),
+        // `f` opens a new floating pane above the tiled panes.
+        (
+            parse_default_key_sequence("<leader>p f"),
+            build_bound_action("new-pane-floating"),
+        ),
         // `m` opens pane placement mode, a preview only this viewer sees.
         (
             parse_default_key_sequence("<leader>p m"),
@@ -602,6 +607,12 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         (
             parse_default_key_sequence("<leader>p w"),
             build_bound_action("toggle-floating-pane-tray"),
+        ),
+        // `i` pins the focused floating pane on this client's screen, or
+        // unpins it when it is pinned there.
+        (
+            parse_default_key_sequence("<leader>p i"),
+            build_bound_action("toggle-pane-pinned"),
         ),
         // The close key kills the pane's whole process group.
         (

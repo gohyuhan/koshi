@@ -451,6 +451,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
+            "core:new-pane-floating",
+            CommandKind::NewPane,
+            PaneSession,
+            vec![Session, ClientTarget],
+        ),
+        (
             "core:close-pane",
             CommandKind::ClosePane,
             PaneSession,
@@ -531,6 +537,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
         (
             "core:unpin-pane",
             CommandKind::SetPanePinned,
+            Client,
+            vec![Pane, ClientTarget],
+        ),
+        (
+            "core:toggle-pane-pinned",
+            CommandKind::TogglePanePinned,
             Client,
             vec![Pane, ClientTarget],
         ),
@@ -1305,6 +1317,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:move-tab",
         "core:new-pane",
         "core:new-pane-down",
+        "core:new-pane-floating",
         "core:new-pane-left",
         "core:new-pane-right",
         "core:new-pane-stacked",
@@ -1349,6 +1362,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:toggle-minimize-all-floating-panes",
         "core:toggle-notification-center",
         "core:toggle-pane-fullscreen",
+        "core:toggle-pane-pinned",
         "core:toggle-pane-placement-stack",
         "core:toggle-selected-tray-tile",
         "core:undock-pane",
