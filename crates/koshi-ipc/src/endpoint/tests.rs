@@ -868,6 +868,81 @@ fn a_shared_hold_of_the_update_lock_is_not_an_update() {
 }
 
 #[test]
+fn waiting_for_the_update_lock_with_no_lock_file_returns_at_once() {
+    let runtime_directory = TempDir::new().expect("the test directory");
+
+    assert!(wait_for_update_lock_release(runtime_directory.path()).is_ok());
+}
+
+#[test]
+fn waiting_for_an_update_lock_whose_file_cannot_be_opened_returns_the_open_error() {
+    let test_directory = TempDir::new().expect("the test directory");
+    #[cfg(unix)]
+    let (runtime_directory, expected_error_kind) = {
+        let runtime_directory = test_directory.path().join("runtime");
+        std::fs::write(&runtime_directory, b"").expect("a file where the runtime directory goes");
+        (runtime_directory, std::io::ErrorKind::NotADirectory)
+    };
+    #[cfg(windows)]
+    let (runtime_directory, expected_error_kind) = {
+        std::fs::create_dir(resolve_update_lock_path(test_directory.path()))
+            .expect("a directory where the lock file goes");
+        (
+            test_directory.path().to_path_buf(),
+            std::io::ErrorKind::PermissionDenied,
+        )
+    };
+
+    let wait_error = wait_for_update_lock_release(&runtime_directory)
+        .expect_err("a lock file that cannot be opened is an error");
+
+    assert_eq!(wait_error.kind(), expected_error_kind);
+}
+
+#[test]
+fn waiting_for_an_update_lock_nobody_holds_returns_at_once_and_leaves_it_free() {
+    let runtime_directory = TempDir::new().expect("the test directory");
+    let next_update_file = open_update_lock_file(&runtime_directory);
+
+    assert!(wait_for_update_lock_release(runtime_directory.path()).is_ok());
+    assert!(
+        next_update_file.try_lock().is_ok(),
+        "the wait released its shared lock, so the next update takes the lock"
+    );
+}
+
+#[test]
+fn waiting_for_an_update_lock_held_by_an_update_returns_only_after_its_release() {
+    let runtime_directory = TempDir::new().expect("the test directory");
+    let update_lock_file = open_update_lock_file(&runtime_directory);
+    update_lock_file.lock().expect("the update lock is taken");
+    let (wait_result_sender, wait_result_receiver) = std::sync::mpsc::channel();
+    let waiting_runtime_directory = runtime_directory.path().to_path_buf();
+    let waiting_thread = std::thread::spawn(move || {
+        let wait_result = wait_for_update_lock_release(&waiting_runtime_directory);
+        let _ = wait_result_sender.send(wait_result.is_ok());
+    });
+
+    assert_eq!(
+        wait_result_receiver.recv_timeout(Duration::from_millis(300)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "the wait does not return while the update holds the lock"
+    );
+    update_lock_file
+        .unlock()
+        .expect("the update lock is released");
+    assert_eq!(
+        wait_result_receiver.recv_timeout(Duration::from_secs(10)),
+        Ok(true)
+    );
+    waiting_thread.join().expect("the waiting thread ends");
+    assert!(
+        update_lock_file.try_lock().is_ok(),
+        "the wait released its shared lock, so the next update takes the lock"
+    );
+}
+
+#[test]
 fn an_endpoint_file_dated_before_the_epoch_finds_no_endpoint_process() {
     let runtime_directory = TempDir::new().expect("the test directory");
     let endpoint_file_path =

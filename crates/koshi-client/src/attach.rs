@@ -234,6 +234,9 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
+use koshi_link::rejoin_claim::{
+    RejoinClaim, REJOIN_CLIENT_ID_VARIABLE_NAME, REJOIN_TOKEN_VARIABLE_NAME,
+};
 use koshi_link::remote_client::{
     self, DialError, SavedServerAtAddressError, ServerReference,
     REMOTE_RESTART_POLL_INTERVAL_DURATION,
@@ -1964,8 +1967,13 @@ enum AttachmentEnding {
     Restarting,
     /// The session replaced its own process image with a build that refused
     /// this client's protocol version. The koshi at the path this client was
-    /// started from runs `koshi attach <session id>` in this terminal next.
-    RestartedIntoIncompatibleBuild,
+    /// started from runs `koshi attach <session id>` in this terminal next,
+    /// asking for the client `rejoin_claim` names.
+    RestartedIntoIncompatibleBuild {
+        /// The client this viewer was and the resume token its last attach
+        /// minted. `None` when that attach minted no token.
+        rejoin_claim: Option<RejoinClaim>,
+    },
     /// The session replaced its own process image, and its new image answered
     /// this client's join with the refusal carried here. The session keeps
     /// running without this client.
@@ -1983,7 +1991,9 @@ enum AttachmentEnding {
 
 /// Two endings are equal when they are the same variant carrying the same
 /// fields. A [`AttachmentEnding::SwitchSession`] compares its [`SessionId`] and
-/// its user id. A [`AttachmentEnding::LinkLost`] and a
+/// its user id. A [`AttachmentEnding::RestartedIntoIncompatibleBuild`]
+/// compares its claim: the client id and the resume token. A
+/// [`AttachmentEnding::LinkLost`] and a
 /// [`AttachmentEnding::RefusedAfterRestart`] compare the text their cause
 /// prints, which is what the viewer shows.
 impl PartialEq for AttachmentEnding {
@@ -1994,11 +2004,17 @@ impl PartialEq for AttachmentEnding {
             | (AttachmentEnding::ConnectionDied, AttachmentEnding::ConnectionDied)
             | (AttachmentEnding::TerminalGone, AttachmentEnding::TerminalGone)
             | (AttachmentEnding::Restarting, AttachmentEnding::Restarting)
-            | (AttachmentEnding::LeftWhileReconnecting, AttachmentEnding::LeftWhileReconnecting)
-            | (
-                AttachmentEnding::RestartedIntoIncompatibleBuild,
-                AttachmentEnding::RestartedIntoIncompatibleBuild,
-            ) => true,
+            | (AttachmentEnding::LeftWhileReconnecting, AttachmentEnding::LeftWhileReconnecting) => {
+                true
+            }
+            (
+                AttachmentEnding::RestartedIntoIncompatibleBuild {
+                    rejoin_claim: first_rejoin_claim,
+                },
+                AttachmentEnding::RestartedIntoIncompatibleBuild {
+                    rejoin_claim: second_rejoin_claim,
+                },
+            ) => first_rejoin_claim == second_rejoin_claim,
             (
                 AttachmentEnding::SwitchSession {
                     session_id: first_session_id,
@@ -2608,6 +2624,13 @@ fn resolve_local_session_target(
 /// `loaded_app_config` is the `koshi.kdl` the caller read at this process's
 /// start. Its layer names the shared directory, and the first attachment runs
 /// on it.
+///
+/// With a `selector`, the first attach asks for the client that
+/// `KOSHI_REJOIN_CLIENT_ID` and `KOSHI_REJOIN_TOKEN` name
+/// ([`RejoinClaim::from_env`]). Variables that do not read log one warning,
+/// and the attach takes a new client. Example: a client whose session
+/// restarted into another build runs `koshi attach session-<uuid>` with both
+/// set, and comes back as the same client while the session holds its record.
 pub fn attach_selected_session(
     selector: Option<&str>,
     loaded_app_config: LoadedAppConfig,
@@ -2620,6 +2643,16 @@ pub fn attach_selected_session(
             config_directory.as_deref(),
             loaded_app_config,
         );
+    };
+    let rejoin_claim = match RejoinClaim::from_env() {
+        Ok(rejoin_claim) => rejoin_claim,
+        Err(rejoin_claim_error) => {
+            tracing::warn!(
+                %rejoin_claim_error,
+                "the client to come back as could not be read; this attach takes a new client"
+            );
+            None
+        }
     };
     let (session_id, owner_user_id) = resolve_local_session_target(
         &runtime_directory,
@@ -2635,6 +2668,7 @@ pub fn attach_selected_session(
         SessionSelector::SessionId(session_id),
         config_directory.as_deref(),
         loaded_app_config,
+        rejoin_claim,
     )
 }
 
@@ -2699,6 +2733,7 @@ pub fn attach_remote_session(
         session_selector,
         koshi_paths::resolve_config_directory().as_deref(),
         loaded_app_config,
+        None,
     )
 }
 
@@ -2753,6 +2788,7 @@ fn attach_selected_session_from_listing(
                 SessionSelector::SessionId(session_id),
                 config_directory,
                 loaded_app_config,
+                None,
             );
         }
         SessionSelection::Remote(remote_session_index) => {
@@ -2768,6 +2804,7 @@ fn attach_selected_session_from_listing(
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
         loaded_app_config,
+        None,
     )
 }
 
@@ -2874,6 +2911,7 @@ pub(crate) fn attach_session(
         SessionSelector::SessionId(session_id),
         config_directory,
         loaded_app_config,
+        None,
     )
 }
 
@@ -2896,11 +2934,15 @@ pub(crate) fn attach_session(
 /// The first attachment runs on `loaded_app_config`, the `koshi.kdl` read at
 /// this process's start. Every attachment after the first reads `koshi.kdl` in
 /// `config_directory` again when it starts.
+///
+/// The first attachment asks for the client `rejoin_claim` names. Every
+/// attachment after the first asks for none.
 fn attach_home(
     mut home: Home,
     session_selector: SessionSelector,
     config_directory: Option<&Path>,
     loaded_app_config: LoadedAppConfig,
+    mut rejoin_claim: Option<RejoinClaim>,
 ) -> Result<(), CliError> {
     let client_executable_path = koshi_host::program_path::resolve_program_path().ok();
     let mut next_session_selector = session_selector;
@@ -2913,6 +2955,7 @@ fn attach_home(
         let attach_result = attach_once(
             &home,
             &next_session_selector,
+            rejoin_claim.take().as_ref(),
             client_executable_path.as_deref(),
             config_directory,
             attachment_app_config,
@@ -2945,6 +2988,10 @@ fn attach_home(
 /// and the terminal keeps every mode it is in, so nothing on the screen
 /// flickers.
 ///
+/// `rejoin_claim` names the client the dial asks for ([`dial_session`]). A
+/// session that answers with another client logs one warning, and this
+/// attachment goes on as that client.
+///
 /// `client_executable_path` is the path this program was started from, which
 /// [`report_attachment_ending`] runs `koshi attach` from when the session
 /// restarted into a build that refused this client's protocol version.
@@ -2956,6 +3003,7 @@ fn attach_home(
 fn attach_once(
     home: &Home,
     session_selector: &SessionSelector,
+    rejoin_claim: Option<&RejoinClaim>,
     client_executable_path: Option<&Path>,
     config_directory: Option<&Path>,
     loaded_app_config: LoadedAppConfig,
@@ -2976,6 +3024,7 @@ fn attach_once(
     let joined_session = dial_session(
         home,
         session_selector,
+        rejoin_claim,
         attach_settings,
         cell_size_query.get_current_cell_size(),
         resolve_shared_sessions_base_directory_for_layer(loaded_config.app_config_layer.as_ref())
@@ -2983,6 +3032,15 @@ fn attach_once(
         client_config.remote_link_timeout_ms,
     )?;
     let client_id = joined_session.attach_answer.client_id;
+    if let Some(rejoin_claim) =
+        rejoin_claim.filter(|rejoin_claim| rejoin_claim.client_id != client_id)
+    {
+        tracing::warn!(
+            claimed_client_id = %rejoin_claim.client_id,
+            minted_client_id = %client_id,
+            "the session did not hand this client back; this viewer goes on as the new client it minted"
+        );
+    }
     // Until the terminal is set up, the guard holds the join: a return before
     // that sends `Leaving` with `is_returning` `true` and closes the connection.
     let joined_session_guard = JoinedSessionGuard::from_joined_session(joined_session);
@@ -3824,14 +3882,22 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// its process image, is dialed again, as
 /// [`dial_through_router_restart`](remote_client::dial_through_router_restart)
 /// states, for up to [`RESTART_WINDOW_DURATION`].
+///
+/// With `rejoin_claim`, the Attach names its client id and presents its resume
+/// token, on this machine and on a server alike. The session hands that
+/// client back when it still holds the record and the token proves the claim,
+/// and mints a new client otherwise: the claim never makes the dial fail.
 fn dial_session(
     home: &Home,
     session_selector: &SessionSelector,
+    rejoin_claim: Option<&RejoinClaim>,
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     shared_sessions_base_directory: Option<&Path>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, CliError> {
+    let resume_client_id = rejoin_claim.map(|rejoin_claim| rejoin_claim.client_id);
+    let resume_token = rejoin_claim.map(|rejoin_claim| &rejoin_claim.resume_token);
     match home {
         Home::Local {
             runtime_directory,
@@ -3859,8 +3925,8 @@ fn dial_session(
                         &mut reader,
                         &mut writer,
                         &endpoint.connection_token,
-                        None,
-                        None,
+                        resume_client_id,
+                        resume_token,
                         attach_settings,
                         cell_size,
                         None,
@@ -3880,8 +3946,8 @@ fn dial_session(
                 dial_remote(
                     server_address,
                     session_selector,
-                    None,
-                    None,
+                    resume_client_id,
+                    resume_token,
                     attach_settings,
                     cell_size,
                     None,
@@ -4225,7 +4291,10 @@ fn reconnect_after_restart(
                 placement_preview_target,
             );
             if rejoin_result.as_ref().is_err_and(|rejoin_ending| {
-                *rejoin_ending == AttachmentEnding::RestartedIntoIncompatibleBuild
+                matches!(
+                    rejoin_ending,
+                    AttachmentEnding::RestartedIntoIncompatibleBuild { .. }
+                )
             }) {
                 if let Some(router_connection_token_before_restart) =
                     &router_connection_token_before_restart
@@ -5407,7 +5476,8 @@ fn apply_session_notification_queue(
 ///
 /// `Err` carries the ending the attachment reports.
 /// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] when the new socket
-/// refuses this build's protocol version.
+/// refuses this build's protocol version, carrying `client_id` and
+/// `resume_token` as its claim, or no claim when `resume_token` is `None`.
 /// [`AttachmentEnding::RefusedAfterRestart`] carrying the refusal when the new
 /// socket answers the join with any other refusal.
 /// [`AttachmentEnding::Restarting`] for every other way the client cannot come
@@ -5474,7 +5544,12 @@ fn rejoin_session(
             }
             Err(DialError::Refused(join_refusal @ CliError::ProtocolVersionRefused { .. })) => {
                 tracing::warn!(%join_refusal, "the restarted session refused this client");
-                return Err(AttachmentEnding::RestartedIntoIncompatibleBuild);
+                return Err(AttachmentEnding::RestartedIntoIncompatibleBuild {
+                    rejoin_claim: resume_token.map(|resume_token| RejoinClaim {
+                        client_id,
+                        resume_token: resume_token.clone(),
+                    }),
+                });
             }
             Err(DialError::Refused(join_refusal)) => {
                 tracing::warn!(%join_refusal, "the restarted session refused this client");
@@ -6887,8 +6962,13 @@ fn report_attachment_ending(
                 build_reattach_instructions(home, session_id)
             ),
         }),
-        AttachmentEnding::RestartedIntoIncompatibleBuild => {
-            attach_again_from_client_executable(home, session_id, client_executable_path)
+        AttachmentEnding::RestartedIntoIncompatibleBuild { rejoin_claim } => {
+            attach_again_from_client_executable(
+                home,
+                session_id,
+                rejoin_claim.as_ref(),
+                client_executable_path,
+            )
         }
         AttachmentEnding::RefusedAfterRestart(refusal) => Err(CliError::Runtime {
             detail: format!(
@@ -6920,7 +7000,8 @@ fn report_attachment_ending(
 
 /// Run `koshi attach <session id>` from `client_executable_path` in this
 /// terminal, after the session restarted into a build that refused this
-/// client's protocol version.
+/// client's protocol version. The command asks for the client `rejoin_claim`
+/// names ([`build_attach_command`]).
 ///
 /// Prints `koshi: the session restarted into another koshi build; attaching to
 /// session <session id> again with <path>` on stderr first. On Unix the command
@@ -6936,6 +7017,7 @@ fn report_attachment_ending(
 fn attach_again_from_client_executable(
     home: &Home,
     session_id: SessionId,
+    rejoin_claim: Option<&RejoinClaim>,
     client_executable_path: Option<&Path>,
 ) -> Result<Option<(SessionId, Option<u32>)>, CliError> {
     let start_failure_reason = match client_executable_path {
@@ -6946,7 +7028,7 @@ fn attach_again_from_client_executable(
                  attaching to session {session_id} again with {}",
                 client_executable_path.display()
             );
-            let start_error = run_attach_command(client_executable_path, session_id);
+            let start_error = run_attach_command(client_executable_path, session_id, rejoin_claim);
             format!(
                 "could not start {}: {start_error}",
                 client_executable_path.display()
@@ -6964,34 +7046,58 @@ fn attach_again_from_client_executable(
 
 /// The command `koshi attach <session id>`, run from `client_executable_path`
 /// with this process's environment minus the
-/// [`IN_SESSION_MARKER_VARIABLE_NAME`](koshi_link::in_session::IN_SESSION_MARKER_VARIABLE_NAME)
-/// variable. A client that runs inside a pane of another session attaches to
+/// [`IN_SESSION_MARKER_VARIABLE_NAME`](koshi_link::in_session::IN_SESSION_MARKER_VARIABLE_NAME),
+/// [`REJOIN_CLIENT_ID_VARIABLE_NAME`] and [`REJOIN_TOKEN_VARIABLE_NAME`]
+/// variables. A client that runs inside a pane of another session attaches to
 /// `session_id` as a client, and does not move that pane's own client.
+///
+/// With `rejoin_claim`, the command sets `KOSHI_REJOIN_CLIENT_ID` to its
+/// client id (`client-<uuid>`) and `KOSHI_REJOIN_TOKEN` to its resume token.
+/// The arguments never carry the token.
 fn build_attach_command(
     client_executable_path: &Path,
     session_id: SessionId,
+    rejoin_claim: Option<&RejoinClaim>,
 ) -> std::process::Command {
     let mut attach_command = std::process::Command::new(client_executable_path);
     attach_command
         .arg("attach")
         .arg(session_id.to_string())
-        .env_remove(koshi_link::in_session::IN_SESSION_MARKER_VARIABLE_NAME);
+        .env_remove(koshi_link::in_session::IN_SESSION_MARKER_VARIABLE_NAME)
+        .env_remove(REJOIN_CLIENT_ID_VARIABLE_NAME)
+        .env_remove(REJOIN_TOKEN_VARIABLE_NAME);
+    if let Some(rejoin_claim) = rejoin_claim {
+        attach_command
+            .env(
+                REJOIN_CLIENT_ID_VARIABLE_NAME,
+                rejoin_claim.client_id.to_string(),
+            )
+            .env(
+                REJOIN_TOKEN_VARIABLE_NAME,
+                rejoin_claim.resume_token.expose_secret(),
+            );
+    }
     attach_command
 }
 
 /// Replace this process's image with [`build_attach_command`]'s command, after
 /// standard output is flushed. The command keeps this terminal, working
-/// directory and process id, and this environment minus the variable
-/// [`build_attach_command`] removes. Returns only the error that kept the
+/// directory and process id, and runs with the environment
+/// [`build_attach_command`] gives it. Returns only the error that kept the
 /// command from starting, on the terms
 /// [`exec_and_keep_ignoring_sigpipe`](koshi_link::process::exec_and_keep_ignoring_sigpipe)
 /// states.
 #[cfg(unix)]
-fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> io::Error {
+fn run_attach_command(
+    client_executable_path: &Path,
+    session_id: SessionId,
+    rejoin_claim: Option<&RejoinClaim>,
+) -> io::Error {
     let _ = io::stdout().flush();
     koshi_link::process::exec_and_keep_ignoring_sigpipe(&mut build_attach_command(
         client_executable_path,
         session_id,
+        rejoin_claim,
     ))
 }
 
@@ -7000,9 +7106,13 @@ fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> i
 /// exit code once the child ends, or with 1 when the child reports no code.
 /// Returns only the error that kept the child from starting.
 #[cfg(windows)]
-fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> io::Error {
+fn run_attach_command(
+    client_executable_path: &Path,
+    session_id: SessionId,
+    rejoin_claim: Option<&RejoinClaim>,
+) -> io::Error {
     let _ = io::stdout().flush();
-    match build_attach_command(client_executable_path, session_id).status() {
+    match build_attach_command(client_executable_path, session_id, rejoin_claim).status() {
         Ok(child_exit_status) => std::process::exit(child_exit_status.code().unwrap_or(1)),
         Err(spawn_error) => spawn_error,
     }

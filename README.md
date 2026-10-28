@@ -583,10 +583,16 @@ the restarted session does not speak that client's protocol version, the client
 waits for the router to restart too: up to 30 seconds, and longer while
 `koshi update` is still restarting servers. Then it runs
 `koshi attach <session id>` in the same terminal, with the koshi at the path the
-client was started from. A client from koshi 0.5.0-pr.1 or earlier, and a client
-of a session on another machine, prints the attach command instead: start the
-installed build and run `koshi attach workspace` to reattach to a session named
-`workspace`.
+client was started from. That attach comes back as the same client, on the same
+tab with the same focus, zoom, scroll positions, selections, lock mode and
+floating panes, while the session still holds the client's record and its tab.
+The session holds the record of a client that has not come back until 60 seconds
+after it restarts. While `koshi update` or `koshi restart-servers` holds
+`update.lock`, the 60 seconds start when that command releases the lock. A
+client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. A client from
+koshi 0.5.0-pr.1 or earlier, and a client of a session on another machine,
+prints the attach command instead: start the installed build and run
+`koshi attach workspace` to reattach to a session named `workspace`.
 
 Saved state carries a format number. Koshi applies the required conversion
 steps in order as the updated build opens it. This also works when an update

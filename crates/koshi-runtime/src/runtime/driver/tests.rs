@@ -5,7 +5,7 @@
 //! press and pasted text, the inbox events that are dropped or answered on
 //! their reply channel, and the abrupt group-kill the panic path takes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::mpsc;
 use std::time::SystemTime;
 
@@ -662,6 +662,41 @@ fn a_freed_queue_slot_is_a_wake_that_handles_nothing() {
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
+}
+
+#[test]
+fn a_grace_window_close_carrying_another_servers_id_detaches_nobody_and_one_carrying_this_servers_id_detaches_the_unclaimed_client(
+) {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (earlier_server, _earlier_fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let session_id = SessionId::new();
+    let (client_id, _pane_id) = bootstrap_test_session(&mut server, session_id);
+    server.client_ids_awaiting_reconnect.insert(client_id);
+    assert_ne!(
+        earlier_server.get_grace_window_id(),
+        server.get_grace_window_id()
+    );
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::DropUnclaimedClients {
+        grace_window_id: earlier_server.get_grace_window_id(),
+        unclaimed_client_deadline: SystemTime::UNIX_EPOCH,
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(
+        server.client_ids_awaiting_reconnect,
+        HashSet::from([client_id])
+    );
+    assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 1);
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::DropUnclaimedClients {
+        grace_window_id: server.get_grace_window_id(),
+        unclaimed_client_deadline: SystemTime::UNIX_EPOCH,
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(server.client_ids_awaiting_reconnect, HashSet::new());
+    assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 0);
 }
 
 #[test]

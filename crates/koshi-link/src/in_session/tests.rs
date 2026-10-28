@@ -6,11 +6,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 const SESSION_UUID: &str = "0192f0c1-0000-7000-8000-000000000001";
-const CLIENT_UUID: &str = "0192f0c1-0000-7000-8000-000000000002";
+pub(crate) const CLIENT_UUID: &str = "0192f0c1-0000-7000-8000-000000000002";
 const PANE_UUID: &str = "0192f0c1-0000-7000-8000-000000000003";
 
 /// Build a lookup over a fixed variable map.
-fn build_environment_lookup(
+pub(crate) fn build_environment_lookup(
     environment_variables: &[(&str, &str)],
 ) -> impl Fn(&str) -> Option<String> {
     let environment_variable_by_name: BTreeMap<String, String> = environment_variables

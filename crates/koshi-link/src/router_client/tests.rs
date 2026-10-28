@@ -1488,3 +1488,37 @@ fn wait_for_router_endpoint_change_gives_up_at_its_deadline_while_an_update_hold
 fn the_handover_carries_the_argument_that_waits() {
     assert_eq!(WAIT_FOR_LOCK_FLAG, "--wait-for-lock");
 }
+
+#[test]
+fn a_started_router_runs_the_router_subcommand_without_the_rejoin_variables() {
+    let router_command = build_router_command(
+        Path::new("/home/user/bin/koshi"),
+        Path::new("/home/user/run"),
+        true,
+    );
+
+    assert_eq!(
+        router_command.get_program(),
+        std::ffi::OsStr::new("/home/user/bin/koshi")
+    );
+    assert_eq!(
+        router_command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<String>>(),
+        vec![
+            String::from("serve-router"),
+            String::from("--runtime-dir"),
+            String::from("/home/user/run"),
+            String::from("--wait-for-lock"),
+        ]
+    );
+    assert_eq!(
+        router_command.get_envs().collect::<Vec<_>>(),
+        vec![
+            (std::ffi::OsStr::new("KOSHI_REJOIN_CLIENT_ID"), None),
+            (std::ffi::OsStr::new("KOSHI_REJOIN_TOKEN"), None),
+        ],
+        "the command removes both rejoin variables and sets none"
+    );
+}

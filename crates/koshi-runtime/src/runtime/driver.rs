@@ -365,11 +365,14 @@ impl Server {
                 let _ = response_sender.send(!is_routed);
             }
             RuntimeEvent::DropUnclaimedClients {
+                grace_window_id,
                 unclaimed_client_deadline,
             } => {
-                let unclaimed_client_drop_events =
-                    self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
-                self.publish_events(&unclaimed_client_drop_events);
+                if grace_window_id == self.grace_window_id {
+                    let unclaimed_client_drop_events =
+                        self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
+                    self.publish_events(&unclaimed_client_drop_events);
+                }
             }
             // The frame the subscriber is owed goes from this pass's
             // `push_due_frames`, at the subscriber's pace.

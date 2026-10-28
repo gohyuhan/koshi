@@ -323,8 +323,13 @@ pub enum RuntimeEvent {
     },
     /// The grace window for the clients whose records came across an image
     /// swap has closed. The dispatcher detaches every one of those clients
-    /// that has not attached again, and does nothing when they all have.
+    /// that has not attached again, and does nothing when they all have. An
+    /// event whose `grace_window_id` is not the server's
+    /// [`get_grace_window_id`](crate::server::Server::get_grace_window_id) is
+    /// dropped.
     DropUnclaimedClients {
+        /// The grace window this event closes.
+        grace_window_id: u64,
         /// When the window closed, supplied by the producer. The handler reads
         /// this value, not the clock, and files each dropped client's view
         /// as detached at it.

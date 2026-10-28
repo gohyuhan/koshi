@@ -26,6 +26,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use koshi_core::command::ToggleLockModeArgs;
 use koshi_core::command::{
     CliExitCode, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
     WriteToPaneArgs,
@@ -33,6 +35,8 @@ use koshi_core::command::{
 use koshi_core::discovery::{PaneLifecycle, SessionOverview};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
+#[cfg(unix)]
+use koshi_core::lock::LockMode;
 use koshi_core::notification::{NotificationQueue, NotificationSeverity};
 use koshi_core::process::SpawnSpec;
 use koshi_ipc::endpoint::{resolve_resume_file_path, EndpointFile};
@@ -62,6 +66,8 @@ use common::{
     send_attach_lookup, start_router_process, terminate_process, wait_for_session_lookup_refusal,
     RunningProcess, RunningSessions, SessionProcess, SESSION_SERVER_NAME, WAIT_DURATION,
 };
+#[cfg(unix)]
+use common::{resolve_runtime_directory_under_home, RunningClient};
 use koshi_test_support::fixtures::{
     build_paint_report_request, send_committed_request, start_program_process,
 };
@@ -79,7 +85,7 @@ const SETTLE_DURATION: Duration = Duration::from_millis(750);
 const TYPED_AFTER_RESTART_FRAME_DURATION: Duration = Duration::from_millis(250);
 
 /// How long a test waits for the session server to detach a client record
-/// nobody claimed: 75 seconds. The session server holds such a record for 30
+/// nobody claimed: 75 seconds. The session server holds such a record for 60
 /// seconds.
 const RECONNECT_WAIT_DURATION: Duration = Duration::from_secs(75);
 
@@ -1554,6 +1560,109 @@ fn a_client_that_never_comes_back_is_detached_when_the_window_closes() {
         );
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
+}
+
+/// The terminal size the carried client reports in
+/// [`a_koshi_attach_naming_the_carried_client_in_its_environment_comes_back_as_that_client`]:
+/// 133 columns by 41 rows. The relaunched `koshi attach` reports another size.
+#[cfg(unix)]
+const CARRIED_CLIENT_VIEWPORT_SIZE: Size = Size {
+    column_count: 133,
+    row_count: 41,
+};
+
+/// A `koshi attach` started the way a client whose session restarted into
+/// another build starts it, with `KOSHI_REJOIN_CLIENT_ID` and
+/// `KOSHI_REJOIN_TOKEN` naming the client the session carried across the swap,
+/// comes back as that client: the same id, the lock mode it held, and the
+/// terminal size the new process reports. The session holds no second client.
+#[cfg(unix)]
+#[test]
+fn a_koshi_attach_naming_the_carried_client_in_its_environment_comes_back_as_that_client() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = resolve_runtime_directory_under_home(test_home_directory.path());
+    let binary_path = copy_koshi_binary(test_home_directory.path());
+    let session_id = SessionId::new();
+    let _router_process = start_router_process(test_home_directory.path(), &runtime_directory);
+    let _session_server_process = start_session_server(
+        &binary_path,
+        test_home_directory.path(),
+        &runtime_directory,
+        session_id,
+    );
+
+    let (carried_client_stream, endpoint_before_restart) = AttachedClientStream::attach_test_client(
+        &runtime_directory,
+        session_id,
+        CARRIED_CLIENT_VIEWPORT_SIZE,
+        None,
+        None,
+    );
+    let carried_client_id = carried_client_stream.client_id;
+    let carried_resume_token = carried_client_stream
+        .resume_token
+        .clone()
+        .expect("the session mints a resume token for every attach");
+    let (mut control_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
+    submit_session_command(
+        &mut control_connection,
+        session_id,
+        carried_client_id,
+        Command::ToggleLockMode(ToggleLockModeArgs {
+            client_id: Some(carried_client_id),
+        }),
+    );
+
+    assert_eq!(
+        send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
+        IpcResult::Restarting
+    );
+    carried_client_stream.receive_events_until_restarting();
+    // Nobody claims the record on this connection: the session holds it.
+    drop(carried_client_stream);
+    drop(control_connection);
+    let restarted_endpoint = wait_for_restarted_session_endpoint(
+        &runtime_directory,
+        session_id,
+        &endpoint_before_restart,
+    );
+    let _restarted_process = RunningProcess {
+        process_id: restarted_endpoint.process_id,
+    };
+
+    let _relaunched_client = RunningClient {
+        child_process: build_koshi_command_at(&binary_path, test_home_directory.path())
+            .arg("attach")
+            .arg(session_id.to_string())
+            .env("KOSHI_REJOIN_CLIENT_ID", carried_client_id.to_string())
+            .env("KOSHI_REJOIN_TOKEN", carried_resume_token.expose_secret())
+            .spawn()
+            .expect("the koshi binary starts"),
+    };
+
+    // The relaunched attach replaces the record's terminal size with its own.
+    let claim_deadline = Instant::now() + WAIT_DURATION;
+    let claimed_client = loop {
+        let session_clients = fetch_session_overview(&runtime_directory, session_id).clients;
+        assert!(
+            session_clients
+                .iter()
+                .all(|client_discovery| client_discovery.client_id == carried_client_id),
+            "the session minted a second client instead of handing the carried one back"
+        );
+        if let [carried_client] = session_clients.as_slice() {
+            if carried_client.viewport_size != CARRIED_CLIENT_VIEWPORT_SIZE {
+                break carried_client.clone();
+            }
+        }
+        assert!(
+            Instant::now() < claim_deadline,
+            "the relaunched attach never took the carried client's record"
+        );
+        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    };
+    assert_eq!(claimed_client.client_id, carried_client_id);
+    assert_eq!(claimed_client.lock_mode, LockMode::Locked);
 }
 
 #[test]

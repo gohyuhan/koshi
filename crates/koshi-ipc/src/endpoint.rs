@@ -96,10 +96,13 @@ pub const RESUME_SUFFIX: &str = ".resume";
 
 /// How long a session replacing its own image has to come back.
 ///
-/// Three sides read it. The session server writes the resume file and swaps;
+/// Four sides read it. The session server writes the resume file and swaps;
 /// the router leaves a session whose file is younger than this alone, and
 /// removes the session when it is older; an attached client waits this long
-/// for the new socket before it gives up and reports the session gone.
+/// for the new socket before it gives up and reports the session gone; and the
+/// session that came back keeps the records of the clients that have not
+/// attached again for this long plus the session server's
+/// `RECONNECT_GRACE_DURATION`.
 pub const RESTART_WINDOW_DURATION: Duration = Duration::from_secs(30);
 
 /// Where the resume file for `session_id` lives: `session-<uuid>.resume`,
@@ -170,6 +173,35 @@ pub fn is_update_restarting_servers(runtime_directory: &Path) -> bool {
         update_lock_file.try_lock_shared(),
         Err(std::fs::TryLockError::WouldBlock)
     )
+}
+
+/// Block until neither `koshi update` nor `koshi restart-servers` holds the lock
+/// at [`resolve_update_lock_path`] in `runtime_directory`: take a shared lock of
+/// that file, then release it.
+/// A shared lock taken while an update holds the exclusive one waits for its
+/// release. A take interrupted by a signal is taken again. A missing file
+/// returns `Ok` at once.
+///
+/// Example: an update that holds the lock for 50 more seconds makes this call
+/// return 50 seconds after it starts; with no update running it returns at
+/// once.
+///
+/// # Errors
+/// The error of a lock file that exists and cannot be opened, and of a shared
+/// lock that could not be taken for any reason other than a signal.
+pub fn wait_for_update_lock_release(runtime_directory: &Path) -> std::io::Result<()> {
+    let update_lock_file = match std::fs::File::open(resolve_update_lock_path(runtime_directory)) {
+        Ok(update_lock_file) => update_lock_file,
+        Err(open_error) if open_error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(open_error) => return Err(open_error),
+    };
+    loop {
+        match update_lock_file.lock_shared() {
+            Ok(()) => return update_lock_file.unlock(),
+            Err(lock_error) if lock_error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(lock_error) => return Err(lock_error),
+        }
+    }
 }
 
 /// Unlink the socket file at `socket_address` on Unix, where the address is a
