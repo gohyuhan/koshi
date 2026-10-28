@@ -203,6 +203,16 @@ pub struct Surface {
 ///   restore its saved state after a restart posts the `Error` notification
 ///   `the session could not be restored after the restart; a new shell
 ///   started`. 4 carried the field, and left it out while it was `false`.
+/// - The `RunClientAction` request, the `ClientActionRequested` event and the
+///   `ClientActionAnswer` request exist in 5 only. A `RunClientAction` runs
+///   only as the request a `Prepare` holds, and its `Commit` is answered once
+///   the client answered, or the session answered for that client. The
+///   attached client answers a `ClientActionRequested` with a
+///   `ClientActionAnswer` that carries `client_action_request_id` and
+///   `refusal`, the refusal or `null`. The field is required.
+/// - The `Quit` command is an object with `client_id`, the client that it
+///   detaches, or `null`. 4 sent a bare `Quit` that ended the session. The
+///   `KillSession` command exists in 5 only, and ends the session.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

@@ -10,6 +10,7 @@ use koshi_beta::beta_feature;
 use koshi_config::layer::PartialLoggingConfig;
 use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
 use koshi_core::action::ActionReference;
+use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::log::{LogFormat, LogLevel};
@@ -964,7 +965,10 @@ fn build_logging_parameters_keep_the_defaults_for_every_field_the_config_leaves_
 
 #[test]
 fn a_pane_with_no_direction_named_anywhere_opens_rightward() {
-    assert_eq!(resolve_new_pane_direction(None), Direction::Right);
+    assert_eq!(
+        resolve_client_config(None).layout.new_pane_direction,
+        Direction::Right
+    );
 }
 
 #[test]
@@ -977,7 +981,9 @@ fn a_pane_with_no_direction_named_takes_the_one_the_config_names() {
     };
 
     assert_eq!(
-        resolve_new_pane_direction(Some(app_config)),
+        resolve_client_config(Some(app_config))
+            .layout
+            .new_pane_direction,
         Direction::Left
     );
 }
@@ -992,7 +998,9 @@ fn a_layout_section_naming_no_direction_still_opens_rightward() {
     };
 
     assert_eq!(
-        resolve_new_pane_direction(Some(app_config)),
+        resolve_client_config(Some(app_config))
+            .layout
+            .new_pane_direction,
         Direction::Right
     );
 }

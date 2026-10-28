@@ -174,7 +174,7 @@ use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
 
 use crate::floating_pane_tray::FloatingPaneTrayAnchor;
-use crate::input::{InputReadClock, KeyOutcome};
+use crate::input::{InputReadClock, KeyOutcome, RequestedClientActionFit};
 use crate::mouse::MouseAction;
 use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client, LinkStatus, PlacementTargetOutcome};
@@ -187,6 +187,7 @@ use koshi_core::command::{
     VisualCommand,
 };
 use koshi_core::constant::{compute_frame_interval, compute_heartbeat_interval};
+use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PixelCellSize, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{KeyInput, KeySequence};
@@ -194,14 +195,15 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput};
 use koshi_core::notification::NotificationQueue;
 use koshi_core::registry::ActionRegistry;
-use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
+use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan, ResolveError};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
 use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, WireMouseAction,
+    ClientActionRefusal, ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
+    WireMouseAction,
 };
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
@@ -2328,25 +2330,81 @@ impl Uplink {
         }
     }
 
-    /// Resolve `bound_action` against the action table with `client`'s own
-    /// new-pane direction and scroll line count. `None` when the table refuses
-    /// the action.
+    /// Resolve `action_reference` against the action table with `client`'s
+    /// own new-pane direction and scroll line count, or give the table's
+    /// refusal.
     ///
     /// The new-pane direction is this viewer's own setting, so a pane-opening
     /// binding that names no direction already says where the pane goes by the
     /// time the command leaves.
-    fn resolve_bound_action(
+    fn resolve_action_plan(
         &self,
         client: &Client,
-        bound_action: &BoundAction,
-    ) -> Option<DispatchPlan> {
+        action_reference: &ActionReference,
+    ) -> Result<DispatchPlan, ResolveError> {
         resolve_action_with_scroll_line_count(
-            &bound_action.action_reference,
+            action_reference,
             &self.registry,
             client.get_client_config().layout.new_pane_direction,
             client.get_client_config().mouse.scroll_line_count,
         )
-        .ok()
+    }
+
+    /// Run `action_reference`, which `koshi actions run` asked this viewer to
+    /// run, against `mouse_frame`, the frame this terminal last painted, as
+    /// its key would run it in the viewer's current mode. Returns `None` when
+    /// it ran or already had its result, and the refusal the answer carries
+    /// otherwise:
+    ///
+    /// - an action the table does not hold: [`RejectReason::TargetNotFound`]
+    ///   with the table's refusal, such as `action core:frob is not
+    ///   registered`;
+    /// - an action that builds a session command:
+    ///   [`RejectReason::InvalidState`] `core:new-tab builds a session
+    ///   command; a viewer runs only viewer-local actions`;
+    /// - an action that does not apply in the viewer's mode
+    ///   ([`Client::find_requested_client_action_fit`]):
+    ///   [`RejectReason::InvalidState`] with the fit's sentence.
+    fn run_requested_client_action(
+        &mut self,
+        client: &mut Client,
+        action_reference: &ActionReference,
+        mouse_frame: Option<&MouseFrame>,
+    ) -> Option<ClientActionRefusal> {
+        let client_action_kind = match self.resolve_action_plan(client, action_reference) {
+            Ok(DispatchPlan::ClientAction(client_action_kind)) => client_action_kind,
+            Ok(DispatchPlan::Command(_)) => {
+                return Some(ClientActionRefusal {
+                    reject_reason: RejectReason::InvalidState,
+                    help: format!(
+                        "{action_reference} builds a session command; a viewer runs only \
+                         viewer-local actions"
+                    ),
+                })
+            }
+            Err(resolve_error) => {
+                return Some(ClientActionRefusal {
+                    reject_reason: RejectReason::TargetNotFound,
+                    help: resolve_error.to_string(),
+                })
+            }
+        };
+        match client.find_requested_client_action_fit(client_action_kind, action_reference) {
+            RequestedClientActionFit::Runs => {
+                self.run_dispatch_plan(
+                    client,
+                    DispatchPlan::ClientAction(client_action_kind),
+                    mouse_frame,
+                    action_reference,
+                );
+                None
+            }
+            RequestedClientActionFit::HasItsResult => None,
+            RequestedClientActionFit::RunsOnlyIn { refusal_help } => Some(ClientActionRefusal {
+                reject_reason: RejectReason::InvalidState,
+                help: refusal_help,
+            }),
+        }
     }
 
     /// Resolve one fired binding against the action table and run its plan
@@ -2367,7 +2425,8 @@ impl Uplink {
         bound_action: BoundAction,
         mouse_frame: Option<&MouseFrame>,
     ) -> ControlFlow<()> {
-        let Some(dispatch_plan) = self.resolve_bound_action(client, &bound_action) else {
+        let Ok(dispatch_plan) = self.resolve_action_plan(client, &bound_action.action_reference)
+        else {
             return ControlFlow::Continue(());
         };
         if let Some(lock_mode) = find_lock_mode_set_by(&dispatch_plan, client.get_lock_mode()) {
@@ -2433,7 +2492,7 @@ impl Uplink {
 
 /// Whether `dispatch_plan` runs [`Command::Quit`].
 fn is_quit_dispatch_plan(dispatch_plan: &DispatchPlan) -> bool {
-    matches!(dispatch_plan, DispatchPlan::Command(command) if **command == Command::Quit)
+    matches!(dispatch_plan, DispatchPlan::Command(command) if matches!(**command, Command::Quit(_)))
 }
 
 /// The lock mode `dispatch_plan` sets on the client that runs it while that
@@ -3583,6 +3642,24 @@ fn run_attachment<B: Backend, W: Write>(
                             let _ = terminal_writer.write_all(&held_host_write_bytes);
                             let _ = terminal_writer.flush();
                             held_host_write_bytes = Vec::new();
+                        }
+                        // `koshi actions run` asked this viewer to run one
+                        // viewer-local action; the answer names the request.
+                        // The pass ends with the refresh that paints the
+                        // result.
+                        Ok(SessionEvent::ClientActionRequested {
+                            client_action_request_id,
+                            action_reference,
+                        }) => {
+                            let refusal = uplink.run_requested_client_action(
+                                client,
+                                &action_reference,
+                                last_mouse_frame.as_ref(),
+                            );
+                            uplink.send_request(IpcRequestKind::ClientActionAnswer {
+                                client_action_request_id,
+                                refusal,
+                            });
                         }
                         // Every other frame is a `Pong`, which carries nothing.
                         // The frames that end the attachment leave the loop
@@ -4988,7 +5065,8 @@ fn hold_fired_binding(
     uplink: &Uplink,
     bound_action: BoundAction,
 ) -> ControlFlow<()> {
-    let Some(dispatch_plan) = uplink.resolve_bound_action(client, &bound_action) else {
+    let Ok(dispatch_plan) = uplink.resolve_action_plan(client, &bound_action.action_reference)
+    else {
         return ControlFlow::Continue(());
     };
     if is_quit_dispatch_plan(&dispatch_plan) {

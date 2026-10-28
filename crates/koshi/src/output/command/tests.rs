@@ -100,7 +100,7 @@ fn a_session_that_quit_names_the_processes_koshi_ended_after_it() {
 fn a_session_that_did_not_quit_names_the_quit_failure_and_its_process() {
     assert_eq!(
         render_session_ending(&SessionEnding::Stopped {
-            quit_failure: "IPC unavailable: the session did not answer in time".to_string(),
+            kill_session_failure: "IPC unavailable: the session did not answer in time".to_string(),
             session_process_id: 5000,
             stopped_process_count: 3,
         }),
@@ -109,7 +109,7 @@ fn a_session_that_did_not_quit_names_the_quit_failure_and_its_process() {
     );
     assert_eq!(
         render_session_ending(&SessionEnding::Stopped {
-            quit_failure: "session session-0 is not running".to_string(),
+            kill_session_failure: "session session-0 is not running".to_string(),
             session_process_id: 5000,
             stopped_process_count: 0,
         }),

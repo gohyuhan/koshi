@@ -105,7 +105,10 @@ is unregistered.
   in the action name (`core:new-pane-left`), an open value lives in the CLI.
 - `remove "<key>"` — void a key in this mode, so lower layers no longer bind it.
 
-Run `koshi actions list` to see every action name you can bind to.
+Run `koshi actions list` to see every action name you can bind to. `koshi
+actions run <action>` runs one action from a shell, as a key bound to it runs
+it: `koshi actions run toggle-notification-center` opens the notification
+center.
 
 ## Full example
 

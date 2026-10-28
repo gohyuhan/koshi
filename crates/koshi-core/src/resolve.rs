@@ -32,9 +32,9 @@ use std::fmt;
 use crate::action::{ActionHandlerReference, ActionReference, ClientActionKind};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs,
-    ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs,
-    TabTarget, ToggleLockModeArgs, TogglePanePinnedArgs,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget, PlacePaneArgs, QuitArgs,
+    ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs,
+    SetPanePinnedArgs, TabTarget, ToggleLockModeArgs, TogglePanePinnedArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -237,7 +237,7 @@ fn resolve_core_action(
         }),
 
         // --- Session ---
-        "quit" => Command::Quit,
+        "quit" => Command::Quit(QuitArgs::default()),
 
         // --- Lock ---
         "toggle-lock" => Command::ToggleLockMode(ToggleLockModeArgs { client_id: None }),

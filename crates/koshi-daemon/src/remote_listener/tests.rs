@@ -1720,6 +1720,7 @@ mod bridge_round_trip {
 
     use super::*;
 
+    use koshi_core::action::ActionReference;
     use koshi_core::command::{
         Command, CommandEnvelope, CommandResult, CommandSource, FocusTabArgs, NewTabArgs, TabTarget,
     };
@@ -2224,6 +2225,28 @@ mod bridge_round_trip {
         let session_endpoint =
             EndpointFile::load_from_path(&running_session.get_session_endpoint_path())
                 .expect("the session server advertises its socket");
+        let command_envelope = CommandEnvelope::from_parts(
+            CommandId::new(),
+            CommandSource::from_external_cli(Some(running_session.session_id), None),
+            command,
+        );
+        submit_committed_session_request(
+            &session_endpoint,
+            IpcRequestKind::SubmitCommand {
+                command_envelope: Box::new(command_envelope),
+                fired_action: None,
+            },
+        )
+    }
+
+    /// Send `prepared_request_kind` to the session at `session_endpoint` over
+    /// a control connection of its own: the Hello, then the request inside a
+    /// `Prepare` and its `Commit`. Returns the command result that answers
+    /// it.
+    fn submit_committed_session_request(
+        session_endpoint: &EndpointFile,
+        prepared_request_kind: IpcRequestKind,
+    ) -> CommandResult {
         let mut connection = Connection::connect(&session_endpoint.socket_address)
             .expect("the control socket answers");
         connection
@@ -2245,19 +2268,11 @@ mod bridge_round_trip {
             unexpected_response => panic!("the Hello was answered with {unexpected_response:?}"),
         }
 
-        let command_envelope = CommandEnvelope::from_parts(
-            CommandId::new(),
-            CommandSource::from_external_cli(Some(running_session.session_id), None),
-            command,
-        );
         send_committed_request(
             &mut connection,
             IpcRequest {
                 request_id: 2,
-                request_kind: IpcRequestKind::SubmitCommand {
-                    command_envelope: Box::new(command_envelope),
-                    fired_action: None,
-                },
+                request_kind: prepared_request_kind,
             },
         );
         let command_response: IpcResponse =
@@ -2546,6 +2561,103 @@ mod bridge_round_trip {
         assert!(
             focus_round_count >= 12,
             "the hold made only {focus_round_count} rounds; the link was not exercised"
+        );
+    }
+
+    /// A viewer action that `koshi actions run` asks for crosses the session's
+    /// control socket, reaches the remote viewer it names as a
+    /// `ClientActionRequested` frame through the TLS listener and the
+    /// router's bridge, and the viewer's `ClientActionAnswer` comes back to
+    /// the caller as `Ok` under the caller's command id.
+    #[test]
+    fn a_viewer_action_from_the_cli_reaches_a_remote_viewer_and_its_answer_reaches_the_cli() {
+        let running_session = RunningSession::start_running_session();
+        let test_remote_listener =
+            start_test_remote_listener(running_session.get_located_session());
+        let remote_link = connect_test_remote_client(&test_remote_listener);
+        let (mut reader, mut writer) = remote_client::attach_remote_session(
+            remote_link,
+            SessionSelector::SessionId(running_session.session_id),
+            VIEWER_LINK_TIMEOUT_DURATION,
+        )
+        .expect("the attach request is written");
+        let _hello_response: IpcResponse = reader.recv().expect("the session answers the Hello");
+        send_committed_attach(
+            &mut reader,
+            &mut writer,
+            None,
+            koshi_ipc::protocol::GraphicsCapabilities::default(),
+        );
+        let attach_response: IpcResponse = reader.recv().expect("the session answers the attach");
+        let IpcResult::Attached { client_id, .. } = attach_response.answer_result else {
+            panic!(
+                "expected an attach reply, got {:?}",
+                attach_response.answer_result
+            );
+        };
+        let notification_center_toggle =
+            ActionReference::from_core_action_name("toggle-notification-center")
+                .expect("valid name");
+        let command_id = CommandId::new();
+        let run_client_action_kind = IpcRequestKind::RunClientAction {
+            command_id,
+            command_source: CommandSource::from_external_cli(
+                Some(running_session.session_id),
+                Some(client_id),
+            ),
+            action_reference: notification_center_toggle.clone(),
+        };
+        let session_endpoint =
+            EndpointFile::load_from_path(&running_session.get_session_endpoint_path())
+                .expect("the session server advertises its socket");
+        let caller_thread = std::thread::spawn(move || {
+            submit_committed_session_request(&session_endpoint, run_client_action_kind)
+        });
+
+        let mut painted_update_receiver = PaintedUpdateReceiver::new();
+        let session_event_deadline = Instant::now() + EVENT_DELIVERY_TIMEOUT_DURATION;
+        let client_action_request_id = loop {
+            reader.set_deadline(Some(session_event_deadline));
+            let received_frame = reader
+                .recv_message_or_binary::<SessionEvent>()
+                .expect("the request reaches the remote viewer in time");
+            match painted_update_receiver
+                .accept_session_frame(received_frame)
+                .expect("a painted update part that applies")
+            {
+                Some(SessionFrame::Event(SessionEvent::ClientActionRequested {
+                    client_action_request_id,
+                    action_reference,
+                })) => {
+                    assert_eq!(action_reference, notification_center_toggle);
+                    break client_action_request_id;
+                }
+                Some(SessionFrame::Painted(received_painted_frame)) => {
+                    writer
+                        .send(&build_paint_report_request(
+                            received_painted_frame.update_sequence,
+                        ))
+                        .expect("the paint report is written");
+                }
+                Some(SessionFrame::Event(_) | SessionFrame::ImageChunk(_)) | None => {}
+            }
+        };
+        writer
+            .send(&IpcRequest {
+                request_id: 3,
+                request_kind: IpcRequestKind::ClientActionAnswer {
+                    client_action_request_id,
+                    refusal: None,
+                },
+            })
+            .expect("the answer is written");
+
+        assert_eq!(
+            caller_thread.join().expect("the caller thread ends"),
+            CommandResult::Ok {
+                command_id,
+                emitted_events: Vec::new(),
+            }
         );
     }
 

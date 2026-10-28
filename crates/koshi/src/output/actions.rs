@@ -4,7 +4,7 @@ use super::*;
 
 /// Column headers for an `actions list` row, matching
 /// [`render_action_summary_cells`].
-const ACTION_LIST_HEADERS: &[&str] = &["action", "command", "scope"];
+const ACTION_LIST_HEADERS: &[&str] = &["action", "command", "scope", "cli_invocation"];
 
 /// Field headers for an `actions explain` answer, matching
 /// [`render_action_detail_cells`].
@@ -27,6 +27,9 @@ struct ActionSummary {
     command: String,
     /// How broad the action's effect is.
     scope: String,
+    /// The `koshi` invocation that runs the action from a shell
+    /// ([`format_cli_invocation`]).
+    cli_invocation: String,
 }
 
 /// One action as it appears in an `actions explain` answer.
@@ -44,17 +47,17 @@ struct ActionDetail {
     targets: Vec<String>,
     /// The internal command the action dispatches.
     command: String,
-    /// Ways to invoke the action: its config reference and, when one exists,
-    /// its CLI verb.
+    /// Ways to invoke the action ([`list_action_examples`]).
     examples: Vec<String>,
 }
 
 /// Render a `koshi actions list` answer over every action in the static table.
 #[must_use]
 pub fn render_actions_list(output_format: OutputFormat) -> String {
+    let action_registry = ActionRegistry::new();
     let action_summaries: Vec<ActionSummary> = build_core_action_seeds()
         .iter()
-        .map(build_action_summary)
+        .map(|action_seed| build_action_summary(action_seed, &action_registry))
         .collect();
     match output_format {
         OutputFormat::Json => render_json(&action_summaries),
@@ -69,17 +72,20 @@ pub fn render_actions_list(output_format: OutputFormat) -> String {
 }
 
 /// Render a `koshi actions explain <action>` answer, or `None` when no action
-/// matches `action_name` (accepted as a bare name or a full `core:`
-/// reference).
+/// matches `action_reference_text` (accepted as a bare name or a full `core:`
+/// reference, as [`parse_action_reference_text`] reads it).
 #[must_use]
-pub fn render_action_explain(action_name: &str, output_format: OutputFormat) -> Option<String> {
+pub fn render_action_explain(
+    action_reference_text: &str,
+    output_format: OutputFormat,
+) -> Option<String> {
+    let action_reference = parse_action_reference_text(action_reference_text)?;
     let action_seeds = build_core_action_seeds();
-    let (action_reference, action_metadata) =
-        action_seeds.iter().find(|(candidate_action, _)| {
-            candidate_action.action_name.get_name() == action_name
-                || candidate_action.to_string() == action_name
-        })?;
-    let action_detail = build_action_detail(action_reference, action_metadata);
+    let (_, action_metadata) = action_seeds
+        .iter()
+        .find(|(candidate_action, _)| *candidate_action == action_reference)?;
+    let action_detail =
+        build_action_detail(&action_reference, action_metadata, &ActionRegistry::new());
     Some(match output_format {
         OutputFormat::Json => render_json(&action_detail),
         OutputFormat::Table => render_fields(
@@ -89,14 +95,17 @@ pub fn render_action_explain(action_name: &str, output_format: OutputFormat) -> 
     })
 }
 
-/// One seed entry as an [`ActionSummary`].
+/// One seed entry as an [`ActionSummary`], with its CLI invocation read
+/// from `action_registry`.
 fn build_action_summary(
     (action_reference, action_metadata): &(ActionReference, ActionMetadata),
+    action_registry: &ActionRegistry,
 ) -> ActionSummary {
     ActionSummary {
         action: action_reference.to_string(),
         command: format_command_label(&action_metadata.handler),
         scope: format_scope_label(action_metadata.scope).to_string(),
+        cli_invocation: format_cli_invocation(action_reference, action_registry),
     }
 }
 
@@ -106,13 +115,16 @@ fn render_action_summary_cells(summary: &ActionSummary) -> Vec<String> {
         summary.action.clone(),
         summary.command.clone(),
         summary.scope.clone(),
+        summary.cli_invocation.clone(),
     ]
 }
 
-/// One seed entry as an [`ActionDetail`].
+/// One seed entry as an [`ActionDetail`], with its examples read from
+/// `action_registry`.
 fn build_action_detail(
     action_reference: &ActionReference,
     action_metadata: &ActionMetadata,
+    action_registry: &ActionRegistry,
 ) -> ActionDetail {
     ActionDetail {
         action: action_reference.to_string(),
@@ -125,7 +137,7 @@ fn build_action_detail(
             .map(|target_kind| format_target_label(*target_kind).to_string())
             .collect(),
         command: format_command_label(&action_metadata.handler),
-        examples: list_action_examples(action_reference),
+        examples: list_action_examples(action_reference, action_registry),
     }
 }
 
@@ -180,15 +192,43 @@ pub(super) fn format_command_label(action_handler: &ActionHandlerReference) -> S
     }
 }
 
-/// The usage examples for an action: always its config reference
-/// (`core:new-pane`), plus `koshi <verb>` when that runs the action on its own.
-fn list_action_examples(action_reference: &ActionReference) -> Vec<String> {
+/// The usage examples for an action: its config reference
+/// (`core:new-pane`), its CLI invocation ([`format_cli_invocation`]), and
+/// `koshi <name>` when that verb runs the action on its own and is not the CLI
+/// invocation already. `core:new-pane` gives `core:new-pane`,
+/// `koshi actions run core:new-pane` and `koshi new-pane`.
+fn list_action_examples(
+    action_reference: &ActionReference,
+    action_registry: &ActionRegistry,
+) -> Vec<String> {
     let action_name = action_reference.action_name.get_name();
-    let mut action_examples = vec![action_reference.to_string()];
-    if can_run_cli_verb_without_arguments(action_name) {
-        action_examples.push(format!("koshi {action_name}"));
+    let cli_invocation = format_cli_invocation(action_reference, action_registry);
+    let cli_verb_invocation = format!("koshi {action_name}");
+    let has_own_cli_verb =
+        cli_verb_invocation != cli_invocation && can_run_cli_verb_without_arguments(action_name);
+    let mut action_examples = vec![action_reference.to_string(), cli_invocation];
+    if has_own_cli_verb {
+        action_examples.push(cli_verb_invocation);
     }
     action_examples
+}
+
+/// The `koshi` invocation that runs `action_reference` from a shell:
+/// `koshi actions run core:new-tab`, or, for an action whose command takes
+/// arguments, the verb that supplies them
+/// ([`format_argument_verb_invocation`]): `koshi focus-tab`.
+fn format_cli_invocation(
+    action_reference: &ActionReference,
+    action_registry: &ActionRegistry,
+) -> String {
+    match resolve_action(action_reference, action_registry, Direction::Right) {
+        Err(ResolveError::ArgumentsRequired { .. }) => {
+            format_argument_verb_invocation(action_reference)
+        }
+        Ok(_) | Err(ResolveError::Unregistered { .. }) => {
+            format!("koshi actions run {action_reference}")
+        }
+    }
 }
 
 /// Whether `koshi <name>` parses on its own — a top-level verb with no required

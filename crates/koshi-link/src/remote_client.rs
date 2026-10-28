@@ -42,6 +42,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use fs4::{FileExt, TryLockError};
 
+use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::ids::{ClientId, CommandId, SessionId};
@@ -1684,12 +1685,56 @@ pub fn submit_remote_command(
         CommandSource::from_external_cli(Some(session_id), client_id),
         command,
     );
-    let prepare_request = IpcRequest {
-        request_id: 2,
-        request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
+    submit_remote_prepared_request(
+        saved_server_record,
+        session_id,
+        IpcRequestKind::SubmitCommand {
             command_envelope: Box::new(command_envelope),
             fired_action: None,
-        })),
+        },
+    )
+}
+
+/// Ask the session `session_id` on the saved server `saved_server_record`
+/// names to have the client `client_id` run `action_reference`, a
+/// viewer-local action such as `core:toggle-notification-center`, and hand
+/// back the answer: `Ok` once that client ran the action, else the rejection
+/// that names the cause. With no `client_id`, the session picks its acting
+/// client.
+///
+/// Same exchange, timeouts, restart handling and errors as
+/// [`submit_remote_command`], with a `RunClientAction` inside the `Prepare`.
+/// The session answers within 5 s of the request, inside
+/// [`REPLY_TIMEOUT_DURATION`].
+pub fn submit_remote_client_action(
+    saved_server_record: &SavedServer,
+    session_id: SessionId,
+    client_id: Option<ClientId>,
+    action_reference: &ActionReference,
+) -> Result<CommandResult, CliError> {
+    submit_remote_prepared_request(
+        saved_server_record,
+        session_id,
+        IpcRequestKind::RunClientAction {
+            command_id: CommandId::new(),
+            command_source: CommandSource::from_external_cli(Some(session_id), client_id),
+            action_reference: action_reference.clone(),
+        },
+    )
+}
+
+/// The command result the session `session_id` on the saved server
+/// `saved_server_record` names answers to `prepared_request_kind`, handed
+/// over inside a `Prepare` and run with a `Commit`, as
+/// [`submit_remote_command`] states.
+fn submit_remote_prepared_request(
+    saved_server_record: &SavedServer,
+    session_id: SessionId,
+    prepared_request_kind: IpcRequestKind,
+) -> Result<CommandResult, CliError> {
+    let prepare_request = IpcRequest {
+        request_id: 2,
+        request_kind: IpcRequestKind::Prepare(Box::new(prepared_request_kind)),
     };
     run_remote_session_exchange(
         saved_server_record,

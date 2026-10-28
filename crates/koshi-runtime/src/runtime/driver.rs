@@ -36,7 +36,9 @@ impl Server {
     ///
     /// 1. When no pane's output queue holds output or an exit, wait for one
     ///    inbox event, at most until
-    ///    [`compute_next_render_wakeup`](Self::compute_next_render_wakeup).
+    ///    [`compute_next_render_wakeup`](Self::compute_next_render_wakeup) or
+    ///    the earliest answer deadline of a waiting viewer action request,
+    ///    whichever comes first.
     /// 2. Handle that event, then every event the inbox already holds: keys,
     ///    IPC requests, resizes, timers, and output wakes. A run of
     ///    [`RuntimeEvent::Resize`] events with no other event between them
@@ -47,7 +49,9 @@ impl Server {
     ///    does. A pane whose queue still holds output goes back to the end of
     ///    the rotation, behind every pane whose wake arrived during its turn. A
     ///    pass that handled a [`RuntimeEvent::Quit`] in step 2 gives no turn.
-    /// 4. Push the frames that are due ([`push_due_frames`](Self::push_due_frames)).
+    /// 4. Answer each viewer action request whose answer deadline has passed,
+    ///    then push the frames that are due
+    ///    ([`push_due_frames`](Self::push_due_frames)).
     ///
     /// Example — pane `A` holds 1 MiB, and the wake of pane `B`, which holds
     /// 10 bytes, arrives during `A`'s turn: the next pass gives `B` its turn.
@@ -57,12 +61,21 @@ impl Server {
     pub fn run_dispatch_pass(&mut self) -> DispatchPassOutcome {
         let mut waited_event = None;
         if self.ready_output_pane_ids.is_empty() {
-            waited_event = match self.compute_next_render_wakeup(Instant::now()) {
-                Some(render_wakeup_timeout) => {
-                    match self
-                        .get_inbox_receiver()
-                        .recv_timeout(render_wakeup_timeout)
-                    {
+            let wait_start_time = Instant::now();
+            let client_action_answer_wakeup = self
+                .waiting_client_actions
+                .find_earliest_answer_deadline()
+                .map(|answer_deadline| answer_deadline.saturating_duration_since(wait_start_time));
+            let next_wakeup = [
+                self.compute_next_render_wakeup(wait_start_time),
+                client_action_answer_wakeup,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            waited_event = match next_wakeup {
+                Some(wakeup_timeout) => {
+                    match self.get_inbox_receiver().recv_timeout(wakeup_timeout) {
                         Ok(runtime_event) => Some(runtime_event),
                         Err(RecvTimeoutError::Timeout) => None,
                         Err(RecvTimeoutError::Disconnected) => {
@@ -84,7 +97,9 @@ impl Server {
                 self.ready_output_pane_ids.push_back(served_pane_id);
             }
         }
-        self.push_due_frames(Instant::now());
+        let pass_end_time = Instant::now();
+        self.answer_overdue_client_actions(pass_end_time);
+        self.push_due_frames(pass_end_time);
         if has_quit_event {
             DispatchPassOutcome::QuitEventHandled
         } else {
@@ -132,7 +147,8 @@ impl Server {
     /// handler emits. Returns [`ControlFlow::Break`] when the event is a quit
     /// request, which each loop reads on its own terms. A [`RuntimeEvent::Quit`]
     /// is a terminal hangup: it breaks the loop and leaves teardown on the
-    /// graceful path. Explicit quit travels through the `core:quit` command.
+    /// graceful path. An explicit quit travels through
+    /// [`Command::KillSession`].
     pub fn handle_runtime_event(&mut self, runtime_event: RuntimeEvent) -> ControlFlow<()> {
         match runtime_event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
@@ -170,6 +186,26 @@ impl Server {
                 self.allow_client_frame_now(client_id);
                 self.run_client_mouse(client_id, request_id, mouse_actions);
             }
+            // `koshi actions run` asks one attached client to run a
+            // viewer-local action; the caller waits for that client's answer.
+            RuntimeEvent::IpcClientAction {
+                command_id,
+                command_source,
+                action_reference,
+                response_sender,
+            } => {
+                self.request_client_action(
+                    command_id,
+                    &command_source,
+                    action_reference,
+                    response_sender,
+                );
+            }
+            RuntimeEvent::ClientActionAnswer {
+                client_id,
+                client_action_request_id,
+                refusal,
+            } => self.answer_client_action(client_id, client_action_request_id, refusal),
             // A raw mouse event is the viewer's to read: only the frame it
             // painted says which pane the pointer is over and which gesture is
             // under way. One arriving here belongs to no attached viewer, and

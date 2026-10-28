@@ -11,6 +11,8 @@
 //! subscriber's client on that subscriber's own queue, in the place of a frame
 //! at the tail of the queue that the writing thread has not taken,
 //! `EventBus::try_send_mouse_answer` puts one round of mouse answers on it,
+//! `EventBus::try_send_client_action_request` puts one viewer-local action
+//! the subscriber's client is asked to run on it,
 //! `EventBus::queue_host_write` adds bytes aimed at that subscriber's own
 //! terminal to its waiting host writes, and `EventBus::try_send_switch` puts
 //! the session that subscriber's client moves to on its queue, and
@@ -26,8 +28,9 @@
 //! snapshot rides the same queue as events, so the subscriber reads the
 //! backlog it already had, then the snapshot, then live events again. A
 //! notification post reaches a desynced subscriber through the notification
-//! queue its snapshot carries. A mouse answer or session switch that does
-//! not fit marks the subscriber desynced the same way; a frame that does not
+//! queue its snapshot carries. A mouse answer, a viewer action request or a
+//! session switch that does not fit marks the subscriber desynced the same
+//! way, and is never replayed; a frame that does not
 //! fit is dropped and the subscriber stays live.
 //!
 //! A command rejection that does not fit marks the subscriber desynced and is
@@ -716,6 +719,38 @@ impl EventBus {
         }
     }
 
+    /// Put the request numbered `client_action_request_id` to run
+    /// `action_reference` on a live subscriber's queue.
+    ///
+    /// Returns `true` when queued. A full queue marks the subscriber desynced,
+    /// and a missing, paused or disconnected subscriber returns `false`. A
+    /// request that returns `false` never reaches the client.
+    pub(crate) fn try_send_client_action_request(
+        &mut self,
+        subscriber_id: SubscriberId,
+        client_action_request_id: u64,
+        action_reference: ActionReference,
+    ) -> bool {
+        match self.try_send_delivery(
+            subscriber_id,
+            Delivery::ClientActionRequested {
+                client_action_request_id,
+                action_reference,
+            },
+        ) {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
+                tracing::warn!(
+                    subscriber_id = %subscriber_id,
+                    client_action_request_id,
+                    "viewer action request dropped; subscriber desynced, awaiting snapshot"
+                );
+                false
+            }
+            QueueDeliveryStatus::Skipped => false,
+        }
+    }
+
     /// Add `host_write` behind the host writes that wait for the terminal
     /// subscriber `subscriber_id`'s client runs in, live or paused alike. Each
     /// waiting host write that sets the same clipboard targets, in any order,
@@ -990,7 +1025,10 @@ fn hold_command_rejection(
 /// folder advertises it.
 ///
 /// A [`Delivery::CommandRejected`] becomes [`SessionEvent::CommandRejected`]
-/// carrying the same command id, fired action, reason and hint.
+/// carrying the same command id, fired action, reason and hint. A
+/// [`Delivery::ClientActionRequested`] becomes
+/// [`SessionEvent::ClientActionRequested`] carrying the same number and
+/// action.
 ///
 /// A [`Delivery::PanePlacementCommitted`] becomes
 /// [`SessionEvent::PanePlacementCommitted`] carrying the same command id,
@@ -1062,6 +1100,13 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             fired_action: fired_action.clone(),
             reject_reason: *reject_reason,
             help: help.clone(),
+        }),
+        Delivery::ClientActionRequested {
+            client_action_request_id,
+            action_reference,
+        } => Some(SessionEvent::ClientActionRequested {
+            client_action_request_id: *client_action_request_id,
+            action_reference: action_reference.clone(),
         }),
     }
 }

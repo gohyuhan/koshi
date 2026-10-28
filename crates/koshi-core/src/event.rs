@@ -142,9 +142,8 @@ impl Event {
 /// Payload for [`Event::Quit`]: what ended the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuitCause {
-    /// A quit was asked for: `core:quit` from a source naming no client,
-    /// `kill-session`, the last client leaving under `auto-close-session`, or
-    /// the session process being told to stop.
+    /// A quit was asked for: `kill-session`, the last client leaving under
+    /// `auto-close-session`, or the session process being told to stop.
     Requested,
     /// The session's last tab closed.
     LastTabClosed {

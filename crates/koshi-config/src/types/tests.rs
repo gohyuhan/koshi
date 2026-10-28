@@ -6,7 +6,8 @@ use super::*;
 use koshi_core::action::{ActionReference, ClientActionKind};
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewPanePlacement, NewTabArgs, ResizePaneArgs, TabTarget, TogglePanePinnedArgs,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, QuitArgs, ResizePaneArgs, TabTarget,
+    TogglePanePinnedArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::key::{
@@ -667,7 +668,12 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
                 client_id: None,
             })),
         ),
-        build_expected_binding("normal", "<C-q>", "quit", Ok(Command::Quit)),
+        build_expected_binding(
+            "normal",
+            "<C-q>",
+            "quit",
+            Ok(Command::Quit(QuitArgs::default())),
+        ),
         build_expected_binding(
             "normal",
             "<C-p> n",
@@ -877,7 +883,12 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
                 client_id: None,
             })),
         ),
-        build_expected_binding("locked", "<C-q>", "quit", Ok(Command::Quit)),
+        build_expected_binding(
+            "locked",
+            "<C-q>",
+            "quit",
+            Ok(Command::Quit(QuitArgs::default())),
+        ),
         build_expected_client_binding(
             "pane-placement",
             "<Left>",

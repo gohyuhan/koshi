@@ -31,7 +31,30 @@ fn unit_command_variants_round_trip_through_json() {
         client_id: Some(ClientId::new()),
     }));
     assert_json_roundtrip(&Command::TogglePaneFullscreen);
-    assert_json_roundtrip(&Command::Quit);
+    assert_json_roundtrip(&Command::KillSession);
+}
+
+#[test]
+fn quit_carries_the_client_it_removes_on_the_wire() {
+    let client_id = ClientId::new();
+    for (quit_command, expected_wire_value) in [
+        (
+            Command::Quit(QuitArgs::default()),
+            json!({"Quit": {"client_id": null}}),
+        ),
+        (
+            Command::Quit(QuitArgs {
+                client_id: Some(client_id),
+            }),
+            json!({"Quit": {"client_id": client_id}}),
+        ),
+    ] {
+        assert_eq!(
+            serde_json::to_value(&quit_command).expect("serialize"),
+            expected_wire_value
+        );
+        assert_json_roundtrip(&quit_command);
+    }
 }
 
 #[test]
@@ -459,7 +482,8 @@ fn command_variant_names_are_canonical() {
             }),
             "SetAllFloatingPanesMinimized",
         ),
-        (Command::Quit, "Quit"),
+        (Command::Quit(QuitArgs::default()), "Quit"),
+        (Command::KillSession, "KillSession"),
         (Command::ToggleMouseSelect, "ToggleMouseSelect"),
         (Command::Detach(DetachArgs::default()), "Detach"),
         (Command::DetachAll, "DetachAll"),
@@ -472,7 +496,7 @@ fn command_variant_names_are_canonical() {
             "SwitchSession",
         ),
     ];
-    assert_eq!(command_cases.len(), 25);
+    assert_eq!(command_cases.len(), 26);
     for (command, command_name) in &command_cases {
         assert_eq!(&format_debug_variant_name(command), command_name);
     }
@@ -949,14 +973,17 @@ fn command_envelope_from_parts_derives_client_id_from_source() {
     ];
     assert_eq!(command_source_cases.len(), 5);
     for (command_source, expected_client_id) in command_source_cases {
-        let command_envelope =
-            CommandEnvelope::from_parts(CommandId::new(), command_source.clone(), Command::Quit);
+        let command_envelope = CommandEnvelope::from_parts(
+            CommandId::new(),
+            command_source.clone(),
+            Command::KillSession,
+        );
         assert_eq!(
             command_envelope.client_id, expected_client_id,
             "{command_source:?}"
         );
         assert_eq!(command_envelope.command_source, command_source);
-        assert_eq!(command_envelope.command, Command::Quit);
+        assert_eq!(command_envelope.command, Command::KillSession);
     }
 }
 
@@ -996,7 +1023,7 @@ fn an_envelope_written_without_a_client_id_field_decodes_when_its_source_names_n
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(None, None),
-        Command::Quit,
+        Command::KillSession,
     );
     let mut envelope_json = serde_json::to_value(&command_envelope).expect("serialize");
     envelope_json
@@ -1016,7 +1043,7 @@ fn an_envelope_written_without_a_client_id_field_is_rejected_when_its_source_nam
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(ClientId::new()),
-        Command::Quit,
+        Command::KillSession,
     );
     let mut envelope_json = serde_json::to_value(&command_envelope).expect("serialize");
     envelope_json
@@ -1039,7 +1066,7 @@ fn an_envelope_written_without_its_command_is_rejected() {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(None, None),
-        Command::Quit,
+        Command::KillSession,
     );
     let mut envelope_json = serde_json::to_value(&command_envelope).expect("serialize");
     envelope_json
@@ -1059,7 +1086,7 @@ fn every_payload_free_command_round_trips_as_a_bare_wire_string() {
     for (command, expected_wire_text) in [
         (Command::ToggleMouseSelect, "\"ToggleMouseSelect\""),
         (Command::TogglePaneFullscreen, "\"TogglePaneFullscreen\""),
-        (Command::Quit, "\"Quit\""),
+        (Command::KillSession, "\"KillSession\""),
         (Command::DetachAll, "\"DetachAll\""),
     ] {
         assert_eq!(
@@ -1207,7 +1234,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`, `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`, `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

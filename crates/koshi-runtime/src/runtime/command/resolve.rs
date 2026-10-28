@@ -16,21 +16,28 @@ use koshi_session::session::state::Tab;
 
 impl Server {
     /// Check a command against live state before it reaches a handler. Runs the
-    /// universal checks in fixed precedence: CLI command admission, session
+    /// universal checks in fixed precedence: command source admission, session
     /// resolution, session admission, the in-session issuing pane's liveness,
-    /// the acting client for a client-scoped command, then target resolution.
-    /// Returns the first failure, or `Ok(())` when the command is well-formed
-    /// against current state.
+    /// then target resolution. Returns the first failure, or `Ok(())` when the
+    /// command is well-formed against current state.
     ///
     /// [`Server::dispatch_reporting_moved_cells`] is the only caller and runs this
     /// before any handler, so every command crosses this gate.
     pub(super) fn validate_command(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
-        // 1. CLI admission: a CLI command source may submit only the commands
-        //    `is_command_allowed_from_source` lists.
+        // 1. Source admission: a command source may submit only the commands
+        //    `is_command_allowed_from_source` lists for it.
         if !Self::is_command_allowed_from_source(&envelope.command, &envelope.command_source) {
+            let refusal_help = match envelope.command_source {
+                CommandSource::ExternalCli { .. } | CommandSource::InSessionCli { .. } => {
+                    "command cannot be issued from the CLI"
+                }
+                CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
+                    "command cannot be issued from a key or the mouse"
+                }
+            };
             return Err(Rejection::from_reason_and_help(
                 RejectReason::Unauthorized,
-                "command cannot be issued from the CLI",
+                refusal_help,
             ));
         }
 
@@ -55,14 +62,8 @@ impl Server {
             Self::require_live_source_pane(Self::require_session(session)?, *pane_id)?;
         }
 
-        // 5. A client-scoped command must resolve an acting client, whatever
-        //    the command source: the issuer while it is attached, else the session's
-        //    sole attached client.
-        if Self::is_client_scoped(&envelope.command) {
-            Self::resolve_acting_client(&envelope.command_source, Self::require_session(session)?)?;
-        }
-
-        // 6. Target resolution: the pane/tab/session the command names must resolve.
+        // 5. Target resolution: the pane/tab/session/client the command names
+        //    must resolve.
         self.resolve_target(&envelope.command, &envelope.command_source, session)
     }
 
@@ -117,11 +118,11 @@ impl Server {
 
     /// Whether `command` may arrive from `command_source`.
     ///
-    /// A CLI source may send only the commands this function lists. An
-    /// external CLI may also send [`Command::Quit`]. [`Command::Visual`] and
-    /// [`Command::ToggleMouseSelect`] are refused from every CLI source, and
-    /// [`Command::Quit`] from an in-session CLI, before any state is read. A
-    /// keybinding or mouse source may send every command.
+    /// A CLI source may send only the commands this function lists.
+    /// [`Command::KillSession`] arrives from an external CLI alone.
+    /// [`Command::Visual`] and [`Command::TogglePaneMinimized`] are refused
+    /// from every CLI source before any state is read. A keybinding or mouse
+    /// source may send every command but [`Command::KillSession`].
     pub(super) fn is_command_allowed_from_source(
         command: &Command,
         command_source: &CommandSource,
@@ -136,9 +137,12 @@ impl Server {
                 | Command::ScrollPane(_)
                 | Command::MoveFloatingPane(_)
                 | Command::SetPanePinned(_)
+                | Command::TogglePanePinned(_)
                 | Command::SetPaneMinimized(_)
                 | Command::SetAllFloatingPanesMinimized(_)
+                | Command::ToggleAllFloatingPanesMinimized
                 | Command::TogglePaneFullscreen
+                | Command::ToggleMouseSelect
                 | Command::WriteToPane(_)
                 | Command::NewTab(_)
                 | Command::CloseTab(_)
@@ -147,6 +151,7 @@ impl Server {
                 | Command::FocusPane(_)
                 | Command::SetLockMode(_)
                 | Command::ToggleLockMode(_)
+                | Command::Quit(_)
                 | Command::Detach(_)
                 | Command::DetachAll
                 | Command::SwitchSession(_)
@@ -154,21 +159,12 @@ impl Server {
         match command_source {
             CommandSource::InSessionCli { .. } => is_cli_command_allowed,
             CommandSource::ExternalCli { .. } => {
-                is_cli_command_allowed || matches!(command, Command::Quit)
+                is_cli_command_allowed || matches!(command, Command::KillSession)
             }
-            CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => true,
+            CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
+                !matches!(command, Command::KillSession)
+            }
         }
-    }
-
-    /// Whether the dispatcher resolves `command`'s acting client with
-    /// [`Self::resolve_acting_client`] before it resolves the target: `true`
-    /// for [`Command::ToggleMouseSelect`] only. A command that names a client,
-    /// or whose source names one, resolves its client in its target resolver
-    /// instead ([`Self::resolve_view_client`]).
-    /// [`Self::is_command_allowed_from_source`] refuses
-    /// [`Command::ToggleMouseSelect`] from a CLI source before this check runs.
-    pub(super) fn is_client_scoped(command: &Command) -> bool {
-        matches!(command, Command::ToggleMouseSelect)
     }
 
     /// Confirm the pane an in-session CLI command was issued from is still a
@@ -399,9 +395,14 @@ impl Server {
                 Self::require_session(session)?,
             )
             .map(drop),
-            // Mouse-select is client-scoped: the acting client resolved by the
-            // client-scoped check in `validate_command` is the whole target.
-            Command::ToggleMouseSelect => Ok(()),
+            // Mouse select flips one client's own mode: the client the source
+            // names, else the acting client.
+            Command::ToggleMouseSelect => Self::resolve_view_client(
+                command_source.get_target_client_id(),
+                command_source,
+                Self::require_session(session)?,
+            )
+            .map(drop),
             // A highlight command acts on the pane it names, never on the
             // focused pane, and its handler confirms that pane still exists.
             // The client checked is the issuing client alone.
@@ -448,7 +449,14 @@ impl Server {
                 Self::require_session(session)?,
             )
             .map(drop),
-            Command::DetachAll | Command::Quit => Ok(()),
+            // A quit removes one client, resolved as a detach resolves it.
+            Command::Quit(command_args) => Self::resolve_target_client(
+                command_args.client_id,
+                command_source,
+                Self::require_session(session)?,
+            )
+            .map(drop),
+            Command::KillSession | Command::DetachAll => Ok(()),
         }
     }
 
@@ -1788,8 +1796,10 @@ impl Server {
     /// tab when none is given. An in-session CLI defaults to the tab containing
     /// its command source `pane_id` (the command targets the command source pane's context, even
     /// if the client has since switched tabs); any other command source defaults to the
-    /// acting client's live `active_tab_id` ([`Self::resolve_acting_client`] — the
-    /// issuer while attached, else the session's sole attached client). Fails
+    /// live `active_tab_id` of the client the source names
+    /// ([`CommandSource::get_target_client_id`]), else of the acting client
+    /// ([`Self::resolve_view_client`]). With clients A and B attached,
+    /// `koshi actions run core:close-tab --client <A>` closes A's active tab. Fails
     /// with [`RejectReason::TargetNotFound`] when there is no session context,
     /// with [`Self::require_tab`]'s refusal when the tab is gone, and with
     /// [`RejectReason::InvalidState`]
@@ -1822,7 +1832,11 @@ impl Server {
                         )),
                     };
                 }
-                let client_id = Self::resolve_acting_client(command_source, session)?;
+                let client_id = Self::resolve_view_client(
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )?;
                 let client = Self::require_client(session, client_id)?;
                 let active_tab_id = client.get_active_tab_id();
                 Self::require_tab(session, active_tab_id)?;

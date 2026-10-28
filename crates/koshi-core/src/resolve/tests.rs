@@ -349,7 +349,7 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
                 client_id: None,
             }),
         ),
-        ("quit", Command::Quit),
+        ("quit", Command::Quit(QuitArgs::default())),
         (
             "toggle-lock",
             Command::ToggleLockMode(ToggleLockModeArgs::default()),
@@ -490,8 +490,9 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::ToggleAllFloatingPanesMinimized => {
             Some(CommandKind::ToggleAllFloatingPanesMinimized)
         }
-        Command::Quit => Some(CommandKind::Quit),
+        Command::Quit(_) => Some(CommandKind::Quit),
         Command::TogglePaneMinimized(_)
+        | Command::KillSession
         | Command::Visual(_)
         | Command::Detach(_)
         | Command::DetachAll

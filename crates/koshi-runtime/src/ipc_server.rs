@@ -135,7 +135,8 @@ const CLIPBOARD_COPY_ORIGIN_REFUSAL: &str =
 
 /// The sentence that refuses, with [`IpcErrorCode::Restarting`], a request
 /// read while the session replaces its process image.
-const SESSION_RESTARTING_MESSAGE: &str = "the session is restarting; ask again in a moment";
+pub(crate) const SESSION_RESTARTING_MESSAGE: &str =
+    "the session is restarting; ask again in a moment";
 
 /// Reads the `allow-other-users` setting from the configuration again and
 /// reports whether it is on. Called for each connection from another local
@@ -900,9 +901,14 @@ fn run_accept_loop(
 /// on a connection from another machine or from another local user. The
 /// connection drops every byte it holds, and keeps serving.
 ///
-/// A `SubmitCommand` on this connection has its source stamped by
-/// [`stamp_cli_command_source`] before it crosses to the dispatcher: this connection carries
-/// a `koshi` CLI invocation.
+/// A `SubmitCommand` or a `RunClientAction` on this connection has its source
+/// stamped by [`stamp_cli_command_source`] before it crosses to the
+/// dispatcher: this connection carries a `koshi` CLI invocation. A
+/// `RunClientAction` is answered once the client it names answered, or the
+/// session answered for that client. One that reaches the dispatcher after
+/// the session told its clients it restarts is refused with
+/// [`IpcErrorCode::Restarting`] and [`SESSION_RESTARTING_MESSAGE`], and did
+/// not run.
 ///
 /// A `Restart` runs the restart check `image_replacement` holds on this
 /// thread before anything reaches the dispatcher. A check that refuses, and a
@@ -1036,6 +1042,7 @@ fn serve_connection(
                 "no request waits for a Commit on this connection".to_owned(),
             ),
             uncommitted_request_kind @ (IpcRequestKind::SubmitCommand { .. }
+            | IpcRequestKind::RunClientAction { .. }
             | IpcRequestKind::Attach { .. }
             | IpcRequestKind::ClipboardCopy { .. }
             | IpcRequestKind::Restart)
@@ -1100,6 +1107,7 @@ fn serve_connection(
                     }
                 }
                 preparable_request_kind @ (IpcRequestKind::SubmitCommand { .. }
+                | IpcRequestKind::RunClientAction { .. }
                 | IpcRequestKind::Attach { .. }
                 | IpcRequestKind::Restart) => {
                     let dispatch_response = request_dispatcher_response(
@@ -1131,8 +1139,13 @@ fn serve_connection(
             IpcRequestKind::SubmitCommand {
                 command_envelope, ..
             } => {
-                let stamped_command_envelope =
-                    Box::new(stamp_cli_command_source(*command_envelope));
+                // The envelope's `client_id` is derived again from the
+                // stamped source; the two always agree.
+                let stamped_command_envelope = Box::new(CommandEnvelope::from_parts(
+                    command_envelope.command_id,
+                    stamp_cli_command_source(command_envelope.command_source),
+                    command_envelope.command,
+                ));
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
@@ -1152,6 +1165,34 @@ fn serve_connection(
                 IpcResponse {
                     request_id,
                     answer_result: IpcResult::CommandResult(command_result),
+                }
+            }
+            IpcRequestKind::RunClientAction {
+                command_id,
+                command_source,
+                action_reference,
+            } => {
+                let stamped_command_source = stamp_cli_command_source(command_source);
+                let dispatch_response = request_dispatcher_response(
+                    &served_connection.intake,
+                    inbox_sender,
+                    &mut connection,
+                    request_id,
+                    |response_sender| RuntimeEvent::IpcClientAction {
+                        command_id,
+                        command_source: stamped_command_source,
+                        action_reference,
+                        response_sender,
+                    },
+                );
+                // No dispatcher left, or a refusal while the session restarts:
+                // the connection ends.
+                let Some(answer_result) = dispatch_response else {
+                    return;
+                };
+                IpcResponse {
+                    request_id,
+                    answer_result,
                 }
             }
             IpcRequestKind::Attach { viewport_size, .. }
@@ -1282,10 +1323,11 @@ fn serve_connection(
                 return;
             }
             // A keyboard event, a resize, a cell size, a paste, a mouse round,
-            // a placement preview target, a placement confirm, a ping and a
-            // paint report belong on an attached client's connection, which
-            // the `Attach` arm above hands to `stream_events`. On this control
-            // path they name no client and close the connection.
+            // a placement preview target, a placement confirm, a ping, a
+            // paint report and a viewer action answer belong on an attached
+            // client's connection, which the `Attach` arm above hands to
+            // `stream_events`. On this control path they name no client and
+            // close the connection.
             IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
@@ -1294,7 +1336,8 @@ fn serve_connection(
             | IpcRequestKind::SetPanePlacementPreview { .. }
             | IpcRequestKind::ConfirmPanePlacement { .. }
             | IpcRequestKind::Ping
-            | IpcRequestKind::PaintedUpdate { .. } => return,
+            | IpcRequestKind::PaintedUpdate { .. }
+            | IpcRequestKind::ClientActionAnswer { .. } => return,
             IpcRequestKind::Discovery => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
@@ -1929,6 +1972,14 @@ fn stream_events(
                 expected_placed_tab_layout: Box::new(expected_placed_tab_layout),
                 fired_action,
             },
+            IpcRequestKind::ClientActionAnswer {
+                client_action_request_id,
+                refusal,
+            } => RuntimeEvent::ClientActionAnswer {
+                client_id,
+                client_action_request_id,
+                refusal,
+            },
             IpcRequestKind::Ping => continue,
             IpcRequestKind::PaintedUpdate { update_sequence } => {
                 paint_reporter.report_painted_update(PaintedUpdateReport {
@@ -1953,6 +2004,7 @@ fn stream_events(
             | IpcRequestKind::Restart
             | IpcRequestKind::ClipboardCopyPart { .. }
             | IpcRequestKind::ClipboardCopy { .. }
+            | IpcRequestKind::RunClientAction { .. }
             | IpcRequestKind::Prepare(_)
             | IpcRequestKind::Commit => break,
         };
@@ -2633,8 +2685,8 @@ fn report_image_send_error(
     }
 }
 
-/// Rebuild `command_envelope` with the source a control connection carries,
-/// over whatever source its sender wrote.
+/// The source a control connection carries, over `command_source`, the
+/// source its sender wrote.
 ///
 /// A control connection carries a `koshi` CLI invocation. Its two sources,
 /// [`CommandSource::InSessionCli`] and [`CommandSource::ExternalCli`], are kept
@@ -2642,27 +2694,19 @@ fn report_image_send_error(
 /// `ExternalCli { session_id: None, target_client_id: None }`, which names no
 /// session and no client.
 ///
-/// The envelope's `client_id` is re-derived from the stamped source; the two
-/// always agree.
-///
-/// A sender that writes `CommandSource::KeyBinding` and
-/// `Command::ToggleMouseSelect` reaches the dispatcher as
-/// `ExternalCli { session_id: None, target_client_id: None }` carrying
-/// `Command::ToggleMouseSelect`. The dispatcher's CLI-admission check refuses
-/// it: the CLI has no mouse-select verb.
-fn stamp_cli_command_source(command_envelope: CommandEnvelope) -> CommandEnvelope {
-    let command_source = match command_envelope.command_source {
+/// A sender that writes `CommandSource::KeyBinding` and a `Command::Visual`
+/// copy reaches the dispatcher as
+/// `ExternalCli { session_id: None, target_client_id: None }` carrying that
+/// copy. The dispatcher's source admission check refuses it: the CLI has no
+/// copy verb.
+fn stamp_cli_command_source(command_source: CommandSource) -> CommandSource {
+    match command_source {
         command_source @ (CommandSource::InSessionCli { .. }
         | CommandSource::ExternalCli { .. }) => command_source,
         CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
             CommandSource::from_external_cli(None, None)
         }
-    };
-    CommandEnvelope::from_parts(
-        command_envelope.command_id,
-        command_source,
-        command_envelope.command,
-    )
+    }
 }
 
 /// Rebuild `command_envelope` with [`CommandSource::KeyBinding`] naming

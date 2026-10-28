@@ -4,6 +4,7 @@
 //! and exact table/field renderings, all over fixed fake data.
 
 use koshi_core::client::ClientOrigin;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -731,12 +732,20 @@ fn actions_list_table_shows_every_seeded_action() {
     assert_eq!(rendered_lines.len(), build_core_action_seeds().len() + 1);
     assert_eq!(
         rendered_lines[0].split_whitespace().collect::<Vec<_>>(),
-        vec!["action", "command", "scope"]
+        vec!["action", "command", "scope", "cli_invocation"]
     );
     // The first seeded action is new-pane.
     assert_eq!(
         rendered_lines[1].split_whitespace().collect::<Vec<_>>(),
-        vec!["core:new-pane", "NewPane", "pane-session"]
+        vec![
+            "core:new-pane",
+            "NewPane",
+            "pane-session",
+            "koshi",
+            "actions",
+            "run",
+            "core:new-pane"
+        ]
     );
 }
 
@@ -754,6 +763,42 @@ fn actions_list_json_is_an_array_of_every_seeded_summary() {
     assert_eq!(action_records[0]["action"], "core:new-pane");
     assert_eq!(action_records[0]["command"], "NewPane");
     assert_eq!(action_records[0]["scope"], "pane-session");
+    assert_eq!(
+        action_records[0]["cli_invocation"],
+        "koshi actions run core:new-pane"
+    );
+}
+
+#[test]
+fn actions_list_names_the_verb_of_an_action_that_takes_arguments() {
+    let rendered_text = render_actions_list(OutputFormat::Json);
+    let json_document: serde_json::Value =
+        serde_json::from_str(&rendered_text).expect("valid JSON");
+    let cli_invocation_by_action: BTreeMap<&str, &str> = json_document
+        .as_array()
+        .expect("a JSON array")
+        .iter()
+        .map(|action_record| {
+            (
+                action_record["action"].as_str().expect("an action"),
+                action_record["cli_invocation"]
+                    .as_str()
+                    .expect("a CLI invocation"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cli_invocation_by_action["core:focus-tab"],
+        "koshi focus-tab"
+    );
+    assert_eq!(
+        cli_invocation_by_action["core:write-to-pane"],
+        "koshi input"
+    );
+    assert_eq!(
+        cli_invocation_by_action["core:toggle-notification-center"],
+        "koshi actions run core:toggle-notification-center"
+    );
 }
 
 #[test]
@@ -765,7 +810,7 @@ description: Split the focused pane and start a shell in the new one
 scope: pane-session
 targets: pane
 command: NewPane
-examples: core:new-pane, koshi new-pane
+examples: core:new-pane, koshi actions run core:new-pane, koshi new-pane
 ";
     assert_eq!(
         render_action_explain("new-pane", OutputFormat::Table),
@@ -786,6 +831,7 @@ fn explain_new_pane_json_is_exact() {
   "command": "NewPane",
   "examples": [
     "core:new-pane",
+    "koshi actions run core:new-pane",
     "koshi new-pane"
   ]
 }
@@ -805,9 +851,8 @@ fn explain_accepts_a_full_core_action_reference() {
 }
 
 #[test]
-fn explain_run_omits_the_koshi_example() {
-    // `core:run` lists only its config reference `core:run` as an example, and
-    // no `koshi` example.
+fn explain_run_names_its_verb() {
+    // `core:run` takes a program, so its CLI invocation is its own verb.
     let expected_text = r#"{
   "action": "core:run",
   "display_name": "Run Command",
@@ -818,7 +863,8 @@ fn explain_run_omits_the_koshi_example() {
   ],
   "command": "NewPane",
   "examples": [
-    "core:run"
+    "core:run",
+    "koshi run"
   ]
 }
 "#;
@@ -838,8 +884,8 @@ fn explain_of_an_unknown_action_is_none() {
 
 #[test]
 fn explain_renders_multiple_targets_joined() {
-    // `focus-pane` targets a pane and a client, joined into one cell. It lists
-    // no `koshi` example.
+    // `focus-pane` targets a pane and a client, joined into one cell. It
+    // takes a pane, so its CLI invocation is its own verb.
     let expected_text = "\
 action: core:focus-pane
 display_name: Focus Pane
@@ -847,7 +893,7 @@ description: Move the issuing client's focus to a pane
 scope: client
 targets: pane, client
 command: FocusPane
-examples: core:focus-pane
+examples: core:focus-pane, koshi focus-pane
 ";
     assert_eq!(
         render_action_explain("focus-pane", OutputFormat::Table),
@@ -1045,7 +1091,7 @@ description: Create a new tab
 scope: tab
 targets: tab
 command: NewTab
-examples: core:new-tab, koshi new-tab
+examples: core:new-tab, koshi actions run core:new-tab, koshi new-tab
 ";
     assert_eq!(
         render_action_explain("new-tab", OutputFormat::Table),
@@ -1062,7 +1108,7 @@ description: Leave the session, ending it when auto-close-session is on and no o
 scope: client
 targets: client, session
 command: Quit
-examples: core:quit
+examples: core:quit, koshi actions run core:quit
 ";
     assert_eq!(
         render_action_explain("quit", OutputFormat::Table),

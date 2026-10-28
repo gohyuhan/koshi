@@ -1,6 +1,7 @@
 //! Ending one session for `kill-session`, whatever koshi version it runs.
 //!
-//! [`end_session`](crate::session_end::end_session) asks the session to quit.
+//! [`end_session`](crate::session_end::end_session) sends the session
+//! `KillSession`, which ends it.
 //! When the session's endpoint file names a process that
 //! `find_server_process_record` confirms, that process and
 //! every process started under it end, whether or not the session quits.
@@ -21,10 +22,10 @@ use koshi_link::ipc_client;
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// How long the session has to answer `Quit`.
-const QUIT_ANSWER_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
+/// How long the session has to answer `KillSession`.
+const KILL_SESSION_ANSWER_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
-/// How long the session's process has to end after it answered `Quit`.
+/// How long the session's process has to end after it answered `KillSession`.
 const SESSION_EXIT_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
 /// How long a process has to end after `SIGTERM` before it gets `SIGKILL`,
@@ -39,11 +40,12 @@ pub enum SessionEnding {
     /// The session quit. `stopped_process_count` processes started under it
     /// still ran after that, and koshi ended them.
     Quit { stopped_process_count: usize },
-    /// The session's process still ran after `Quit`, and koshi ended it.
+    /// The session's process still ran after `KillSession`, and koshi ended
+    /// it.
     Stopped {
-        /// What `Quit` gave instead of ending the session, such as
+        /// What `KillSession` gave instead of ending the session, such as
         /// `IPC unavailable: the session did not answer in time`.
-        quit_failure: String,
+        kill_session_failure: String,
         /// The id of the session's process koshi ended.
         session_process_id: u32,
         /// How many processes started under the session still ran, and koshi
@@ -63,10 +65,10 @@ pub enum SessionEnding {
 /// 1. The processes under the session's process are listed. On Windows, the
 ///    processes holding the session's panes and the processes under them are
 ///    listed too.
-/// 2. The session is sent `Quit`. It has 5 s to take the `Quit`, and 5 s more
-///    to answer it.
+/// 2. The session is sent `KillSession`. It has 5 s to take the
+///    `KillSession`, and 5 s more to answer it.
 /// 3. If it answered and its process ends within 2 s, or its process is gone
-///    after a failed `Quit`, the processes under the session's process from
+///    after a failed `KillSession`, the processes under the session's process from
 ///    step 1 that still run are ended: [`SessionEnding::Quit`]. On Windows,
 ///    the processes holding the panes and the processes listed under them in
 ///    step 1 then have 2 s to end. If one of them still runs after that, each
@@ -77,7 +79,7 @@ pub enum SessionEnding {
 ///    under them are added. All of them, then the session's process, are
 ///    ended, with the processes from step 1: [`SessionEnding::Stopped`].
 ///
-/// A session whose process is not confirmed is sent `Quit` alone, with the
+/// A session whose process is not confirmed is sent `KillSession` alone, with the
 /// same 5 s to take it and 5 s more to answer it: [`SessionEnding::Quit`] with
 /// `stopped_process_count` `0`.
 ///
@@ -97,7 +99,7 @@ pub enum SessionEnding {
 ///   it is the list of step 1.
 /// - A confirmed session whose process still runs 2 s after koshi ended it:
 ///   [`CliError::Runtime`].
-/// - An unconfirmed session that does not quit: the `Quit` failure. While a
+/// - An unconfirmed session that does not quit: the `KillSession` failure. While a
 ///   process with the endpoint file's process id runs, it is
 ///   [`CliError::Runtime`] naming that failure, the process id, and the
 ///   command that ends it.
@@ -118,7 +120,7 @@ pub fn end_session(
     let Some(session_record) =
         find_server_process_record(&endpoint_file_path, endpoint_file.process_id)
     else {
-        return quit_unconfirmed_session(runtime_directory, &endpoint_file, session_id);
+        return end_unconfirmed_session(runtime_directory, &endpoint_file, session_id);
     };
 
     let session_records = std::slice::from_ref(&session_record);
@@ -128,22 +130,23 @@ pub fn end_session(
         process_tree::list_member_records(session_records, &first_process_records);
     let first_holder_member_records =
         process_tree::list_member_records(&first_pane_holder_records, &first_process_records);
-    let quit_failure = match submit_quit(runtime_directory, &endpoint_file, session_id) {
-        Ok(()) => {
-            let has_session_exited = process_tree::wait_for_processes_to_end(
-                session_records,
-                SESSION_EXIT_TIMEOUT_DURATION,
-            );
-            (!has_session_exited).then(|| {
-                format!(
-                    "it answered quit and still ran {} s after it",
-                    SESSION_EXIT_TIMEOUT_DURATION.as_secs()
-                )
-            })
-        }
-        Err(_) if !process_tree::is_process_running(&session_record) => None,
-        Err(quit_error) => Some(format_quit_failure(&quit_error)),
-    };
+    let kill_session_failure =
+        match submit_kill_session(runtime_directory, &endpoint_file, session_id) {
+            Ok(()) => {
+                let has_session_exited = process_tree::wait_for_processes_to_end(
+                    session_records,
+                    SESSION_EXIT_TIMEOUT_DURATION,
+                );
+                (!has_session_exited).then(|| {
+                    format!(
+                        "it answered quit and still ran {} s after it",
+                        SESSION_EXIT_TIMEOUT_DURATION.as_secs()
+                    )
+                })
+            }
+            Err(_) if !process_tree::is_process_running(&session_record) => None,
+            Err(kill_session_error) => Some(format_kill_session_failure(&kill_session_error)),
+        };
     let mut pane_holder_records = list_pane_holder_records(runtime_directory, session_id);
     append_unlisted_records(
         &mut pane_holder_records,
@@ -151,7 +154,7 @@ pub fn end_session(
             .into_iter()
             .filter(process_tree::is_process_running),
     );
-    let Some(quit_failure) = quit_failure else {
+    let Some(kill_session_failure) = kill_session_failure else {
         let mut stopped_records =
             process_tree::stop_processes(&first_member_records, PROCESS_STOP_GRACE_DURATION);
         stopped_records.extend(stop_pane_holder_trees_left_running(
@@ -174,13 +177,13 @@ pub fn end_session(
     if !process_tree::wait_for_processes_to_end(session_records, PROCESS_STOP_GRACE_DURATION) {
         return Err(CliError::Runtime {
             detail: format!(
-                "{session_id} did not quit ({quit_failure}), and its process {} still runs after koshi ended it",
+                "{session_id} did not quit ({kill_session_failure}), and its process {} still runs after koshi ended it",
                 session_record.process_id
             ),
         });
     }
     Ok(SessionEnding::Stopped {
-        quit_failure,
+        kill_session_failure,
         session_process_id: session_record.process_id,
         stopped_process_count: stopped_records
             .iter()
@@ -194,7 +197,7 @@ pub fn end_session(
 /// ran when koshi ended them.
 ///
 /// `pane_holder_records` and `first_holder_member_records`, the processes
-/// listed under the pane holders before `Quit`, have 2 s to end. If one of
+/// listed under the pane holders before `KillSession`, have 2 s to end. If one of
 /// them still runs after that, koshi ends these processes:
 ///
 /// 1. each of `first_holder_member_records` that still runs,
@@ -249,12 +252,12 @@ fn stop_pane_holder_trees_left_running(
 /// 1. `pane_holder_records`, the processes holding the session's panes,
 /// 2. `first_member_records` and `first_holder_member_records`, the processes
 ///    listed under the session process and under the pane holders before
-///    `Quit`,
+///    `KillSession`,
 /// 3. the processes under `pane_holder_records` and `session_record`, listed
 ///    at that moment,
 /// 4. `session_record`.
 ///
-/// Example: a `ping` `5002` is listed under a pane holder before `Quit`, and
+/// Example: a `ping` `5002` is listed under a pane holder before `KillSession`, and
 /// its parent ends after that. The list of step 3 does not hold `5002`, and
 /// step 2 ends it.
 ///
@@ -343,53 +346,53 @@ fn is_other_koshi_process_of_current_user(process_record: &ProcessRecord) -> boo
         && process_record.process_id != std::process::id()
 }
 
-/// Send `Quit` to the session `session_id` at `endpoint_file`, read from
-/// `runtime_directory` or the shared directory. The session has 5 s to take
-/// the `Quit`, and 5 s more to answer it. A session of this user's that
-/// refuses the connection token is sent the `Quit` once more inside the first
-/// 5 s, as
+/// Send `KillSession` to the session `session_id` at `endpoint_file`, read
+/// from `runtime_directory` or the shared directory. The session has 5 s to
+/// take the `KillSession`, and 5 s more to answer it. A session of this
+/// user's that refuses the connection token is sent the `KillSession` once
+/// more inside the first 5 s, as
 /// [`run_session_exchange_with_token_wait`](ipc_client::run_session_exchange_with_token_wait)
-/// states. A session that refuses the `Quit` while it replaces its process
-/// image, or whose connection ends while its resume file shows it doing so, is
-/// sent the `Quit` once more over the endpoint its new image advertises inside
-/// the first 5 s, as
+/// states. A session that refuses the `KillSession` while it replaces its
+/// process image, or whose connection ends while its resume file shows it
+/// doing so, is sent the `KillSession` once more over the endpoint its new
+/// image advertises inside the first 5 s, as
 /// [`wait_for_restarted_session_endpoint`](ipc_client::wait_for_restarted_session_endpoint)
 /// states.
 ///
 /// # Errors
-/// A rejected `Quit` is [`CliError::CommandRejected`]. Every other failure is
+/// A rejected `KillSession` is [`CliError::CommandRejected`]. Every other failure is
 /// what [`submit_external_command_to_endpoint`](ipc_client::submit_external_command_to_endpoint)
 /// gives.
-fn submit_quit(
+fn submit_kill_session(
     runtime_directory: &Path,
     endpoint_file: &EndpointFile,
     session_id: SessionId,
 ) -> Result<(), CliError> {
-    let answer_deadline = Instant::now() + QUIT_ANSWER_TIMEOUT_DURATION;
-    let send_quit = |session_endpoint: &EndpointFile| {
+    let answer_deadline = Instant::now() + KILL_SESSION_ANSWER_TIMEOUT_DURATION;
+    let send_kill_session = |session_endpoint: &EndpointFile| {
         ipc_client::submit_external_command_to_endpoint(
             session_endpoint,
             session_id,
-            Command::Quit,
+            Command::KillSession,
             Some(answer_deadline),
         )
     };
-    let (asked_endpoint, quit_result) = ipc_client::run_session_exchange_with_token_wait(
+    let (asked_endpoint, kill_session_result) = ipc_client::run_session_exchange_with_token_wait(
         runtime_directory,
         session_id,
         endpoint_file.clone(),
         Some(answer_deadline),
-        send_quit,
+        send_kill_session,
     );
-    let quit_result = ipc_client::run_exchange_again_after_restart(
+    let kill_session_result = ipc_client::run_exchange_again_after_restart(
         runtime_directory,
         session_id,
         Some(&asked_endpoint.connection_token),
         Some(answer_deadline),
-        quit_result,
-        send_quit,
+        kill_session_result,
+        send_kill_session,
     );
-    match quit_result? {
+    match kill_session_result? {
         CommandResult::Ok { .. } => Ok(()),
         CommandResult::Rejected { reason, help, .. } => {
             Err(CliError::CommandRejected { reason, help })
@@ -397,39 +400,40 @@ fn submit_quit(
     }
 }
 
-/// Send `Quit` to a session whose process is not confirmed, and end nothing
-/// through the operating system.
+/// Send `KillSession` to a session whose process is not confirmed, and end
+/// nothing through the operating system.
 ///
 /// # Errors
-/// The `Quit` failure. While a process with the endpoint file's process id
+/// The `KillSession` failure. While a process with the endpoint file's process id
 /// runs, the failure is [`CliError::Runtime`], for example
 /// `IPC unavailable: the session did not answer in time; koshi cannot confirm
 /// that process 5000 is session-…, and leaves it running. If it is, end it
 /// with: kill 5000`.
-fn quit_unconfirmed_session(
+fn end_unconfirmed_session(
     runtime_directory: &Path,
     endpoint_file: &EndpointFile,
     session_id: SessionId,
 ) -> Result<SessionEnding, CliError> {
-    let Err(quit_error) = submit_quit(runtime_directory, endpoint_file, session_id) else {
+    let Err(kill_session_error) = submit_kill_session(runtime_directory, endpoint_file, session_id)
+    else {
         return Ok(SessionEnding::Quit {
             stopped_process_count: 0,
         });
     };
     if process_tree::find_process_record(endpoint_file.process_id).is_none() {
-        return Err(quit_error);
+        return Err(kill_session_error);
     }
     Err(CliError::Runtime {
         detail: format!(
-            "{quit_failure}; koshi cannot confirm that process {process_id} is {session_id}, and leaves it running. If it is, end it with: {kill_command}",
-            quit_failure = format_quit_failure(&quit_error),
+            "{kill_session_failure}; koshi cannot confirm that process {process_id} is {session_id}, and leaves it running. If it is, end it with: {kill_command}",
+            kill_session_failure = format_kill_session_failure(&kill_session_error),
             process_id = endpoint_file.process_id,
             kill_command = format_process_kill_command(endpoint_file.process_id),
         ),
     })
 }
 
-/// The sentence a failed `Quit` reports: the `detail` of
+/// The sentence a failed `KillSession` reports: the `detail` of
 /// [`CliError::PreviousReleaseServer`], without its `koshi restart-servers`
 /// advice, the sentence of [`CliError::CommittedRequestUnanswered`], without
 /// its advice to check before the request runs again, and the error's own
@@ -437,8 +441,8 @@ fn quit_unconfirmed_session(
 ///
 /// Example — a koshi 0.4.0 session gives `the server answered in the format of
 /// koshi 0.4.0 or older, which this koshi cannot talk to`.
-fn format_quit_failure(quit_error: &CliError) -> String {
-    match quit_error {
+fn format_kill_session_failure(kill_session_error: &CliError) -> String {
+    match kill_session_error {
         CliError::PreviousReleaseServer { detail } => detail.clone(),
         CliError::CommittedRequestUnanswered { detail } => {
             format!("IPC unavailable: the session took the request and gave no answer ({detail})")

@@ -783,6 +783,13 @@ fn sample_events() -> Vec<SessionEvent> {
             help: None,
         },
         SessionEvent::Pong,
+        SessionEvent::ClientActionRequested {
+            client_action_request_id: 1,
+            action_reference: koshi_core::action::ActionReference::from_core_action_name(
+                "toggle-notification-center",
+            )
+            .expect("valid name"),
+        },
     ]
 }
 

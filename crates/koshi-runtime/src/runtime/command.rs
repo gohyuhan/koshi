@@ -13,6 +13,8 @@
 //! or leave one — quit, detach, detach-all, and the switch that moves one
 //! client to another session. The rest live in submodules by what they act on:
 //! `pane`, `tab`, `client`, `visual`, with target resolution in `resolve`.
+//! `client_action` asks one attached client to run a viewer-local action that
+//! `koshi actions run` named, and answers the caller.
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU16;
@@ -31,7 +33,7 @@ use koshi_core::{
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
         NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
+        QuitArgs, ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
         SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, VisualCommand,
         WriteToPaneArgs,
     },
@@ -560,7 +562,10 @@ impl Server {
             Command::Visual(command) => {
                 self.handle_visual(command_id, &envelope.command_source, &command)
             }
-            Command::Quit => Ok(self.handle_quit(command_id, &envelope.command_source)),
+            Command::Quit(command_args) => {
+                self.handle_quit(command_id, &envelope.command_source, &command_args)
+            }
+            Command::KillSession => Ok(self.handle_kill_session(command_id)),
             Command::Detach(command_args) => {
                 self.handle_detach(command_id, &envelope.command_source, &command_args)
             }
@@ -756,34 +761,41 @@ impl Server {
         self.is_quit_requested = true;
     }
 
-    /// Handle [`Command::Quit`]: a command source that names a client leaves the
-    /// session; a command source that names none ends the process.
-    ///
-    /// A keybinding or a mouse action names the client that issued it, so quit
-    /// removes that client alone, through the same detach [`Command::Detach`]
-    /// runs ([`Server::handle_client_detach`]). `auto-close-session` then
-    /// decides what happens to the session left behind: with the setting on and
-    /// no other client attached the session ends, keeping the graceful window;
+    /// Handle [`Command::Quit`]: remove the client
+    /// [`Server::resolve_target_client`] resolves — the named client, else the
+    /// issuer while it is attached, else the session's sole attached client —
+    /// through the same detach [`Command::Detach`] runs
+    /// ([`Server::handle_client_detach`]). `auto-close-session` then decides
+    /// what happens to the session left behind: with the setting on and no
+    /// other client attached the session ends, keeping the graceful window;
     /// with the setting off, or with another client still attached, the session
     /// and its panes keep running.
     ///
-    /// A command source that names no client — `kill-session` over the external
-    /// CLI, the runtime itself — takes [`Self::request_quit`] instead.
+    /// Example: with alice and bob attached,
+    /// `koshi actions run core:quit --client <alice>` removes alice, and the
+    /// session keeps running for bob.
     fn handle_quit(
         &mut self,
         command_id: CommandId,
         command_source: &CommandSource,
-    ) -> CommandResult {
-        let Some(client_id) = command_source.get_client_id() else {
-            self.request_quit();
-            return CommandResult::Ok {
-                command_id,
-                emitted_events: Vec::new(),
-            };
-        };
+        command_args: &QuitArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
+        let client_id =
+            Self::resolve_target_client(command_args.client_id, command_source, session)?;
 
         let emitted_events = self.handle_client_detach(client_id);
-        self.commit_events(command_id, emitted_events)
+        Ok(self.commit_events(command_id, emitted_events))
+    }
+
+    /// Handle [`Command::KillSession`]: end the session at once
+    /// ([`Self::request_quit`]), whichever clients are attached.
+    fn handle_kill_session(&mut self, command_id: CommandId) -> CommandResult {
+        self.request_quit();
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
     }
 
     /// Handle [`Command::Detach`]: remove the resolved client from the session
@@ -1235,6 +1247,7 @@ fn is_local_host(host: Option<&str>) -> bool {
 }
 
 mod client;
+pub(crate) mod client_action;
 mod pane;
 mod resolve;
 mod tab;

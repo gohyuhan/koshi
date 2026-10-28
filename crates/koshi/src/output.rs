@@ -39,10 +39,15 @@ use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
 };
 use koshi_core::display_width::compute_text_display_width;
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, Size};
 use serde::Serialize;
 
-use crate::cli::{KeymapScope, OutputFormat};
+use koshi_core::registry::ActionRegistry;
+use koshi_core::resolve::{resolve_action, ResolveError};
+
+use crate::cli::{
+    format_argument_verb_invocation, parse_action_reference_text, KeymapScope, OutputFormat,
+};
 use koshi_link::discovery::{ClientRow, PaneRow, SessionRow, TabRow};
 
 /// The pretty-printed JSON form of `serializable_value`, ending in a newline.
