@@ -2627,10 +2627,11 @@ fn resolve_local_session_target(
 ///
 /// With a `selector`, the first attach asks for the client that
 /// `KOSHI_REJOIN_CLIENT_ID` and `KOSHI_REJOIN_TOKEN` name
-/// ([`RejoinClaim::from_env`]). Variables that do not read log one warning,
-/// and the attach takes a new client. Example: a client whose session
-/// restarted into another build runs `koshi attach session-<uuid>` with both
-/// set, and comes back as the same client while the session holds its record.
+/// ([`RejoinClaim::from_env`]). Variables that do not read log one warning, with
+/// the read error, to the log of the session, and the attach takes a new
+/// client. Example: a client whose session restarted into another build runs
+/// `koshi attach session-<uuid>` with both set, and comes back as the same
+/// client while the session holds its record.
 pub fn attach_selected_session(
     selector: Option<&str>,
     loaded_app_config: LoadedAppConfig,
@@ -2644,16 +2645,7 @@ pub fn attach_selected_session(
             loaded_app_config,
         );
     };
-    let rejoin_claim = match RejoinClaim::from_env() {
-        Ok(rejoin_claim) => rejoin_claim,
-        Err(rejoin_claim_error) => {
-            tracing::warn!(
-                %rejoin_claim_error,
-                "the client to come back as could not be read; this attach takes a new client"
-            );
-            None
-        }
-    };
+    let rejoin_claim_reading = RejoinClaim::from_env();
     let (session_id, owner_user_id) = resolve_local_session_target(
         &runtime_directory,
         resolve_shared_sessions_base_directory_for_layer(loaded_app_config.find_app_config_layer())
@@ -2668,7 +2660,7 @@ pub fn attach_selected_session(
         SessionSelector::SessionId(session_id),
         config_directory.as_deref(),
         loaded_app_config,
-        rejoin_claim,
+        rejoin_claim_reading,
     )
 }
 
@@ -2733,7 +2725,7 @@ pub fn attach_remote_session(
         session_selector,
         koshi_paths::resolve_config_directory().as_deref(),
         loaded_app_config,
-        None,
+        Ok(None),
     )
 }
 
@@ -2788,7 +2780,7 @@ fn attach_selected_session_from_listing(
                 SessionSelector::SessionId(session_id),
                 config_directory,
                 loaded_app_config,
-                None,
+                Ok(None),
             );
         }
         SessionSelection::Remote(remote_session_index) => {
@@ -2804,7 +2796,7 @@ fn attach_selected_session_from_listing(
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
         loaded_app_config,
-        None,
+        Ok(None),
     )
 }
 
@@ -2911,8 +2903,24 @@ pub(crate) fn attach_session(
         SessionSelector::SessionId(session_id),
         config_directory,
         loaded_app_config,
-        None,
+        Ok(None),
     )
+}
+
+/// Install the log subscriber of session `session_id` for this process, on the
+/// terms the `logging` section of `app_config_layer` sets
+/// ([`initialize_tracing`](koshi_observability::logging::initialize_tracing)).
+/// A process that already has a subscriber keeps it.
+pub(crate) fn initialize_session_log(
+    app_config_layer: Option<&PartialKoshiConfig>,
+    session_id: SessionId,
+) {
+    let _ = koshi_observability::logging::initialize_tracing(
+        koshi_link::config::build_logging_parameters(
+            app_config_layer,
+            koshi_observability::logging::LogFileOwner::Session { session_id },
+        ),
+    );
 }
 
 /// Join the session `session_selector` names in `home` and run until nothing moves this
@@ -2935,15 +2943,32 @@ pub(crate) fn attach_session(
 /// this process's start. Every attachment after the first reads `koshi.kdl` in
 /// `config_directory` again when it starts.
 ///
-/// The first attachment asks for the client `rejoin_claim` names. Every
-/// attachment after the first asks for none.
+/// A `session_selector` that names a session id installs the log subscriber of
+/// that session before the first dial ([`initialize_session_log`]).
+///
+/// The first attachment asks for the client `rejoin_claim_reading` names.
+/// Every attachment after the first asks for none. An `Err` logs one warning
+/// that carries the error, and the first attachment asks for no client.
 fn attach_home(
     mut home: Home,
     session_selector: SessionSelector,
     config_directory: Option<&Path>,
     loaded_app_config: LoadedAppConfig,
-    mut rejoin_claim: Option<RejoinClaim>,
+    rejoin_claim_reading: Result<Option<RejoinClaim>, CliError>,
 ) -> Result<(), CliError> {
+    if let SessionSelector::SessionId(session_id) = session_selector {
+        initialize_session_log(loaded_app_config.find_app_config_layer(), session_id);
+    }
+    let mut rejoin_claim = match rejoin_claim_reading {
+        Ok(rejoin_claim) => rejoin_claim,
+        Err(rejoin_claim_error) => {
+            tracing::warn!(
+                %rejoin_claim_error,
+                "the client to come back as could not be read; this attach takes a new client"
+            );
+            None
+        }
+    };
     let client_executable_path = koshi_host::program_path::resolve_program_path().ok();
     let mut next_session_selector = session_selector;
     let mut first_loaded_app_config = Some(loaded_app_config);
@@ -2992,6 +3017,10 @@ fn attach_home(
 /// session that answers with another client logs one warning, and this
 /// attachment goes on as that client.
 ///
+/// Once the dial returns, the log subscriber of the joined session is installed
+/// ([`initialize_session_log`]). The config warnings and the warning above are
+/// logged after it.
+///
 /// `client_executable_path` is the path this program was started from, which
 /// [`report_attachment_ending`] runs `koshi attach` from when the session
 /// restarted into a build that refused this client's protocol version.
@@ -3032,6 +3061,13 @@ fn attach_once(
         client_config.remote_link_timeout_ms,
     )?;
     let client_id = joined_session.attach_answer.client_id;
+    initialize_session_log(
+        loaded_config.app_config_layer.as_ref(),
+        joined_session.attach_answer.session_id,
+    );
+    for warning in &config_warnings {
+        tracing::warn!("{warning}");
+    }
     if let Some(rejoin_claim) =
         rejoin_claim.filter(|rejoin_claim| rejoin_claim.client_id != client_id)
     {
@@ -3112,18 +3148,6 @@ fn attach_once(
     // from this user's config files. Its frames arrive over the connection,
     // and the delivery receiver it holds has no sender. It holds the cleanup
     // guard that restores this outer terminal.
-    // The subscriber this client writes its own log through. `koshi attach`
-    // installs none before this point; a bare `koshi` already has one, and
-    // this call answers `AlreadyInitialized` for it.
-    let _ = koshi_observability::logging::initialize_tracing(
-        koshi_link::config::build_logging_parameters(
-            loaded_config.app_config_layer.as_ref(),
-            koshi_observability::logging::LogFileOwner::Session { session_id },
-        ),
-    );
-    for warning in &config_warnings {
-        tracing::warn!("{warning}");
-    }
     let mut client = terminal::build_client_with_loaded_config(
         client_id,
         get_terminal_viewport_size(),
