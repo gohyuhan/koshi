@@ -23,5 +23,9 @@ flate2.workspace = true
 koshi-test-support.workspace = true
 serde_json.workspace = true
 
+[[bench]]
+name = "engine_throughput"
+harness = false
+
 [lints]
 workspace = true
