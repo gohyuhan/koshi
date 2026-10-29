@@ -1,9 +1,9 @@
 //! Tests for where the floating pane tray and its tabline button sit: the
 //! button three cells left of the mode tag, the tray hanging from the pane
 //! area's top row with its right border under the button's last cell, the
-//! slots per row the pane area's width allows, the titlebar's tile title,
-//! label and close button and their room, and every frame that has no room
-//! for the tray.
+//! slots per row the pane area's width allows, the tiles the tray shows, the
+//! titlebar's tile title, label and close button and their room, and every
+//! frame that has no room for the tray.
 
 use super::*;
 
@@ -177,11 +177,17 @@ fn the_button_sits_three_cells_left_of_the_mode_tag_with_its_glyph_in_the_middle
 }
 
 #[test]
-fn a_session_with_no_floating_pane_draws_no_button_and_no_tray() {
+fn a_session_with_no_floating_pane_draws_the_button_and_has_room_for_the_tray() {
     let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
 
-    assert_eq!(find_core_button_rect(&render_snapshot), None);
-    assert_eq!(compute_core_tray_layout(&render_snapshot), None);
+    assert_eq!(
+        find_core_button_rect(&render_snapshot),
+        Some(build_cell_rect(71, 0, 3, 1))
+    );
+    assert_eq!(
+        compute_core_tray_layout(&render_snapshot).map(|tray_layout| tray_layout.tray_rect),
+        Some(build_cell_rect(5, 1, 69, 10))
+    );
 }
 
 #[test]
@@ -279,15 +285,40 @@ fn the_label_reads_restore_all_only_while_every_floating_pane_is_minimized() {
         build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &["htop", "logs"]);
     assert_eq!(
         select_toggle_minimize_all_label_text(&render_snapshot.session_snapshot),
-        "restore all"
+        Some("restore all")
     );
 
     show_tray_test_floating_pane(&mut render_snapshot, 1, build_cell_rect(16, 4, 48, 13));
 
     assert_eq!(
         select_toggle_minimize_all_label_text(&render_snapshot.session_snapshot),
-        "minimize all"
+        Some("minimize all")
     );
+}
+
+#[test]
+fn a_session_with_no_floating_pane_has_no_label_and_the_tile_title_takes_every_title_cell() {
+    let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+
+    assert_eq!(
+        select_toggle_minimize_all_label_text(&render_snapshot.session_snapshot),
+        None
+    );
+    let tray_layout = compute_core_tray_layout(&render_snapshot)
+        .expect("an 80x24 frame with no floating pane has room for the tray");
+    assert_eq!(tray_layout.toggle_minimize_all_rect, None);
+    assert_eq!(
+        tray_layout.tile_title_rect,
+        Some(build_cell_rect(7, 2, 61, 1))
+    );
+}
+
+#[test]
+fn the_tray_shows_one_tile_more_than_the_floating_panes_until_every_slot_holds_a_pane() {
+    assert_eq!(compute_tray_tile_count(0), 1);
+    assert_eq!(compute_tray_tile_count(3), 4);
+    assert_eq!(compute_tray_tile_count(11), 12);
+    assert_eq!(compute_tray_tile_count(12), 12);
 }
 
 #[test]

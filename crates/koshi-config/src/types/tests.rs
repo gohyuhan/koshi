@@ -1156,8 +1156,8 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
         build_expected_client_binding(
             "floating-pane-tray",
             "<CR>",
-            "toggle-selected-tray-tile",
-            ClientActionKind::ToggleSelectedTrayTile,
+            "activate-selected-tray-tile",
+            ClientActionKind::ActivateSelectedTrayTile,
         ),
         build_expected_binding(
             "floating-pane-tray",

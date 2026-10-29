@@ -414,11 +414,13 @@ fn compute_hidden_column_count(box_column_count: u16, hidden_per_mille: u16) -> 
 /// with 3, and ` ●99+ ` with more than 99. `●` (`U+25CF`) has East Asian
 /// ambiguous width, and koshi draws it one cell wide.
 #[must_use]
-pub fn format_notification_button_text(notification_button: NotificationButton) -> String {
+pub fn format_notification_button_text(
+    notification_button: NotificationButton,
+) -> Cow<'static, str> {
     match notification_button.unread_entry_count {
-        0 => " ● ".to_string(),
-        unread_entry_count @ 1..=99 => format!(" ●{unread_entry_count} "),
-        _ => " ●99+ ".to_string(),
+        0 => Cow::Borrowed(" ● "),
+        unread_entry_count @ 1..=99 => Cow::Owned(format!(" ●{unread_entry_count} ")),
+        _ => Cow::Borrowed(" ●99+ "),
     }
 }
 
@@ -1426,18 +1428,15 @@ fn find_notification_pane_area(frame_layout: FrameLayout<'_>) -> Option<RatatuiR
 }
 
 /// The columns the tabline's notification button takes: the cells right
-/// before `button_end_column`, the tray button's column or, with no tray
-/// button, the mode tag's column. `None` when `notification_button` is
-/// `None`, or when fewer cells of the row than the button takes lie left of
-/// `button_end_column`. A ` ●3 ` button before a mode tag at column `74`
-/// gives `70..74`.
+/// before `button_end_column`, the tray button's column. `None` when fewer
+/// cells of the row than the button takes lie left of `button_end_column`. A
+/// ` ●3 ` button before a tray button at column `71` gives `67..71`.
 pub(crate) fn find_notification_button_columns(
-    notification_button: Option<NotificationButton>,
+    notification_button: NotificationButton,
     tabline_area: RatatuiRect,
     button_end_column: u16,
 ) -> Option<Range<u16>> {
-    let button_column_count =
-        get_text_width(&format_notification_button_text(notification_button?));
+    let button_column_count = get_text_width(&format_notification_button_text(notification_button));
     let has_room = button_end_column.saturating_sub(tabline_area.x) >= button_column_count;
     has_room.then(|| (button_end_column - button_column_count)..button_end_column)
 }

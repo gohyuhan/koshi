@@ -2,18 +2,21 @@
 //! act on, and the command a key or a click on it sends.
 //!
 //! The tray is this viewer's alone. Opening, closing and selecting send
-//! nothing. A tile toggle sends `TogglePaneMinimized` for the tile's pane, and
-//! the header label sends `ToggleAllFloatingPanesMinimized`. The session reads
+//! nothing. A pane's tile sends `TogglePaneMinimized` for that pane, and the
+//! header label sends `ToggleAllFloatingPanesMinimized`. The session reads
 //! this client's view when it runs each, and changes the view of this client
-//! only.
+//! only. The `+ new` tile closes the tray and sends the `NewPane` of
+//! `core:new-pane-floating`.
 
 use koshi_core::command::{Command, TogglePaneMinimizedArgs};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{CommandId, PaneId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
+use koshi_core::resolve::build_new_floating_pane_command;
 use koshi_renderer::floating_pane_tray::{
-    compute_floating_pane_tray_layout, find_floating_pane_tray_glyph_cell, FloatingPaneTrayLayout,
+    compute_floating_pane_tray_layout, compute_tray_tile_count, find_floating_pane_tray_glyph_cell,
+    FloatingPaneTrayLayout,
 };
 use koshi_renderer::snapshot::{
     CommittedRegions, FloatingPaneTray, FrameLayout, LinkStatus, MouseFrame, RenderSnapshot,
@@ -46,11 +49,11 @@ impl Client {
     ///
     /// Opens nothing while another local submode is on, while the viewer is
     /// not [`LinkStatus::Linked`], with no painted frame, and when the frame
-    /// has no room for the tray ([`compute_floating_pane_tray_layout`]): the
-    /// session holds no floating pane, or the pane area is too small.
+    /// has no room for the tray ([`compute_floating_pane_tray_layout`]).
     ///
     /// With floating panes `htop`, `logs` and `notes` and `logs` focused, the
-    /// tray opens with tile `1` selected.
+    /// tray opens with tile `1` selected. With no floating pane, it opens with
+    /// tile `0`, the `+ new` tile, selected.
     pub(crate) fn open_floating_pane_tray(&mut self, mouse_frame: Option<&MouseFrame>) {
         if self.find_viewer_local_input_mode().is_some() || self.link_status != LinkStatus::Linked {
             return;
@@ -90,11 +93,13 @@ impl Client {
     /// Select the tile one step in `direction` from the selected tile, in the
     /// tray's grid as `mouse_frame` lays it out: `Left` and `Right` step in the
     /// row, `Up` and `Down` step one row. A step past the grid's edge, or onto
-    /// a slot that shows no floating pane, selects nothing new. Does nothing
-    /// while the tray is closed or with no painted frame.
+    /// a slot that shows no tile ([`compute_tray_tile_count`]), selects
+    /// nothing new. Does nothing while the tray is closed or with no painted
+    /// frame.
     ///
     /// In a tray of six slots per row with eight floating panes, `Down` from
-    /// tile `1` selects tile `7`, and `Down` from tile `2` stays on tile `2`.
+    /// tile `1` selects tile `7`, `Down` from tile `2` selects tile `8`, the
+    /// `+ new` tile, and `Down` from tile `3` stays on tile `3`.
     pub(crate) fn select_tray_tile(
         &mut self,
         direction: Direction,
@@ -109,7 +114,7 @@ impl Client {
             return;
         };
         let slots_per_row = usize::from(tray_layout.slots_per_row);
-        let tile_count = mouse_frame.session_snapshot.floating_panes.len();
+        let tile_count = compute_tray_tile_count(mouse_frame.session_snapshot.floating_panes.len());
         let selected_tile_index = floating_pane_tray.selected_tile_index;
         let column_index = selected_tile_index % slots_per_row;
         let next_tile_index = match direction {
@@ -128,59 +133,87 @@ impl Client {
         }
     }
 
-    /// The `TogglePaneMinimized` of the selected tile's pane
-    /// ([`build_tray_tile_toggle_command`]), sent as a key binding's command.
-    /// `Consumed` while the tray is closed, with no painted frame, or when the
-    /// selected tile shows no pane.
-    pub(crate) fn toggle_selected_tray_tile(
-        &self,
+    /// The command of the selected tile ([`activate_tray_tile`](Self::activate_tray_tile)),
+    /// sent as a key binding's command. `Consumed` while the tray is closed,
+    /// with no painted frame, or when the selected slot shows no tile.
+    pub(crate) fn activate_selected_tray_tile(
+        &mut self,
         mouse_frame: Option<&MouseFrame>,
     ) -> PlacementInputAction {
         let (Some(floating_pane_tray), Some(mouse_frame)) = (self.floating_pane_tray, mouse_frame)
         else {
             return PlacementInputAction::Consumed;
         };
-        let Some(floating_pane) = mouse_frame
-            .session_snapshot
-            .floating_panes
-            .get(floating_pane_tray.selected_tile_index)
-        else {
+        let Some(command) = self.activate_tray_tile(
+            &mouse_frame.session_snapshot,
+            floating_pane_tray.selected_tile_index,
+        ) else {
             return PlacementInputAction::Consumed;
         };
         PlacementInputAction::SubmitCommand {
             command_id: CommandId::new(),
-            command: build_tray_tile_toggle_command(floating_pane.get_pane_id()),
+            command,
         }
+    }
+
+    /// The command tile `tile_index` of the open tray sends for
+    /// `session_snapshot`'s floating panes. A pane's tile gives
+    /// `TogglePaneMinimized` for that pane: the session minimizes the pane
+    /// while this client shows it, and restores it on top and focuses it while
+    /// this client minimized it. The `+ new` tile closes the tray
+    /// ([`close_floating_pane_tray`](Self::close_floating_pane_tray)) and gives
+    /// the `NewPane` of `core:new-pane-floating`
+    /// ([`build_new_floating_pane_command`]). `None`, changing nothing, when
+    /// the slot shows no tile ([`compute_tray_tile_count`]).
+    ///
+    /// With floating panes `htop` and `logs`, tile `1` gives the toggle of
+    /// `logs`, tile `2` closes the tray and gives the `NewPane`, and tile `3`
+    /// gives `None`.
+    fn activate_tray_tile(
+        &mut self,
+        session_snapshot: &SessionSnapshot,
+        tile_index: usize,
+    ) -> Option<Command> {
+        if let Some(floating_pane) = session_snapshot.floating_panes.get(tile_index) {
+            return Some(Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+                pane_id: Some(floating_pane.get_pane_id()),
+            }));
+        }
+        if tile_index >= compute_tray_tile_count(session_snapshot.floating_panes.len()) {
+            return None;
+        }
+        self.close_floating_pane_tray();
+        Some(build_new_floating_pane_command())
     }
 
     /// Keep the open tray in step with `render_snapshot`, the frame just
     /// applied, painted with `committed_regions`: a selected tile index past
-    /// the last floating pane moves to the last one, and a hovered tile index
-    /// past it is dropped. The tray closes
+    /// the last tile ([`compute_tray_tile_count`]) moves to the last tile, and
+    /// a hovered tile index past it is dropped. The tray closes
     /// ([`close_floating_pane_tray`](Self::close_floating_pane_tray)) when
     /// the frame has no room for it ([`compute_floating_pane_tray_layout`]):
-    /// the session holds no floating pane, every pane is suppressed, or the
-    /// pane area is too small. Does nothing while the tray is closed.
+    /// every pane is suppressed, or the pane area is too small. Does nothing
+    /// while the tray is closed.
     ///
     /// Returns where the frame lays out the open tray, or `None` while the
     /// tray is closed, this call closing it included.
     ///
-    /// With the tray open on tile `2` of three, a frame with two floating
-    /// panes selects tile `1`, and a frame with none closes the tray.
+    /// With the tray open on tile `3`, the `+ new` tile after three floating
+    /// panes, a frame with one floating pane selects tile `1`, its `+ new`
+    /// tile.
     pub(crate) fn update_floating_pane_tray(
         &mut self,
         render_snapshot: &RenderSnapshot,
         committed_regions: &CommittedRegions,
     ) -> Option<FloatingPaneTrayLayout> {
         let floating_pane_tray = self.floating_pane_tray?;
-        let floating_pane_count = render_snapshot.session_snapshot.floating_panes.len();
+        let tile_count =
+            compute_tray_tile_count(render_snapshot.session_snapshot.floating_panes.len());
         self.floating_pane_tray = Some(FloatingPaneTray {
-            selected_tile_index: floating_pane_tray
-                .selected_tile_index
-                .min(floating_pane_count.saturating_sub(1)),
+            selected_tile_index: floating_pane_tray.selected_tile_index.min(tile_count - 1),
             hovered_tile_index: floating_pane_tray
                 .hovered_tile_index
-                .filter(|&hovered_tile_index| hovered_tile_index < floating_pane_count),
+                .filter(|&hovered_tile_index| hovered_tile_index < tile_count),
         });
         let viewer_chrome = self.build_viewer_chrome(
             render_snapshot.client_snapshot.active_tab_id,
@@ -256,9 +289,11 @@ impl Client {
     /// - A pointer motion sets the hovered tile to the tile under the pointer,
     ///   or to none. Over the tray it also clears the hovered pane and the
     ///   placement handle hover, and sends nothing.
-    /// - A left press on a tile selects it and sends its
-    ///   [`build_tray_tile_toggle_command`]. A left press on the titlebar
-    ///   label sends `ToggleAllFloatingPanesMinimized`. A left press on the
+    /// - A left press on a tile selects it and sends its command
+    ///   ([`activate_tray_tile`](Self::activate_tray_tile)): a pane's tile
+    ///   sends `TogglePaneMinimized`, and the `+ new` tile closes the tray and
+    ///   sends `NewPane`. A left press on the titlebar label sends
+    ///   `ToggleAllFloatingPanesMinimized`. A left press on the
     ///   close button `✕` closes the tray and sends nothing. A left press on
     ///   any other cell of the tray sends nothing.
     /// - A press on the tray button `mouse_frame` shows closes the tray and
@@ -310,10 +345,12 @@ impl Client {
                     selected_tile_index: tile_index,
                     ..floating_pane_tray
                 });
-                let pane_id = mouse_frame.session_snapshot.floating_panes[tile_index].get_pane_id();
-                Some(vec![MouseAction::Command(Box::new(
-                    build_tray_tile_toggle_command(pane_id),
-                ))])
+                let mouse_actions =
+                    match self.activate_tray_tile(&mouse_frame.session_snapshot, tile_index) {
+                        Some(command) => vec![MouseAction::Command(Box::new(command))],
+                        None => Vec::new(),
+                    };
+                Some(mouse_actions)
             }
             (MouseKind::Press(MouseButton::Left), HitRegion::FloatingPaneTrayToggleMinimizeAll) => {
                 Some(vec![MouseAction::Command(Box::new(
@@ -335,17 +372,6 @@ impl Client {
             _ => is_on_tray.then(Vec::new),
         }
     }
-}
-
-/// The command a tile of the floating pane `pane_id` sends:
-/// `TogglePaneMinimized` for `pane_id`. The session minimizes the pane while
-/// the viewer shows it, and restores it on top and focuses it while the viewer
-/// minimized it.
-#[must_use]
-fn build_tray_tile_toggle_command(pane_id: PaneId) -> Command {
-    Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-        pane_id: Some(pane_id),
-    })
 }
 
 /// Where the floating panes of one frame minimize into and restore out of,

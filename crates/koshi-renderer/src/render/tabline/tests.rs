@@ -158,16 +158,23 @@ fn get_rendered_cell_symbol(render_buffer: &Buffer, column_index: u16) -> &str {
     render_buffer[(column_index, 0)].symbol()
 }
 
+/// The cells the notification button ` ● ` and the tray button ` ⧉ ` take left
+/// of the mode tag on every row with room for them.
+const TABLINE_BUTTONS_COLUMN_COUNT: u16 = 6;
+
 // --- geometry: block widths and the fitting window ---------------------------
 
 #[test]
 fn one_tab_that_fits_shows_whole_with_no_arrows() {
     // Session block ` s ` (3 cells) plus the version badge; right block
-    // " BASE " = 6; the strip starts one cell past the session block, so the
-    // tab " #1  a " (7 cells) sits just after the badge.
+    // " BASE " = 6, with ` ● ` and ` ⧉ ` in the 6 cells left of it; the strip
+    // starts one cell past the session block, so the tab " #1  a " (7 cells)
+    // sits just after the badge.
     let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
-        build_tabline_area(20 + compute_version_badge_column_count()),
+        build_tabline_area(
+            20 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(
         tabline_layout.session_block_width,
@@ -175,7 +182,7 @@ fn one_tab_that_fits_shows_whole_with_no_arrows() {
     );
     assert_eq!(
         tabline_layout.right_block_start_column,
-        14 + compute_version_badge_column_count()
+        14 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count()
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
@@ -217,10 +224,12 @@ fn several_tabs_that_all_fit_pack_left_to_right_with_a_gap() {
 #[test]
 fn a_tab_that_exactly_fills_the_gap_is_kept() {
     // One cell wider than the tab needs: the tab's cells end exactly where the
-    // right block starts, so it just fits and no scrolling begins.
+    // notification button starts, so it just fits and no scrolling begins.
     let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
-        build_tabline_area(17 + compute_version_badge_column_count()),
+        build_tabline_area(
+            17 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(
         tabline_layout.visible_tab_spans,
@@ -241,7 +250,9 @@ fn one_column_too_narrow_drops_the_tab_and_shows_a_right_arrow() {
     // off the right edge.
     let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
-        build_tabline_area(16 + compute_version_badge_column_count()),
+        build_tabline_area(
+            16 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert!(tabline_layout.visible_tab_spans.is_empty());
@@ -267,7 +278,9 @@ fn two_tabs_fit_when_the_row_holds_both_plus_the_gap_between_them() {
 
     let fitting_layout = solve_tabline_layout(
         &tabline_test_frame,
-        build_tabline_area(25 + compute_version_badge_column_count()),
+        build_tabline_area(
+            25 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(fitting_layout.first_visible_tab_index, 0);
     assert_eq!(
@@ -282,7 +295,9 @@ fn two_tabs_fit_when_the_row_holds_both_plus_the_gap_between_them() {
 
     let one_cell_short_layout = solve_tabline_layout(
         &tabline_test_frame,
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(one_cell_short_layout.first_visible_tab_index, 0);
     assert_eq!(
@@ -313,7 +328,9 @@ fn following_the_active_tab_scrolls_it_into_view() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 2);
     assert_eq!(
@@ -345,7 +362,9 @@ fn the_window_starts_at_the_smallest_index_that_still_shows_the_active_tab() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(28 + compute_version_badge_column_count()),
+        build_tabline_area(
+            28 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 2);
     assert_eq!(
@@ -372,7 +391,9 @@ fn a_peek_offset_windows_from_that_index_with_both_arrows() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 1);
     assert_eq!(
@@ -403,7 +424,9 @@ fn a_peek_offset_past_the_last_tab_clamps_to_it() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 2);
     assert_eq!(
@@ -433,7 +456,9 @@ fn a_peek_offset_of_zero_holds_the_window_at_the_first_tab() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
@@ -488,7 +513,9 @@ fn no_active_tab_windows_from_the_first() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
@@ -517,7 +544,9 @@ fn the_first_active_tab_wins_when_several_are_marked() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert_eq!(
@@ -548,7 +577,9 @@ fn an_active_tab_wider_than_the_window_shows_no_tabs_between_both_arrows() {
             LockMode::Normal,
             false,
         ),
-        build_tabline_area(24 + compute_version_badge_column_count()),
+        build_tabline_area(
+            24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(tabline_layout.first_visible_tab_index, 1);
     assert!(tabline_layout.visible_tab_spans.is_empty());
@@ -598,13 +629,14 @@ fn a_zero_width_row_yields_no_blocks_and_no_tabs() {
 
 #[test]
 fn a_row_offset_from_the_origin_places_every_block_from_its_x() {
-    // The same row as the origin case, 20 cells plus the version badge's width,
-    // starting at column 10: every column below is the origin case shifted by
-    // 10, and the right block still ends at the row's right edge.
+    // The same row as the origin case, 20 cells plus the buttons' and the
+    // version badge's width, starting at column 10: every column below is the
+    // origin case shifted by 10, and the right block still ends at the row's
+    // right edge.
     let tabline_area = RatatuiRect {
         x: 10,
         y: 0,
-        width: 20 + compute_version_badge_column_count(),
+        width: 20 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
         height: 1,
     };
     let tabline_layout = solve_tabline_layout(
@@ -617,7 +649,7 @@ fn a_row_offset_from_the_origin_places_every_block_from_its_x() {
     );
     assert_eq!(
         tabline_layout.right_block_start_column,
-        24 + compute_version_badge_column_count()
+        24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count()
     );
     assert_eq!(
         tabline_layout.visible_tab_spans,
@@ -800,7 +832,9 @@ fn a_wide_session_name_widens_the_left_block() {
     // first tab start one cell further right.
     let tabline_layout = solve_tabline_layout(
         &build_tabline_frame("字", &[("a", true)], None, LockMode::Normal, false),
-        build_tabline_area(20 + compute_version_badge_column_count()),
+        build_tabline_area(
+            20 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(
         tabline_layout.session_block_width,
@@ -823,7 +857,9 @@ fn empty_session_and_tab_names_keep_their_padding() {
     let tabline_frame = build_tabline_frame("", &[("", true)], None, LockMode::Normal, false);
     let tabline_layout = solve_tabline_layout(
         &tabline_frame,
-        build_tabline_area(20 + compute_version_badge_column_count()),
+        build_tabline_area(
+            20 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+        ),
     );
     assert_eq!(
         tabline_layout.session_block_width,
@@ -838,7 +874,10 @@ fn empty_session_and_tab_names_keep_their_padding() {
         )]
     );
 
-    let render_buffer = render_tabline(&tabline_frame, 20 + compute_version_badge_column_count());
+    let render_buffer = render_tabline(
+        &tabline_frame,
+        20 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
+    );
     let tab_start_column = 3 + compute_version_badge_column_count();
     let rendered_text: String = (tab_start_column..tab_start_column + 6)
         .map(|column_index| get_rendered_cell_symbol(&render_buffer, column_index))
@@ -864,7 +903,7 @@ fn a_two_digit_tab_number_widens_that_tab() {
 
 #[test]
 fn draw_paints_session_tab_and_mode_with_their_styles() {
-    let column_count = 20 + compute_version_badge_column_count();
+    let column_count = 20 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count();
     let render_buffer = render_tabline(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         column_count,
@@ -1063,18 +1102,19 @@ fn a_row_below_the_buffer_leaves_every_cell_untouched() {
 
 #[test]
 fn a_row_too_narrow_for_the_badge_drops_it_whole() {
-    // 16 cells hold the session block and the " BASE " tag but not the badge
-    // as well. The badge is dropped entire rather than cut off part-way. The
-    // tab does not fit either, so the strip is just its right arrow.
+    // 22 cells hold the session block, ` ● `, ` ⧉ ` and the " BASE " tag but
+    // not the badge as well. The badge is dropped entire rather than cut off
+    // part-way. The tab does not fit either, so the strip is just its right
+    // arrow.
     let tabline_test_frame =
         build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false);
-    let render_buffer = render_tabline(&tabline_test_frame, 16);
-    let rendered_row: String = (0..16)
+    let render_buffer = render_tabline(&tabline_test_frame, 22);
+    let rendered_row: String = (0..22)
         .map(|column_index| get_rendered_cell_symbol(&render_buffer, column_index))
         .collect();
-    assert_eq!(rendered_row, " s       ▶ BASE ");
+    assert_eq!(rendered_row, " s       ▶ ●  ⧉  BASE ");
     assert_eq!(
-        solve_tabline_layout(&tabline_test_frame, build_tabline_area(16)).session_block_width,
+        solve_tabline_layout(&tabline_test_frame, build_tabline_area(22)).session_block_width,
         3
     );
 }
@@ -1240,13 +1280,14 @@ fn draw_paints_the_base_tag_while_the_viewer_has_a_link() {
 
 #[test]
 fn draw_paints_the_right_scroll_arrow_when_a_tab_is_hidden() {
-    let column_count = 16 + compute_version_badge_column_count();
+    let column_count = 16 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count();
     let render_buffer = render_tabline(
         &build_tabline_frame("s", &[("a", true)], None, LockMode::Normal, false),
         column_count,
     );
-    // The tab is dropped; a "▶" sits one cell left of the right block.
-    let right_arrow_column = column_count - 7;
+    // The tab is dropped; a "▶" sits one cell left of the notification
+    // button.
+    let right_arrow_column = column_count - 7 - TABLINE_BUTTONS_COLUMN_COUNT;
     assert_eq!(
         get_rendered_cell_symbol(&render_buffer, right_arrow_column),
         "▶"
@@ -1275,7 +1316,7 @@ fn draw_paints_the_left_scroll_arrow_when_a_tab_is_hidden_left() {
             LockMode::Normal,
             false,
         ),
-        24 + compute_version_badge_column_count(),
+        24 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count(),
     );
     // Peeking from index 1 hides tab 0 off the left: "◀" at the strip start,
     // one cell past the session block and its badge.
@@ -1305,8 +1346,9 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
     let oversized_session_name = "x".repeat(usize::from(u16::MAX) + 64);
     assert_eq!(get_text_width(&oversized_session_name), u16::MAX);
 
-    // The solve still answers, and the oversized name claims exactly the 34
-    // cells left of the 6-cell " BASE " block — never more than the row.
+    // The solve still answers, and the oversized name claims exactly the 28
+    // cells left of ` ● `, ` ⧉ ` and the 6-cell " BASE " block — never more
+    // than the row.
     let tabline_test_frame = build_tabline_frame(
         &oversized_session_name,
         &[("one", true)],
@@ -1323,7 +1365,7 @@ fn an_absurdly_long_name_saturates_instead_of_wrapping() {
             height: 1,
         },
     );
-    assert_eq!(tabline_layout.session_block_width, 34);
+    assert_eq!(tabline_layout.session_block_width, 28);
     assert_eq!(tabline_layout.right_block_start_column, 34);
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
     assert!(tabline_layout.visible_tab_spans.is_empty());
@@ -1394,8 +1436,8 @@ fn the_tray_button_glyph_takes_one_cell_also_where_ambiguous_characters_take_two
 }
 
 #[test]
-fn a_session_with_a_floating_pane_puts_the_tray_button_left_of_the_mode_tag_and_ends_the_tabs_there(
-) {
+fn both_buttons_show_with_no_floating_pane_and_no_notification_and_a_floating_pane_changes_nothing()
+{
     let mut tabline_test_frame = build_tabline_frame(
         "s",
         &[("one", true), ("two", false)],
@@ -1409,6 +1451,11 @@ fn a_session_with_a_floating_pane_puts_the_tray_button_left_of_the_mode_tag_and_
     let tabline_column_count = 31 + badge_column_count;
     let tabline_area = build_tabline_area(tabline_column_count);
     let tabline_layout_without_float = solve_tabline_layout(&tabline_test_frame, tabline_area);
+    let rendered_buttons_without_float = format_rendered_cells(
+        &render_tabline(&tabline_test_frame, tabline_column_count),
+        0,
+        19 + badge_column_count..tabline_column_count,
+    );
     tabline_test_frame
         .render_snapshot
         .session_snapshot
@@ -1420,57 +1467,41 @@ fn a_session_with_a_floating_pane_puts_the_tray_button_left_of_the_mode_tag_and_
 
     let tabline_layout_with_float = solve_tabline_layout(&tabline_test_frame, tabline_area);
 
-    // ` BASE ` takes the last 6 columns, from 25 + badge. Both tabs fit before
-    // it. The button takes the 3 columns before ` BASE `, the second tab no
-    // longer fits, and the strip scrolls with a right arrow before the button.
-    let right_block_start_column = 25 + badge_column_count;
-    assert_eq!(
-        tabline_layout_without_float.right_block_start_column,
-        right_block_start_column
-    );
-    assert_eq!(
-        tabline_layout_without_float.floating_pane_tray_button_column,
-        None
-    );
-    assert_eq!(
-        tabline_layout_without_float.tab_strip_end_column,
-        right_block_start_column
-    );
-    assert_eq!(
-        tabline_layout_without_float.visible_tab_spans,
-        vec![
-            build_visible_tab_span(0, 4 + badge_column_count, 9),
-            build_visible_tab_span(1, 14 + badge_column_count, 9),
-        ]
-    );
-    assert_eq!(
-        tabline_layout_with_float.right_block_start_column,
-        right_block_start_column
-    );
-    assert_eq!(
-        tabline_layout_with_float.floating_pane_tray_button_column,
-        Some(22 + badge_column_count)
-    );
-    assert_eq!(
-        tabline_layout_with_float.tab_strip_end_column,
-        22 + badge_column_count
-    );
-    assert_eq!(
-        tabline_layout_with_float.visible_tab_spans,
-        vec![build_visible_tab_span(0, 5 + badge_column_count, 9)]
-    );
-    assert_eq!(tabline_layout_with_float.left_scroll_arrow_column, None);
-    assert_eq!(
-        tabline_layout_with_float.right_scroll_arrow_column,
-        Some(21 + badge_column_count)
-    );
+    // ` BASE ` takes the last 6 columns, from 25 + badge, ` ⧉ ` the 3 before
+    // it and ` ● ` the 3 before that. The two tabs no longer fit, and the
+    // strip scrolls with a right arrow before ` ● `.
+    for tabline_layout in [&tabline_layout_without_float, &tabline_layout_with_float] {
+        assert_eq!(
+            tabline_layout.right_block_start_column,
+            25 + badge_column_count
+        );
+        assert_eq!(
+            tabline_layout.floating_pane_tray_button_column,
+            Some(22 + badge_column_count)
+        );
+        assert_eq!(
+            tabline_layout.notification_button_columns,
+            Some((19 + badge_column_count)..(22 + badge_column_count))
+        );
+        assert_eq!(tabline_layout.tab_strip_end_column, 19 + badge_column_count);
+        assert_eq!(
+            tabline_layout.visible_tab_spans,
+            vec![build_visible_tab_span(0, 5 + badge_column_count, 9)]
+        );
+        assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+        assert_eq!(
+            tabline_layout.right_scroll_arrow_column,
+            Some(18 + badge_column_count)
+        );
+    }
+    assert_eq!(rendered_buttons_without_float, " ●  ⧉  BASE ");
     assert_eq!(
         format_rendered_cells(
             &render_tabline(&tabline_test_frame, tabline_column_count),
             0,
-            22 + badge_column_count..tabline_column_count
+            19 + badge_column_count..tabline_column_count
         ),
-        " ⧉  BASE "
+        " ●  ⧉  BASE "
     );
 }
 
@@ -1504,9 +1535,9 @@ fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there(
             pane_id: PaneId::new(),
             pane_title: None,
         });
-    tabline_test_frame.viewer_chrome.notification_button = Some(NotificationButton {
+    tabline_test_frame.viewer_chrome.notification_button = NotificationButton {
         unread_entry_count: 3,
-    });
+    };
     let badge_column_count = compute_version_badge_column_count();
     let tabline_column_count = 31 + badge_column_count;
 
@@ -1548,9 +1579,9 @@ fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there(
 fn the_notification_button_is_reversed_only_while_the_lock_mode_is_notification_center() {
     let mut tabline_test_frame =
         build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
-    tabline_test_frame.viewer_chrome.notification_button = Some(NotificationButton {
+    tabline_test_frame.viewer_chrome.notification_button = NotificationButton {
         unread_entry_count: 0,
-    });
+    };
     let tabline_column_count = 40 + compute_version_badge_column_count();
     let mode_style = compute_mode_style(&Theme::default());
     let find_button_glyph_modifier = |render_buffer: &Buffer| {
@@ -1620,16 +1651,43 @@ fn the_tray_button_is_reversed_only_while_the_lock_mode_is_floating_pane_tray() 
 }
 
 #[test]
-fn a_viewer_with_no_notification_shows_no_button() {
+fn a_viewer_with_no_unread_notification_shows_the_button_with_no_count() {
     let tabline_test_frame =
         build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
     let badge_column_count = compute_version_badge_column_count();
+    let tabline_column_count = 31 + badge_column_count;
 
     let tabline_layout = solve_tabline_layout(
         &tabline_test_frame,
-        build_tabline_area(31 + badge_column_count),
+        build_tabline_area(tabline_column_count),
     );
 
+    assert_eq!(
+        tabline_layout.notification_button_columns,
+        Some((19 + badge_column_count)..(22 + badge_column_count))
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 19 + badge_column_count);
+    assert_eq!(
+        format_rendered_cells(
+            &render_tabline(&tabline_test_frame, tabline_column_count),
+            0,
+            19 + badge_column_count..22 + badge_column_count
+        ),
+        " ● "
+    );
+}
+
+#[test]
+fn a_row_with_no_room_for_the_tray_button_draws_neither_button() {
+    // 8 cells hold ` BASE ` and two more cells: too few for ` ⧉ `, so ` ● `,
+    // which sits left of ` ⧉ `, is not drawn either.
+    let tabline_test_frame =
+        build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(8));
+
+    assert_eq!(tabline_layout.right_block_start_column, 2);
+    assert_eq!(tabline_layout.floating_pane_tray_button_column, None);
     assert_eq!(tabline_layout.notification_button_columns, None);
-    assert_eq!(tabline_layout.tab_strip_end_column, 25 + badge_column_count);
+    assert_eq!(tabline_layout.tab_strip_end_column, 2);
 }

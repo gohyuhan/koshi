@@ -62,12 +62,8 @@ pub(crate) struct TablineInputs<'a> {
     pub(crate) reconnecting: Option<Reconnecting>,
     /// The first tab index the viewer is peeking at, if one is set.
     pub(crate) tabline_offset: Option<usize>,
-    /// Whether the session holds a floating pane: the tabline draws the tray
-    /// button ` ⧉ ` left of the mode tag.
-    pub(crate) has_floating_panes: bool,
-    /// The notification button the tabline draws left of the tray button, or
-    /// left of the mode tag with no tray button. `None` draws none.
-    pub(crate) notification_button: Option<NotificationButton>,
+    /// The notification button the tabline draws left of the tray button.
+    pub(crate) notification_button: NotificationButton,
 }
 
 #[cfg(test)]

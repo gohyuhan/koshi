@@ -233,7 +233,7 @@ mode "floating-pane-tray" {
     bind "<Down>" "core:select-tray-tile-down"
     bind "<Up>" "core:select-tray-tile-up"
     bind "<Right>" "core:select-tray-tile-right"
-    bind "<CR>" "core:toggle-selected-tray-tile"
+    bind "<CR>" "core:activate-selected-tray-tile"
     bind "a" "core:toggle-minimize-all-floating-panes"
     bind "<Esc>" "core:close-floating-pane-tray"
     bind "<leader>p w" "core:toggle-floating-pane-tray"
@@ -449,11 +449,11 @@ pane of the only tab, or when the session already holds 12 floating panes.
 
 ## Floating pane tray
 
-The tabline shows the tray button `⧉` left of the mode tag while the session
-holds at least one floating pane. `<leader>p w`
+The tabline shows the tray button `⧉` left of the mode tag, also while the
+session holds no floating pane. `<leader>p w`
 (`core:toggle-floating-pane-tray`) or a click on the button opens the tray under
 the button. The tray lists every floating pane of the session as a tile, in the
-order the panes became floating:
+order the panes became floating, then the `+ new` tile:
 
 - A tile shows its number, `1` to `12`, on its top border, and the pane's
   title under it. A tile is 10 cells wide. A title of 8 cells or more shows
@@ -461,14 +461,18 @@ order the panes became floating:
   `logser…`. A pane with no title shows its number alone.
 - A lit tile is a pane that this client shows. A gray tile is a pane that
   this client minimized.
+- The `+ new` tile sits in the slot right after the last floating pane. With
+  no floating pane, it is the first tile. With 12 floating panes, every slot
+  holds a pane and the tray shows no `+ new` tile.
 - The tray holds 12 slots in 2 rows of 6. A narrow terminal puts fewer slots
   in each row.
 - The tray's titlebar, the row under its top border, shows the full title of
   the tile under the pointer, else of the selected tile. A title too long for
-  its cells ends in `…`. Right of the title, the titlebar reads `minimize all`
-  while this client shows a floating pane, and `restore all` while it shows
-  none, then the close button `✕`. A tray of one slot per row has no room for
-  this label and leaves it out.
+  its cells ends in `…`. The `+ new` tile has no title. Right of the title,
+  the titlebar reads `minimize all` while this client shows a floating pane,
+  and `restore all` while it shows none, then the close button `✕`. With no
+  floating pane in the session, and in a tray of one slot per row, the
+  titlebar has no label.
 
 While the tray is open, the tabline shows the tag `TRAY`. The
 `floating-pane-tray` keymap has priority over the normal or locked keymap, and
@@ -477,8 +481,10 @@ screen only. Another client sees no change.
 
 - The arrow keys (`core:select-tray-tile-left`, `-down`, `-up`, `-right`)
   select the next tile in that direction.
-- Enter (`core:toggle-selected-tray-tile`) minimizes the pane of a lit tile.
-  On a gray tile, it shows the pane on top and focuses it.
+- Enter (`core:activate-selected-tray-tile`) minimizes the pane of a lit tile.
+  On a gray tile, it shows the pane on top and focuses it. On the `+ new`
+  tile, it closes the tray and creates a floating pane, as
+  `core:new-pane-floating` does.
 - `a` (`core:toggle-minimize-all-floating-panes`) minimizes every floating
   pane this client shows. When this client shows none, it shows every one, in
   the order the panes became floating, and focuses the last one. A click on
@@ -490,11 +496,11 @@ screen only. Another client sees no change.
   does with no tray open.
 
 The tray stays open after a tile changes, and it shows each change at once.
-It closes when the session holds no floating pane or the terminal has no room
-for it. A lock mode change, a mouse-select change, the loss of the terminal's
-focus, a lost link to the session and a session switch also close it. The tray
-and the notification center are never open together: while the center is
-open, the tray's actions do nothing.
+It closes when the terminal has no room for it. A lock mode change, a
+mouse-select change, the loss of the terminal's focus, a lost link to the
+session and a session switch also close it. The tray and the notification
+center are never open together: while the center is open, the tray's actions
+do nothing.
 
 A minimize shrinks the pane into its tile in 160 ms. With the tray closed, it
 shrinks into the cell under the glyph `⧉`, on the top row of the pane area. A
@@ -516,11 +522,12 @@ the session writes, the session keeps each refusal of this client's commands
 until the client catches up. Then equal refusals in a row show as one
 notification with their count: `[Koshi] Warning ×3`.
 
-The tabline shows the notification button `●` while this client holds at
-least one notification. The button sits left of the tray button, or left of
-the mode tag when the tabline shows no tray button. With unread notifications,
-the button shows their count: `●3`, and `●99+` above 99. A notification is
-read once the center opens after it arrives.
+The tabline shows the notification button `●` left of the tray button, also
+while this client holds no notification. A tabline with no room for the tray
+button shows no notification button. With unread notifications, the button
+shows their count: `●3`, and `●99+` above 99. A notification is read once the
+center opens after it arrives. With no notification, the center reads
+`No notifications`.
 
 `<A-n>` (`core:toggle-notification-center`) or a click on the button opens the
 center. The center covers the right side of the pane area and changes no pane.

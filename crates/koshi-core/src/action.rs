@@ -341,8 +341,9 @@ pub enum ClientActionKind {
     /// Select the tray tile one step in `direction` inside the tile grid.
     SelectTrayTile(Direction),
     /// Minimize the selected tray tile's floating pane when the viewer shows
-    /// it, and restore it when the viewer minimized it.
-    ToggleSelectedTrayTile,
+    /// it, and restore it when the viewer minimized it. On the `+ new` tile,
+    /// close the tray and create a floating pane.
+    ActivateSelectedTrayTile,
     /// Open the notification center, which then holds the viewer's keys, when
     /// it is closed, and close it when it is open.
     ToggleNotificationCenter,
@@ -911,12 +912,12 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::SelectTrayTile(Direction::Right)),
         ),
         build_core_action_seed(
-            "toggle-selected-tray-tile",
-            "Toggle Selected Tray Tile",
-            "Minimize or restore the selected tile's floating pane on this client's screen",
+            "activate-selected-tray-tile",
+            "Activate Selected Tray Tile",
+            "Minimize or restore the selected tile's floating pane on this client's screen; on the + new tile, close the tray and create a floating pane",
             Client,
             vec![ClientTarget],
-            CoreClient(ClientActionKind::ToggleSelectedTrayTile),
+            CoreClient(ClientActionKind::ActivateSelectedTrayTile),
         ),
         build_core_action_seed(
             "toggle-notification-center",

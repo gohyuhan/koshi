@@ -276,9 +276,9 @@ fn the_close_action_closes_the_center_and_keeps_every_entry() {
     assert_eq!(list_merged_entry_texts(&client), vec!["entry 0", "entry 1"]);
     assert_eq!(
         client.build_notification_button(),
-        Some(NotificationButton {
+        NotificationButton {
             unread_entry_count: 0
-        })
+        }
     );
 }
 
@@ -292,7 +292,12 @@ fn the_clear_action_removes_every_entry_and_closes_the_center() {
 
     assert_eq!(get_center(&client), None);
     assert_eq!(list_merged_entry_texts(&client), Vec::<String>::new());
-    assert_eq!(client.build_notification_button(), None);
+    assert_eq!(
+        client.build_notification_button(),
+        NotificationButton {
+            unread_entry_count: 0
+        }
+    );
 }
 
 #[test]
@@ -854,7 +859,7 @@ fn a_press_on_the_notification_button_opens_the_center_and_a_second_press_closes
 }
 
 #[test]
-fn the_notification_button_counts_unread_entries_and_shows_only_with_an_entry() {
+fn the_notification_button_counts_unread_entries_and_shows_with_no_entry() {
     let (mut client, mouse_frame) = build_center_client();
     let button_before_any_post = client.build_notification_button();
     post_own_entries(&mut client, 3);
@@ -862,18 +867,23 @@ fn the_notification_button_counts_unread_entries_and_shows_only_with_an_entry() 
 
     open_center(&mut client, &mouse_frame);
 
-    assert_eq!(button_before_any_post, None);
+    assert_eq!(
+        button_before_any_post,
+        NotificationButton {
+            unread_entry_count: 0
+        }
+    );
     assert_eq!(
         with_three_unread,
-        Some(NotificationButton {
+        NotificationButton {
             unread_entry_count: 3
-        })
+        }
     );
     assert_eq!(
         client.build_notification_button(),
-        Some(NotificationButton {
+        NotificationButton {
             unread_entry_count: 0
-        })
+        }
     );
 }
 
@@ -913,7 +923,7 @@ fn the_center_actions_do_nothing_while_the_tray_is_open_and_the_tray_actions_whi
     for client_action_kind in [
         ClientActionKind::ToggleFloatingPaneTray,
         ClientActionKind::CloseFloatingPaneTray,
-        ClientActionKind::ToggleSelectedTrayTile,
+        ClientActionKind::ActivateSelectedTrayTile,
     ] {
         assert_eq!(
             center_client.apply_client_action(client_action_kind, Some(&mouse_frame)),

@@ -140,7 +140,7 @@ pub(crate) fn find_requested_client_action_modes(
             LockMode::Locked,
             LockMode::FloatingPaneTray,
         ]),
-        ClientActionKind::SelectTrayTile(_) | ClientActionKind::ToggleSelectedTrayTile => {
+        ClientActionKind::SelectTrayTile(_) | ClientActionKind::ActivateSelectedTrayTile => {
             RunsIn(&[LockMode::FloatingPaneTray])
         }
         ClientActionKind::CloseFloatingPaneTray => Ends(LockMode::FloatingPaneTray),
@@ -584,7 +584,7 @@ impl Client {
             ClientActionKind::ToggleFloatingPaneTray
                 | ClientActionKind::CloseFloatingPaneTray
                 | ClientActionKind::SelectTrayTile(_)
-                | ClientActionKind::ToggleSelectedTrayTile
+                | ClientActionKind::ActivateSelectedTrayTile
         );
         let is_notification_center_action = matches!(
             client_action_kind,
@@ -678,7 +678,9 @@ impl Client {
                 self.select_tray_tile(direction, mouse_frame);
                 PlacementInputAction::Consumed
             }
-            ClientActionKind::ToggleSelectedTrayTile => self.toggle_selected_tray_tile(mouse_frame),
+            ClientActionKind::ActivateSelectedTrayTile => {
+                self.activate_selected_tray_tile(mouse_frame)
+            }
             ClientActionKind::ToggleNotificationCenter => {
                 self.toggle_notification_center(mouse_frame);
                 PlacementInputAction::Consumed

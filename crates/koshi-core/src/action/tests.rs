@@ -959,8 +959,8 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
         (
-            "core:toggle-selected-tray-tile".to_string(),
-            ClientActionKind::ToggleSelectedTrayTile,
+            "core:activate-selected-tray-tile".to_string(),
+            ClientActionKind::ActivateSelectedTrayTile,
             Client,
             vec![ClientTarget],
         ),
@@ -1275,6 +1275,7 @@ fn core_action_seed_name_snapshot_is_stable() {
     core_action_names.sort();
 
     let expected_core_action_names = vec![
+        "core:activate-selected-tray-tile",
         "core:begin-dock-undock",
         "core:begin-floating-pane-move",
         "core:begin-pane-placement",
@@ -1364,7 +1365,6 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:toggle-pane-fullscreen",
         "core:toggle-pane-pinned",
         "core:toggle-pane-placement-stack",
-        "core:toggle-selected-tray-tile",
         "core:undock-pane",
         "core:unlock",
         "core:unpin-pane",

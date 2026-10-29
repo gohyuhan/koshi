@@ -624,7 +624,9 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             floating_pane_move_draft: None,
             floating_pane_tray: None,
             notification_center: None,
-            notification_button: None,
+            notification_button: NotificationButton {
+                unread_entry_count: 0,
+            },
             notification_toast: None,
         }
     );

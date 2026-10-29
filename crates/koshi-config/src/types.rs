@@ -876,7 +876,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         ),
         (
             parse_default_key_sequence("<CR>"),
-            build_bound_action("toggle-selected-tray-tile"),
+            build_bound_action("activate-selected-tray-tile"),
         ),
         (
             parse_default_key_sequence("a"),

@@ -63,7 +63,7 @@ const EFFECTIVE_LAYOUT_SIZE: Size = Size {
 };
 
 /// The names of the three tabs every frame here carries, the first active.
-const TAB_NAMES: [&str; 3] = ["one", "two", "three"];
+const TAB_NAMES: [&str; 3] = ["a", "b", "c"];
 
 /// The glyphs a tiled pane's border ring is drawn with.
 const BORDER_GLYPHS: [&str; 6] = ["┌", "┐", "└", "┘", "─", "│"];
@@ -153,7 +153,7 @@ fn build_render_snapshot(
             session_name: "work".to_string(),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
-                tab_name: "one".to_string(),
+                tab_name: TAB_NAMES[0].to_string(),
                 pane_slots,
                 tab_size: effective_layout_size,
                 stack_headers,
@@ -311,6 +311,8 @@ fn every_cell_classifies_as_what_was_painted() {
     let mut border_cell_count = 0_u32;
     let mut header_cell_count = 0_u32;
     let mut letterbox_cell_count = 0_u32;
+    let mut floating_pane_tray_button_cell_count = 0_u32;
+    let mut notification_button_cell_count = 0_u32;
 
     for row_index in 0..TEST_VIEWPORT_SIZE.row_count {
         for column_index in 0..TEST_VIEWPORT_SIZE.column_count {
@@ -388,11 +390,26 @@ fn every_cell_classifies_as_what_was_painted() {
                     );
                     border_cell_count += 1;
                 }
+                HitRegion::FloatingPaneTrayButton => {
+                    assert_eq!(row_index, 0);
+                    assert!(
+                        [" ", "⧉"].contains(&painted_cell.symbol()),
+                        "tray button cell ({column_index}, {row_index}) was not painted"
+                    );
+                    floating_pane_tray_button_cell_count += 1;
+                }
+                HitRegion::NotificationButton => {
+                    assert_eq!(row_index, 0);
+                    assert!(
+                        [" ", "●"].contains(&painted_cell.symbol()),
+                        "notification button cell ({column_index}, {row_index}) was not painted"
+                    );
+                    notification_button_cell_count += 1;
+                }
                 HitRegion::PaneTitlebar { .. }
                 | HitRegion::PanePinToggle { .. }
                 | HitRegion::PaneMinimizeButton { .. }
                 | HitRegion::PaneCloseButton { .. }
-                | HitRegion::FloatingPaneTrayButton
                 | HitRegion::FloatingPaneTrayTile { .. }
                 | HitRegion::FloatingPaneTrayToggleMinimizeAll
                 | HitRegion::FloatingPaneTrayClose
@@ -401,8 +418,7 @@ fn every_cell_classifies_as_what_was_painted() {
                         "floating pane region at ({column_index}, {row_index}) in a frame with no floating pane"
                     );
                 }
-                HitRegion::NotificationButton
-                | HitRegion::NotificationCenterClose
+                HitRegion::NotificationCenterClose
                 | HitRegion::NotificationCenterClearAll
                 | HitRegion::NotificationCenterBody
                 | HitRegion::NotificationCenter
@@ -434,6 +450,9 @@ fn every_cell_classifies_as_what_was_painted() {
     assert_eq!(content_cell_count, 2 * 23 * 8 - 23);
     assert_eq!(border_cell_count, 2 * (25 * 10 - 23 * 8));
     assert_eq!(header_cell_count, 23);
+    // ` ⧉ ` and ` ● ` show with no floating pane and no notification.
+    assert_eq!(floating_pane_tray_button_cell_count, 3);
+    assert_eq!(notification_button_cell_count, 3);
     // The 60x14 viewport less the two chrome rows and the centered 50x10 layout.
     assert_eq!(
         letterbox_cell_count,
@@ -681,7 +700,10 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
         format!("│ htop{}minimize all  ✕  │", " ".repeat(23)),
         format!("├{}┤", "─".repeat(45)),
         format!("│ ┌ 1 ─────┐ ┌ 2 ─────┐ {0} {0} │", empty_slot_rows[0]),
-        format!("│ │ htop   │ │ logs   │ {0} {0} │", empty_slot_rows[1]),
+        format!(
+            "│ │ htop   │ │ logs   │ │ + new  │ {0} │",
+            empty_slot_rows[1]
+        ),
         format!("│ └────────┘ └────────┘ {0} {0} │", empty_slot_rows[2]),
         format!("│ {0} {0} {0} {0} │", empty_slot_rows[0]),
         format!("│ {0} {0} {0} {0} │", empty_slot_rows[1]),
@@ -697,10 +719,14 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
     assert_eq!(painted_tray_rows, expected_tray_rows);
 
     // Every cell of the tray hits the region painted there: tile 0's box at
-    // (9, 4) 10x3, tile 1's box at (20, 4) 10x3, the label's 12 cells and the
-    // close button on row 2, and the tray for every other cell, the empty
-    // slots included.
-    let tile_rects = [build_cell_rect(9, 4, 10, 3), build_cell_rect(20, 4, 10, 3)];
+    // (9, 4) 10x3, tile 1's box at (20, 4) 10x3, the `+ new` tile's box at
+    // (31, 4) 10x3, the label's 12 cells and the close button on row 2, and
+    // the tray for every other cell, the empty slots included.
+    let tile_rects = [
+        build_cell_rect(9, 4, 10, 3),
+        build_cell_rect(20, 4, 10, 3),
+        build_cell_rect(31, 4, 10, 3),
+    ];
     let label_rect = build_cell_rect(36, 2, 12, 1);
     let close_button_point = Point { column: 50, row: 2 };
     for row_index in 1..14 {
@@ -713,6 +739,8 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
                 HitRegion::FloatingPaneTrayTile { tile_index: 0 }
             } else if tile_rects[1].is_point_inside(screen_point) {
                 HitRegion::FloatingPaneTrayTile { tile_index: 1 }
+            } else if tile_rects[2].is_point_inside(screen_point) {
+                HitRegion::FloatingPaneTrayTile { tile_index: 2 }
             } else if label_rect.is_point_inside(screen_point) {
                 HitRegion::FloatingPaneTrayToggleMinimizeAll
             } else if screen_point == close_button_point {
@@ -751,9 +779,9 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
             selected_notification_id: None,
             hidden_per_mille: 0,
         }),
-        notification_button: Some(NotificationButton {
+        notification_button: NotificationButton {
             unread_entry_count: 3,
-        }),
+        },
         notification_toast: Some(NotificationToast {
             toast_position: ToastPosition::BottomLeft,
             text_row_count: 1,
@@ -789,11 +817,13 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
-    // The mode tag ` NOTIFICATIONS ` takes columns 45 to 59 and the button
-    // ` ●3 ` the 4 columns before it.
+    // The mode tag ` NOTIFICATIONS ` takes columns 45 to 59, the tray button
+    // ` ⧉ ` the 3 columns before it, and the notification button ` ●3 ` the 4
+    // columns before that.
     assert_eq!(get_row_text(&screen_buffer, 0, 45, 60), " NOTIFICATIONS ");
-    assert_eq!(get_row_text(&screen_buffer, 0, 41, 45), " ●3 ");
-    for column_index in 41..45 {
+    assert_eq!(get_row_text(&screen_buffer, 0, 42, 45), " ⧉ ");
+    assert_eq!(get_row_text(&screen_buffer, 0, 38, 42), " ●3 ");
+    for column_index in 38..42 {
         assert_eq!(
             resolve_hit_region(
                 frame_layout,

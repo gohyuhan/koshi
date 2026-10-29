@@ -21,14 +21,14 @@ mod tests;
 ///
 /// The whole row is filled with the theme's bar background (black by default).
 /// The session name with the `[v…]` version badge sits on the left and the mode
-/// tag on the right, painted as colored text over that fill. While the session
-/// holds a floating pane, the tray button ` ⧉ ` sits left of the mode tag in
-/// the mode tag's style, in reverse video while the lock mode is
-/// `FloatingPaneTray`. While the viewer's notification center holds an entry,
-/// the notification button ` ● ` or ` ●3 ` sits left of the tray button, or
-/// left of the mode tag with no tray button, in the mode tag's style, in
-/// reverse video while the lock mode is `NotificationCenter`. A center that
-/// slides out draws the button with no reverse video.
+/// tag on the right, painted as colored text over that fill. The tray button
+/// ` ⧉ ` sits left of the mode tag in the mode tag's style, in reverse video
+/// while the lock mode is `FloatingPaneTray`. The notification button ` ● ` or
+/// ` ●3 ` sits left of the tray button in the mode tag's style, in reverse
+/// video while the lock mode is `NotificationCenter`. A center that slides out
+/// draws the button with no reverse video. A button that the row has no room
+/// for is not drawn, and the notification button is not drawn with no tray
+/// button.
 /// Only the tab list between them carries block backgrounds — each tab is a
 /// two-block ribbon on its own stop of the theme's chrome ramp (light-purple →
 /// light-blue by default). A tab that does not fit is dropped whole, and a `◀`
@@ -79,10 +79,7 @@ pub(super) fn draw_tabline(
             FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
         );
     }
-    if let (Some(notification_button_columns), Some(notification_button)) = (
-        &tabline_layout.notification_button_columns,
-        tabline_inputs.notification_button,
-    ) {
+    if let Some(notification_button_columns) = &tabline_layout.notification_button_columns {
         let mut button_style = compute_mode_style(theme);
         if tabline_inputs.lock_mode == LockMode::NotificationCenter {
             button_style = button_style.add_modifier(Modifier::REVERSED);
@@ -92,7 +89,7 @@ pub(super) fn draw_tabline(
             notification_button_columns.start,
             tabline_area.y,
             &Line::from(Span::styled(
-                format_notification_button_text(notification_button),
+                format_notification_button_text(tabline_inputs.notification_button),
                 button_style,
             )),
             notification_button_columns.end - notification_button_columns.start,
@@ -177,13 +174,12 @@ pub(crate) struct TablineLayout {
     /// The column where the right block, the mode tag, starts.
     pub right_block_start_column: u16,
     /// The column where the tray button ` ⧉ ` starts, three cells left of the
-    /// mode tag. `None` while the session holds no floating pane, or when the
-    /// row leaves fewer than three cells left of the mode tag.
+    /// mode tag. `None` when the row leaves fewer than three cells left of the
+    /// mode tag.
     pub floating_pane_tray_button_column: Option<u16>,
     /// The columns the notification button takes, right before the tray
-    /// button, or right before the mode tag with no tray button. `None` while
-    /// the viewer's notification center holds no entry, or when the row leaves
-    /// no room for the button.
+    /// button. `None` with no tray button, or when the row leaves no room for
+    /// the button.
     pub notification_button_columns: Option<Range<u16>>,
     /// The column where the session block and the tab strip end: the
     /// notification button's first column, else the tray button's column,
@@ -214,11 +210,9 @@ pub(crate) struct VisibleTabSpan {
 /// arrows for `tabline_area`.
 ///
 /// The right block anchors the right edge and the session block the left.
-/// While `tabline_inputs.has_floating_panes` is `true`, the tray button takes
-/// the three cells left of the right block when the row has them. While
-/// `tabline_inputs.notification_button` is `Some`, the notification button
-/// takes the cells left of the tray button, or left of the right block with no
-/// tray button, when the row has them. The gap ends at the leftmost button. If
+/// The tray button takes the three cells left of the right block when the row
+/// has them. The notification button takes the cells left of the tray button
+/// when the row has them. The gap ends at the leftmost button. If
 /// every tab fits in the gap, all are shown from index 0
 /// with no arrows. Otherwise the strip scrolls, a one-cell arrow is reserved on
 /// each side and drawn on whichever side still hides tabs, and the window
@@ -239,16 +233,16 @@ pub(crate) fn solve_tabline_layout(
     tabline_area: RatatuiRect,
 ) -> TablineLayout {
     let right_block_start_column = compute_right_block_start_column(tabline_inputs, tabline_area);
-    let floating_pane_tray_button_column = find_floating_pane_tray_button_column(
-        tabline_inputs,
-        tabline_area,
-        right_block_start_column,
-    );
-    let notification_button_columns = find_notification_button_columns(
-        tabline_inputs.notification_button,
-        tabline_area,
-        floating_pane_tray_button_column.unwrap_or(right_block_start_column),
-    );
+    let floating_pane_tray_button_column =
+        find_floating_pane_tray_button_column(tabline_area, right_block_start_column);
+    let notification_button_columns =
+        floating_pane_tray_button_column.and_then(|floating_pane_tray_button_column| {
+            find_notification_button_columns(
+                tabline_inputs.notification_button,
+                tabline_area,
+                floating_pane_tray_button_column,
+            )
+        });
     let tab_strip_end_column = notification_button_columns
         .as_ref()
         .map(|notification_button_columns| notification_button_columns.start)
@@ -428,17 +422,15 @@ pub(crate) fn compute_right_block_start_column(
 }
 
 /// The column where the tray button ` ⧉ ` starts: the three cells left of
-/// `right_block_start_column`. `None` while `tabline_inputs.has_floating_panes`
-/// is `false`, and when fewer than three cells of `tabline_area` lie left of
-/// `right_block_start_column`. A right block at column `74` gives `71`.
+/// `right_block_start_column`. `None` when fewer than three cells of
+/// `tabline_area` lie left of `right_block_start_column`. A right block at
+/// column `74` gives `71`.
 pub(crate) fn find_floating_pane_tray_button_column(
-    tabline_inputs: TablineInputs<'_>,
     tabline_area: RatatuiRect,
     right_block_start_column: u16,
 ) -> Option<u16> {
-    let is_button_drawn = tabline_inputs.has_floating_panes
-        && right_block_start_column.saturating_sub(tabline_area.x)
-            >= FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT;
+    let is_button_drawn = right_block_start_column.saturating_sub(tabline_area.x)
+        >= FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT;
     is_button_drawn.then(|| right_block_start_column - FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT)
 }
 

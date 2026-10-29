@@ -7,7 +7,9 @@ use ratatui::text::{Line, Span};
 
 use koshi_core::geometry::{Point, Rect, Size};
 
-use crate::floating_pane_tray::{select_toggle_minimize_all_label_text, FloatingPaneTrayLayout};
+use crate::floating_pane_tray::{
+    compute_tray_tile_count, select_toggle_minimize_all_label_text, FloatingPaneTrayLayout,
+};
 use crate::snapshot::{FloatingPane, FloatingPaneTray, RenderSnapshot};
 use crate::theme::Theme;
 
@@ -23,6 +25,9 @@ use super::{
     write_text_fitted, DrawnRows,
 };
 
+/// The text of the tile that creates a floating pane.
+const NEW_FLOATING_PANE_TILE_TEXT: &str = "+ new";
+
 /// Draw the open tray `tray_layout` over every cell drawn before it, in this
 /// order:
 ///
@@ -33,18 +38,22 @@ use super::{
 ///    ([`find_floating_pane_title`]), in the titlebar's tile title cells, and
 ///    the label ([`select_toggle_minimize_all_label_text`]) in the label's
 ///    cells, each fitted to its cells ([`write_text_fitted`]) in the focused
-///    border style.
+///    border style. The `+ new` tile has no title.
 /// 3. Draws each slot's border ring. Slot `i` shows the session's floating
 ///    pane `i`: its number `i + 1` on the top border as ` <number> `, and its
 ///    title on the row under it ([`write_pane_title_clipped`]), each in the
 ///    eight cells inside the ring. A tile whose pane has no title shows its
-///    number alone. A slot with no pane draws its ring alone.
+///    number alone. The slot right after the last floating pane, while a slot
+///    is free ([`compute_tray_tile_count`]), is the `+ new` tile: no number,
+///    and ` + new` on the row under the top border. Every other slot draws its
+///    ring alone.
 ///
 /// A tile is lit while the viewer did not minimize its pane, and gray while
-/// the viewer minimized it ([`FloatingPane::is_minimized`]). A
-/// lit tile's text takes the placement hover style, and a gray tile's text and
-/// an empty slot's ring the unfocused border style. The selected tile's ring
-/// takes the hover border style, and every other tile's ring its text style.
+/// the viewer minimized it ([`FloatingPane::is_minimized`]). The `+ new` tile
+/// is lit. A lit tile's text takes the placement hover style, and a gray
+/// tile's text and an empty slot's ring the unfocused border style. The
+/// selected tile's ring takes the hover border style, and every other tile's
+/// ring its text style.
 ///
 /// Every step runs only over the rows `drawn_rows` draws. A tray on no drawn
 /// row is not drawn.
@@ -87,19 +96,23 @@ pub(super) fn draw_floating_pane_tray(
         ) {
             write_text_fitted(screen_buffer, tile_title_rect, pane_title, tray_style);
         }
-        if let Some(toggle_minimize_all_rect) = tray_layout.toggle_minimize_all_rect {
+        if let (Some(toggle_minimize_all_rect), Some(label_text)) = (
+            tray_layout.toggle_minimize_all_rect,
+            select_toggle_minimize_all_label_text(session_snapshot),
+        ) {
             write_text_fitted(
                 screen_buffer,
                 toggle_minimize_all_rect,
-                select_toggle_minimize_all_label_text(session_snapshot),
+                label_text,
                 tray_style,
             );
         }
     }
 
+    let tile_count = compute_tray_tile_count(session_snapshot.floating_panes.len());
     for (slot_index, slot_rect) in tray_layout.slot_rects.iter().enumerate() {
         let slot_area = place_screen_rect(*slot_rect);
-        let Some(floating_pane) = session_snapshot.floating_panes.get(slot_index) else {
+        if slot_index >= tile_count {
             draw_pane_border(
                 slot_area,
                 compute_unfocused_border_style(theme),
@@ -107,8 +120,9 @@ pub(super) fn draw_floating_pane_tray(
                 screen_buffer,
             );
             continue;
-        };
-        let tile_text_style = if floating_pane.is_minimized() {
+        }
+        let floating_pane = session_snapshot.floating_panes.get(slot_index);
+        let tile_text_style = if floating_pane.is_some_and(FloatingPane::is_minimized) {
             compute_unfocused_border_style(theme)
         } else {
             compute_placement_hover_border_style(theme)
@@ -129,7 +143,7 @@ pub(super) fn draw_floating_pane_tray(
                 row_count: 1,
             },
         );
-        if drawn_rows.is_row_drawn(slot_area.y) {
+        if floating_pane.is_some() && drawn_rows.is_row_drawn(slot_area.y) {
             write_text_clipped(
                 screen_buffer,
                 number_rect,
@@ -144,12 +158,16 @@ pub(super) fn draw_floating_pane_tray(
             },
             number_rect.size,
         );
-        if let Some(pane_title) = find_floating_pane_title(render_snapshot, floating_pane) {
+        let tile_title = match floating_pane {
+            Some(floating_pane) => find_floating_pane_title(render_snapshot, floating_pane),
+            None => Some(NEW_FLOATING_PANE_TILE_TEXT),
+        };
+        if let Some(tile_title) = tile_title {
             if drawn_rows.is_row_drawn(slot_area.y + 1) {
                 write_pane_title_clipped(
                     screen_buffer,
                     title_row_rect,
-                    pane_title,
+                    tile_title,
                     tile_text_style,
                 );
             }

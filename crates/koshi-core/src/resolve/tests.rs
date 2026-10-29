@@ -72,7 +72,7 @@ const CLIENT_ACTIONS: [&str; 43] = [
     "select-tray-tile-down",
     "select-tray-tile-up",
     "select-tray-tile-right",
-    "toggle-selected-tray-tile",
+    "activate-selected-tray-tile",
     "toggle-notification-center",
     "close-notification-center",
     "clear-notifications",

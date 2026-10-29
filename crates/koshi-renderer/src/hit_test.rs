@@ -45,7 +45,9 @@ use ratatui::layout::Rect as RatatuiRect;
 use crate::floating_chrome::{
     compute_floating_content_rect, compute_floating_titlebar, FloatingTitlebarControls,
 };
-use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
+use crate::floating_pane_tray::{
+    compute_tray_tile_count, find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout,
+};
 use crate::notification::{
     find_drawn_notification_center_layout, find_drawn_notification_toast_layout,
     NotificationCenterLayout,
@@ -126,10 +128,14 @@ pub enum HitRegion {
     /// closes the viewer's tray.
     FloatingPaneTrayButton,
     /// A slot of the viewer's open floating pane tray that shows a floating
-    /// pane; clicking it minimizes or restores that pane.
+    /// pane or the `+ new` tile; clicking a pane's tile minimizes or restores
+    /// that pane, and clicking `+ new` creates a floating pane.
     FloatingPaneTrayTile {
-        /// The tile's index, the pane's index in the session's
-        /// [`floating_panes`](crate::snapshot::SessionSnapshot::floating_panes).
+        /// The tile's index, counted as
+        /// [`FloatingPaneTray`](crate::snapshot::FloatingPaneTray) counts it:
+        /// the pane's index in the session's
+        /// [`floating_panes`](crate::snapshot::SessionSnapshot::floating_panes),
+        /// or the index right after the last floating pane for `+ new`.
         tile_index: usize,
     },
     /// The tray titlebar's `minimize all` or `restore all` label; clicking it
@@ -416,15 +422,16 @@ fn classify_floating_pane_region(
 /// Classify `screen_point`, a cell inside `tray_layout`'s tray rect, by the
 /// part of the tray's floating chrome under it
 /// ([`classify_floating_frame_point`] with the close button only): a content
-/// cell in the slot of a floating pane is that tile, the close button is
-/// [`FloatingPaneTrayClose`](HitRegion::FloatingPaneTrayClose), a titlebar
-/// cell of the label is the label, and every other cell is
+/// cell in the slot of a tile ([`compute_tray_tile_count`]) is that tile, the
+/// close button is [`FloatingPaneTrayClose`](HitRegion::FloatingPaneTrayClose),
+/// a titlebar cell of the label is the label, and every other cell is
 /// [`FloatingPaneTray`](HitRegion::FloatingPaneTray).
 ///
 /// With two floating panes on an `80`-column viewport, whose tray holds slot
 /// `1` at `(18, 4)` `10x3`, `(20, 5)` gives
-/// `FloatingPaneTrayTile { tile_index: 1 }`, a cell of slot `2` gives
-/// `FloatingPaneTray`, and `(70, 2)` gives `FloatingPaneTrayClose`.
+/// `FloatingPaneTrayTile { tile_index: 1 }`, a cell of slot `2`, the `+ new`
+/// tile, gives `FloatingPaneTrayTile { tile_index: 2 }`, a cell of slot `3`
+/// gives `FloatingPaneTray`, and `(70, 2)` gives `FloatingPaneTrayClose`.
 fn classify_floating_pane_tray_region(
     frame_layout: FrameLayout<'_>,
     tray_layout: &FloatingPaneTrayLayout,
@@ -438,7 +445,8 @@ fn classify_floating_pane_tray_region(
         screen_point,
     ) {
         FloatingFramePart::Content => {
-            let tile_count = frame_layout.session_snapshot.floating_panes.len();
+            let tile_count =
+                compute_tray_tile_count(frame_layout.session_snapshot.floating_panes.len());
             tray_layout
                 .slot_rects
                 .iter()

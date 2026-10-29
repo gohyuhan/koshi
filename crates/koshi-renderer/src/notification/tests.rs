@@ -547,9 +547,9 @@ fn the_button_text_counts_unread_entries_up_to_99() {
 #[test]
 fn the_button_starts_right_before_its_end_column_when_the_row_has_room() {
     let tabline_area = RatatuiRect::new(0, 0, 80, 1);
-    let three_unread_button = Some(NotificationButton {
+    let three_unread_button = NotificationButton {
         unread_entry_count: 3,
-    });
+    };
 
     assert_eq!(
         find_notification_button_columns(three_unread_button, tabline_area, 74),
@@ -561,10 +561,6 @@ fn the_button_starts_right_before_its_end_column_when_the_row_has_room() {
     );
     assert_eq!(
         find_notification_button_columns(three_unread_button, tabline_area, 3),
-        None
-    );
-    assert_eq!(
-        find_notification_button_columns(None, tabline_area, 74),
         None
     );
 }

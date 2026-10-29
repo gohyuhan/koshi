@@ -1,19 +1,20 @@
 //! Where the floating pane tray and its tabline button sit on screen.
 //!
-//! The tabline draws the tray button ` ⧉ ` left of the mode tag while the
-//! session holds a floating pane. The tray hangs from the top row of the pane
-//! area, and its right border sits under the button's last cell. It draws the
-//! floating chrome ([`crate::floating_chrome`]) with the close button only.
-//! Its titlebar holds the title of the hovered or selected tile and the label
-//! `minimize all` or `restore all`. A tray of six slots per row, with three
-//! floating panes and tile `0` selected:
+//! The tabline draws the tray button ` ⧉ ` left of the mode tag. The tray
+//! hangs from the top row of the pane area, and its right border sits under
+//! the button's last cell. It draws the floating chrome
+//! ([`crate::floating_chrome`]) with the close button only. Its titlebar holds
+//! the title of the hovered or selected tile and, while the session holds a
+//! floating pane, the label `minimize all` or `restore all`. The slot right
+//! after the last floating pane shows the `+ new` tile. A tray of six slots
+//! per row, with three floating panes and tile `0` selected:
 //!
 //! ```text
 //! ┌───────────────────────────────────────────────────────────────────┐   row 0: top border
 //! │ htop                                             minimize all  ✕  │   row 1: titlebar
 //! ├───────────────────────────────────────────────────────────────────┤   row 2: separator
 //! │ ┌ 1 ─────┐ ┌ 2 ─────┐ ┌ 3 ─────┐ ┌────────┐ ┌────────┐ ┌────────┐ │   rows 3 to 5: slots 0 to 5
-//! │ │ htop   │ │ logs   │ │ vim    │ │        │ │        │ │        │ │
+//! │ │ htop   │ │ logs   │ │ vim    │ │ + new  │ │        │ │        │ │
 //! │ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │
 //! │ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │   rows 6 to 8: slots 6 to 11
 //! │ │        │ │        │ │        │ │        │ │        │ │        │ │
@@ -71,7 +72,8 @@ pub struct FloatingPaneTrayLayout {
     pub tray_rect: Rect,
     /// The box of each slot, slot `0` first: left to right, then top to
     /// bottom. Slot `i` shows the session's floating pane `i` while the
-    /// session holds one.
+    /// session holds one, and the slot right after the last floating pane
+    /// shows the `+ new` tile.
     pub slot_rects: [Rect; FLOATING_PANE_TRAY_SLOT_COUNT],
     /// The slots in each row: `6`, or fewer when the pane area left of the
     /// tray's right border is narrower than a six-slot tray (`69` columns).
@@ -80,15 +82,16 @@ pub struct FloatingPaneTrayLayout {
     /// `None` when the titlebar has no title cell.
     pub tile_title_rect: Option<Rect>,
     /// The titlebar label `minimize all` or `restore all`, right-aligned in
-    /// the titlebar's title cells. `None` when the label and the two blank
-    /// cells before it leave no title cell.
+    /// the titlebar's title cells. `None` while the session holds no floating
+    /// pane, and when the label and the two blank cells before it leave no
+    /// title cell.
     pub toggle_minimize_all_rect: Option<Rect>,
 }
 
 /// The tray button ` ⧉ ` on the tabline row: three cells left of the mode
 /// tag. `None` when the frame draws no tabline (a zero-size viewport or
-/// tabline region, or every pane suppressed), the session holds no floating
-/// pane, or the row leaves fewer than three cells left of the mode tag.
+/// tabline region, or every pane suppressed), or the row leaves fewer than
+/// three cells left of the mode tag.
 ///
 /// An `80`-column viewport whose mode tag ` BASE ` starts at column `74` gives
 /// `(71, 0)` `3x1`.
@@ -108,11 +111,9 @@ pub fn find_floating_pane_tray_button_rect(frame_layout: FrameLayout<'_>) -> Opt
     if tabline_area.width == 0 || tabline_area.height == 0 {
         return None;
     }
-    let tabline_inputs = frame_layout.get_tabline_inputs();
     let button_column = find_floating_pane_tray_button_column(
-        tabline_inputs,
         tabline_area,
-        compute_right_block_start_column(tabline_inputs, tabline_area),
+        compute_right_block_start_column(frame_layout.get_tabline_inputs(), tabline_area),
     )?;
     Some(Rect::from_origin_and_size(
         Point {
@@ -151,7 +152,9 @@ pub fn find_floating_pane_tray_glyph_cell(frame_layout: FrameLayout<'_>) -> Opti
 /// chrome ([`crate::floating_chrome`]). The label is right-aligned in the
 /// title cells, and the tile title takes the title cells left of it, less two
 /// blank cells. The label is `restore all` while the viewer minimized every
-/// floating pane, and `minimize all` otherwise.
+/// floating pane, `minimize all` while it shows one, and absent while the
+/// session holds no floating pane. With no label, the tile title takes every
+/// title cell.
 ///
 /// `None` when the button is not drawn
 /// ([`find_floating_pane_tray_button_rect`]), the pane area left of the border
@@ -214,38 +217,40 @@ pub fn compute_floating_pane_tray_layout(
 
     let titlebar =
         compute_floating_titlebar(tray_rect, FloatingTitlebarControls::CLOSE_BUTTON_ONLY);
-    let label_column_count = get_text_width(select_toggle_minimize_all_label_text(
-        frame_layout.session_snapshot,
-    ));
-    let (tile_title_rect, toggle_minimize_all_rect) = match titlebar.title_rect {
-        Some(title_rect)
-            if title_rect.size.column_count > label_column_count + TITLE_LABEL_GAP_COLUMN_COUNT =>
-        {
-            let tile_title_column_count =
-                title_rect.size.column_count - label_column_count - TITLE_LABEL_GAP_COLUMN_COUNT;
-            (
-                Some(Rect::from_origin_and_size(
-                    title_rect.origin,
-                    Size {
-                        column_count: tile_title_column_count,
-                        row_count: 1,
-                    },
-                )),
-                Some(Rect::from_origin_and_size(
-                    Point {
-                        column: title_rect.origin.column + title_rect.size.column_count
-                            - label_column_count,
-                        row: title_rect.origin.row,
-                    },
-                    Size {
-                        column_count: label_column_count,
-                        row_count: 1,
-                    },
-                )),
-            )
-        }
-        title_rect => (title_rect, None),
-    };
+    let label_column_count =
+        select_toggle_minimize_all_label_text(frame_layout.session_snapshot).map(get_text_width);
+    let (tile_title_rect, toggle_minimize_all_rect) =
+        match (titlebar.title_rect, label_column_count) {
+            (Some(title_rect), Some(label_column_count))
+                if title_rect.size.column_count
+                    > label_column_count + TITLE_LABEL_GAP_COLUMN_COUNT =>
+            {
+                let tile_title_column_count = title_rect.size.column_count
+                    - label_column_count
+                    - TITLE_LABEL_GAP_COLUMN_COUNT;
+                (
+                    Some(Rect::from_origin_and_size(
+                        title_rect.origin,
+                        Size {
+                            column_count: tile_title_column_count,
+                            row_count: 1,
+                        },
+                    )),
+                    Some(Rect::from_origin_and_size(
+                        Point {
+                            column: title_rect.origin.column + title_rect.size.column_count
+                                - label_column_count,
+                            row: title_rect.origin.row,
+                        },
+                        Size {
+                            column_count: label_column_count,
+                            row_count: 1,
+                        },
+                    )),
+                )
+            }
+            (title_rect, _) => (title_rect, None),
+        };
     Some(FloatingPaneTrayLayout {
         tray_rect,
         slot_rects,
@@ -269,16 +274,28 @@ pub fn find_drawn_floating_pane_tray_layout(
 /// The tray's titlebar label: `restore all` while the viewer minimized every
 /// floating pane of `session_snapshot`
 /// ([`SessionSnapshot::is_every_floating_pane_minimized`]), and
-/// `minimize all` otherwise.
+/// `minimize all` otherwise. `None` while the session holds no floating pane.
 #[must_use]
 pub(crate) fn select_toggle_minimize_all_label_text(
     session_snapshot: &SessionSnapshot,
-) -> &'static str {
-    if session_snapshot.is_every_floating_pane_minimized() {
-        RESTORE_ALL_LABEL_TEXT
-    } else {
-        MINIMIZE_ALL_LABEL_TEXT
+) -> Option<&'static str> {
+    if session_snapshot.floating_panes.is_empty() {
+        return None;
     }
+    if session_snapshot.is_every_floating_pane_minimized() {
+        Some(RESTORE_ALL_LABEL_TEXT)
+    } else {
+        Some(MINIMIZE_ALL_LABEL_TEXT)
+    }
+}
+
+/// The tiles a tray shows for `floating_pane_count` floating panes: one per
+/// floating pane, and the `+ new` tile in the next slot while a slot is free.
+/// `0` gives `1`, `3` gives `4`, and
+/// [`FLOATING_PANE_TRAY_SLOT_COUNT`] gives [`FLOATING_PANE_TRAY_SLOT_COUNT`].
+#[must_use]
+pub fn compute_tray_tile_count(floating_pane_count: usize) -> usize {
+    (floating_pane_count + 1).min(FLOATING_PANE_TRAY_SLOT_COUNT)
 }
 
 /// The columns of a tray whose rows hold `slots_per_row` slots: the two side

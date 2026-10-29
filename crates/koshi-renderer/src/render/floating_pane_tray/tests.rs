@@ -1,9 +1,9 @@
 //! Tests for drawing the floating pane tray: its floating chrome and titlebar
 //! over the floating panes, one ring per slot with the tile's number and
-//! title, a title cut with `…` where it does not fit, the lit, gray, selected
-//! and empty styles, the title of the tile under the pointer in the titlebar,
-//! the tabline button in reverse video while the tray is open, and no cursor
-//! under the tray.
+//! title or the `+ new` text, a title cut with `…` where it does not fit, the
+//! lit, gray, `+ new`, selected and empty styles, the title of the tile under
+//! the pointer in the titlebar, the tabline button in reverse video while the
+//! tray is open, and no cursor under the tray.
 
 use super::*;
 
@@ -109,7 +109,7 @@ fn the_open_tray_draws_its_titlebar_its_slots_and_each_tiles_number_and_title() 
             "│ htop                                             minimize all  ✕  │",
             "├───────────────────────────────────────────────────────────────────┤",
             "│ ┌ 1 ─────┐ ┌ 2 ─────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │",
-            "│ │ htop   │ │ logs   │ │        │ │        │ │        │ │        │ │",
+            "│ │ htop   │ │ logs   │ │ + new  │ │        │ │        │ │        │ │",
             "│ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │",
             "│ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │",
             "│ │        │ │        │ │        │ │        │ │        │ │        │ │",
@@ -190,7 +190,8 @@ fn a_closed_tray_draws_nothing_over_the_floating_pane() {
 }
 
 #[test]
-fn a_lit_tile_a_gray_tile_the_selected_ring_and_an_empty_slot_take_their_styles() {
+fn a_lit_tile_a_gray_tile_the_new_pane_tile_the_selected_ring_and_an_empty_slot_take_their_styles()
+{
     let theme = Theme::default();
     let render_buffer = render_tray_frame(
         &build_htop_and_logs_render_snapshot(),
@@ -215,9 +216,18 @@ fn a_lit_tile_a_gray_tile_the_selected_ring_and_an_empty_slot_take_their_styles(
         get_cell_color_and_modifier(&render_buffer, 18, 4),
         get_style_color_and_modifier(compute_unfocused_border_style(&theme))
     );
-    // Slot 2 shows no pane.
+    // Slot 2 is the `+ new` tile, lit.
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 31, 5),
+        get_style_color_and_modifier(compute_placement_hover_border_style(&theme))
+    );
     assert_eq!(
         get_cell_color_and_modifier(&render_buffer, 29, 4),
+        get_style_color_and_modifier(compute_placement_hover_border_style(&theme))
+    );
+    // Slot 3 shows no tile.
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 40, 4),
         get_style_color_and_modifier(compute_unfocused_border_style(&theme))
     );
     // The tray's ring, its tile title, its label, its close button and its
@@ -283,7 +293,7 @@ fn every_pane_minimized_reads_restore_all_in_the_titlebar() {
 }
 
 #[test]
-fn the_tabline_button_shows_while_the_session_holds_a_floating_pane_and_reverses_while_open() {
+fn the_tabline_button_reverses_while_the_tray_is_open() {
     let theme = Theme::default();
     let render_snapshot = build_htop_and_logs_render_snapshot();
     let closed_render_buffer = render_tray_frame(&render_snapshot, ViewerChrome::default());
@@ -308,14 +318,28 @@ fn the_tabline_button_shows_while_the_session_holds_a_floating_pane_and_reverses
 }
 
 #[test]
-fn a_session_with_no_floating_pane_draws_the_tabline_it_drew_before_the_button() {
+fn a_session_with_no_floating_pane_draws_both_buttons_and_a_tray_of_only_the_new_pane_tile() {
     let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
 
-    let render_buffer = render_tray_frame(&render_snapshot, ViewerChrome::default());
+    let closed_render_buffer = render_tray_frame(&render_snapshot, ViewerChrome::default());
+    let open_render_buffer = render_tray_frame(&render_snapshot, build_open_tray_viewer_chrome(0));
 
     assert_eq!(
-        format_rendered_cells(&render_buffer, 0, 68..80),
-        "       BASE "
+        format_rendered_cells(&closed_render_buffer, 0, 68..80),
+        " ●  ⧉  BASE "
+    );
+    let tray_rows: Vec<String> = (2..7)
+        .map(|row_index| format_rendered_cells(&open_render_buffer, row_index, 5..74))
+        .collect();
+    assert_eq!(
+        tray_rows,
+        [
+            "│                                                                ✕  │",
+            "├───────────────────────────────────────────────────────────────────┤",
+            "│ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │",
+            "│ │ + new  │ │        │ │        │ │        │ │        │ │        │ │",
+            "│ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │",
+        ]
     );
 }
 
