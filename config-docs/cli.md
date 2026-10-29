@@ -141,12 +141,13 @@ starts, each with the files as they are, and the next start migrates them again.
 problem. A file that does not parse applies no settings, as before the update.
 
 Live session handoff is available for sessions started by koshi 0.3.0, 0.4.0,
-0.5.0-pr.1, 0.5.0-pr.2, or 0.5.0. A session started by koshi 0.2.0 or one of
-its pre-releases has no restart handoff, and an update that koshi 0.2.0 runs
-leaves that session on koshi 0.2.0. `koshi update` and `koshi restart-servers`
-from the installed build name such a session and ask whether to end it, as the
-`koshi restart-servers` paragraphs below state. A koshi 0.1.0 window serves its
-session from its own terminal. It keeps its build until that terminal closes.
+0.5.0-pr.1, 0.5.0-pr.2, 0.5.0, or 0.6.0-pr.1. A session started by koshi 0.2.0
+or one of its pre-releases has no restart handoff, and an update that koshi
+0.2.0 runs leaves that session on koshi 0.2.0. `koshi update` and
+`koshi restart-servers` from the installed build name such a session and ask
+whether to end it, as the `koshi restart-servers` paragraphs below state. A
+koshi 0.1.0 window serves its session from its own terminal. It keeps its build
+until that terminal closes.
 
 While the router restarts, it first finishes the lookups and session starts it
 already holds. A new `koshi attach` or a new session start that reaches it in
@@ -1586,7 +1587,7 @@ lists every copy it covers and every copy it does not.
 
 ```text
 koshi version
-koshi 0.5.0
+koshi 0.6.0-pr.1
 ```
 
 These two answers differ while an update rolls out. `koshi update` installs a
@@ -1597,8 +1598,8 @@ your shell runs is a newer build than the process answering it:
 ```text
 koshi server-version
 kind     session                                       version
-router   -                                             0.5.0
-session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.5.0
+router   -                                             0.6.0-pr.1
+session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.6.0-pr.1
 session  session-91c4de07-2b53-41a8-bf6e-70d9a2c81f35  0.3.0
 ```
 
