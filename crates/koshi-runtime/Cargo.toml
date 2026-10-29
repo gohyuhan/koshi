@@ -32,5 +32,9 @@ koshi-test-support.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 
+[[bench]]
+name = "frame_cost"
+harness = false
+
 [lints]
 workspace = true
