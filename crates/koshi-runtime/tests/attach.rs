@@ -648,7 +648,8 @@ fn the_event_stream_ends_with_the_quit_frame_when_the_only_program_exits() {
                 .expect("the only pane's program exits");
 
             // The exit and the quit the session ends on are published in one pass,
-            // and the raised ending drops whatever is still queued for a client.
+            // and the raised ending drops every delivery still queued for a
+            // client but a viewer action request.
             // The quit frame is the one frame this stream is promised.
             let (viewer_connection, session_frames) =
                 read_session_frames_until(viewer_connection, |session_frame| {

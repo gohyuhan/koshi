@@ -591,7 +591,8 @@ fn wait_until(timeout_duration: Duration, mut is_done: impl FnMut() -> bool) -> 
 /// Serve a socket whose stand-in dispatcher answers the first attach with
 /// `delivery_receiver` and `writer_handoff` under `ending_notice`, attach
 /// one client, and return the first `frame_count` frames that client reads, in
-/// order. Asserts that the client's writing thread ends after those frames.
+/// order. Panics when the client has not read `frame_count` frames within 60
+/// seconds. Asserts that the client's writing thread ends after those frames.
 fn read_frames_of_ending_session(
     directory_tag: &str,
     delivery_receiver: DeliveryReceiver,
@@ -622,10 +623,17 @@ fn read_frames_of_ending_session(
     .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
-    let mut painted_update_receiver = PaintedUpdateReceiver::new();
-    let read_frames: Vec<SessionFrame<SessionEvent>> = (0..frame_count)
-        .map(|_| read_session_frame(&mut connection, &mut painted_update_receiver))
-        .collect();
+    let (read_sender, read_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut painted_update_receiver = PaintedUpdateReceiver::new();
+        let read_frames: Vec<SessionFrame<SessionEvent>> = (0..frame_count)
+            .map(|_| read_session_frame(&mut connection, &mut painted_update_receiver))
+            .collect();
+        let _ = read_sender.send((read_frames, connection));
+    });
+    let (read_frames, connection) = read_receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the client reads every expected frame within 60 seconds");
     assert_eq!(
         wait_for_running_writer_count(ending_notice),
         0,
@@ -879,6 +887,61 @@ fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last
             vec![
                 SessionEvent::HostWrite {
                     host_write_bytes: b"\x1b]52;c;b25l\x07\x1b]52;p;dHdv\x07".to_vec(),
+                },
+                ending_frame,
+            ]
+        );
+    }
+}
+
+#[test]
+fn viewer_action_requests_queued_before_the_session_ends_reach_the_client_ahead_of_its_last_frame()
+{
+    // A placement, viewer action request 7 and a second placement are queued.
+    // The ending drops both placements, writes the request, then the last
+    // frame.
+    use koshi_core::event::{Event, QuitCause};
+
+    use crate::runtime::bus::EventBus;
+
+    for (ending_event, ending_frame, directory_tag) in [
+        (
+            Event::Restarting,
+            SessionEvent::Restarting,
+            "restart-client-action",
+        ),
+        (
+            Event::Quit(QuitCause::Requested),
+            SessionEvent::Quit,
+            "quit-client-action",
+        ),
+    ] {
+        let action_reference = ActionReference::from_core_action_name("toggle-notification-center")
+            .expect("the action name is valid");
+        let mut event_bus = EventBus::new();
+        let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+        event_bus.publish(&build_test_placement_event(TabId::new()));
+        assert!(event_bus.try_send_client_action_request(
+            subscriber_id,
+            7,
+            action_reference.clone()
+        ));
+        event_bus.publish(&build_test_placement_event(TabId::new()));
+        let ending_notice = Arc::clone(event_bus.get_ending_notice());
+        event_bus.publish(&ending_event);
+
+        assert_eq!(
+            read_events_of_ending_session(
+                directory_tag,
+                delivery_receiver,
+                writer_handoff,
+                &ending_notice,
+                2
+            ),
+            vec![
+                SessionEvent::ClientActionRequested {
+                    client_action_request_id: 7,
+                    action_reference,
                 },
                 ending_frame,
             ]

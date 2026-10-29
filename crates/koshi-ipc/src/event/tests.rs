@@ -99,6 +99,11 @@ fn list_test_events() -> Vec<SessionEvent> {
             help: Some("the pane is at its minimum width".to_string()),
         },
         SessionEvent::Pong,
+        SessionEvent::ClientActionRequested {
+            client_action_request_id: 1,
+            action_reference: ActionReference::from_core_action_name("toggle-notification-center")
+                .expect("the action name is valid"),
+        },
     ]
 }
 
@@ -366,6 +371,10 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
                 "help": "the pane is at its minimum width"
             } }),
             json!("Pong"),
+            json!({ "ClientActionRequested": {
+                "client_action_request_id": 1,
+                "action_reference": "core:toggle-notification-center"
+            } }),
         ]
     );
 }

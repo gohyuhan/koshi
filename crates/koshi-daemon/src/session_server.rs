@@ -8,8 +8,9 @@
 //! writes to standard output. Then it serves the runtime inbox and each pane's
 //! output queue — applying each event, giving each pane with output its turn,
 //! timing renders, and handing every attached client its frame — until the last
-//! pane's child exits, or a `core:quit` command is applied and no client is
-//! still expected back from an image swap, and tears down.
+//! pane's child exits, or a quit is requested — `koshi kill-session`, or the
+//! last client leaving under `auto-close-session` — and no client is still
+//! expected back from an image swap, and tears down.
 //!
 //! Startup fails, and every pane is ended first, when:
 //!
@@ -88,7 +89,7 @@ use koshi_runtime::resume::{
     SESSION_NOT_RESTORED_NOTICE_BYTES, SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
 };
 use koshi_runtime::runtime::driver::DispatchPassOutcome;
-use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::event::{RuntimeEvent, SessionEnding};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::{
     can_carry_panes, is_binary_runnable, RestartCheck, RestartRefusal, Server,
@@ -1882,7 +1883,7 @@ fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>
 /// The address is bound again only after the socket has been withdrawn for a
 /// new image that then failed to start.
 ///
-/// A `core:quit` applied by an inbox pass before step 2 abandons the swap and
+/// A quit requested by an inbox pass before step 2 abandons the swap and
 /// ends the session in this process, on the terms [`run_session_serve_loop`] states.
 ///
 /// `Ok(None)` means the session now runs in another process and this one ends
@@ -1917,7 +1918,7 @@ fn swap_session_image(
         )));
     }
 
-    // A `core:quit` applied by either pass above ends the session in this
+    // A quit requested by either pass above ends the session in this
     // process: the serve loop the caller returns to reads the quit and ends on
     // the terms that loop states.
     if session_server.is_quit_requested() {
@@ -1981,10 +1982,13 @@ fn swap_session_image(
     // Nothing a client sends reaches the session from here: each request that
     // needs the session is refused with `Restarting`, and did not run. The
     // pass below is the last one, and it applies what was handed over before.
-    // The wait after it lets each serving thread write the answer that pass
-    // gave, and the refusal of each `Commit` a `Prepared` request waits for.
+    // Each viewer action request whose client sent no answer is then answered
+    // by the session. The wait after it lets each serving thread write the
+    // answer that pass gave, and the refusal of each `Commit` a `Prepared`
+    // request waits for.
     ipc_server.start_refusing_requests();
     apply_held_runtime_events(&mut session_server, DetachPolicy::Skip);
+    session_server.answer_client_actions_at_session_ending(SessionEnding::Restarting);
     let unanswered_request_count =
         ipc_server.wait_until_requests_answered(Instant::now() + UNANSWERED_REQUESTS_WAIT_DURATION);
     if unanswered_request_count > 0 {
@@ -1999,10 +2003,10 @@ fn swap_session_image(
     // killed pane is among the carried panes listed below.
     session_server.wait_for_pane_kills();
 
-    // A `core:quit` applied by the pass above rides the swap out in the carried
+    // A quit requested by the pass above rides the swap out in the carried
     // state, with its kind; the session does not end here. The next image
     // serves until each carried client has attached again or its window has
-    // closed, and ends then. A quit naming one client only detaches it and
+    // closed, and ends then. A `core:quit` only detaches its client and
     // carries nothing.
     if session_server.is_quit_requested() {
         tracing::info!("a quit arrived while the swap was starting; the next image carries it out");
@@ -2552,9 +2556,8 @@ fn hand_over_session_to_new_image(
 /// give one pane with queued output its turn, hand a fresh snapshot to any
 /// subscriber that lost a critical event, push each attached client whose view
 /// changed its frame once its frame pace lets it go, and stop once the inbox
-/// loses its last sender, a [`RuntimeEvent::Quit`] arrives, a `core:quit`
-/// command is applied — in this loop or before it was entered, the swap
-/// included — no pane is left running, or a restart is due.
+/// loses its last sender, a [`RuntimeEvent::Quit`] arrives, a quit is
+/// requested — in this loop or before it was entered, the swap included — no pane is left running, or a restart is due.
 ///
 /// A quit waits while any client is still expected back from an image swap,
 /// at most until that client's reconnect window closes. A session with no pane
@@ -2567,7 +2570,7 @@ fn hand_over_session_to_new_image(
 /// socket to the clients attached to it.
 fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
     loop {
-        // A `core:quit` applied outside this loop ends the session before the
+        // A quit requested outside this loop ends the session before the
         // wait below: the image swap applies whatever the inbox holds, and the
         // rebuild after a swap that did not start applies it again.
         //

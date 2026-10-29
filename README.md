@@ -358,7 +358,7 @@ is visible. Messages stay clear of every visible stack header. When panes
 overlap during a slide, the moving pane's tint takes priority.
 
 `koshi keys list` prints the active keymap. `koshi actions list` prints actions
-that can be bound.
+that can be bound. `koshi actions run <ACTION>` runs one from a shell.
 
 ## Configuration
 
@@ -480,6 +480,7 @@ session id.
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported bindable actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action and its targets |
+| `koshi actions run <ACTION> [--client <CLIENT_ID>]` | Run one action as a key bound to it runs it |
 | `koshi keys list [--mode <MODE>] [--scope default\|user]` | List active shortcuts |
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut and its source, or each shortcut it starts |
 | `koshi keys conflicts` | Report clashes, unreachable shortcuts, and warnings |

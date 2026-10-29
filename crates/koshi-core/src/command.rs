@@ -118,8 +118,13 @@ pub enum Command {
     /// client's view when it runs the command.
     /// `core:toggle-minimize-all-floating-panes` sends it.
     ToggleAllFloatingPanesMinimized,
-    /// Prompt the issuing client to quit the client or session.
-    Quit,
+    /// Remove one client from the session, as [`Command::Detach`] does. The
+    /// session's `auto-close-session` setting then decides whether a session
+    /// left with no client ends. `core:quit` sends it.
+    Quit(QuitArgs),
+    /// End the session at once, whichever clients are attached.
+    /// `koshi kill-session` sends it, and no action builds it.
+    KillSession,
     /// Detach one client from the session. The session keeps running and its
     /// panes are untouched.
     Detach(DetachArgs),
@@ -606,6 +611,15 @@ pub struct SetAllFloatingPanesMinimizedArgs {
 pub struct DetachArgs {
     /// Client that detaches; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
+    pub client_id: Option<ClientId>,
+}
+
+/// Arguments for [`Command::Quit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct QuitArgs {
+    /// Client that quits: the named client, else the issuing client while it
+    /// is attached, else the session's sole attached client. A quit that
+    /// resolves no client is refused.
     pub client_id: Option<ClientId>,
 }
 

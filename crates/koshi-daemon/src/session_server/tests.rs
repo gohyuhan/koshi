@@ -270,7 +270,7 @@ fn the_session_answers_discovery_with_the_id_and_name_it_was_started_with() {
 }
 
 #[test]
-fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
+fn a_kill_session_command_arriving_on_the_socket_ends_the_loop() {
     let (mut server, _, runtime_event_sender) = build_test_server();
     let session_id = SessionId::new();
     server
@@ -292,12 +292,12 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
                     session_id: Some(session_id),
                     target_client_id: None,
                 },
-                Command::Quit,
+                Command::KillSession,
             )),
             fired_action: None,
             response_sender: command_response_sender,
         })
-        .expect("the quit command is queued");
+        .expect("the kill-session command is queued");
 
     run_session_serve_loop(&mut server);
 
@@ -488,7 +488,7 @@ fn a_copy_applied_while_the_swap_runs_reaches_the_clients_own_terminal() {
 }
 
 #[test]
-fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_again() {
+fn a_kill_session_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_again() {
     // `koshi kill-session` arriving inside the swap window is applied by the
     // same pass, after the serve loop returned.
     let (mut server, _, runtime_event_sender) = build_test_server();
@@ -515,12 +515,12 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
                     session_id: Some(session_id),
                     target_client_id: None,
                 },
-                Command::Quit,
+                Command::KillSession,
             )),
             fired_action: None,
             response_sender: mpsc::channel().0,
         })
-        .expect("the quit command is queued");
+        .expect("the kill-session command is queued");
     apply_queued_runtime_events(&mut server, DetachPolicy::Apply);
     assert!(
         server.is_quit_requested(),
@@ -2316,14 +2316,14 @@ fn start_session_with_a_prepared_request(
     )
 }
 
-/// A `SubmitCommand` carrying `core:quit` from the `koshi` command line.
+/// A `SubmitCommand` carrying `KillSession`, as `koshi kill-session` sends it.
 #[cfg(unix)]
-fn build_quit_submit_request_kind() -> IpcRequestKind {
+fn build_kill_session_submit_request_kind() -> IpcRequestKind {
     IpcRequestKind::SubmitCommand {
         command_envelope: Box::new(CommandEnvelope::from_parts(
             CommandId::new(),
             CommandSource::from_external_cli(None, None),
-            Command::Quit,
+            Command::KillSession,
         )),
         fired_action: None,
     }
@@ -2394,7 +2394,7 @@ fn a_swap_waits_the_whole_answer_window_for_a_request_held_by_its_prepare() {
             &session_start,
             &runtime_event_sender,
             runtime_event_receiver,
-            build_quit_submit_request_kind(),
+            build_kill_session_submit_request_kind(),
         );
 
     let swap_started_at = Instant::now();
@@ -2428,7 +2428,7 @@ fn a_commit_that_reaches_a_swap_after_its_last_pass_is_refused_as_restarting() {
             &session_start,
             &runtime_event_sender,
             runtime_event_receiver,
-            build_quit_submit_request_kind(),
+            build_kill_session_submit_request_kind(),
         );
 
     let commit_response = std::thread::scope(|thread_scope| {
@@ -3592,7 +3592,7 @@ fn a_restart_accepted_in_the_pass_that_loses_the_last_pane_ends_the_session() {
 }
 
 #[test]
-fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swapping() {
+fn a_kill_session_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swapping() {
     // Both requests reach the inbox before the loop reads either. The quit
     // decides.
     let (mut server, _, runtime_event_sender) = build_test_server();
@@ -3615,12 +3615,12 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
                     session_id: Some(session_id),
                     target_client_id: None,
                 },
-                Command::Quit,
+                Command::KillSession,
             )),
             fired_action: None,
             response_sender: mpsc::channel().0,
         })
-        .expect("the quit command is queued");
+        .expect("the kill-session command is queued");
 
     let serve_outcome = run_session_serve_loop(&mut server);
 

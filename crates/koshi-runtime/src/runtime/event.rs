@@ -21,7 +21,7 @@ use std::time::{Instant, SystemTime};
 
 use koshi_core::{
     action::ActionReference,
-    command::{CommandEnvelope, CommandResult, TiledPlacementTarget},
+    command::{CommandEnvelope, CommandResult, CommandSource, TiledPlacementTarget},
     discovery::SessionOverview,
     geometry::{PaneArea, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
@@ -31,7 +31,7 @@ use koshi_core::{
 };
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
-use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
+use koshi_ipc::protocol::{ClientActionRefusal, ConnectionToken, IpcResult, WireMouseAction};
 use koshi_layout::placement::PlacedTabLayout;
 
 use crate::runtime::bus::WriterHandoff;
@@ -95,8 +95,9 @@ pub enum RuntimeEvent {
     },
     /// A request to stop the event loop and shut the process down. Produced
     /// when reading a client's outer terminal fails, which is that terminal
-    /// reaching end of stream. Explicit quit travels through the `core:quit`
-    /// command instead.
+    /// reaching end of stream. An explicit quit travels through
+    /// [`Command::KillSession`](koshi_core::command::Command::KillSession)
+    /// instead.
     Quit,
     /// One decoded outer-terminal key awaiting keybinding resolution.
     ///
@@ -175,6 +176,36 @@ pub enum RuntimeEvent {
         fired_action: Option<ActionReference>,
         /// Where the dispatcher sends the command's result.
         response_sender: Sender<CommandResult>,
+    },
+    /// A viewer-local action to run in one attached client, delivered over the
+    /// IPC socket by `koshi actions run`
+    /// ([`IpcRequestKind::RunClientAction`](koshi_ipc::protocol::IpcRequestKind::RunClientAction)).
+    /// The dispatcher sends the answer into `response_sender` once the client
+    /// answered, or at once when the request cannot reach it: a
+    /// [`IpcResult::CommandResult`] for `command_id`, or the
+    /// [`IpcErrorCode::Restarting`](koshi_ipc::protocol::IpcErrorCode::Restarting)
+    /// refusal of a request that arrives after the session told its clients
+    /// it restarts.
+    IpcClientAction {
+        /// The id the answer names.
+        command_id: CommandId,
+        /// Who asks, as the connection stamped it.
+        command_source: CommandSource,
+        /// The action to run.
+        action_reference: ActionReference,
+        /// Where the dispatcher sends the answer.
+        response_sender: Sender<IpcResult>,
+    },
+    /// An attached client's answer to the viewer action request numbered
+    /// `client_action_request_id`
+    /// ([`IpcRequestKind::ClientActionAnswer`](koshi_ipc::protocol::IpcRequestKind::ClientActionAnswer)).
+    ClientActionAnswer {
+        /// The client whose connection carried the answer.
+        client_id: ClientId,
+        /// The number the request carried.
+        client_action_request_id: u64,
+        /// `None` when the client ran the action.
+        refusal: Option<ClientActionRefusal>,
     },
     /// An attach request delivered over the IPC socket: the caller asks to
     /// join the running session as a viewing client. Carries the reply sender
@@ -448,8 +479,9 @@ impl RunningCount {
 /// session's last frame.
 ///
 /// Publishing that frame raises the notice. A writing thread reads it at the
-/// top of each turn: raised, it drops whatever is still queued for that client,
-/// writes the frame the notice names, and ends. The queue each client reads is
+/// top of each turn: raised, it writes each viewer action request still queued
+/// for that client, drops every other queued delivery, writes the frame the
+/// notice names, and ends. The queue each client reads is
 /// bounded: a published last frame does not reach a client whose queue is
 /// full, and the notice reaches that client instead. A client whose queue the
 /// server closed already left the session, and its writing thread writes its

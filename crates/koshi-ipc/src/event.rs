@@ -21,7 +21,7 @@
 //! ([`IpcResult::Attached`](crate::protocol::IpcResult::Attached)) and
 //! [`Resync`](crate::event::SessionEvent::Resync) carry the whole queue.
 //!
-//! Seven frames here are not session facts.
+//! Eight frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
 //! sends it after a client's queue overflowed. It names how many deliveries
 //! went missing, and carries the rejections of the client's commands that the
@@ -43,6 +43,9 @@
 //! [`Pong`](crate::event::SessionEvent::Pong) is the seventh: the session
 //! writes one to a client whose `Attach` named a `link_timeout_ms` whenever it
 //! has written that client nothing for a third of it.
+//! [`ClientActionRequested`](crate::event::SessionEvent::ClientActionRequested)
+//! is the eighth: it asks the client to run one viewer-local action that
+//! `koshi actions run` named, and to answer.
 
 use koshi_core::action::ActionReference;
 use koshi_core::command::PanePlacementTarget;
@@ -235,6 +238,17 @@ pub enum SessionEvent {
     /// a `link_timeout_ms` whenever the session has written that client
     /// nothing for a third of it. Carries nothing.
     Pong,
+    /// Run `action_reference`, a viewer-local action, as this client's key
+    /// would run it in the client's current mode, then send one
+    /// [`ClientActionAnswer`](crate::protocol::IpcRequestKind::ClientActionAnswer)
+    /// carrying `client_action_request_id`. Sent to that client alone, for a
+    /// [`RunClientAction`](crate::protocol::IpcRequestKind::RunClientAction).
+    ClientActionRequested {
+        /// The number the answer carries.
+        client_action_request_id: u64,
+        /// The action to run, such as `core:toggle-notification-center`.
+        action_reference: ActionReference,
+    },
 }
 
 impl SessionEvent {
@@ -258,6 +272,7 @@ impl SessionEvent {
             SessionEvent::SwitchTo { .. } => "SwitchTo",
             SessionEvent::CommandRejected { .. } => "CommandRejected",
             SessionEvent::Pong => "Pong",
+            SessionEvent::ClientActionRequested { .. } => "ClientActionRequested",
         }
     }
 }
@@ -281,6 +296,7 @@ impl WireVariants for SessionEvent {
         "SwitchTo",
         "CommandRejected",
         "Pong",
+        "ClientActionRequested",
     ];
 }
 

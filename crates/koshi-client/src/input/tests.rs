@@ -17,6 +17,7 @@ use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{CommandId, PaneId, TabId};
 use koshi_core::mouse::{MouseButton, MouseKind, MouseTracking};
 use koshi_core::registry::ActionRegistry;
+use koshi_core::resolve::{resolve_action, DispatchPlan};
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
@@ -4333,4 +4334,153 @@ fn a_committed_dock_ends_pane_placement_and_keeps_dock_undock_mode_open() {
     assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
     assert!(!client.is_dock_undock_command_pending());
     assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
+}
+
+// --- Viewer-local actions `koshi actions run` asks for ---
+
+/// Every input mode a viewer has.
+const EVERY_INPUT_MODE: [LockMode; 8] = [
+    LockMode::Normal,
+    LockMode::Locked,
+    LockMode::PanePlacement,
+    LockMode::PaneMoveChoice,
+    LockMode::FloatingPaneMove,
+    LockMode::DockUndock,
+    LockMode::FloatingPaneTray,
+    LockMode::NotificationCenter,
+];
+
+/// The reference `core:<action_name>`.
+fn build_action_reference(action_name: &str) -> ActionReference {
+    ActionReference::from_core_action_name(action_name).expect("valid name")
+}
+
+#[test]
+fn every_viewer_local_action_a_default_key_fires_applies_in_that_keys_mode() {
+    let keybindings_config = KeybindingsConfig::default();
+    let action_registry = ActionRegistry::new();
+    let mut checked_binding_count = 0;
+    for lock_mode in EVERY_INPUT_MODE {
+        let mode_name = ModeName::from_text(lock_mode.get_keymap_name());
+        let Some(mode_bindings) = keybindings_config.mode_bindings_by_name.get(&mode_name) else {
+            continue;
+        };
+        for bound_action in mode_bindings.bound_action_by_key_sequence.values() {
+            let Ok(DispatchPlan::ClientAction(client_action_kind)) = resolve_action(
+                &bound_action.action_reference,
+                &action_registry,
+                Direction::Right,
+            ) else {
+                continue;
+            };
+            let is_applying_in_mode = match find_requested_client_action_modes(client_action_kind) {
+                RequestedClientActionModes::RunsIn(lock_modes) => lock_modes.contains(&lock_mode),
+                RequestedClientActionModes::Ends(ended_lock_mode) => ended_lock_mode == lock_mode,
+            };
+            assert!(
+                is_applying_in_mode,
+                "{} is bound in {} mode",
+                bound_action.action_reference,
+                lock_mode.get_keymap_name()
+            );
+            checked_binding_count += 1;
+        }
+    }
+    assert!(
+        checked_binding_count > 0,
+        "the default keymap binds viewer actions"
+    );
+}
+
+#[test]
+fn a_placement_action_asked_for_in_normal_mode_is_refused_naming_its_modes() {
+    let client = build_test_client();
+
+    assert_eq!(
+        client.find_requested_client_action_fit(
+            ClientActionKind::SelectPaneTarget(Direction::Left),
+            &build_action_reference("select-pane-target-left"),
+        ),
+        RequestedClientActionFit::RunsOnlyIn {
+            refusal_help: "core:select-pane-target-left runs only in pane-placement or \
+                           dock-undock mode; the client is in normal mode"
+                .to_string(),
+        }
+    );
+}
+
+#[test]
+fn a_mode_opening_action_asked_for_in_locked_mode_runs() {
+    let mut client = build_test_client();
+    client.set_lock_mode(LockMode::Locked);
+
+    assert_eq!(
+        client.find_requested_client_action_fit(
+            ClientActionKind::ToggleNotificationCenter,
+            &build_action_reference("toggle-notification-center"),
+        ),
+        RequestedClientActionFit::Runs
+    );
+}
+
+#[test]
+fn a_mode_closing_action_asked_for_while_its_mode_is_off_has_its_result() {
+    let client = build_test_client();
+
+    assert_eq!(
+        client.find_requested_client_action_fit(
+            ClientActionKind::CloseNotificationCenter,
+            &build_action_reference("close-notification-center"),
+        ),
+        RequestedClientActionFit::HasItsResult
+    );
+}
+
+#[test]
+fn a_mode_closing_action_runs_while_its_mode_owns_the_keyboard() {
+    let mut client = build_test_client();
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: Some(TabId::new()),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command_id: None,
+    });
+
+    assert_eq!(
+        client.find_requested_client_action_fit(
+            ClientActionKind::CancelPanePlacement,
+            &build_action_reference("cancel-pane-placement"),
+        ),
+        RequestedClientActionFit::Runs
+    );
+}
+
+#[test]
+fn a_mode_closing_action_asked_for_under_another_mode_is_refused() {
+    let mut client = build_test_client();
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: Some(TabId::new()),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command_id: None,
+    });
+    client.dock_undock_mode = Some(DockUndockMode {
+        tiled_pane_selection: None,
+    });
+
+    assert_eq!(
+        client.find_requested_client_action_fit(
+            ClientActionKind::CancelPanePlacement,
+            &build_action_reference("cancel-pane-placement"),
+        ),
+        RequestedClientActionFit::RunsOnlyIn {
+            refusal_help: "core:cancel-pane-placement runs only in pane-placement mode; the \
+                           client is in dock-undock mode"
+                .to_string(),
+        }
+    );
 }

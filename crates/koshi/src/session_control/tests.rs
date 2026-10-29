@@ -73,8 +73,8 @@ fn build_test_runtime_directory(test_label: &str) -> PathBuf {
 ///
 /// # Panics
 /// When `kill_prepare_request` is not a `Prepare` of a submitted
-/// [`Command::Quit`], or the next request is not a `Commit`.
-fn answer_prepared_quit(
+/// [`Command::KillSession`], or the next request is not a `Commit`.
+fn answer_prepared_kill_session(
     kill_connection: &mut Connection,
     hello_request_id: u64,
     kill_prepare_request: IpcRequest,
@@ -88,7 +88,7 @@ fn answer_prepared_quit(
     else {
         panic!("expected a prepared submitted command");
     };
-    assert_eq!(command_envelope.command, Command::Quit);
+    assert_eq!(command_envelope.command, Command::KillSession);
     send_ipc_reply(
         kill_connection,
         hello_request_id,
@@ -155,7 +155,7 @@ fn serve_kill_session(
         let mut kill_connection = listener.accept().expect("accept kill command");
         let kill_hello_request: IpcRequest = kill_connection.recv().expect("read kill hello");
         let kill_prepare_request: IpcRequest = kill_connection.recv().expect("read kill prepare");
-        answer_prepared_quit(
+        answer_prepared_kill_session(
             &mut kill_connection,
             kill_hello_request.request_id,
             kill_prepare_request,
@@ -164,7 +164,7 @@ fn serve_kill_session(
 }
 
 /// A stand-in session for `session_id` that serves one connection: a Hello,
-/// then a `Prepare` of a submitted [`Command::Quit`] and its `Commit`,
+/// then a `Prepare` of a submitted [`Command::KillSession`] and its `Commit`,
 /// answered with [`QuitCause::Requested`]. Any other first request after the Hello, such as
 /// a discovery request, panics the thread, and joining it raises that panic.
 fn serve_kill_session_without_discovery(
@@ -193,7 +193,7 @@ fn serve_kill_session_without_discovery(
             kill_hello_request.request_kind,
             IpcRequestKind::build_hello_request(connection_token.clone())
         );
-        answer_prepared_quit(
+        answer_prepared_kill_session(
             &mut kill_connection,
             kill_hello_request.request_id,
             kill_prepare_request,

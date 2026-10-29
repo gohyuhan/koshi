@@ -47,11 +47,11 @@ pub fn render_session_ending(session_ending: &SessionEnding) -> String {
             format_counted_noun(*stopped_process_count, "process", "processes")
         ),
         SessionEnding::Stopped {
-            quit_failure,
+            kill_session_failure,
             session_process_id,
             stopped_process_count,
         } => format!(
-            "the session did not quit ({quit_failure}); koshi ended its process {session_process_id} and {} under it\n",
+            "the session did not quit ({kill_session_failure}); koshi ended its process {session_process_id} and {} under it\n",
             format_counted_noun(*stopped_process_count, "process", "processes")
         ),
     }

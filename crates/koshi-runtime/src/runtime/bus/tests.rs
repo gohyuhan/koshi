@@ -2025,6 +2025,18 @@ fn each_session_event_delivery_converts_to_its_wire_frame() {
         build_wire_event(&Delivery::Restarting),
         Some(SessionEvent::Restarting)
     );
+    let notification_center_toggle =
+        ActionReference::from_core_action_name("toggle-notification-center").expect("valid name");
+    assert_eq!(
+        build_wire_event(&Delivery::ClientActionRequested {
+            client_action_request_id: 7,
+            action_reference: notification_center_toggle.clone(),
+        }),
+        Some(SessionEvent::ClientActionRequested {
+            client_action_request_id: 7,
+            action_reference: notification_center_toggle,
+        })
+    );
 }
 
 #[test]

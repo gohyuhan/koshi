@@ -42,7 +42,7 @@ use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName, ToastPositi
 use koshi_core::action::ClientActionKind;
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, CloseTabArgs, FocusTabArgs, GridPosition, NewTabArgs,
-    PanePlacementAnchor, PanePlacementTarget, Selection, SelectionKind, SetSelectionArgs,
+    PanePlacementAnchor, PanePlacementTarget, QuitArgs, Selection, SelectionKind, SetSelectionArgs,
     TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::constant::{DEFAULT_MAX_FRAMES_PER_SECOND, MIN_LINK_TIMEOUT_MS};
@@ -10594,7 +10594,7 @@ fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer()
     else {
         panic!("the quit goes up as a command");
     };
-    assert_eq!(command_envelope.command, Command::Quit);
+    assert_eq!(command_envelope.command, Command::Quit(QuitArgs::default()));
 }
 
 #[test]
@@ -10654,7 +10654,7 @@ fn the_quit_keybinding_ends_a_linked_attachment_at_once_as_detached() {
     else {
         panic!("the quit goes up as a command");
     };
-    assert_eq!(command_envelope.command, Command::Quit);
+    assert_eq!(command_envelope.command, Command::Quit(QuitArgs::default()));
 }
 
 #[test]
@@ -15978,5 +15978,127 @@ fn the_toast_clock_stops_while_no_frame_shows() {
             build_one_row_toast(500),
             client.get_notification_history().get_revision()
         ))
+    );
+}
+
+// --- Running a viewer action `koshi actions run` asked for ------------------
+
+#[test]
+fn a_requested_notification_center_toggle_opens_the_center_and_answers_ok() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.run_requested_client_action(
+            &mut client,
+            &ActionReference::from_core_action_name("toggle-notification-center")
+                .expect("valid name"),
+            Some(&mouse_frame),
+        ),
+        None
+    );
+
+    assert_eq!(client.get_active_input_mode(), LockMode::NotificationCenter);
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[test]
+fn a_requested_action_that_builds_a_session_command_is_refused_and_sends_nothing() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.run_requested_client_action(
+            &mut client,
+            &ActionReference::from_core_action_name("next-tab").expect("valid name"),
+            Some(&mouse_frame),
+        ),
+        Some(ClientActionRefusal {
+            reject_reason: RejectReason::InvalidState,
+            help: "core:next-tab builds a session command; a viewer runs only viewer-local \
+                   actions"
+                .to_string(),
+        })
+    );
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[test]
+fn a_requested_action_this_viewer_does_not_know_is_target_not_found() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.run_requested_client_action(
+            &mut client,
+            &ActionReference::from_core_action_name("frob").expect("valid name"),
+            Some(&mouse_frame),
+        ),
+        Some(ClientActionRefusal {
+            reject_reason: RejectReason::TargetNotFound,
+            help: "action core:frob is not registered".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_requested_placement_action_in_normal_mode_is_refused_and_changes_nothing() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.run_requested_client_action(
+            &mut client,
+            &ActionReference::from_core_action_name("select-pane-target-left").expect("valid name"),
+            Some(&mouse_frame),
+        ),
+        Some(ClientActionRefusal {
+            reject_reason: RejectReason::InvalidState,
+            help: "core:select-pane-target-left runs only in pane-placement or dock-undock \
+                   mode; the client is in normal mode"
+                .to_string(),
+        })
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+#[test]
+fn a_requested_close_of_a_center_that_is_closed_answers_ok_and_changes_nothing() {
+    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.run_requested_client_action(
+            &mut client,
+            &ActionReference::from_core_action_name("close-notification-center")
+                .expect("valid name"),
+            Some(&mouse_frame),
+        ),
+        None
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
     );
 }

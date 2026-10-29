@@ -335,9 +335,108 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             clipboard_targets: "c".to_string(),
             copied_bytes: b"lo".to_vec(),
         },
+        build_run_client_action_request_kind(),
+        IpcRequestKind::ClientActionAnswer {
+            client_action_request_id: 7,
+            refusal: None,
+        },
         IpcRequestKind::Prepare(Box::new(IpcRequestKind::Restart)),
         IpcRequestKind::Commit,
     ]
+}
+
+/// A `RunClientAction` for `core:toggle-notification-center` from an
+/// external CLI naming its session and client, every id the fixed test id.
+fn build_run_client_action_request_kind() -> IpcRequestKind {
+    IpcRequestKind::RunClientAction {
+        command_id: CommandId::from_uuid(build_fixed_test_uuid()),
+        command_source: CommandSource::from_external_cli(
+            Some(SessionId::from_uuid(build_fixed_test_uuid())),
+            Some(ClientId::from_uuid(build_fixed_test_uuid())),
+        ),
+        action_reference: ActionReference::from_core_action_name("toggle-notification-center")
+            .expect("valid name"),
+    }
+}
+
+#[test]
+fn a_run_client_action_request_has_this_wire_shape() {
+    let ipc_request = IpcRequest {
+        request_id: 2,
+        request_kind: build_run_client_action_request_kind(),
+    };
+
+    assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+    assert_eq!(
+        serde_json::to_value(&ipc_request).expect("request encodes"),
+        json!({
+            "request_id": 2,
+            "request_kind": {
+                "RunClientAction": {
+                    "command_id": "00000000-0000-0000-0000-000000000001",
+                    "command_source": {
+                        "ExternalCli": {
+                            "session_id": "00000000-0000-0000-0000-000000000001",
+                            "target_client_id": "00000000-0000-0000-0000-000000000001"
+                        }
+                    },
+                    "action_reference": "core:toggle-notification-center"
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn a_client_action_answer_carries_its_refusal_or_null() {
+    let refused_answer_request = IpcRequest {
+        request_id: 9,
+        request_kind: IpcRequestKind::ClientActionAnswer {
+            client_action_request_id: 7,
+            refusal: Some(ClientActionRefusal {
+                reject_reason: RejectReason::InvalidState,
+                help: "core:confirm-pane-placement runs only in pane-placement mode".to_string(),
+            }),
+        },
+    };
+
+    assert_eq!(
+        round_trip_wire_message(&refused_answer_request),
+        refused_answer_request
+    );
+    assert_eq!(
+        serde_json::to_value(&refused_answer_request).expect("request encodes"),
+        json!({
+            "request_id": 9,
+            "request_kind": {
+                "ClientActionAnswer": {
+                    "client_action_request_id": 7,
+                    "refusal": {
+                        "reject_reason": "InvalidState",
+                        "help": "core:confirm-pane-placement runs only in pane-placement mode"
+                    }
+                }
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<IpcRequestKind>(json!({
+            "ClientActionAnswer": { "client_action_request_id": 7, "refusal": null }
+        }))
+        .expect("a null refusal decodes"),
+        IpcRequestKind::ClientActionAnswer {
+            client_action_request_id: 7,
+            refusal: None,
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<IpcRequestKind>(json!({
+            "ClientActionAnswer": { "client_action_request_id": 7 }
+        }))
+        .expect_err("the refusal field is required")
+        .to_string(),
+        "missing field `refusal`"
+    );
 }
 
 /// One answer of every kind, in the order the enum declares them.

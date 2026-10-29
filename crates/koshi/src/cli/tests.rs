@@ -1713,8 +1713,9 @@ fn new_pane_without_a_direction_flag_follows_the_config_file() {
         "version 1\nlayout {\n    new-pane-direction \"down\"\n}\n",
     )
     .expect("the fixture parses");
-    let configured_direction =
-        koshi_link::config::resolve_new_pane_direction(Some(config_file.layer));
+    let configured_direction = koshi_link::config::resolve_client_config(Some(config_file.layer))
+        .layout
+        .new_pane_direction;
     assert_eq!(
         configured_direction,
         Direction::Down,
@@ -1778,7 +1779,9 @@ fn an_explicit_direction_flag_wins_over_the_config_file() {
 #[test]
 fn no_config_file_leaves_the_built_in_split_direction() {
     assert_eq!(
-        koshi_link::config::resolve_new_pane_direction(None),
+        koshi_link::config::resolve_client_config(None)
+            .layout
+            .new_pane_direction,
         Direction::Right
     );
 
@@ -5127,4 +5130,262 @@ fn every_id_the_json_output_prints_parses_back_through_its_target_flag() {
         parse_session_reference(printed_scope),
         Ok(SessionReference::SessionId(session_id))
     );
+}
+
+// --- `koshi actions run` ---
+
+/// What `koshi actions run <action_reference_text>` sends, with no
+/// `--client`, the built-in `Right` split direction and 3 scroll lines.
+fn build_actions_run_request_for(action_reference_text: &str) -> Result<SessionRequest, CliError> {
+    build_actions_run_request(action_reference_text, None, Direction::Right, 3)
+}
+
+#[test]
+fn every_registered_action_runs_as_its_key_does_or_names_the_verb_that_takes_its_arguments() {
+    let action_registry = ActionRegistry::new();
+    let action_seeds = build_core_action_seeds();
+    assert_eq!(action_seeds.len(), 94);
+    for (action_reference, action_metadata) in &action_seeds {
+        let key_dispatch_plan = koshi_core::resolve::resolve_action_with_scroll_line_count(
+            action_reference,
+            &action_registry,
+            Direction::Right,
+            3,
+        );
+        let actions_run_request = build_actions_run_request_for(&action_reference.to_string());
+        match (key_dispatch_plan, actions_run_request) {
+            (Ok(DispatchPlan::Command(key_command)), Ok(SessionRequest::Command(run_command))) => {
+                assert_eq!(run_command, *key_command, "{action_reference}");
+            }
+            (
+                Ok(DispatchPlan::ClientAction(client_action_kind)),
+                Ok(SessionRequest::ClientAction(run_reference)),
+            ) => {
+                assert_eq!(&run_reference, action_reference);
+                assert_eq!(
+                    action_metadata.handler,
+                    ActionHandlerReference::CoreClient(client_action_kind)
+                );
+            }
+            (Err(ResolveError::ArgumentsRequired { .. }), Err(run_error)) => {
+                let verb_invocation = format_argument_verb_invocation(action_reference);
+                assert_eq!(
+                    run_error.to_string(),
+                    format!(
+                        "invalid arguments: {action_reference} takes arguments; run \
+                         {verb_invocation}"
+                    )
+                );
+                let verb_name = verb_invocation
+                    .split_whitespace()
+                    .nth(1)
+                    .expect("the invocation names a verb");
+                assert_eq!(
+                    parse_cli_error(&["koshi", verb_name, "--help"]).kind(),
+                    ErrorKind::DisplayHelp,
+                    "{verb_invocation} is a verb"
+                );
+            }
+            (key_dispatch_plan, actions_run_request) => panic!(
+                "{action_reference}: the key gives {key_dispatch_plan:?}, actions run gives \
+                 {actions_run_request:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn actions_run_takes_a_bare_name_or_a_full_reference() {
+    assert_eq!(
+        build_actions_run_request_for("next-tab").expect("registered"),
+        build_actions_run_request_for("core:next-tab").expect("registered")
+    );
+    assert_eq!(
+        build_actions_run_request_for("toggle-notification-center").expect("registered"),
+        SessionRequest::ClientAction(
+            ActionReference::from_core_action_name("toggle-notification-center")
+                .expect("valid name")
+        )
+    );
+}
+
+#[test]
+fn actions_run_refuses_text_that_names_no_action_as_explain_does() {
+    for action_reference_text in ["core:frob", "frob", "plugin:next-tab", "Next Tab", ""] {
+        assert_eq!(
+            build_actions_run_request_for(action_reference_text)
+                .expect_err("names no action")
+                .to_string(),
+            format!("unknown action: {action_reference_text}")
+        );
+    }
+}
+
+#[test]
+fn actions_run_puts_its_client_in_a_command_that_has_a_client_argument() {
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    assert_eq!(
+        build_actions_run_request("lock", Some(client_id), Direction::Right, 3)
+            .expect("registered"),
+        SessionRequest::Command(Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: Some(client_id),
+        }))
+    );
+    assert_eq!(
+        build_actions_run_request("quit", Some(client_id), Direction::Right, 3)
+            .expect("registered"),
+        SessionRequest::Command(Command::Quit(QuitArgs {
+            client_id: Some(client_id),
+        }))
+    );
+    assert_eq!(
+        build_actions_run_request("close-pane", Some(client_id), Direction::Right, 3)
+            .expect("registered"),
+        SessionRequest::Command(Command::ClosePane(ClosePaneArgs::default()))
+    );
+}
+
+#[test]
+fn actions_run_builds_with_this_clis_direction_and_scroll_line_count() {
+    assert_eq!(
+        build_actions_run_request("new-pane", None, Direction::Down, 3).expect("registered"),
+        SessionRequest::Command(Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Down,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: None,
+        }))
+    );
+    assert_eq!(
+        build_actions_run_request("scroll-pane-down", None, Direction::Right, 7)
+            .expect("registered"),
+        SessionRequest::Command(Command::ScrollPane(ScrollPaneArgs {
+            pane_id: None,
+            scroll_line_count: -7,
+        }))
+    );
+}
+
+#[test]
+fn actions_run_is_an_action_verb_whose_client_rides_on_its_source() {
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let client_id_text = client_id.to_string();
+    let parsed_command = parse_cli_command(&[
+        "koshi",
+        "actions",
+        "run",
+        "close-pane",
+        "--client",
+        &client_id_text,
+    ]);
+
+    assert!(parsed_command.is_action_verb());
+    assert_eq!(parsed_command.get_target_client_id(), Some(client_id));
+    assert_eq!(parsed_command.get_source_client_id(), Some(client_id));
+    assert_eq!(
+        parsed_command.list_session_choice_flags(),
+        &["--client <client-id>"]
+    );
+    assert_eq!(
+        parsed_command.build_action_command(&ResolvedTargets::default(), Direction::Right),
+        None
+    );
+    for argument_values in [
+        &["koshi", "actions", "list"][..],
+        &["koshi", "actions", "explain", "new-tab"][..],
+    ] {
+        assert!(!parse_cli_command(argument_values).is_action_verb());
+    }
+}
+
+#[test]
+fn the_session_request_of_a_verb_is_its_command_and_of_actions_run_is_its_request() {
+    let new_tab_command = parse_cli_command(&["koshi", "new-tab"]);
+    assert_eq!(
+        new_tab_command.build_session_request(&ResolvedTargets::default(), Direction::Right, None),
+        SessionRequest::Command(Command::NewTab(NewTabArgs::default()))
+    );
+
+    let actions_run_command = parse_cli_command(&["koshi", "actions", "run", "new-tab"]);
+    let actions_run_request = build_actions_run_request_for("new-tab").expect("registered");
+    assert_eq!(
+        actions_run_command.build_session_request(
+            &ResolvedTargets::default(),
+            Direction::Right,
+            Some(actions_run_request.clone()),
+        ),
+        actions_run_request
+    );
+}
+
+#[test]
+fn each_action_verb_names_the_flags_that_pick_its_session() {
+    let flag_cases: [(&[&str], &[&str]); 5] = [
+        (
+            &["koshi", "new-pane"],
+            &[
+                "--session <name-or-id>",
+                "--tab <name-or-id>",
+                "--pane <pane-id>",
+                "--client <client-id>",
+            ],
+        ),
+        (&["koshi", "lock"], &["--client <client-id>"]),
+        (&["koshi", "close-pane"], &["--pane <pane-id>"]),
+        (
+            &["koshi", "move-tab", "--index", "0"],
+            &["--tab <name-or-id>"],
+        ),
+        (
+            &["koshi", "close-tab"],
+            &["--session <name-or-id>", "--tab <name-or-id>"],
+        ),
+    ];
+    for (argument_values, expected_flags) in flag_cases {
+        assert_eq!(
+            parse_cli_command(argument_values).list_session_choice_flags(),
+            expected_flags,
+            "{argument_values:?}"
+        );
+    }
+    assert_eq!(
+        parse_cli_command(&["koshi", "list-sessions"]).list_session_choice_flags(),
+        &[] as &[&str]
+    );
+}
+
+#[test]
+fn an_action_text_parses_as_a_bare_name_or_a_core_reference() {
+    let new_tab_reference = ActionReference::from_core_action_name("new-tab").expect("valid name");
+    assert_eq!(
+        parse_action_reference_text("new-tab"),
+        Some(new_tab_reference.clone())
+    );
+    assert_eq!(
+        parse_action_reference_text("core:new-tab"),
+        Some(new_tab_reference)
+    );
+    assert_eq!(parse_action_reference_text("plugin:new-tab"), None);
+    assert_eq!(parse_action_reference_text("New Tab"), None);
+}
+
+#[test]
+fn an_action_that_takes_arguments_names_the_verb_that_supplies_them() {
+    for (action_name, expected_invocation) in [
+        ("focus-tab", "koshi focus-tab"),
+        ("write-to-pane", "koshi input"),
+        ("move-floating-pane", "koshi move-pane --x --y"),
+    ] {
+        assert_eq!(
+            format_argument_verb_invocation(
+                &ActionReference::from_core_action_name(action_name).expect("valid name")
+            ),
+            expected_invocation
+        );
+    }
 }

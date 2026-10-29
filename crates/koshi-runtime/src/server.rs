@@ -50,8 +50,9 @@ use crate::{
     },
     runtime::{
         bus::{EventBus, HostWrite, WriterHandoff},
+        command::client_action::WaitingClientActions,
         delivery_queue::DeliveryReceiver,
-        event::RuntimeEvent,
+        event::{RuntimeEvent, SessionEnding},
         mouse::HeldMouseButton,
         placement_preview::ClientPlacementPreview,
         pty_inbox::PaneOutputQueue,
@@ -302,8 +303,10 @@ pub struct Server {
     /// True when a quit asked for zero-grace process teardown, in this process
     /// or carried across an image swap.
     pub(crate) should_shutdown_immediately: bool,
-    /// True once a `core:quit` command was applied, in this process or carried
-    /// across an image swap. The event loop polls it before it waits for an
+    /// True once a quit was requested —
+    /// [`Command::KillSession`](koshi_core::command::Command::KillSession), or
+    /// the last client leaving under `auto-close-session` — in this process
+    /// or carried across an image swap. The event loop polls it before it waits for an
     /// event and after each event batch, and exits once
     /// [`is_awaiting_client`](Self::is_awaiting_client) is false; the flag never
     /// resets.
@@ -322,6 +325,10 @@ pub struct Server {
     /// [`handle_drop_unclaimed_clients`](Self::handle_drop_unclaimed_clients)
     /// when the grace window closes.
     pub(crate) client_ids_awaiting_reconnect: HashSet<ClientId>,
+    /// The viewer action requests that wait for their client's answer
+    /// ([`request_client_action`](Self::request_client_action)). Nothing in it
+    /// is carried across an image swap: the swap answers every one first.
+    pub(crate) waiting_client_actions: WaitingClientActions,
     /// The id [`get_grace_window_id`](Self::get_grace_window_id) returns.
     pub(crate) grace_window_id: u64,
     /// The view each dropped client left behind
@@ -375,6 +382,7 @@ impl Server {
             is_quit_requested: false,
             is_restart_requested: false,
             client_ids_awaiting_reconnect: HashSet::new(),
+            waiting_client_actions: WaitingClientActions::default(),
             grace_window_id: NEXT_GRACE_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
             saved_view_store: SavedViewStore::default(),
             device_reply_failure_warning: WarningRateLimiter::new(),
@@ -1152,8 +1160,10 @@ impl Server {
         }
     }
 
-    /// Whether a `core:quit` command was applied, in this process or carried
-    /// across an image swap. The event loop exits once this is true and
+    /// Whether a quit was requested —
+    /// [`Command::KillSession`](koshi_core::command::Command::KillSession), or
+    /// the last client leaving under `auto-close-session` — in this process
+    /// or carried across an image swap. The event loop exits once this is true and
     /// [`is_awaiting_client`](Self::is_awaiting_client) is false.
     #[must_use]
     pub fn is_quit_requested(&self) -> bool {
@@ -1196,7 +1206,9 @@ impl Server {
 
     /// Tell every attached client that this session is replacing its own
     /// process image, so each one waits for it and attaches again, and return
-    /// once every one of them holds that frame.
+    /// once every one of them holds that frame. A viewer action request that
+    /// waits for an answer keeps waiting: the client's writing thread writes
+    /// each queued request ahead of this frame.
     ///
     /// [`Event::Restarting`] is the stream's last frame for the clients that
     /// receive it, the same way [`Event::Quit`] is. Publishing it raises the
@@ -1214,7 +1226,9 @@ impl Server {
 
     /// Tell every attached client that this session ended, and return once
     /// every one of them holds that frame. Each client then says the session
-    /// ended.
+    /// ended. Every viewer action request that waits for an answer is
+    /// answered first
+    /// ([`answer_client_actions_at_session_ending`](Self::answer_client_actions_at_session_ending)).
     ///
     /// [`Event::Quit`] is the stream's last frame for the clients that receive
     /// it. Publishing it raises the shared
@@ -1234,6 +1248,7 @@ impl Server {
     /// frame and ended, or until one second passes, so the caller can tear the
     /// process down knowing nothing is left half-told.
     pub fn announce_quit(&mut self) {
+        self.answer_client_actions_at_session_ending(SessionEnding::Quit);
         if self
             .event_bus
             .get_ending_notice()

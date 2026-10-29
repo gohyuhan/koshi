@@ -25,11 +25,11 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
-    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs,
-    SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs, TabTarget,
-    TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
+    ClosePaneArgs, CloseTabArgs, Command, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
+    LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
+    NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs,
+    ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs,
+    SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, Point,
@@ -38,8 +38,11 @@ use koshi_core::ids::{parse_owned_session_id, parse_prefixed_uuid, OwnedSessionI
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_core::registry::ActionRegistry;
+use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan, ResolveError};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::{MAX_TOKEN_LIFETIME_DURATION, TOKEN_LIFETIME_TOO_LONG_MESSAGE};
+use koshi_link::error::CliError;
 
 /// A parsed `koshi` invocation.
 #[derive(Debug, PartialEq, Eq, Parser)]
@@ -1362,9 +1365,10 @@ pub enum InspectTarget {
     },
 }
 
-/// The `koshi actions` introspection subcommands: list the supported actions or
-/// explain one. Both read the static action table and render through
-/// [`crate::output`]; neither needs a running session.
+/// The `koshi actions` subcommands: list the supported actions, explain one,
+/// or run one. `list` and `explain` read the static action table and render
+/// through [`crate::output`], and need no running session. `run` sends the
+/// action to a running session ([`build_actions_run_request`]).
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum ActionsCommand {
     /// List every supported action with its internal command and scope.
@@ -1393,6 +1397,27 @@ pub enum ActionsCommand {
         )]
         output_format: OutputFormat,
     },
+    /// Run one action in a running session, as a key bound to it runs it in
+    /// the client's viewer.
+    Run {
+        /// Action to run, as a bare name (`next-tab`) or full ref
+        /// (`core:next-tab`).
+        action_reference_text: String,
+        /// Client the action runs for; defaults to the issuing client, else
+        /// the session's only attached one.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
+    },
+}
+
+/// What an action verb sends its session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRequest {
+    /// A command the session runs.
+    Command(Command),
+    /// A viewer-local action, such as `core:toggle-notification-center`, that
+    /// the session asks one of its clients to run.
+    ClientAction(ActionReference),
 }
 
 impl CliCommand {
@@ -1424,8 +1449,14 @@ impl CliCommand {
             | CliCommand::Lock { .. }
             | CliCommand::Unlock { .. }
             | CliCommand::ToggleLock { .. }
-            | CliCommand::Run { .. } => true,
-            CliCommand::ListSessions { .. }
+            | CliCommand::Run { .. }
+            | CliCommand::Actions {
+                command: ActionsCommand::Run { .. },
+            } => true,
+            CliCommand::Actions {
+                command: ActionsCommand::List { .. } | ActionsCommand::Explain { .. },
+            }
+            | CliCommand::ListSessions { .. }
             | CliCommand::KillSession { .. }
             | CliCommand::Attach { .. }
             | CliCommand::Detach { .. }
@@ -1438,7 +1469,6 @@ impl CliCommand {
             | CliCommand::RestartServers
             | CliCommand::Version { .. }
             | CliCommand::ServerVersion { .. }
-            | CliCommand::Actions { .. }
             | CliCommand::Inspect { .. }
             | CliCommand::ListTabs { .. }
             | CliCommand::ListPanes { .. }
@@ -1466,13 +1496,15 @@ impl CliCommand {
     ///
     /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
     /// setting, read from `koshi.kdl` by
-    /// [`config::resolve_new_pane_direction`](koshi_link::config::resolve_new_pane_direction). A
+    /// [`config::resolve_client_config`](koshi_link::config::resolve_client_config). A
     /// pane-opening verb given no `--direction` splits toward it.
     ///
-    /// `None` for the verbs that are not actions — the lifecycle commands
+    /// `None` for `actions run`, which [`build_actions_run_request`] builds,
+    /// and for the verbs that are not actions — the lifecycle commands
     /// (`list-sessions`, `kill-session`, `attach`, `detach`, `doctor`), the
     /// read-only discovery and local queries (`inspect`, the `list-*` verbs,
-    /// `actions`, `keys`, `config`, and the `debug` dumps), `update`,
+    /// `actions list`, `actions explain`, `keys`, `config`, and the `debug`
+    /// dumps), `update`,
     /// `restart-servers`, `version`, `server-version`, `share`, `remote`, and the
     /// hidden `serve-router`, `serve-session`, `serve-pty-supervisor` and
     /// `resume-support`.
@@ -1841,6 +1873,30 @@ impl CliCommand {
         Some((action_reference, command))
     }
 
+    /// What this action verb sends its session: `actions_run_request`, which
+    /// [`build_actions_run_request`] built for `actions run`, else the
+    /// command [`Self::build_action_command`] builds for `resolved_targets`
+    /// and `new_pane_direction`.
+    ///
+    /// # Panics
+    /// When this verb is not an action ([`Self::is_action_verb`]) and
+    /// `actions_run_request` is `None`.
+    #[must_use]
+    pub fn build_session_request(
+        &self,
+        resolved_targets: &ResolvedTargets,
+        new_pane_direction: Direction,
+        actions_run_request: Option<SessionRequest>,
+    ) -> SessionRequest {
+        if let Some(actions_run_request) = actions_run_request {
+            return actions_run_request;
+        }
+        let (_, action_command) = self
+            .build_action_command(resolved_targets, new_pane_direction)
+            .expect("only an action verb is sent to a session");
+        SessionRequest::Command(action_command)
+    }
+
     /// The `--session` flag of this invocation, for the verbs that take one.
     /// The routing layer reads it to pick which running session the command
     /// is sent to.
@@ -1938,19 +1994,24 @@ impl CliCommand {
             | CliCommand::PinPane { client_id, .. }
             | CliCommand::UnpinPane { client_id, .. }
             | CliCommand::MinimizePane { client_id, .. }
-            | CliCommand::RestorePane { client_id, .. } => *client_id,
+            | CliCommand::RestorePane { client_id, .. }
+            | CliCommand::Actions {
+                command: ActionsCommand::Run { client_id, .. },
+            } => *client_id,
             _ => None,
         }
     }
 
-    /// The client this invocation names that no [`Command`] carries; it rides
-    /// on the command's source instead
+    /// The client that rides on this invocation's source
     /// ([`CommandSource::ExternalCli`](koshi_core::command::CommandSource::ExternalCli)).
     /// `toggle-pane-fullscreen`, `scroll-pane`, `resize-pane`, `move-pane`,
     /// `place-pane`, `undock-pane`, `dock-pane`, `pin-pane`, `unpin-pane`,
-    /// `minimize-pane` and `restore-pane` answer their `--client` value; every
-    /// other verb answers `None`, and a client-taking one puts its client in
-    /// the command's own arguments, which travel on both routes.
+    /// `minimize-pane` and `restore-pane`, whose commands carry no client,
+    /// answer their `--client` value. `actions run` answers its `--client`
+    /// value too, which [`build_actions_run_request`] also puts in a
+    /// command's own client argument. Every other verb answers `None`, and a
+    /// client-taking one puts its client in the command's own arguments,
+    /// which travel on both routes.
     /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
     /// carries no client, and a command with one here never takes the
     /// in-session route ([`crate::targeting::resolve_command_route`]).
@@ -1967,8 +2028,79 @@ impl CliCommand {
             | CliCommand::PinPane { client_id, .. }
             | CliCommand::UnpinPane { client_id, .. }
             | CliCommand::MinimizePane { client_id, .. }
-            | CliCommand::RestorePane { client_id, .. } => *client_id,
+            | CliCommand::RestorePane { client_id, .. }
+            | CliCommand::Actions {
+                command: ActionsCommand::Run { client_id, .. },
+            } => *client_id,
             _ => None,
+        }
+    }
+
+    /// The flags of this action verb that pick the session it goes to, as
+    /// the routing layer's refusal names them when several sessions run and
+    /// none is picked: `koshi lock` gives `["--client <client-id>"]`. Every
+    /// verb that is not an action gives no flag.
+    #[must_use]
+    pub fn list_session_choice_flags(&self) -> &'static [&'static str] {
+        const SESSION_FLAG: &str = "--session <name-or-id>";
+        const TAB_FLAG: &str = "--tab <name-or-id>";
+        const PANE_FLAG: &str = "--pane <pane-id>";
+        const CLIENT_FLAG: &str = "--client <client-id>";
+        match self {
+            CliCommand::NewPane { .. } | CliCommand::Run { .. } => {
+                &[SESSION_FLAG, TAB_FLAG, PANE_FLAG, CLIENT_FLAG]
+            }
+            CliCommand::NewTab { .. } => &[SESSION_FLAG, CLIENT_FLAG],
+            CliCommand::CloseTab { .. } => &[SESSION_FLAG, TAB_FLAG],
+            CliCommand::PlacePane { .. } | CliCommand::DockPane { .. } => {
+                &[TAB_FLAG, PANE_FLAG, CLIENT_FLAG]
+            }
+            CliCommand::FocusTab { .. } => &[TAB_FLAG, CLIENT_FLAG],
+            CliCommand::MoveTab { .. } => &[TAB_FLAG],
+            CliCommand::ResizePane { .. }
+            | CliCommand::MovePane { .. }
+            | CliCommand::UndockPane { .. }
+            | CliCommand::PinPane { .. }
+            | CliCommand::UnpinPane { .. }
+            | CliCommand::MinimizePane { .. }
+            | CliCommand::RestorePane { .. }
+            | CliCommand::ScrollPane { .. }
+            | CliCommand::FocusPane { .. } => &[PANE_FLAG, CLIENT_FLAG],
+            CliCommand::ClosePane { .. } | CliCommand::Input { .. } => &[PANE_FLAG],
+            CliCommand::TogglePaneFullscreen { .. }
+            | CliCommand::NextTab { .. }
+            | CliCommand::PreviousTab { .. }
+            | CliCommand::Lock { .. }
+            | CliCommand::Unlock { .. }
+            | CliCommand::ToggleLock { .. }
+            | CliCommand::Actions {
+                command: ActionsCommand::Run { .. },
+            } => &[CLIENT_FLAG],
+            CliCommand::Actions {
+                command: ActionsCommand::List { .. } | ActionsCommand::Explain { .. },
+            }
+            | CliCommand::ListSessions { .. }
+            | CliCommand::KillSession { .. }
+            | CliCommand::Attach { .. }
+            | CliCommand::Detach { .. }
+            | CliCommand::Doctor { .. }
+            | CliCommand::Config { .. }
+            | CliCommand::Share { .. }
+            | CliCommand::Remote { .. }
+            | CliCommand::Debug { .. }
+            | CliCommand::Update
+            | CliCommand::RestartServers
+            | CliCommand::Version { .. }
+            | CliCommand::ServerVersion { .. }
+            | CliCommand::Inspect { .. }
+            | CliCommand::ListTabs { .. }
+            | CliCommand::ListPanes { .. }
+            | CliCommand::ListClients { .. }
+            | CliCommand::Keys { .. }
+            | CliCommand::ServeRouter { .. }
+            | CliCommand::ServeSession { .. }
+            | CliCommand::ServePtySupervisor { .. }
+            | CliCommand::ResumeSupport => &[],
         }
     }
 
@@ -2084,6 +2216,120 @@ fn build_floating_pane_minimize_action(
             is_minimized,
         }),
     )
+}
+
+/// The action `action_reference_text` names, as a bare name (`next-tab`) or a
+/// full ref (`core:next-tab`). `None` for text that is neither, such as
+/// `plugin:next-tab` or `Next Tab`.
+#[must_use]
+pub fn parse_action_reference_text(action_reference_text: &str) -> Option<ActionReference> {
+    if action_reference_text.contains(':') {
+        return action_reference_text.parse().ok();
+    }
+    ActionReference::from_core_action_name(action_reference_text).ok()
+}
+
+/// What `koshi actions run <action_reference_text>` sends its session: the
+/// command a key bound to the action builds, or the viewer-local action
+/// itself. With `client_id`, a command that has its own client argument
+/// carries `client_id` there: `core:lock` builds
+/// `SetLockMode { is_locked: true, client_id: Some(client_id) }`.
+///
+/// `new_pane_direction` and `scroll_line_count` are this CLI's own
+/// `layout.new-pane-direction` and `mouse.scroll-line-count`: `core:new-pane`
+/// splits toward the direction, and `core:scroll-pane-up` scrolls that many
+/// lines.
+///
+/// # Errors
+/// [`CliError::UnknownAction`] for text that names no action, as
+/// `koshi actions explain` gives it. [`CliError::InvalidArgs`] for an action
+/// whose command takes arguments, naming the verb that supplies them:
+/// `core:focus-tab takes arguments; run koshi focus-tab`.
+pub fn build_actions_run_request(
+    action_reference_text: &str,
+    client_id: Option<ClientId>,
+    new_pane_direction: Direction,
+    scroll_line_count: u16,
+) -> Result<SessionRequest, CliError> {
+    let build_unknown_action_error = || CliError::UnknownAction {
+        action_name: action_reference_text.to_string(),
+    };
+    let action_reference = parse_action_reference_text(action_reference_text)
+        .ok_or_else(build_unknown_action_error)?;
+    let dispatch_plan = match resolve_action_with_scroll_line_count(
+        &action_reference,
+        &ActionRegistry::new(),
+        new_pane_direction,
+        scroll_line_count,
+    ) {
+        Ok(dispatch_plan) => dispatch_plan,
+        Err(ResolveError::Unregistered { .. }) => return Err(build_unknown_action_error()),
+        Err(ResolveError::ArgumentsRequired { action_reference }) => {
+            return Err(CliError::InvalidArgs {
+                detail: format!(
+                    "{action_reference} takes arguments; run {}",
+                    format_argument_verb_invocation(&action_reference)
+                ),
+            })
+        }
+    };
+    let mut action_command = match dispatch_plan {
+        DispatchPlan::Command(action_command) => *action_command,
+        DispatchPlan::ClientAction(_) => {
+            return Ok(SessionRequest::ClientAction(action_reference));
+        }
+    };
+    let Some(target_client_id) = client_id else {
+        return Ok(SessionRequest::Command(action_command));
+    };
+    let command_client_id = match &mut action_command {
+        Command::NewPane(NewPaneArgs { client_id, .. })
+        | Command::FocusPane(FocusPaneArgs { client_id, .. })
+        | Command::NewTab(NewTabArgs { client_id, .. })
+        | Command::FocusTab(FocusTabArgs { client_id, .. })
+        | Command::ToggleLockMode(ToggleLockModeArgs { client_id })
+        | Command::SetLockMode(LockModeArgs { client_id, .. })
+        | Command::Quit(QuitArgs { client_id })
+        | Command::Detach(DetachArgs { client_id })
+        | Command::SwitchSession(SwitchSessionArgs { client_id, .. }) => client_id,
+        Command::ClosePane(_)
+        | Command::ResizePane(_)
+        | Command::CloseTab(_)
+        | Command::WriteToPane(_)
+        | Command::ToggleMouseSelect
+        | Command::Visual(_)
+        | Command::TogglePaneFullscreen
+        | Command::MoveTab(_)
+        | Command::MovePane(_)
+        | Command::PlacePane(_)
+        | Command::ScrollPane(_)
+        | Command::MoveFloatingPane(_)
+        | Command::SetPanePinned(_)
+        | Command::TogglePanePinned(_)
+        | Command::SetPaneMinimized(_)
+        | Command::TogglePaneMinimized(_)
+        | Command::SetAllFloatingPanesMinimized(_)
+        | Command::ToggleAllFloatingPanesMinimized
+        | Command::KillSession
+        | Command::DetachAll => return Ok(SessionRequest::Command(action_command)),
+    };
+    *command_client_id = Some(target_client_id);
+    Ok(SessionRequest::Command(action_command))
+}
+
+/// The `koshi` verb that supplies the arguments `action_reference` takes:
+/// `koshi focus-tab` for `core:focus-tab`, `koshi input` for
+/// `core:write-to-pane`, and `koshi move-pane --x --y` for
+/// `core:move-floating-pane`. Every other action gives the verb of its own
+/// name.
+#[must_use]
+pub fn format_argument_verb_invocation(action_reference: &ActionReference) -> String {
+    let cli_verb_text = match action_reference.action_name.get_name() {
+        "write-to-pane" => "input",
+        "move-floating-pane" => "move-pane --x --y",
+        action_name => action_name,
+    };
+    format!("koshi {cli_verb_text}")
 }
 
 /// The id inside a `--tab` flag given directly as one; a name (or no flag)

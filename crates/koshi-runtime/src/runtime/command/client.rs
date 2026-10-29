@@ -678,8 +678,8 @@ impl Server {
     ///
     /// Runs for every detach trigger but a returning client's: an attached
     /// client's connection that ends with a client that does not attach again,
-    /// the [`Command::Detach`] / [`Command::DetachAll`] execution arms, and a
-    /// [`Command::Quit`] whose command source names a client. Target
+    /// the [`Command::Detach`] / [`Command::DetachAll`] / [`Command::Quit`]
+    /// execution arms. Target
     /// resolution happens at command resolution before this is reached. With
     /// `auto-close-session` on, a detach that leaves the session with no
     /// client requests a graceful quit. A client that may attach again goes
@@ -736,6 +736,8 @@ impl Server {
 
     /// Release every mouse button the client `client_id` holds
     /// ([`release_client_mouse_buttons`](Self::release_client_mouse_buttons)),
+    /// answer every viewer action request that waits for it
+    /// ([`answer_departed_client_actions`](Self::answer_departed_client_actions)),
     /// then remove its record, reflow the tab it was viewing and the session's
     /// floating panes, and mark the view of every subscriber changed, as
     /// [`handle_client_detach`](Self::handle_client_detach) states. Pushes one
@@ -744,13 +746,14 @@ impl Server {
     ///
     /// The id of the session that held the client, once its record is removed.
     /// `None` for a client no session holds, which changes nothing but the
-    /// release.
+    /// release and the answers.
     fn remove_client_record(
         &mut self,
         client_id: ClientId,
         emitted_events: &mut Vec<Event>,
     ) -> Option<SessionId> {
         self.release_client_mouse_buttons(client_id);
+        self.answer_departed_client_actions(client_id);
         // A detach for a client no session holds is dropped.
         let session = self.get_session_for_client_mut(client_id)?;
         let session_id = session.session_id;
@@ -930,12 +933,15 @@ impl Server {
         Ok((client_id, client))
     }
 
-    /// Handle [`Command::ToggleMouseSelect`]: flip whether the acting client
-    /// grabs the mouse for text selection and emit [`Event::MouseSelectChanged`]
+    /// Handle [`Command::ToggleMouseSelect`]: flip whether one client grabs
+    /// the mouse for text selection and emit [`Event::MouseSelectChanged`]
     /// carrying the new value.
     ///
-    /// Client-scoped like the lock commands: the target is the acting client
-    /// alone, no pane is resolved. It changes only how the client's mouse
+    /// The client is the one the source names
+    /// ([`CommandSource::get_target_client_id`]), else the acting client
+    /// ([`Self::resolve_view_client`]); no pane is resolved. With clients A
+    /// and B attached, `koshi actions run core:mouse-select --client <B>`
+    /// flips B's mode and leaves A's. It changes only how the client's mouse
     /// gestures route — koshi selection versus the program — never the layout,
     /// focus, or any PTY. The event is what carries the new value to the
     /// viewer, which routes its own mouse events against its own copy.
@@ -944,7 +950,8 @@ impl Server {
         command_id: CommandId,
         command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let (client_id, client) = self.resolve_acting_client_mut(command_source, None)?;
+        let (client_id, client) =
+            self.resolve_acting_client_mut(command_source, command_source.get_target_client_id())?;
         let is_mouse_selection_enabled = client.toggle_mouse_selection();
         let mut transaction_scope = TransactionScope::new();
         transaction_scope.emit(Event::MouseSelectChanged(MouseSelectChanged {

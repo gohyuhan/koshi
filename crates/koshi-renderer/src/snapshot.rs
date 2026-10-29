@@ -327,8 +327,9 @@ impl CommittedRegions {
 /// fresh frame that resyncs a subscriber whose queue overflowed, one post the
 /// session's notification queue took, the answers to one round of mouse
 /// actions, a wake-up for the bytes that wait for the subscriber's own
-/// terminal, the session its client moves to, or a command from the
-/// subscriber's client that the session rejected.
+/// terminal, the session its client moves to, a command from the
+/// subscriber's client that the session rejected, or a viewer-local action
+/// the session asks the subscriber's client to run.
 ///
 /// All of them ride the same queue in order: a subscriber that missed events
 /// reads the backlog it already had, then the frame, then live events again.
@@ -406,6 +407,14 @@ pub enum Delivery {
         reject_reason: RejectReason,
         /// The session's hint for resolving the rejection, or `None`.
         help: Option<String>,
+    },
+    /// Run one viewer-local action in the subscriber's client and answer
+    /// under `client_action_request_id`.
+    ClientActionRequested {
+        /// The number the client's answer carries.
+        client_action_request_id: u64,
+        /// The action to run, such as `core:toggle-notification-center`.
+        action_reference: ActionReference,
     },
 }
 

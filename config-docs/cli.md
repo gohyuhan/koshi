@@ -402,7 +402,10 @@ may be used; zero or several sessions fail.
 
 Example: one running session + `koshi new-tab` results in a tab in that
 session. Two running sessions + the same command fails with `several sessions
-are running; name one with --session <name-or-id>`.
+are running; name one with --session <name-or-id> or --client <client-id>`.
+The refusal names the flags of that command that choose a session: `koshi
+lock` names `--client <client-id>`, and `koshi close-pane` names `--pane
+<pane-id>`.
 
 `--client` names one viewer of a session, and a viewer-scoped command changes
 only that viewer's screen. Example: terminals `client-1a2b…` and `client-3c4d…`
@@ -544,7 +547,7 @@ or id exits 3.
 `kill-session` ends a session of yours whatever koshi version it runs:
 
 1. Koshi lists every process that runs under the session process. Then it
-   sends the session a quit request. The session has 5 seconds to take the
+   sends the session a request to end. The session has 5 seconds to take the
    request, and 5 seconds more to answer it.
 2. If the session quits, koshi ends each listed process that still runs. An
    example is a `sleep 600 &` that a pane shell started in a process group of
@@ -597,7 +600,7 @@ process 5000 is session-…, and leaves it running. If it is, end it with: kill
 5000`. While it runs, `kill-session`
 ignores Ctrl+C and a terminal that closes.
 
-A session that another user started gets the quit request alone. If that
+A session that another user started gets the request to end alone. If that
 session does not answer, the command exits 4.
 
 `attach` run outside koshi opens that session in this terminal. Run inside a
@@ -622,7 +625,9 @@ reads `attach to which session? [1]`.
 detach` works only inside a koshi pane and detaches that terminal. Outside one,
 name the target: `koshi detach session-3f2a…` takes a client id, a session id,
 `<user id>/<session id>`, or a session name. `--all` detaches every terminal of
-one session.
+one session. A terminal that has not come back since its session restarted is
+refused with `client <id> is reconnecting`. `--all` is refused the same way
+while one terminal of the session has not come back, and detaches none.
 
 A session left with no terminal keeps running unless `auto-close-session` is on
 in `koshi.kdl`, which ends it once the last terminal leaves.
@@ -677,8 +682,9 @@ and no `--client`, the resize is refused. A floating pane grows only up to that
 client's pane area edge on the moved side: a 40-column pane at column 20 of 80
 columns, grown right by 30, becomes 60 columns wide. A pane that client pinned
 keeps its pinned cell. On a tiled pane, the resize ends the fullscreen view of
-the client `--client` names. A positive `scroll-pane --lines` moves toward
-history.
+the client `--client` names. Outside koshi without `--pane` or `--client`, it
+ends the fullscreen view of the session's only attached client, as that
+client's own key does. A positive `scroll-pane --lines` moves toward history.
 
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.
@@ -711,9 +717,11 @@ with `several clients are attached; name the target client`.
 The client that `--client` names shows and focuses the new pane. If that client
 views another tab, it moves onto the tab of the new pane first. Without
 `--client`, the client of the pane the command runs in does this. Outside koshi
-without `--client`, the new pane takes no client's focus on a tab that a client
-already views. On a tab that no client views, the session's only attached
-client moves onto the tab and focuses the new pane.
+without `--client`, `--pane` or `--tab`, the session's only attached client
+focuses the new pane, as its own key does. Outside koshi with `--pane` or
+`--tab` and no `--client`, the new pane takes no client's focus on a tab that a
+client already views. On a tab that no client views, the session's only
+attached client moves onto the tab and focuses the new pane.
 
 Example: terminal `client-1a2b…` views tab `logs`, and terminal `client-3c4d…`
 views tab `build`. `koshi new-pane --direction right --client client-3c4d…`,
@@ -870,10 +878,46 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action |
+| `koshi actions run <ACTION> [--client <CLIENT_ID>]` | Run one action as a key bound to it runs it |
 | `koshi keys list [--mode <MODE>] [--scope default\|user] [--format table\|json]` | List effective shortcuts |
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut, or each shortcut it starts |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
+
+`actions list` prints the `cli_invocation` column (`cli_invocation` in JSON):
+the command that runs the action from a shell. An action whose command needs
+arguments names its own verb, such as `koshi focus-tab` for `core:focus-tab`.
+Every other action names `koshi actions run`, such as `koshi actions run
+core:toggle-notification-center`.
+
+`actions run` takes a bare name (`next-tab`) or a full name
+(`core:next-tab`), and runs that action in a running session, as a key bound
+to it runs it:
+
+- An action that sends the session a command sends the same command. `koshi
+  actions run next-tab` focuses the next tab, as `koshi next-tab` does.
+  `--client` names the client the command acts for. `koshi actions run quit
+  --client client-3c4d…` detaches `client-3c4d…`, and the session keeps
+  running.
+- An action that changes one client's own screen, such as
+  `core:toggle-notification-center`, runs in that client. The session sends
+  the request to the client, and the command exits 0 once the client ran the
+  action. If the client does not answer within 5 seconds, the command prints
+  `invalid in the current state`, then `client <id> did not answer within 5
+  s; the action runs if that client reads the request`, and exits 1.
+- An action that applies only in one input mode is refused in every other
+  mode, and changes nothing. In normal mode, `koshi actions run
+  select-pane-target-left` prints `invalid in the current state`, then
+  `core:select-pane-target-left runs only in pane-placement or dock-undock
+  mode; the client is in normal mode`, and exits 1.
+  An action that closes a mode that is not open exits 0 and changes nothing.
+- An action whose command needs arguments exits 2 and names the verb that
+  takes them: `koshi actions run focus-tab` prints `koshi: invalid arguments:
+  core:focus-tab takes arguments; run koshi focus-tab`.
+- A name that is not an action exits 2 with `unknown action: frob`, as
+  `actions explain` does.
+
+`actions run` takes `--remote`, as the other action verbs do.
 
 `keys list --mode` takes the name of one built-in mode, such as `normal` or
 `locked`. Another name exits 2 and lists the mode names. `--scope user` lists

@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
@@ -474,6 +475,96 @@ pub fn submit_external_command_to_endpoint(
     )
 }
 
+/// Ask the running session `in_session_context` names to have one of its
+/// clients run `action_reference`, a viewer-local action such as
+/// `core:toggle-notification-center`, as `koshi actions run` typed in this
+/// pane, and hand back the answer: `Ok` once that client ran the action,
+/// else the rejection that names the cause. The session picks the client as
+/// it picks the acting client of a command from this pane.
+///
+/// Same exchange, error mapping and restart handling as
+/// [`submit_in_session_command`], with a `RunClientAction` inside the
+/// `Prepare`. The `Commit` waits for the session's answer however long it
+/// takes; the session answers within 5 s of the request.
+pub fn submit_in_session_client_action(
+    in_session_context: &InSessionContext,
+    action_reference: &ActionReference,
+) -> Result<CommandResult, CliError> {
+    run_session_exchange_across_restart(
+        &resolve_runtime_directory()?,
+        None,
+        in_session_context.session_id,
+        None,
+        None,
+        |endpoint_file| {
+            let command_source = CommandSource::from_in_session_cli(
+                in_session_context.session_id,
+                in_session_context.client_id,
+                in_session_context.pane_id,
+                PathBuf::from(&endpoint_file.socket_address),
+            );
+            submit_client_action_request(
+                endpoint_file,
+                in_session_context.session_id,
+                command_source,
+                action_reference,
+            )
+        },
+    )
+}
+
+/// Ask the running session `session_id` to have the client `client_id` run
+/// `action_reference`, a viewer-local action, as an external invocation of
+/// `koshi actions run`, and hand back the answer as
+/// [`submit_in_session_client_action`] does. With no `client_id`, the session
+/// picks its acting client.
+///
+/// Same exchange, error mapping and restart handling as
+/// [`submit_external_command`], with a `RunClientAction` inside the
+/// `Prepare`. The `Commit` waits for the session's answer however long it
+/// takes; the session answers within 5 s of the request.
+pub fn submit_external_client_action(
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+    owner_user_id: Option<u32>,
+    client_id: Option<ClientId>,
+    action_reference: &ActionReference,
+) -> Result<CommandResult, CliError> {
+    run_session_exchange_across_restart(
+        &resolve_runtime_directory()?,
+        shared_sessions_base_directory,
+        session_id,
+        owner_user_id,
+        None,
+        |endpoint_file| {
+            submit_client_action_request(
+                endpoint_file,
+                session_id,
+                CommandSource::from_external_cli(Some(session_id), client_id),
+                action_reference,
+            )
+        },
+    )
+}
+
+/// One viewer action request over `endpoint`: a `RunClientAction` from
+/// `command_source` for `action_reference`, under a new command id, handed
+/// over and answered as [`exchange_command_result_request`] states, with no
+/// deadline.
+fn submit_client_action_request(
+    endpoint: &EndpointFile,
+    session_id: SessionId,
+    command_source: CommandSource,
+    action_reference: &ActionReference,
+) -> Result<CommandResult, CliError> {
+    let run_client_action_kind = IpcRequestKind::RunClientAction {
+        command_id: CommandId::new(),
+        command_source,
+        action_reference: action_reference.clone(),
+    };
+    exchange_command_result_request(endpoint, session_id, run_client_action_kind, None)
+}
+
 /// Fill a pane-creating command's unset working directory with this CLI
 /// process's own, read here at send time. A command that already names a
 /// directory is left alone, and every other command carries none.
@@ -489,16 +580,10 @@ fn apply_current_working_directory_to_command(mut command: Command) -> Command {
     command
 }
 
-/// One command submission over `endpoint`: connect, send the Hello and the
-/// enveloped command inside a `Prepare`, commit it, and read the command's
-/// result, as [`exchange_prepared_session_request`] states. A pane-creating
-/// command with no directory of its own gets this process's current
-/// directory, and a rejection's hint is filtered by
-/// [`filter_rejection_hint`](crate::talk::filter_rejection_hint).
-///
-/// With `answer_deadline`, the `Prepare` is answered by that moment, as
-/// [`connect_to_session`] states, and the `Commit` has
-/// [`SERVER_ANSWER_TIMEOUT_DURATION`] after it.
+/// One command submission over `endpoint`: the enveloped command inside a
+/// `SubmitCommand`, handed over and answered as
+/// [`exchange_command_result_request`] states. A pane-creating command with
+/// no directory of its own gets this process's current directory.
 fn submit_command_envelope(
     endpoint: &EndpointFile,
     session_id: SessionId,
@@ -516,13 +601,31 @@ fn submit_command_envelope(
         command_envelope: Box::new(command_envelope),
         fired_action: None,
     };
-    let prepared_submit = exchange_prepared_session_request(
+    exchange_command_result_request(endpoint, session_id, submit_command_kind, answer_deadline)
+}
+
+/// The command result the session at `endpoint` answers to
+/// `prepared_request_kind`: connect, send the Hello and the request inside a
+/// `Prepare`, commit it, and read its result, as
+/// [`exchange_prepared_session_request`] states. A rejection's hint is
+/// filtered by [`filter_rejection_hint`](crate::talk::filter_rejection_hint).
+///
+/// With `answer_deadline`, the `Prepare` is answered by that moment, as
+/// [`connect_to_session`] states, and the `Commit` has
+/// [`SERVER_ANSWER_TIMEOUT_DURATION`] after it.
+fn exchange_command_result_request(
+    endpoint: &EndpointFile,
+    session_id: SessionId,
+    prepared_request_kind: IpcRequestKind,
+    answer_deadline: Option<Instant>,
+) -> Result<CommandResult, CliError> {
+    let prepared_exchange = exchange_prepared_session_request(
         endpoint,
         session_id,
-        submit_command_kind,
+        prepared_request_kind,
         answer_deadline,
     )?;
-    match prepared_submit.request_result? {
+    match prepared_exchange.request_result? {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
         IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
         // An answer to the `Commit` that is not the command's result is

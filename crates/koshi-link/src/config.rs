@@ -44,7 +44,6 @@ use koshi_config::parser::ParsedConfigFile;
 use koshi_config::profile::{parse_profile, ProfileError};
 use koshi_config::theme::parse_theme;
 use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME_NAME};
-use koshi_core::geometry::Direction;
 use koshi_layout::template::ProfileTemplate;
 use koshi_observability::logging::{LogFileOwner, LoggingParameters};
 #[cfg(unix)]
@@ -503,25 +502,14 @@ pub fn apply_beta_gate(app_config_layer: Option<PartialKoshiConfig>) {
     koshi_beta::set_beta_features_allowed(server_config.should_allow_beta_features);
 }
 
-/// The split direction a pane-opening verb uses when `--direction` is absent:
-/// `app_config_layer`'s `layout.new-pane-direction` folded onto the built-in
-/// defaults. The CLI folds the viewer-owned sections exactly as a viewer does.
-/// `None` — no config directory, no `koshi.kdl`, or a file that did not parse —
-/// gives the built-in [`Direction::Right`].
-#[must_use]
-pub fn resolve_new_pane_direction(app_config_layer: Option<PartialKoshiConfig>) -> Direction {
-    merge_client(
-        ClientConfig::default(),
-        app_config_layer.into_iter().collect(),
-    )
-    .layout
-    .new_pane_direction
-}
-
 /// This viewer's settings: `app_config_layer` folded onto the built-in
 /// defaults. `None` gives [`ClientConfig::default`]. Example: a layer that sets
 /// `image-support #false` gives `supports_image_protocols` `false`, with every
-/// other field at its default.
+/// other field at its default. The CLI folds the same sections: a
+/// pane-opening verb given no `--direction` splits toward
+/// `layout.new_pane_direction`, which is
+/// [`Direction::Right`](koshi_core::geometry::Direction::Right) with no
+/// `koshi.kdl`.
 #[must_use]
 pub fn resolve_client_config(app_config_layer: Option<PartialKoshiConfig>) -> ClientConfig {
     merge_client(

@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use koshi::cli::{
-    parse_session_reference, ActionsCommand, Cli, CliCommand, DebugCommand, InspectTarget,
-    KeysCommand, OutputFormat, SessionReference, TabReference,
+    self, parse_session_reference, ActionsCommand, Cli, CliCommand, DebugCommand, InspectTarget,
+    KeysCommand, OutputFormat, SessionReference, SessionRequest, TabReference,
 };
 use koshi::config_command;
 use koshi::doctor;
@@ -194,9 +194,12 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Actions { command }) = &cli.command {
-        // `actions` renders from the static action table on this machine and
-        // asks nothing over IPC.
-        return run_actions(command);
+        // `actions list` and `actions explain` render from the static action
+        // table on this machine and ask nothing over IPC. `actions run` is an
+        // action verb and travels a session's control socket below.
+        if let Some(actions_query_result) = run_actions_query(command) {
+            return actions_query_result;
+        }
     }
 
     if let Some(CliCommand::Keys { command }) = &cli.command {
@@ -563,8 +566,33 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
 
     // The `koshi.kdl` layer gives `layout.new-pane-direction`: a pane-opening
     // verb given no `--direction` splits toward it, and the session holds no
-    // direction of its own.
+    // direction of its own. It also gives `mouse.scroll-line-count`, the
+    // lines `koshi actions run core:scroll-pane-up` scrolls. Other users'
+    // sessions are looked up in the shared directory it names.
     let app_config_layer = loaded_app_config.into_app_config_layer();
+    let shared_sessions_base_directory =
+        config::resolve_shared_sessions_base_directory_for_layer(app_config_layer.as_ref());
+    let client_config = config::resolve_client_config(app_config_layer);
+    let new_pane_direction = client_config.layout.new_pane_direction;
+
+    // `koshi actions run` resolves its action before any session is asked:
+    // an action that is not registered, or that takes arguments, is refused
+    // here.
+    let actions_run_request = match cli_command {
+        CliCommand::Actions {
+            command:
+                ActionsCommand::Run {
+                    action_reference_text,
+                    client_id,
+                },
+        } => Some(cli::build_actions_run_request(
+            action_reference_text,
+            *client_id,
+            new_pane_direction,
+            client_config.mouse.scroll_line_count,
+        )?),
+        _ => None,
+    };
 
     // With `--remote` the target is picked from the sessions on the named
     // machine; the pane identity on this one is not read.
@@ -573,45 +601,60 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             server_reference,
             cli.certificate_fingerprint_text.as_deref(),
             cli_command,
-            config::resolve_new_pane_direction(app_config_layer),
+            new_pane_direction,
+            actions_run_request,
         )?,
-        None => {
-            // Other users' sessions are looked up in the shared directory
-            // `koshi.kdl` names.
-            let shared_sessions_base_directory =
-                config::resolve_shared_sessions_base_directory_for_layer(app_config_layer.as_ref());
-            let new_pane_direction = config::resolve_new_pane_direction(app_config_layer);
-            match targeting::resolve_command_route(
-                cli_command,
-                in_session_context.as_ref(),
-                shared_sessions_base_directory.as_deref(),
-            )? {
-                Route::InSession(resolved_targets) => {
-                    let in_session_context =
-                        in_session_context.expect("an in-session route needs the pane identity");
-                    let (_, action_command) = cli_command
-                        .build_action_command(&resolved_targets, new_pane_direction)
-                        .expect("every verb that is not an action returned above");
-                    ipc_client::submit_in_session_command(&in_session_context, action_command)?
+        None => match targeting::resolve_command_route(
+            cli_command,
+            in_session_context.as_ref(),
+            shared_sessions_base_directory.as_deref(),
+        )? {
+            Route::InSession(resolved_targets) => {
+                let in_session_context =
+                    in_session_context.expect("an in-session route needs the pane identity");
+                match cli_command.build_session_request(
+                    &resolved_targets,
+                    new_pane_direction,
+                    actions_run_request,
+                ) {
+                    SessionRequest::Command(action_command) => {
+                        ipc_client::submit_in_session_command(&in_session_context, action_command)?
+                    }
+                    SessionRequest::ClientAction(action_reference) => {
+                        ipc_client::submit_in_session_client_action(
+                            &in_session_context,
+                            &action_reference,
+                        )?
+                    }
                 }
-                Route::External {
+            }
+            Route::External {
+                session_id,
+                owner_user_id,
+                targets: resolved_targets,
+            } => match cli_command.build_session_request(
+                &resolved_targets,
+                new_pane_direction,
+                actions_run_request,
+            ) {
+                SessionRequest::Command(action_command) => ipc_client::submit_external_command(
+                    shared_sessions_base_directory.as_deref(),
                     session_id,
                     owner_user_id,
-                    targets: resolved_targets,
-                } => {
-                    let (_, action_command) = cli_command
-                        .build_action_command(&resolved_targets, new_pane_direction)
-                        .expect("every verb that is not an action returned above");
-                    ipc_client::submit_external_command(
+                    cli_command.get_source_client_id(),
+                    action_command,
+                )?,
+                SessionRequest::ClientAction(action_reference) => {
+                    ipc_client::submit_external_client_action(
                         shared_sessions_base_directory.as_deref(),
                         session_id,
                         owner_user_id,
                         cli_command.get_source_client_id(),
-                        action_command,
+                        &action_reference,
                     )?
                 }
-            }
-        }
+            },
+        },
     };
 
     render_command_result(command_result)
@@ -959,13 +1002,14 @@ fn run_debug_events(
     }
 }
 
-/// Serve a `koshi actions` query from the static action table: print the
-/// rendered answer, or report an unknown action name.
-fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
+/// Serve a `koshi actions list` or `koshi actions explain` query from the
+/// static action table: print the rendered answer, or report an unknown
+/// action name. `None` for `actions run`, which asks a session.
+fn run_actions_query(command: &ActionsCommand) -> Option<Result<(), CliError>> {
     match command {
         ActionsCommand::List { output_format } => {
             print!("{}", output::render_actions_list(*output_format));
-            Ok(())
+            Some(Ok(()))
         }
         ActionsCommand::Explain {
             action_reference_text,
@@ -973,12 +1017,13 @@ fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
         } => match output::render_action_explain(action_reference_text, *output_format) {
             Some(rendered_output) => {
                 print!("{rendered_output}");
-                Ok(())
+                Some(Ok(()))
             }
-            None => Err(CliError::UnknownAction {
+            None => Some(Err(CliError::UnknownAction {
                 action_name: action_reference_text.clone(),
-            }),
+            })),
         },
+        ActionsCommand::Run { .. } => None,
     }
 }
 

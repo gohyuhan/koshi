@@ -2896,8 +2896,8 @@ fn an_explicit_working_directory_survives_command_preparation() {
 #[test]
 fn a_command_without_a_directory_field_is_untouched() {
     assert_eq!(
-        apply_current_working_directory_to_command(Command::Quit),
-        Command::Quit
+        apply_current_working_directory_to_command(Command::KillSession),
+        Command::KillSession
     );
     assert_eq!(
         apply_current_working_directory_to_command(Command::ToggleLockMode(
@@ -6029,5 +6029,101 @@ fn a_prepared_answer_to_a_part_that_is_not_the_last_is_an_unexpected_reply_and_c
                 copied_bytes: b"echo ".to_vec(),
             },
         }]
+    );
+}
+
+// --- Asking a client to run a viewer action -------------------------------
+
+#[test]
+fn a_client_action_request_rides_inside_a_prepare_and_hands_back_the_filtered_answer() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let session_socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
+    let session_listener = Listener::bind(&session_socket_address).expect("bind fake session");
+    let session_connection_token = ConnectionToken::generate();
+    let session_endpoint = EndpointFile {
+        socket_address: session_socket_address,
+        connection_token: session_connection_token.clone(),
+        process_id: std::process::id(),
+    };
+    let (session_request_sender, session_requests) = mpsc::channel();
+    let session_server_thread = std::thread::spawn(move || {
+        let mut session_connection = session_listener.accept().expect("accept the CLI");
+        let hello_request: IpcRequest = session_connection.recv().expect("read hello");
+        let IpcRequestKind::Hello {
+            connection_token: presented_token,
+            ..
+        } = &hello_request.request_kind
+        else {
+            panic!("expected a Hello first");
+        };
+        assert_eq!(presented_token, &session_connection_token);
+        send_ipc_reply(
+            &mut session_connection,
+            hello_request.request_id,
+            build_accepted_hello_result(),
+        );
+        let prepare_request: IpcRequest = session_connection.recv().expect("read the Prepare");
+        let IpcRequestKind::Prepare(prepared_request_kind) = &prepare_request.request_kind else {
+            panic!("expected a Prepare after the Hello");
+        };
+        let IpcRequestKind::RunClientAction { command_id, .. } = **prepared_request_kind else {
+            panic!("expected the Prepare to carry a RunClientAction");
+        };
+        let commit_request_id =
+            answer_prepare_and_read_commit(&mut session_connection, prepare_request.request_id);
+        send_ipc_reply(
+            &mut session_connection,
+            commit_request_id,
+            IpcResult::CommandResult(CommandResult::Rejected {
+                command_id,
+                reason: koshi_core::event::RejectReason::InvalidState,
+                help: Some(
+                    "\u{1b}[2Jcore:confirm-pane-placement runs only in pane-placement mode"
+                        .to_string(),
+                ),
+            }),
+        );
+        session_request_sender
+            .send(*prepared_request_kind.clone())
+            .expect("report the request");
+        close_connection_after_peer_hangs_up(session_connection);
+    });
+
+    let command_result = submit_client_action_request(
+        &session_endpoint,
+        session_id,
+        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
+        &ActionReference::from_core_action_name("confirm-pane-placement").expect("valid name"),
+    )
+    .expect("the exchange succeeds even when the client refuses");
+
+    session_server_thread.join().expect("fake session exits");
+    let IpcRequestKind::RunClientAction {
+        command_id,
+        command_source,
+        action_reference,
+    } = session_requests
+        .recv()
+        .expect("the session read one request")
+    else {
+        panic!("the fake session reports only a RunClientAction");
+    };
+    assert_eq!(
+        command_source,
+        CommandSource::from_external_cli(Some(session_id), Some(client_id))
+    );
+    assert_eq!(action_reference.to_string(), "core:confirm-pane-placement");
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: koshi_core::event::RejectReason::InvalidState,
+            help: Some(
+                "[2Jcore:confirm-pane-placement runs only in pane-placement mode".to_string()
+            ),
+        }
     );
 }

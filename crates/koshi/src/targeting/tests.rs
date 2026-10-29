@@ -22,6 +22,9 @@ use uuid::uuid;
 use clap::Parser;
 
 use super::*;
+
+/// The session choice flags of a verb whose only one is `--session`.
+const SESSION_FLAG_ONLY: &[&str] = &["--session <name-or-id>"];
 use crate::cli::{Cli, CliCommand};
 use koshi_test_support::fixtures::{build_accepted_hello_result, send_ipc_reply};
 
@@ -203,16 +206,29 @@ fn sole_running_session_is_the_default() {
         &[],
         &[],
     )]);
-    let selected_session_overview =
-        select_target_session(None, None, None, None, &discovered_sessions).expect("sole session");
+    let selected_session_overview = select_target_session(
+        None,
+        None,
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect("sole session");
     assert_eq!(selected_session_overview.session.session_id, session_id);
 }
 
 #[test]
 fn no_running_session_reports_no_sessions() {
-    let selection_error =
-        select_target_session(None, None, None, None, &build_complete_discovery([]))
-            .expect_err("nothing to target");
+    let selection_error = select_target_session(
+        None,
+        None,
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &build_complete_discovery([]),
+    )
+    .expect_err("nothing to target");
     assert!(matches!(selection_error, CliError::NoSessions));
 }
 
@@ -230,8 +246,15 @@ fn a_sole_answering_session_is_not_the_default_while_another_is_unasked() {
         )],
         1,
     );
-    let selection_error = select_target_session(None, None, None, None, &discovered_sessions)
-        .expect_err("census incomplete");
+    let selection_error = select_target_session(
+        None,
+        None,
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("census incomplete");
     assert!(
         matches!(&selection_error, CliError::IpcUnavailable { detail }
             if detail == "cannot tell which session to target; name one with \
@@ -244,9 +267,15 @@ fn a_sole_answering_session_is_not_the_default_while_another_is_unasked() {
 fn no_answer_at_all_is_not_reported_as_no_sessions() {
     // The only running session could not be asked. The error names the
     // session that did not answer.
-    let selection_error =
-        select_target_session(None, None, None, None, &build_incomplete_discovery([], 1))
-            .expect_err("census empty");
+    let selection_error = select_target_session(
+        None,
+        None,
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &build_incomplete_discovery([], 1),
+    )
+    .expect_err("census empty");
     assert!(
         matches!(&selection_error, CliError::IpcUnavailable { detail }
             if detail == "cannot tell which session to target; name one with \
@@ -268,9 +297,15 @@ fn an_unasked_session_does_not_turn_an_explicit_target_into_not_found() {
         1,
     );
     let pane_id = PaneId::new();
-    let selection_error =
-        select_target_session(None, Some(pane_id), None, None, &discovered_sessions)
-            .expect_err("the pane may be in the session that stayed silent");
+    let selection_error = select_target_session(
+        None,
+        Some(pane_id),
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("the pane may be in the session that stayed silent");
     assert!(
         matches!(&selection_error, CliError::IpcUnavailable { detail }
         if *detail == format!(
@@ -286,6 +321,7 @@ fn an_unasked_session_does_not_turn_an_explicit_target_into_not_found() {
         None,
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("the name may belong to the session that stayed silent");
@@ -317,6 +353,7 @@ fn a_session_name_with_one_match_is_refused_while_a_session_is_unasked() {
         None,
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("the unasked session may share the name");
@@ -369,8 +406,15 @@ fn two_answering_sessions_stay_ambiguous_even_with_one_unasked() {
         ],
         1,
     );
-    let selection_error =
-        select_target_session(None, None, None, None, &discovered_sessions).expect_err("ambiguous");
+    let selection_error = select_target_session(
+        None,
+        None,
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("ambiguous");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetAmbiguous
@@ -383,8 +427,15 @@ fn two_running_sessions_demand_the_session_flag() {
         build_session_overview("amber-fox", SessionId::new(), &[], &[], &[]),
         build_session_overview("blue-owl", SessionId::new(), &[], &[], &[]),
     ]);
-    let selection_error =
-        select_target_session(None, None, None, None, &discovered_sessions).expect_err("ambiguous");
+    let selection_error = select_target_session(
+        None,
+        None,
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("ambiguous");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetAmbiguous
@@ -404,6 +455,7 @@ fn session_name_matches_exactly_one() {
         None,
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect("unique name");
@@ -428,6 +480,7 @@ fn unknown_session_name_is_not_running() {
         None,
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("no match");
@@ -451,6 +504,7 @@ fn duplicate_session_name_is_ambiguous() {
         None,
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("two match");
@@ -482,6 +536,7 @@ fn session_id_not_advertised_is_not_running() {
         None,
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("not running");
@@ -506,9 +561,15 @@ fn explicit_pane_picks_its_owning_session() {
             &[],
         ),
     ]);
-    let selected_session_overview =
-        select_target_session(None, Some(pane_id), None, None, &discovered_sessions)
-            .expect("owner found");
+    let selected_session_overview = select_target_session(
+        None,
+        Some(pane_id),
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect("owner found");
     assert_eq!(
         selected_session_overview.session.session_id,
         target_session_id
@@ -524,9 +585,15 @@ fn pane_in_no_session_is_not_found() {
         &[],
         &[],
     )]);
-    let selection_error =
-        select_target_session(None, Some(PaneId::new()), None, None, &discovered_sessions)
-            .expect_err("nowhere");
+    let selection_error = select_target_session(
+        None,
+        Some(PaneId::new()),
+        None,
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("nowhere");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetNotFound
@@ -554,6 +621,7 @@ fn explicit_session_with_a_pane_from_another_session_refuses() {
         Some(foreign_pane_id),
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("mismatch never retargets");
@@ -584,9 +652,15 @@ fn explicit_client_picks_its_session() {
             &[client_id],
         ),
     ]);
-    let selected_session_overview =
-        select_target_session(None, None, None, Some(client_id), &discovered_sessions)
-            .expect("owner found");
+    let selected_session_overview = select_target_session(
+        None,
+        None,
+        None,
+        Some(client_id),
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect("owner found");
     assert_eq!(
         selected_session_overview.session.session_id,
         target_session_id
@@ -608,6 +682,7 @@ fn detached_client_is_not_found_anywhere() {
         None,
         None,
         Some(ClientId::new()),
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("attached only");
@@ -638,6 +713,7 @@ fn a_client_from_another_session_is_not_retargeted() {
         None,
         None,
         Some(foreign_client_id),
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect_err("mismatch never retargets");
@@ -727,9 +803,15 @@ fn tab_id_picks_its_owning_session() {
         build_session_overview("blue-owl", target_session_id, &[(tab_id, "one")], &[], &[]),
     ]);
     let tab_reference = TabReference::TabId(tab_id);
-    let selected_session_overview =
-        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
-            .expect("owner found");
+    let selected_session_overview = select_target_session(
+        None,
+        None,
+        Some(&tab_reference),
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect("owner found");
     assert_eq!(
         selected_session_overview.session.session_id,
         target_session_id
@@ -757,9 +839,15 @@ fn tab_name_owned_by_two_sessions_is_ambiguous() {
         ),
     ]);
     let tab_reference = TabReference::TabName("logs".to_string());
-    let selection_error =
-        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
-            .expect_err("two owners");
+    let selection_error = select_target_session(
+        None,
+        None,
+        Some(&tab_reference),
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("two owners");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetAmbiguous
@@ -790,9 +878,15 @@ fn two_tabs_of_one_session_sharing_a_name_are_ambiguous() {
     )]);
     let tab_reference = TabReference::TabName("logs".to_string());
 
-    let selected_session_overview =
-        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
-            .expect("one owning session");
+    let selected_session_overview = select_target_session(
+        None,
+        None,
+        Some(&tab_reference),
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect("one owning session");
     assert_eq!(selected_session_overview.session.session_id, session_id);
 
     let tab_resolution_error = resolve_target_tab(selected_session_overview, &tab_reference)
@@ -865,9 +959,15 @@ fn duplicate_tabs_spanning_sessions_still_offer_the_session_flag() {
         ),
     ]);
     let tab_reference = TabReference::TabName("logs".to_string());
-    let selection_error =
-        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
-            .expect_err("three tabs");
+    let selection_error = select_target_session(
+        None,
+        None,
+        Some(&tab_reference),
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("three tabs");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetAmbiguous
@@ -892,9 +992,15 @@ fn a_tab_name_no_session_holds_is_not_found() {
         &[],
     )]);
     let tab_reference = TabReference::TabName("logs".to_string());
-    let selection_error =
-        select_target_session(None, None, Some(&tab_reference), None, &discovered_sessions)
-            .expect_err("nowhere");
+    let selection_error = select_target_session(
+        None,
+        None,
+        Some(&tab_reference),
+        None,
+        SESSION_FLAG_ONLY,
+        &discovered_sessions,
+    )
+    .expect_err("nowhere");
     assert_eq!(
         read_rejection_reason(&selection_error),
         RejectReason::TargetNotFound
@@ -1919,6 +2025,7 @@ fn an_explicit_floating_pane_picks_its_owning_session() {
         Some(floating_pane_id),
         None,
         None,
+        SESSION_FLAG_ONLY,
         &discovered_sessions,
     )
     .expect("owner found");
@@ -2078,5 +2185,50 @@ fn every_pane_verb_naming_a_floating_pane_goes_to_the_session_holding_it() {
             verb_arguments.join(" ")
         );
         let _ = std::fs::remove_dir_all(&runtime_directory);
+    }
+}
+
+#[test]
+fn several_sessions_and_no_session_flag_name_the_verbs_own_flags() {
+    let discovered_sessions = build_complete_discovery([
+        build_session_overview("amber-fox", SessionId::new(), &[], &[], &[]),
+        build_session_overview("blue-owl", SessionId::new(), &[], &[], &[]),
+    ]);
+    for (verb_arguments, expected_help) in [
+        (
+            &["lock"][..],
+            "several sessions are running; name one with --client <client-id>",
+        ),
+        (
+            &["actions", "run", "toggle-notification-center"][..],
+            "several sessions are running; name one with --client <client-id>",
+        ),
+        (
+            &["close-pane"][..],
+            "several sessions are running; name one with --pane <pane-id>",
+        ),
+        (
+            &["new-tab"][..],
+            "several sessions are running; name one with --session <name-or-id> or --client \
+             <client-id>",
+        ),
+    ] {
+        let command =
+            Cli::try_parse_from(std::iter::once("koshi").chain(verb_arguments.iter().copied()))
+                .expect("the argv parses")
+                .command
+                .expect("the argv carries a subcommand");
+        let selection_error = resolve_command_targets(&command, &discovered_sessions, None)
+            .expect_err("two sessions run");
+        assert_eq!(
+            read_rejection_reason(&selection_error),
+            RejectReason::TargetAmbiguous
+        );
+        assert_eq!(
+            read_rejection_help(&selection_error),
+            expected_help,
+            "koshi {}",
+            verb_arguments.join(" ")
+        );
     }
 }

@@ -240,14 +240,14 @@ pub(crate) fn format_stand_in_file_name(is_koshi: bool) -> &'static str {
 
 #[test]
 fn a_quit_refused_by_a_server_of_koshi_0_4_0_reads_as_the_format_sentence_alone() {
-    let quit_error = CliError::PreviousReleaseServer {
+    let kill_session_error = CliError::PreviousReleaseServer {
         detail: "the server answered in the format of koshi 0.4.0 or older, which this koshi \
                  cannot talk to"
             .to_string(),
     };
 
     assert_eq!(
-        format_quit_failure(&quit_error),
+        format_kill_session_failure(&kill_session_error),
         "the server answered in the format of koshi 0.4.0 or older, which this koshi cannot \
          talk to"
     );
@@ -255,12 +255,12 @@ fn a_quit_refused_by_a_server_of_koshi_0_4_0_reads_as_the_format_sentence_alone(
 
 #[test]
 fn a_quit_the_session_took_and_did_not_answer_reads_without_the_advice_to_check_first() {
-    let quit_error = CliError::CommittedRequestUnanswered {
+    let kill_session_error = CliError::CommittedRequestUnanswered {
         detail: "ipc peer disconnected".to_string(),
     };
 
     assert_eq!(
-        format_quit_failure(&quit_error),
+        format_kill_session_failure(&kill_session_error),
         "IPC unavailable: the session took the request and gave no answer (ipc peer \
          disconnected)"
     );
@@ -269,7 +269,7 @@ fn a_quit_the_session_took_and_did_not_answer_reads_without_the_advice_to_check_
 #[test]
 fn any_other_quit_failure_reads_as_the_errors_own_sentence() {
     assert_eq!(
-        format_quit_failure(&CliError::SessionAnswerTimedOut),
+        format_kill_session_failure(&CliError::SessionAnswerTimedOut),
         "IPC unavailable: the session did not answer in time"
     );
 }
@@ -290,7 +290,7 @@ fn a_quit_refused_for_the_old_token_is_sent_again_once_the_session_advertises_it
             else {
                 panic!("expected a SubmitCommand, got {request_kind:?}");
             };
-            assert_eq!(command_envelope.command, Command::Quit);
+            assert_eq!(command_envelope.command, Command::KillSession);
             IpcResult::CommandResult(CommandResult::Ok {
                 command_id: command_envelope.command_id,
                 emitted_events: Vec::new(),
@@ -302,14 +302,14 @@ fn a_quit_refused_for_the_old_token_is_sent_again_once_the_session_advertises_it
     )
     .expect("the endpoint file is read");
 
-    submit_quit(runtime_directory.path(), &stale_endpoint_file, session_id)
-        .expect("the second Quit is applied");
+    submit_kill_session(runtime_directory.path(), &stale_endpoint_file, session_id)
+        .expect("the second KillSession is applied");
 
     session_thread.join().expect("the stand-in session exits");
 }
 
 #[test]
-fn a_quit_refused_while_the_session_replaces_its_image_is_sent_again_to_the_new_image() {
+fn a_kill_session_refused_while_the_session_replaces_its_image_is_sent_again_to_the_new_image() {
     let runtime_directory = build_short_runtime_directory();
     let session_id = SessionId::new();
     let session_thread = spawn_session_replacing_its_image(
@@ -325,7 +325,7 @@ fn a_quit_refused_while_the_session_replaces_its_image_is_sent_again_to_the_new_
             else {
                 panic!("expected a SubmitCommand, got {request_kind:?}");
             };
-            assert_eq!(command_envelope.command, Command::Quit);
+            assert_eq!(command_envelope.command, Command::KillSession);
             IpcResult::CommandResult(CommandResult::Ok {
                 command_id: command_envelope.command_id,
                 emitted_events: Vec::new(),
@@ -337,8 +337,8 @@ fn a_quit_refused_while_the_session_replaces_its_image_is_sent_again_to_the_new_
     )
     .expect("the endpoint file is read");
 
-    submit_quit(runtime_directory.path(), &asked_endpoint_file, session_id)
-        .expect("the new image applies the Quit");
+    submit_kill_session(runtime_directory.path(), &asked_endpoint_file, session_id)
+        .expect("the new image applies the KillSession");
 
     session_thread.join().expect("the stand-in session exits");
 }
@@ -518,7 +518,7 @@ fn end_session_ends_a_confirmed_session_that_cannot_quit_and_every_process_under
     assert_eq!(
         session_ending,
         SessionEnding::Stopped {
-            quit_failure: format!("session {session_id} is not running"),
+            kill_session_failure: format!("session {session_id} is not running"),
             session_process_id: child.id(),
             stopped_process_count: STAND_IN_CHILD_COUNT,
         }

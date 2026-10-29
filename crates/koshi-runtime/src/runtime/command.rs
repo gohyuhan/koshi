@@ -13,6 +13,8 @@
 //! or leave one — quit, detach, detach-all, and the switch that moves one
 //! client to another session. The rest live in submodules by what they act on:
 //! `pane`, `tab`, `client`, `visual`, with target resolution in `resolve`.
+//! `client_action` asks one attached client to run a viewer-local action that
+//! `koshi actions run` named, and answers the caller.
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU16;
@@ -31,7 +33,7 @@ use koshi_core::{
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
         NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-        ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
+        QuitArgs, ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
         SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, VisualCommand,
         WriteToPaneArgs,
     },
@@ -246,9 +248,10 @@ fn format_side_name(direction: Direction) -> &'static str {
 
 /// The resolved concrete target of a [`Command::NewPane`]: the session and tab
 /// the new pane joins, the command source pane it splits from, and the client to
-/// auto-focus it for: the client the command names, else its issuer while
-/// attached, else none. All fields are `Copy`: the target holds no borrow into
-/// the session map.
+/// auto-focus it for: the client whose input the default source pane takes,
+/// else the client the command names, else its issuer while attached, else
+/// none. All fields are `Copy`: the target holds no borrow into the session
+/// map.
 struct NewPaneTarget {
     session_id: SessionId,
     source_pane_id: PaneId,
@@ -347,13 +350,18 @@ enum PanePinChange {
 
 /// The resolved concrete target of a pane-addressed command
 /// ([`Command::ClosePane`], [`Command::ResizePane`]): the owning session, the
-/// tab whose layout holds the pane (`None` when the pane floats), and the pane
-/// itself. All fields are `Copy`: the target holds no borrow into the session
-/// map.
+/// tab whose layout holds the pane (`None` when the pane floats), the pane
+/// itself, and the client whose input the pane takes when that client's focus
+/// picked it. All fields are `Copy`: the target holds no borrow into the
+/// session map.
 struct PaneTarget {
     session_id: SessionId,
     tab_id: Option<TabId>,
     pane_id: PaneId,
+    /// The client whose focused pane `pane_id` is, when the command named no
+    /// pane and came from outside an in-session CLI. `None` for a pane the
+    /// command named and for an in-session CLI's own pane.
+    focusing_client_id: Option<ClientId>,
 }
 
 /// The resolved target of a [`Command::ScrollPane`]: the client whose view
@@ -560,7 +568,10 @@ impl Server {
             Command::Visual(command) => {
                 self.handle_visual(command_id, &envelope.command_source, &command)
             }
-            Command::Quit => Ok(self.handle_quit(command_id, &envelope.command_source)),
+            Command::Quit(command_args) => {
+                self.handle_quit(command_id, &envelope.command_source, &command_args)
+            }
+            Command::KillSession => Ok(self.handle_kill_session(command_id)),
             Command::Detach(command_args) => {
                 self.handle_detach(command_id, &envelope.command_source, &command_args)
             }
@@ -756,34 +767,43 @@ impl Server {
         self.is_quit_requested = true;
     }
 
-    /// Handle [`Command::Quit`]: a command source that names a client leaves the
-    /// session; a command source that names none ends the process.
-    ///
-    /// A keybinding or a mouse action names the client that issued it, so quit
-    /// removes that client alone, through the same detach [`Command::Detach`]
-    /// runs ([`Server::handle_client_detach`]). `auto-close-session` then
-    /// decides what happens to the session left behind: with the setting on and
-    /// no other client attached the session ends, keeping the graceful window;
+    /// Handle [`Command::Quit`]: remove the client
+    /// [`Server::resolve_target_client`] resolves — the named client, else the
+    /// issuer while it is attached, else the session's sole attached client —
+    /// through the same detach [`Command::Detach`] runs
+    /// ([`Server::handle_client_detach`]). `auto-close-session` then decides
+    /// what happens to the session left behind: with the setting on and no
+    /// other client attached the session ends, keeping the graceful window;
     /// with the setting off, or with another client still attached, the session
-    /// and its panes keep running.
+    /// and its panes keep running. A client whose record came across a restart
+    /// and has not attached again is refused with [`RejectReason::InvalidState`]
+    /// `client <id> is reconnecting`, and keeps its record.
     ///
-    /// A command source that names no client — `kill-session` over the external
-    /// CLI, the runtime itself — takes [`Self::request_quit`] instead.
+    /// Example: with alice and bob attached,
+    /// `koshi actions run core:quit --client <alice>` removes alice, and the
+    /// session keeps running for bob.
     fn handle_quit(
         &mut self,
         command_id: CommandId,
         command_source: &CommandSource,
-    ) -> CommandResult {
-        let Some(client_id) = command_source.get_client_id() else {
-            self.request_quit();
-            return CommandResult::Ok {
-                command_id,
-                emitted_events: Vec::new(),
-            };
-        };
+        command_args: &QuitArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
+        let client_id =
+            self.resolve_target_client(command_args.client_id, command_source, session)?;
 
         let emitted_events = self.handle_client_detach(client_id);
-        self.commit_events(command_id, emitted_events)
+        Ok(self.commit_events(command_id, emitted_events))
+    }
+
+    /// Handle [`Command::KillSession`]: end the session at once
+    /// ([`Self::request_quit`]), whichever clients are attached.
+    fn handle_kill_session(&mut self, command_id: CommandId) -> CommandResult {
+        self.request_quit();
+        CommandResult::Ok {
+            command_id,
+            emitted_events: Vec::new(),
+        }
     }
 
     /// Handle [`Command::Detach`]: remove the resolved client from the session
@@ -792,7 +812,10 @@ impl Server {
     /// running; the other clients keep their records.
     ///
     /// The client is resolved through
-    /// [`Server::resolve_target_client`], the same call validation made.
+    /// [`Server::resolve_target_client`], the same call validation made. A
+    /// client whose record came across a restart and has not attached again is
+    /// refused with [`RejectReason::InvalidState`] `client <id> is
+    /// reconnecting`, and keeps its record.
     fn handle_detach(
         &mut self,
         command_id: CommandId,
@@ -801,7 +824,7 @@ impl Server {
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         let client_id =
-            Self::resolve_target_client(command_args.client_id, command_source, session)?;
+            self.resolve_target_client(command_args.client_id, command_source, session)?;
 
         let emitted_events = self.handle_client_detach(client_id);
         Ok(self.commit_events(command_id, emitted_events))
@@ -812,7 +835,9 @@ impl Server {
     ///
     /// The client is resolved by [`Server::resolve_target_client`], the same
     /// call validation made: a named client must be attached here, and no name
-    /// means the issuing client. The caller resolved the target session, so this
+    /// means the issuing client. A client whose record came across a restart
+    /// and has not attached again is refused with [`RejectReason::InvalidState`]
+    /// `client <id> is reconnecting`. The caller resolved the target session, so this
     /// reads no other session and reaches no other process; it puts the move on
     /// the client's own subscriber queues and that client re-attaches from
     /// there.
@@ -839,7 +864,7 @@ impl Server {
             ));
         }
         let client_id =
-            Self::resolve_target_client(command_args.client_id, command_source, session)?;
+            self.resolve_target_client(command_args.client_id, command_source, session)?;
         if !self.send_switch(
             client_id,
             command_args.session_id,
@@ -866,6 +891,10 @@ impl Server {
     /// acting session, one [`Server::handle_client_detach`] each, and report
     /// the events they emitted together. A session with no attached client
     /// emits nothing.
+    ///
+    /// Validation refuses the command, and no client is detached, while a
+    /// client of the session came across a restart and has not attached again:
+    /// [`RejectReason::InvalidState`] `client <id> is reconnecting`.
     fn handle_detach_all(
         &mut self,
         command_id: CommandId,
@@ -1235,6 +1264,7 @@ fn is_local_host(host: Option<&str>) -> bool {
 }
 
 mod client;
+pub(crate) mod client_action;
 mod pane;
 mod resolve;
 mod tab;

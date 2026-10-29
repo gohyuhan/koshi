@@ -20,10 +20,12 @@ use std::sync::OnceLock;
 
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, MoveFloatingPaneArgs, TiledPlacementTarget,
+    Command, CommandEnvelope, CommandResult, CommandSource, MoveFloatingPaneArgs,
+    TiledPlacementTarget,
 };
 use koshi_core::compat::SESSION_PROTOCOL;
 use koshi_core::discovery::SessionOverview;
+use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, KeyInput};
@@ -680,12 +682,54 @@ pub enum IpcRequestKind {
         #[serde(with = "crate::bytes")]
         copied_bytes: Vec<u8>,
     },
+    /// Run `action_reference`, a viewer-local action, in one attached client,
+    /// as that client's key would run it. Sent by `koshi actions run` on a
+    /// connection with no attached client, inside a [`Prepare`](Self::Prepare).
+    ///
+    /// The session checks the session, the source pane and the client as it
+    /// checks a command, then puts one
+    /// [`SessionEvent::ClientActionRequested`](crate::event::SessionEvent::ClientActionRequested)
+    /// on that client's queue. The [`Commit`](Self::Commit) is answered with
+    /// [`IpcResult::CommandResult`] for `command_id`: `Ok` once the client
+    /// ran the action, `Rejected` with the cause otherwise. Example: with
+    /// alice and bob attached, `core:toggle-notification-center` naming alice
+    /// opens alice's notification center, and bob's view does not change.
+    ///
+    /// On a connection that carries an attached client's event stream, it
+    /// ends the reading loop.
+    RunClientAction {
+        /// The id the answer's [`CommandResult`] names.
+        command_id: CommandId,
+        /// Who asks. The session sets it from the connection, as it sets a
+        /// `SubmitCommand`'s source. An external CLI names the client in
+        /// `target_client_id`; an in-session CLI acts for its pane's client.
+        command_source: CommandSource,
+        /// The action to run, such as `core:toggle-notification-center`.
+        action_reference: ActionReference,
+    },
+    /// The attached client's answer to the
+    /// [`SessionEvent::ClientActionRequested`](crate::event::SessionEvent::ClientActionRequested)
+    /// numbered `client_action_request_id`: it ran the action, or `refusal`
+    /// says why it did not. Nothing answers it. The session drops an answer
+    /// to a request that does not wait, and an answer from a client the
+    /// request was not sent to.
+    ///
+    /// On a connection with no attached client, it closes the connection.
+    ClientActionAnswer {
+        /// The number the request carried.
+        client_action_request_id: u64,
+        /// `None` when the client ran the action. A message without `refusal`
+        /// is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        refusal: Option<ClientActionRefusal>,
+    },
     /// Hand the session a request to hold until the caller sends
     /// [`Commit`](Self::Commit). The session runs the held request only on
     /// that `Commit`. A caller that gives up before it sends the `Commit` knows
     /// that the request never runs.
     ///
-    /// The held request is a [`SubmitCommand`](Self::SubmitCommand), an
+    /// The held request is a [`SubmitCommand`](Self::SubmitCommand), a
+    /// [`RunClientAction`](Self::RunClientAction), an
     /// [`Attach`](Self::Attach), a [`ClipboardCopy`](Self::ClipboardCopy) or a
     /// [`Restart`](Self::Restart).
     /// Every other kind is refused with [`IpcErrorCode::RequestFailed`], and
@@ -707,8 +751,8 @@ pub enum IpcRequestKind {
     /// [`Hello`](Self::Hello). A frame that does not decode and a kind this
     /// build does not have leave it in place too.
     ///
-    /// A `SubmitCommand`, an `Attach`, a `ClipboardCopy` or a `Restart` that
-    /// arrives on its own, with no `Prepare`, is refused with
+    /// A `SubmitCommand`, a `RunClientAction`, an `Attach`, a `ClipboardCopy`
+    /// or a `Restart` that arrives on its own, with no `Prepare`, is refused with
     /// [`IpcErrorCode::RequestFailed`] and does not run. On a connection that
     /// already carries an attached client's event stream, a `SubmitCommand`
     /// runs as it arrives.
@@ -721,6 +765,19 @@ pub enum IpcRequestKind {
     /// this request's `request_id`. With nothing held, the session refuses it
     /// with [`IpcErrorCode::RequestFailed`] and the connection keeps serving.
     Commit,
+}
+
+/// Why an attached client did not run the action an
+/// [`IpcRequestKind::RunClientAction`] asked of it. The session answers the
+/// caller with these two values as the rejection of its `command_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientActionRefusal {
+    /// The class of the refusal, such as [`RejectReason::InvalidState`] for an
+    /// action that does not apply in the client's current mode.
+    pub reject_reason: RejectReason,
+    /// The sentence the caller prints, such as
+    /// `core:select-pane-target-left runs only in pane placement mode`.
+    pub help: String,
 }
 
 /// The most `copied_bytes` one [`IpcRequestKind::ClipboardCopy`] or
@@ -774,6 +831,8 @@ impl IpcRequestKind {
             IpcRequestKind::PaintedUpdate { .. } => "PaintedUpdate",
             IpcRequestKind::ClipboardCopyPart { .. } => "ClipboardCopyPart",
             IpcRequestKind::ClipboardCopy { .. } => "ClipboardCopy",
+            IpcRequestKind::RunClientAction { .. } => "RunClientAction",
+            IpcRequestKind::ClientActionAnswer { .. } => "ClientActionAnswer",
             IpcRequestKind::Prepare(_) => "Prepare",
             IpcRequestKind::Commit => "Commit",
         }
@@ -1040,6 +1099,8 @@ impl WireVariants for IpcRequestKind {
         "PaintedUpdate",
         "ClipboardCopyPart",
         "ClipboardCopy",
+        "RunClientAction",
+        "ClientActionAnswer",
         "Prepare",
         "Commit",
     ];

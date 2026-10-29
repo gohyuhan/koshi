@@ -66,6 +66,97 @@ use crate::{
 #[cfg(test)]
 pub(crate) mod tests;
 
+/// What the viewer does with a viewer-local action that `koshi actions run`
+/// asked it to run ([`Client::find_requested_client_action_fit`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RequestedClientActionFit {
+    /// The viewer runs the action as its key would
+    /// ([`Client::apply_client_action`]).
+    Runs,
+    /// The action ends a mode that is off: it changes nothing, and the viewer
+    /// answers that it ran.
+    HasItsResult,
+    /// The action does not apply in the mode that owns the viewer's keyboard,
+    /// and the viewer refuses it.
+    RunsOnlyIn {
+        /// The sentence the refusal carries, such as
+        /// `core:select-pane-target-left runs only in pane-placement or
+        /// dock-undock mode; the client is in normal mode`.
+        refusal_help: String,
+    },
+}
+
+/// The modes a viewer-local action applies in when `koshi actions run` asks
+/// for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestedClientActionModes {
+    /// The action runs while one of these modes owns the keyboard.
+    RunsIn(&'static [LockMode]),
+    /// The action ends this mode: it runs while the mode is on.
+    Ends(LockMode),
+}
+
+/// The base modes, under every viewer-local submode: `normal` and `locked`.
+const BASE_INPUT_MODES: &[LockMode] = &[LockMode::Normal, LockMode::Locked];
+
+/// The modes `client_action_kind` applies in when `koshi actions run` asks for
+/// it. Each action applies where its keymap binds it by default: an action
+/// that opens a mode applies in the base modes, an action inside a mode
+/// applies in that mode, and each close or cancel action ends its mode.
+/// Example: `core:select-pane-target-left` applies in `pane-placement` and
+/// `dock-undock`, which binds the same placement keys.
+#[must_use]
+pub(crate) fn find_requested_client_action_modes(
+    client_action_kind: ClientActionKind,
+) -> RequestedClientActionModes {
+    use RequestedClientActionModes::{Ends, RunsIn};
+    match client_action_kind {
+        ClientActionKind::BeginPanePlacement | ClientActionKind::BeginDockUndock => {
+            RunsIn(BASE_INPUT_MODES)
+        }
+        ClientActionKind::BeginTiledPanePlacement
+        | ClientActionKind::BeginFloatingPaneMove
+        | ClientActionKind::ConfirmPaneMoveChoice => RunsIn(&[LockMode::PaneMoveChoice]),
+        ClientActionKind::CancelPaneMoveChoice => Ends(LockMode::PaneMoveChoice),
+        ClientActionKind::SelectPaneTarget(_)
+        | ClientActionKind::SelectPaneInsertion(_)
+        | ClientActionKind::CyclePanePlacementSpan
+        | ClientActionKind::TogglePanePlacementStack
+        | ClientActionKind::SelectNextPlacementTab
+        | ClientActionKind::SelectPreviousPlacementTab => {
+            RunsIn(&[LockMode::PanePlacement, LockMode::DockUndock])
+        }
+        ClientActionKind::ConfirmPanePlacement => RunsIn(&[LockMode::PanePlacement]),
+        ClientActionKind::CancelPanePlacement => Ends(LockMode::PanePlacement),
+        ClientActionKind::ConfirmDockUndock => RunsIn(&[LockMode::DockUndock]),
+        ClientActionKind::CancelDockUndock => Ends(LockMode::DockUndock),
+        ClientActionKind::MoveFloatingPane(_)
+        | ClientActionKind::SelectNextFloatingPane
+        | ClientActionKind::SelectPreviousFloatingPane
+        | ClientActionKind::ConfirmFloatingPaneMove => RunsIn(&[LockMode::FloatingPaneMove]),
+        ClientActionKind::CancelFloatingPaneMove => Ends(LockMode::FloatingPaneMove),
+        ClientActionKind::ToggleFloatingPaneTray => RunsIn(&[
+            LockMode::Normal,
+            LockMode::Locked,
+            LockMode::FloatingPaneTray,
+        ]),
+        ClientActionKind::SelectTrayTile(_) | ClientActionKind::ToggleSelectedTrayTile => {
+            RunsIn(&[LockMode::FloatingPaneTray])
+        }
+        ClientActionKind::CloseFloatingPaneTray => Ends(LockMode::FloatingPaneTray),
+        ClientActionKind::ToggleNotificationCenter => RunsIn(&[
+            LockMode::Normal,
+            LockMode::Locked,
+            LockMode::NotificationCenter,
+        ]),
+        ClientActionKind::ClearNotifications
+        | ClientActionKind::SelectNewerNotification
+        | ClientActionKind::SelectOlderNotification
+        | ClientActionKind::DismissSelectedNotification => RunsIn(&[LockMode::NotificationCenter]),
+        ClientActionKind::CloseNotificationCenter => Ends(LockMode::NotificationCenter),
+    }
+}
+
 /// The read times of this terminal's input events, shared by its input thread
 /// and the attach loop under one lock.
 ///
@@ -219,22 +310,79 @@ impl Client {
     /// submode is on.
     #[must_use]
     pub(crate) fn find_viewer_local_input_mode(&self) -> Option<LockMode> {
-        if self.floating_pane_tray.is_some() {
-            return Some(LockMode::FloatingPaneTray);
+        [
+            LockMode::FloatingPaneTray,
+            LockMode::NotificationCenter,
+            LockMode::DockUndock,
+            LockMode::PanePlacement,
+            LockMode::PaneMoveChoice,
+            LockMode::FloatingPaneMove,
+        ]
+        .into_iter()
+        .find(|lock_mode| self.is_input_mode_on(*lock_mode))
+    }
+
+    /// Whether `lock_mode` is on in this viewer: the stored base mode for
+    /// `Normal` and `Locked`, and the submode's own state for each local
+    /// submode, also while another submode owns the keyboard. Example: pane
+    /// placement mode under an open floating pane tray is on.
+    fn is_input_mode_on(&self, lock_mode: LockMode) -> bool {
+        match lock_mode {
+            LockMode::Normal | LockMode::Locked => self.lock_mode == lock_mode,
+            LockMode::FloatingPaneTray => self.floating_pane_tray.is_some(),
+            LockMode::NotificationCenter => self.notification_history.is_notification_center_open(),
+            LockMode::DockUndock => self.dock_undock_mode.is_some(),
+            LockMode::PanePlacement => self.is_placement_mode_active(),
+            LockMode::PaneMoveChoice => self.pane_move_mode == Some(PaneMoveMode::Choice),
+            LockMode::FloatingPaneMove => {
+                matches!(self.pane_move_mode, Some(PaneMoveMode::FloatingPaneMove(_)))
+            }
         }
-        if self.notification_history.is_notification_center_open() {
-            return Some(LockMode::NotificationCenter);
+    }
+
+    /// What this viewer does with `client_action_kind`, the viewer-local
+    /// action `action_reference` names, when `koshi actions run` asks it to
+    /// run the action ([`find_requested_client_action_modes`]):
+    ///
+    /// - an action that runs in listed modes runs when one of them owns the
+    ///   keyboard ([`get_active_input_mode`](Self::get_active_input_mode));
+    /// - an action that ends one mode runs while that mode owns the keyboard,
+    ///   and has its result already while the mode is off;
+    /// - every other case is refused with the modes the action runs in, such
+    ///   as `core:select-pane-target-left runs only in pane-placement or
+    ///   dock-undock mode; the client is in normal mode`. Example: with
+    ///   dock-undock mode on, which keeps pane placement on under it,
+    ///   `core:cancel-pane-placement` is refused.
+    #[must_use]
+    pub(crate) fn find_requested_client_action_fit(
+        &self,
+        client_action_kind: ClientActionKind,
+        action_reference: &ActionReference,
+    ) -> RequestedClientActionFit {
+        let active_input_mode = self.get_active_input_mode();
+        let running_modes: Vec<LockMode> =
+            match find_requested_client_action_modes(client_action_kind) {
+                RequestedClientActionModes::RunsIn(lock_modes) => lock_modes.to_vec(),
+                RequestedClientActionModes::Ends(lock_mode)
+                    if !self.is_input_mode_on(lock_mode) =>
+                {
+                    return RequestedClientActionFit::HasItsResult;
+                }
+                RequestedClientActionModes::Ends(lock_mode) => vec![lock_mode],
+            };
+        if running_modes.contains(&active_input_mode) {
+            return RequestedClientActionFit::Runs;
         }
-        if self.dock_undock_mode.is_some() {
-            return Some(LockMode::DockUndock);
-        }
-        if self.is_placement_mode_active() {
-            return Some(LockMode::PanePlacement);
-        }
-        match self.pane_move_mode {
-            Some(PaneMoveMode::Choice) => Some(LockMode::PaneMoveChoice),
-            Some(PaneMoveMode::FloatingPaneMove(_)) => Some(LockMode::FloatingPaneMove),
-            None => None,
+        let mode_names: Vec<&str> = running_modes
+            .iter()
+            .map(|lock_mode| lock_mode.get_keymap_name())
+            .collect();
+        RequestedClientActionFit::RunsOnlyIn {
+            refusal_help: format!(
+                "{action_reference} runs only in {} mode; the client is in {} mode",
+                mode_names.join(" or "),
+                active_input_mode.get_keymap_name()
+            ),
         }
     }
 

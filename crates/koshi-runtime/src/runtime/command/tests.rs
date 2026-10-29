@@ -79,7 +79,8 @@ fn build_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
 /// Like [`build_runtime`], but also hands back the concrete fake backend so a test
 /// can drive spawn failures and assert on spawned panes, specs, and resizes.
 /// Both the runtime and the returned handle share one backend.
-fn build_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
+pub(crate) fn build_runtime_with_fake() -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>)
+{
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
@@ -505,7 +506,7 @@ fn build_command_matrix_server(client_origin: ClientOrigin) -> CommandMatrixFixt
 
 /// How many [`Command`] variants this build has. [`build_every_command`] lists one
 /// command of each.
-const COMMAND_VARIANT_COUNT: usize = 28;
+const COMMAND_VARIANT_COUNT: usize = 29;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
@@ -591,7 +592,8 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             is_minimized: true,
         }),
         Command::ToggleAllFloatingPanesMinimized,
-        Command::Quit,
+        Command::Quit(QuitArgs::default()),
+        Command::KillSession,
         Command::Detach(DetachArgs { client_id: None }),
         Command::DetachAll,
         Command::SwitchSession(SwitchSessionArgs {
@@ -602,7 +604,7 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     ]
 }
 
-/// The variant name of `command`: `Command::Quit` gives `"Quit"`. The match
+/// The variant name of `command`: `Command::KillSession` gives `"KillSession"`. The match
 /// names every variant, so a new variant stops the build here.
 fn get_command_name(command: &Command) -> &'static str {
     match command {
@@ -630,7 +632,8 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::TogglePaneMinimized(_) => "TogglePaneMinimized",
         Command::SetAllFloatingPanesMinimized(_) => "SetAllFloatingPanesMinimized",
         Command::ToggleAllFloatingPanesMinimized => "ToggleAllFloatingPanesMinimized",
-        Command::Quit => "Quit",
+        Command::Quit(_) => "Quit",
+        Command::KillSession => "KillSession",
         Command::Detach(_) => "Detach",
         Command::DetachAll => "DetachAll",
         Command::SwitchSession(_) => "SwitchSession",
@@ -1338,6 +1341,38 @@ fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
         CommandSource::from_key_binding(client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(split_pane_id),
+            pane_input_bytes: vec![b'l', b's', b'\n'],
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![])
+    );
+    assert_eq!(
+        get_client_scroll_offset(&runtime, client_id, split_pane_id),
+        0
+    );
+}
+
+#[test]
+fn an_external_write_naming_no_pane_snaps_the_sole_client_view_to_live_output() {
+    // `koshi input ls` typed outside koshi, with one client attached: the
+    // bytes reach the pane that takes that client's keys, and that client's
+    // view follows to live output, as when it types there.
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.scroll_up(client_id, split_pane_id, 3);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane_id: None,
             pane_input_bytes: vec![b'l', b's', b'\n'],
         }),
     );
@@ -3301,22 +3336,296 @@ fn focus_pane_by_direction_with_no_neighbor_is_target_not_found() {
 }
 
 #[test]
-fn quit_from_a_source_with_no_client_marks_immediate_teardown() {
-    let (mut runtime, _runtime_event_sender) = build_runtime();
+fn quit_from_an_external_cli_with_no_client_attached_is_refused_and_the_session_runs() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    runtime.handle_client_detach(client_id);
 
-    // A CLI source naming no session and no client: quit ends the process and
-    // detaches no client.
-    let command_envelope = build_sessionless_cli_command_envelope(Command::Quit);
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::Quit(QuitArgs::default()),
+    );
     let command_id = command_envelope.command_id;
     assert_eq!(
         runtime.dispatch(command_envelope),
-        CommandResult::Ok {
+        CommandResult::Rejected {
             command_id,
-            emitted_events: Vec::new(),
+            reason: RejectReason::SourceClientStale,
+            help: Some("no client is attached to the session".to_string()),
         }
     );
-    assert!(runtime.is_quit_requested());
-    assert!(runtime.should_shutdown_immediately);
+    assert!(!runtime.is_quit_requested());
+}
+
+#[test]
+fn quit_from_an_external_cli_naming_one_of_two_clients_removes_that_client_alone() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    let staying_client_id = attach_second_client(&mut runtime, client_id, None);
+    runtime.config.should_auto_close_session = true;
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
+        Command::Quit(QuitArgs {
+            client_id: Some(client_id),
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![])
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .list_attached_clients()
+            .map(Client::get_client_id)
+            .collect::<Vec<ClientId>>(),
+        vec![staying_client_id]
+    );
+    assert!(!runtime.is_quit_requested());
+}
+
+#[test]
+fn quit_from_an_external_cli_naming_no_client_removes_the_sole_client() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::Quit(QuitArgs::default()),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![])
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .map(Client::get_client_id),
+        None
+    );
+    assert!(!runtime.is_quit_requested());
+}
+
+#[test]
+fn quit_from_an_external_cli_naming_no_client_among_two_is_ambiguous() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    attach_second_client(&mut runtime, client_id, None);
+    let attached_client_ids: Vec<String> = runtime.session_by_id[&session_id]
+        .clients
+        .list_attached_clients()
+        .map(|client| client.get_client_id().to_string())
+        .collect();
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::Quit(QuitArgs::default()),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetAmbiguous,
+            help: Some(format!(
+                "several clients are attached; specify the client: {}",
+                attached_client_ids.join(", ")
+            )),
+        }
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id].clients.count_clients(),
+        2
+    );
+}
+
+#[test]
+fn a_command_that_removes_or_moves_a_reconnecting_client_is_refused_and_every_record_stays() {
+    // Alice's record came across a restart, and she has not attached again;
+    // bob is attached. A quit, a detach and a switch that name alice, and a
+    // detach of every client, are each refused, and both records stay.
+    let build_commands: [fn(ClientId) -> Command; 4] = [
+        |reconnecting_client_id| {
+            Command::Quit(QuitArgs {
+                client_id: Some(reconnecting_client_id),
+            })
+        },
+        |reconnecting_client_id| {
+            Command::Detach(DetachArgs {
+                client_id: Some(reconnecting_client_id),
+            })
+        },
+        |reconnecting_client_id| {
+            Command::SwitchSession(SwitchSessionArgs {
+                client_id: Some(reconnecting_client_id),
+                session_id: SessionId::new(),
+                owner_user_id: None,
+            })
+        },
+        |_| Command::DetachAll,
+    ];
+    for build_command in build_commands {
+        let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+        let alice_client_id = create_session_with_attached_client(
+            &mut runtime,
+            SessionId::new(),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+        let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+        let bob_client_id = attach_second_client(&mut runtime, alice_client_id, None);
+        runtime
+            .client_ids_awaiting_reconnect
+            .insert(alice_client_id);
+        let command = build_command(alice_client_id);
+
+        let command_envelope = build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), None),
+            command.clone(),
+        );
+        let command_id = command_envelope.command_id;
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some(format!("client {alice_client_id} is reconnecting")),
+            },
+            "{command:?}"
+        );
+        let mut remaining_client_ids: Vec<ClientId> = runtime.session_by_id[&session_id]
+            .clients
+            .list_attached_clients()
+            .map(Client::get_client_id)
+            .collect();
+        remaining_client_ids.sort();
+        let mut expected_client_ids = vec![alice_client_id, bob_client_id];
+        expected_client_ids.sort();
+        assert_eq!(remaining_client_ids, expected_client_ids, "{command:?}");
+        assert_eq!(
+            runtime.client_ids_awaiting_reconnect,
+            HashSet::from([alice_client_id]),
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn quit_from_an_external_cli_naming_no_client_whose_sole_client_is_reconnecting_is_refused() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    runtime.client_ids_awaiting_reconnect.insert(client_id);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::Quit(QuitArgs::default()),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!("client {client_id} is reconnecting")),
+        }
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .map(Client::get_client_id),
+        Some(client_id)
+    );
+}
+
+#[test]
+fn quit_from_inside_a_pane_removes_the_client_that_pane_names() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
+    let staying_client_id = attach_second_client(&mut runtime, client_id, None);
+
+    let command_envelope = build_command_envelope(
+        build_in_session_source(session_id, Some(client_id), pane_id),
+        Command::Quit(QuitArgs::default()),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![])
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .list_attached_clients()
+            .map(Client::get_client_id)
+            .collect::<Vec<ClientId>>(),
+        vec![staying_client_id]
+    );
 }
 
 #[test]
@@ -4321,32 +4630,65 @@ fn in_session_cli_client_scoped_with_no_attached_client_is_stale() {
 }
 
 #[test]
-fn mouse_select_cannot_be_issued_from_the_cli() {
-    // The CLI has no mouse-select verb; the command is refused before any
-    // state is read, so even an empty runtime answers.
-    let (mut runtime, _runtime_event_sender) = build_runtime();
-    let command_source =
-        build_in_session_source(SessionId::new(), Some(ClientId::new()), PaneId::new());
-    let command_envelope = build_command_envelope(command_source, Command::ToggleMouseSelect);
+fn mouse_select_from_the_cli_flips_the_named_clients_mode_only() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    let named_client_id = attach_second_client(&mut runtime, client_id, None);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(named_client_id)),
+        Command::ToggleMouseSelect,
+    );
     let command_id = command_envelope.command_id;
     assert_eq!(
         runtime.dispatch(command_envelope),
-        CommandResult::Rejected {
+        CommandResult::Ok {
             command_id,
-            reason: RejectReason::Unauthorized,
-            help: Some("command cannot be issued from the CLI".to_string()),
+            emitted_events: vec![Event::MouseSelectChanged(MouseSelectChanged {
+                client_id: named_client_id,
+                is_enabled: true,
+            })],
         }
     );
+
+    let read_mouse_selection = |client_id: ClientId| {
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .map(Client::is_mouse_selection_enabled)
+    };
+    assert_eq!(read_mouse_selection(named_client_id), Some(true));
+    assert_eq!(read_mouse_selection(client_id), Some(false));
 }
 
 #[test]
-fn mouse_select_is_refused_from_the_source_a_control_connection_stamps() {
-    // A control connection that presented `CommandSource::KeyBinding` reaches
-    // dispatch as `ExternalCli { session_id: None, target_client_id: None }`, so
-    // the CLI-admission check refuses the verb the CLI has no word for.
-    let (mut runtime, _runtime_event_sender) = build_runtime();
+fn mouse_select_from_the_cli_naming_no_client_among_two_is_ambiguous() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    attach_second_client(&mut runtime, client_id, None);
+
     let command_envelope = build_command_envelope(
-        CommandSource::from_external_cli(None, None),
+        CommandSource::from_external_cli(Some(session_id), None),
         Command::ToggleMouseSelect,
     );
     let command_id = command_envelope.command_id;
@@ -4354,8 +4696,8 @@ fn mouse_select_is_refused_from_the_source_a_control_connection_stamps() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::Unauthorized,
-            help: Some("command cannot be issued from the CLI".to_string()),
+            reason: RejectReason::TargetAmbiguous,
+            help: Some("several clients are attached; name the target client".to_string()),
         }
     );
 }
@@ -4384,11 +4726,11 @@ fn copy_cannot_be_issued_from_the_cli() {
 }
 
 #[test]
-fn quit_cannot_be_issued_from_inside_a_pane() {
+fn kill_session_cannot_be_issued_from_inside_a_pane() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let command_source =
         build_in_session_source(SessionId::new(), Some(ClientId::new()), PaneId::new());
-    let command_envelope = build_command_envelope(command_source, Command::Quit);
+    let command_envelope = build_command_envelope(command_source, Command::KillSession);
     let command_id = command_envelope.command_id;
     assert_eq!(
         runtime.dispatch(command_envelope),
@@ -4402,12 +4744,33 @@ fn quit_cannot_be_issued_from_inside_a_pane() {
 }
 
 #[test]
-fn quit_from_an_external_cli_is_accepted() {
-    // `kill-session` sends `Quit` from outside the session. It names no client,
-    // so it ends the process whatever `auto-close-session` says.
+fn kill_session_cannot_be_issued_from_a_key_or_the_mouse() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    for command_source in [
+        CommandSource::from_key_binding(ClientId::new()),
+        CommandSource::from_mouse(ClientId::new()),
+    ] {
+        let command_envelope = build_command_envelope(command_source, Command::KillSession);
+        let command_id = command_envelope.command_id;
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::Unauthorized,
+                help: Some("command cannot be issued from a key or the mouse".to_string()),
+            }
+        );
+    }
+    assert!(!runtime.is_quit_requested());
+}
+
+#[test]
+fn kill_session_from_an_external_cli_ends_the_process_at_once() {
+    // `kill-session` sends `KillSession` from outside the session. It ends the
+    // process whatever `auto-close-session` says.
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let command_source = CommandSource::from_external_cli(None, None);
-    let command_envelope = build_command_envelope(command_source, Command::Quit);
+    let command_envelope = build_command_envelope(command_source, Command::KillSession);
     let command_id = command_envelope.command_id;
     assert_eq!(
         runtime.dispatch(command_envelope),
@@ -5733,6 +6096,36 @@ fn new_pane_external_tab_and_named_client_moves_that_client_onto_the_tab() {
 }
 
 #[test]
+fn close_tab_from_an_external_cli_naming_a_client_closes_that_clients_tab() {
+    let TwoViewedTabsFixture {
+        mut runtime,
+        session_id,
+        first_tab_id,
+        second_client_id,
+        ..
+    } = build_two_viewed_tabs_fixture();
+
+    // `koshi actions run core:close-tab --client <second>` typed outside koshi.
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(second_client_id)),
+        Command::CloseTab(CloseTabArgs {
+            tab_id: None,
+            should_force_close: true,
+            should_kill_process_tree: false,
+        }),
+    ));
+
+    let CommandResult::Ok { .. } = command_result else {
+        panic!("the close was refused: {command_result:?}");
+    };
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs.keys().copied().collect::<Vec<TabId>>(),
+        vec![first_tab_id]
+    );
+}
+
+#[test]
 fn new_pane_explicit_client_wins_over_the_in_session_issuer() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let issuer_client_id = ClientId::new();
@@ -6536,6 +6929,93 @@ fn new_pane_external_into_a_viewed_tab_adopts_no_one() {
             .get_focused_pane_id(tab_id),
         Some(root_pane_id)
     );
+}
+
+#[test]
+fn new_pane_external_naming_no_pane_and_no_client_is_focused_and_shown_by_the_sole_client() {
+    // `koshi actions run new-pane` and `koshi actions run new-pane-stacked`
+    // typed outside koshi, with one client attached: the new pane joins the
+    // pane that takes that client's keys, and that client focuses it and
+    // shows it, as its own key does.
+    let build_split_layout_tree: fn(PaneId, PaneId) -> LayoutNode = |root_pane_id, new_pane_id| {
+        split_leaf(
+            &LayoutNode::Pane(root_pane_id),
+            root_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the root pane splits")
+    };
+    let build_stacked_layout_tree: fn(PaneId, PaneId) -> LayoutNode =
+        |root_pane_id, new_pane_id| {
+            add_pane_to_stack(&LayoutNode::Pane(root_pane_id), root_pane_id, new_pane_id)
+                .expect("the root pane takes a stack")
+        };
+    for (placement, build_expected_layout_tree) in [
+        (
+            NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Right,
+            },
+            build_split_layout_tree,
+        ),
+        (
+            NewPanePlacement::Stacked {
+                source_pane_id: None,
+                tab_id: None,
+            },
+            build_stacked_layout_tree,
+        ),
+    ] {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let tab_id = TabId::new();
+        let root_pane_id = PaneId::new();
+        let mut session = build_bare_session(SessionId::new());
+        register_pane_record(&mut session, root_pane_id);
+        register_session_tab(&mut session, tab_id, root_pane_id);
+        attach_client(&mut session, client_id, tab_id, Some(root_pane_id));
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+
+        let command_result = runtime.dispatch(build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), None),
+            Command::NewPane(NewPaneArgs {
+                placement,
+                ..build_new_pane_args()
+            }),
+        ));
+
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Ok(vec![
+                "PaneCreated",
+                "LayoutChanged",
+                "PaneFocused",
+                "PtyResized"
+            ]),
+            "{placement:?}"
+        );
+        let new_pane_id = find_other_pane_id(&runtime, session_id, &[root_pane_id]);
+        let session = &runtime.session_by_id[&session_id];
+        let layout_tree = session.tabs[&tab_id].get_layout_tree();
+        assert_eq!(
+            layout_tree,
+            &build_expected_layout_tree(root_pane_id, new_pane_id),
+            "{placement:?}"
+        );
+        let client = session.clients.get_client_by_id(client_id).unwrap();
+        assert_eq!(
+            client.get_active_focused_pane_id(),
+            Some(new_pane_id),
+            "{placement:?}"
+        );
+        assert!(
+            !layout_tree.is_pane_collapsed(new_pane_id, client.list_focus_history(tab_id)),
+            "{placement:?}: the new pane is shown"
+        );
+    }
 }
 
 #[test]
@@ -13969,6 +14449,46 @@ fn resize_pane_from_outside_drops_the_zoom_of_the_client_it_names() {
 }
 
 #[test]
+fn resize_pane_from_outside_naming_no_pane_and_no_client_drops_the_sole_clients_zoom() {
+    // `koshi actions run resize-pane-left` typed outside koshi, with one
+    // zoomed client attached: the resize moves the border of the pane that
+    // client focuses, and that client sees it tiled, as its own key does.
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        split_pane_id,
+        split_pane_pty_size,
+        ..
+    } = build_fullscreen_fixture();
+    let tab_id = get_only_tab_id(&runtime, session_id);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::ResizePane(ResizePaneArgs {
+            pane_id: None,
+            direction: Direction::Left,
+            resize_amount_cells: 5,
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        get_client_layout_mode(&runtime, session_id, client_id, tab_id),
+        LayoutMode::Tiled
+    );
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&split_pane_id],
+        PtySize {
+            column_count: split_pane_pty_size.column_count + 5,
+            row_count: split_pane_pty_size.row_count,
+        }
+    );
+}
+
+#[test]
 fn close_pane_drops_the_closing_clients_zoom() {
     let ResizeFixture {
         mut runtime,
@@ -14902,7 +15422,7 @@ fn child_exit_by_signal_reports_the_signal_and_the_quit_it_causes_carries_it() {
 /// The `(session, tab, pane)` of a runtime [`create_session_with_attached_client`]
 /// built: exactly one of each. Panics unless the runtime holds a single session with a single tab
 /// and a single pane.
-fn get_only_session_slot(runtime: &Server) -> (SessionId, TabId, PaneId) {
+pub(crate) fn get_only_session_slot(runtime: &Server) -> (SessionId, TabId, PaneId) {
     assert_eq!(runtime.session_by_id.len(), 1, "exactly one session");
     let session = runtime
         .session_by_id
@@ -16477,8 +16997,10 @@ fn quit_from_a_client_detaches_it_and_leaves_the_session_running() {
 
     // `auto-close-session` is off, so quit removes the client and nothing else:
     // the session and its pane keep running.
-    let command_envelope =
-        build_command_envelope(CommandSource::from_key_binding(client_id), Command::Quit);
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::Quit(QuitArgs::default()),
+    );
     let command_id = command_envelope.command_id;
 
     assert_eq!(
@@ -16533,7 +17055,7 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
     // One of two clients quits: the other is still attached, so nothing quits.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(initial_client_id),
-        Command::Quit,
+        Command::Quit(QuitArgs::default()),
     );
     assert_eq!(
         get_command_outcome(&runtime.submit_command(command_envelope)),
@@ -16570,8 +17092,10 @@ fn quit_from_the_last_client_ends_the_session_under_auto_close() {
     let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
     runtime.config.should_auto_close_session = true;
 
-    let command_envelope =
-        build_command_envelope(CommandSource::from_key_binding(client_id), Command::Quit);
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::Quit(QuitArgs::default()),
+    );
     assert_eq!(
         get_command_outcome(&runtime.submit_command(command_envelope)),
         Ok(vec![])
@@ -16607,7 +17131,7 @@ fn quit_from_a_client_that_already_left_is_refused() {
     // session and ends no session.
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(ClientId::new()),
-        Command::Quit,
+        Command::Quit(QuitArgs::default()),
     );
     let command_id = command_envelope.command_id;
 
@@ -17873,16 +18397,16 @@ fn a_rejected_command_leaves_state_intact_and_the_next_command_works() {
 }
 
 #[test]
-fn a_command_after_quit_still_dispatches() {
-    // `Quit` sets the loop's exit flags but does not itself gate dispatch — the
-    // loop exits by polling `is_quit_requested`, not by dispatch refusing
-    // commands. Pin that: a command issued after Quit, before the loop notices,
-    // still runs.
+fn a_command_after_kill_session_still_dispatches() {
+    // `KillSession` sets the loop's exit flags but does not itself gate
+    // dispatch — the loop exits by polling `is_quit_requested`, not by dispatch
+    // refusing commands. Pin that: a command issued after `KillSession`, before
+    // the loop notices, still runs.
     let (mut runtime, _runtime_event_sender, client_id, session_id) = build_lock_fixture();
 
     assert_eq!(
         get_command_outcome(
-            &runtime.dispatch(build_sessionless_cli_command_envelope(Command::Quit))
+            &runtime.dispatch(build_sessionless_cli_command_envelope(Command::KillSession))
         ),
         Ok(vec![])
     );
@@ -18140,24 +18664,6 @@ fn fullscreen_from_a_clientless_pane_zooms_the_sole_client() {
             focused_pane_id: split_pane_id
         }
     );
-}
-
-/// `is_client_scoped` answers `true` for the command whose target is only the
-/// issuing client's view. Every other variant carries a target of its own,
-/// resolved by its own resolver. Every command [`build_every_command`] lists is
-/// classified here.
-#[test]
-fn client_scoped_is_exactly_toggle_mouse_select() {
-    let cases = build_every_command(TabId::new(), PaneId::new());
-
-    assert_eq!(cases.len(), COMMAND_VARIANT_COUNT);
-    for command in &cases {
-        assert_eq!(
-            Server::is_client_scoped(command),
-            matches!(command, Command::ToggleMouseSelect),
-            "{command:?}"
-        );
-    }
 }
 
 /// A session with two attached clients. Each client views a tab of its own,
@@ -23169,7 +23675,7 @@ fn serialize_client_record(runtime: &Server, session_id: SessionId, client_id: C
 
 /// An in-session CLI source issued from the shell of `pane_id`, whose pane was
 /// spawned for `client_id`. `None` names a pane spawned for no client.
-fn build_in_session_source(
+pub(crate) fn build_in_session_source(
     session_id: SessionId,
     client_id: Option<ClientId>,
     pane_id: PaneId,
@@ -25022,7 +25528,7 @@ fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() 
 }
 
 #[test]
-fn every_view_toggle_is_refused_from_the_command_line() {
+fn toggle_pane_minimized_is_refused_from_the_command_line() {
     let FloatingCommandFixture {
         mut runtime,
         session_id,
@@ -25036,29 +25542,71 @@ fn every_view_toggle_is_refused_from_the_command_line() {
     );
     let session_records_before = serialize_session_records(&runtime);
 
-    for command in [
-        Command::TogglePanePinned(TogglePanePinnedArgs {
-            pane_id: Some(floating_pane_id),
-        }),
+    let command_result = runtime.dispatch(build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(alice_client_id)),
         Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
             pane_id: Some(floating_pane_id),
         }),
-        Command::ToggleAllFloatingPanesMinimized,
-    ] {
-        let command_result = runtime.dispatch(build_command_envelope(
-            CommandSource::from_external_cli(Some(session_id), Some(alice_client_id)),
-            command.clone(),
-        ));
-        assert_eq!(
-            get_command_outcome(&command_result),
-            Err((
-                RejectReason::Unauthorized,
-                Some("command cannot be issued from the CLI")
-            )),
-            "{command:?}"
-        );
-    }
+    ));
+
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Err((
+            RejectReason::Unauthorized,
+            Some("command cannot be issued from the CLI")
+        ))
+    );
     assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
+fn pin_and_minimize_all_toggles_from_the_command_line_act_for_the_named_client() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let command_source = CommandSource::from_external_cli(Some(session_id), Some(alice_client_id));
+
+    let pin_envelope = build_command_envelope(
+        command_source.clone(),
+        Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
+    );
+    let pin_command_id = pin_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(pin_envelope),
+        CommandResult::Ok {
+            command_id: pin_command_id,
+            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                client_id: alice_client_id,
+                pane_id: floating_pane_id,
+                is_pinned: true,
+            })],
+        }
+    );
+
+    let minimize_all_result = runtime.dispatch(build_command_envelope(
+        command_source,
+        Command::ToggleAllFloatingPanesMinimized,
+    ));
+    assert_eq!(
+        get_command_outcome(&minimize_all_result),
+        Ok(vec!["PaneMinimizedChanged", "PaneFocused"])
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(alice_client_id)
+            .expect("alice is attached")
+            .list_shown_floating_pane_ids(),
+        &[] as &[PaneId]
+    );
 }
 
 #[test]

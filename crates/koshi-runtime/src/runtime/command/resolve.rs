@@ -16,21 +16,28 @@ use koshi_session::session::state::Tab;
 
 impl Server {
     /// Check a command against live state before it reaches a handler. Runs the
-    /// universal checks in fixed precedence: CLI command admission, session
+    /// universal checks in fixed precedence: command source admission, session
     /// resolution, session admission, the in-session issuing pane's liveness,
-    /// the acting client for a client-scoped command, then target resolution.
-    /// Returns the first failure, or `Ok(())` when the command is well-formed
-    /// against current state.
+    /// then target resolution. Returns the first failure, or `Ok(())` when the
+    /// command is well-formed against current state.
     ///
     /// [`Server::dispatch_reporting_moved_cells`] is the only caller and runs this
     /// before any handler, so every command crosses this gate.
     pub(super) fn validate_command(&self, envelope: &CommandEnvelope) -> Result<(), Rejection> {
-        // 1. CLI admission: a CLI command source may submit only the commands
-        //    `is_command_allowed_from_source` lists.
+        // 1. Source admission: a command source may submit only the commands
+        //    `is_command_allowed_from_source` lists for it.
         if !Self::is_command_allowed_from_source(&envelope.command, &envelope.command_source) {
+            let refusal_help = match envelope.command_source {
+                CommandSource::ExternalCli { .. } | CommandSource::InSessionCli { .. } => {
+                    "command cannot be issued from the CLI"
+                }
+                CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
+                    "command cannot be issued from a key or the mouse"
+                }
+            };
             return Err(Rejection::from_reason_and_help(
                 RejectReason::Unauthorized,
-                "command cannot be issued from the CLI",
+                refusal_help,
             ));
         }
 
@@ -55,14 +62,8 @@ impl Server {
             Self::require_live_source_pane(Self::require_session(session)?, *pane_id)?;
         }
 
-        // 5. A client-scoped command must resolve an acting client, whatever
-        //    the command source: the issuer while it is attached, else the session's
-        //    sole attached client.
-        if Self::is_client_scoped(&envelope.command) {
-            Self::resolve_acting_client(&envelope.command_source, Self::require_session(session)?)?;
-        }
-
-        // 6. Target resolution: the pane/tab/session the command names must resolve.
+        // 5. Target resolution: the pane/tab/session/client the command names
+        //    must resolve.
         self.resolve_target(&envelope.command, &envelope.command_source, session)
     }
 
@@ -117,11 +118,11 @@ impl Server {
 
     /// Whether `command` may arrive from `command_source`.
     ///
-    /// A CLI source may send only the commands this function lists. An
-    /// external CLI may also send [`Command::Quit`]. [`Command::Visual`] and
-    /// [`Command::ToggleMouseSelect`] are refused from every CLI source, and
-    /// [`Command::Quit`] from an in-session CLI, before any state is read. A
-    /// keybinding or mouse source may send every command.
+    /// A CLI source may send only the commands this function lists.
+    /// [`Command::KillSession`] arrives from an external CLI alone.
+    /// [`Command::Visual`] and [`Command::TogglePaneMinimized`] are refused
+    /// from every CLI source before any state is read. A keybinding or mouse
+    /// source may send every command but [`Command::KillSession`].
     pub(super) fn is_command_allowed_from_source(
         command: &Command,
         command_source: &CommandSource,
@@ -136,9 +137,12 @@ impl Server {
                 | Command::ScrollPane(_)
                 | Command::MoveFloatingPane(_)
                 | Command::SetPanePinned(_)
+                | Command::TogglePanePinned(_)
                 | Command::SetPaneMinimized(_)
                 | Command::SetAllFloatingPanesMinimized(_)
+                | Command::ToggleAllFloatingPanesMinimized
                 | Command::TogglePaneFullscreen
+                | Command::ToggleMouseSelect
                 | Command::WriteToPane(_)
                 | Command::NewTab(_)
                 | Command::CloseTab(_)
@@ -147,6 +151,7 @@ impl Server {
                 | Command::FocusPane(_)
                 | Command::SetLockMode(_)
                 | Command::ToggleLockMode(_)
+                | Command::Quit(_)
                 | Command::Detach(_)
                 | Command::DetachAll
                 | Command::SwitchSession(_)
@@ -154,21 +159,12 @@ impl Server {
         match command_source {
             CommandSource::InSessionCli { .. } => is_cli_command_allowed,
             CommandSource::ExternalCli { .. } => {
-                is_cli_command_allowed || matches!(command, Command::Quit)
+                is_cli_command_allowed || matches!(command, Command::KillSession)
             }
-            CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => true,
+            CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
+                !matches!(command, Command::KillSession)
+            }
         }
-    }
-
-    /// Whether the dispatcher resolves `command`'s acting client with
-    /// [`Self::resolve_acting_client`] before it resolves the target: `true`
-    /// for [`Command::ToggleMouseSelect`] only. A command that names a client,
-    /// or whose source names one, resolves its client in its target resolver
-    /// instead ([`Self::resolve_view_client`]).
-    /// [`Self::is_command_allowed_from_source`] refuses
-    /// [`Command::ToggleMouseSelect`] from a CLI source before this check runs.
-    pub(super) fn is_client_scoped(command: &Command) -> bool {
-        matches!(command, Command::ToggleMouseSelect)
     }
 
     /// Confirm the pane an in-session CLI command was issued from is still a
@@ -399,9 +395,14 @@ impl Server {
                 Self::require_session(session)?,
             )
             .map(drop),
-            // Mouse-select is client-scoped: the acting client resolved by the
-            // client-scoped check in `validate_command` is the whole target.
-            Command::ToggleMouseSelect => Ok(()),
+            // Mouse select flips one client's own mode: the client the source
+            // names, else the acting client.
+            Command::ToggleMouseSelect => Self::resolve_view_client(
+                command_source.get_target_client_id(),
+                command_source,
+                Self::require_session(session)?,
+            )
+            .map(drop),
             // A highlight command acts on the pane it names, never on the
             // focused pane, and its handler confirms that pane still exists.
             // The client checked is the issuing client alone.
@@ -434,21 +435,39 @@ impl Server {
             }
             // Detach acts on one attached client, which
             // `resolve_target_client` resolves.
-            Command::Detach(command_args) => Self::resolve_target_client(
-                command_args.client_id,
-                command_source,
-                Self::require_session(session)?,
-            )
-            .map(drop),
+            Command::Detach(command_args) => self
+                .resolve_target_client(
+                    command_args.client_id,
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop),
             // The switch names one client the same way a detach does, and the
             // handler resolves it again through the same helper.
-            Command::SwitchSession(command_args) => Self::resolve_target_client(
-                command_args.client_id,
-                command_source,
-                Self::require_session(session)?,
-            )
-            .map(drop),
-            Command::DetachAll | Command::Quit => Ok(()),
+            Command::SwitchSession(command_args) => self
+                .resolve_target_client(
+                    command_args.client_id,
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop),
+            // A quit removes one client, resolved as a detach resolves it.
+            Command::Quit(command_args) => self
+                .resolve_target_client(
+                    command_args.client_id,
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop),
+            // A detach of every client is refused while one of them is
+            // reconnecting, and then detaches no client.
+            Command::DetachAll => Self::require_session(session)?
+                .clients
+                .list_attached_clients()
+                .try_for_each(|client| {
+                    self.require_client_not_awaiting_reconnect(client.get_client_id())
+                }),
+            Command::KillSession => Ok(()),
         }
     }
 
@@ -961,18 +980,21 @@ impl Server {
     /// The client a command names in its own `client` argument, resolved by
     /// [`Self::resolve_view_client`]. A [`RejectReason::TargetAmbiguous`] hint
     /// from that call is replaced with one listing every attached client id to
-    /// choose from.
+    /// choose from. A client whose record came across a restart and has not
+    /// attached again is [`Self::require_client_not_awaiting_reconnect`]'s
+    /// refusal.
     ///
-    /// Shared by [`Command::Detach`], which removes the client it resolves, and
-    /// [`Command::SwitchSession`], which moves it to another session. Validation
-    /// and the handler both call it.
+    /// Shared by [`Command::Detach`] and [`Command::Quit`], which remove the
+    /// client it resolves, and [`Command::SwitchSession`], which moves it to
+    /// another session. Validation and the handler both call it.
     pub(super) fn resolve_target_client(
+        &self,
         explicit_client_id: Option<ClientId>,
         command_source: &CommandSource,
         session: &Session,
     ) -> Result<ClientId, Rejection> {
-        Self::resolve_view_client(explicit_client_id, command_source, session).map_err(
-            |rejection| {
+        let client_id = Self::resolve_view_client(explicit_client_id, command_source, session)
+            .map_err(|rejection| {
                 if rejection.reason == RejectReason::TargetAmbiguous {
                     let client_id_strings: Vec<String> = session
                         .clients
@@ -989,8 +1011,25 @@ impl Server {
                 } else {
                     rejection
                 }
-            },
-        )
+            })?;
+        self.require_client_not_awaiting_reconnect(client_id)?;
+        Ok(client_id)
+    }
+
+    /// Refuse `client_id` while its record came across a restart and it has
+    /// not attached again: [`RejectReason::InvalidState`] `client <id> is
+    /// reconnecting`.
+    pub(super) fn require_client_not_awaiting_reconnect(
+        &self,
+        client_id: ClientId,
+    ) -> Result<(), Rejection> {
+        if self.client_ids_awaiting_reconnect.contains(&client_id) {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                &format!("client {client_id} is reconnecting"),
+            ));
+        }
+        Ok(())
     }
 
     /// Resolve a [`Command::NewPane`] to its concrete target: the session and
@@ -1007,13 +1046,17 @@ impl Server {
     /// `explicit_client_id` names, else of the acting client
     /// ([`Self::resolve_pane_target`]).
     ///
-    /// The focus client is `explicit_client_id` when set, else the issuer
-    /// while it is attached to the session the new pane joins, else none
-    /// ([`Self::resolve_new_pane_focus_client_id`]).
+    /// The focus client is the client whose input the default pane takes, when
+    /// that client's focus picked the source pane (`focusing_client_id` of
+    /// [`Self::resolve_pane_target`]). Else it is `explicit_client_id` when
+    /// set, else the issuer while it is attached to the session the new pane
+    /// joins, else none ([`Self::resolve_new_pane_focus_client_id`]).
     ///
     /// With clients A and B attached and B named, an external CLI naming no
     /// pane and no tab splits the pane that takes B's input, and B focuses the
     /// new pane. With neither named, it is [`RejectReason::TargetAmbiguous`].
+    /// With A alone attached and no client named, it splits the pane that
+    /// takes A's input, and A focuses the new pane, as A's own key does.
     ///
     /// A source pane that floats is [`RejectReason::InvalidState`]:
     /// `<pane> is floating and has no split to divide; use new-pane --floating,
@@ -1049,8 +1092,9 @@ impl Server {
             // pane stands in — the in-session CLI's captured pane, else the
             // pane that takes the named or acting client's input. Both resolve
             // through [`Self::resolve_pane_target`], so the pane's own tab is
-            // the receiving tab. An in-session CLI whose client is gone still
-            // splits its pane, and focuses the new pane for no client.
+            // the receiving tab. The client whose input the default pane takes
+            // focuses the new pane. An in-session CLI whose client is gone
+            // still splits its pane, and focuses the new pane for no client.
             (source_pane_id, _) => {
                 let pane_target = self.resolve_pane_target(
                     source_pane_id,
@@ -1067,15 +1111,20 @@ impl Server {
                         ),
                     ));
                 };
-                let owner_session = self
-                    .session_by_id
-                    .get(&pane_target.session_id)
-                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-                let focus_client_id = Self::resolve_new_pane_focus_client_id(
-                    explicit_client_id,
-                    command_source,
-                    owner_session,
-                )?;
+                let focus_client_id = match pane_target.focusing_client_id {
+                    Some(focusing_client_id) => Some(focusing_client_id),
+                    None => {
+                        let owner_session = self
+                            .session_by_id
+                            .get(&pane_target.session_id)
+                            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+                        Self::resolve_new_pane_focus_client_id(
+                            explicit_client_id,
+                            command_source,
+                            owner_session,
+                        )?
+                    }
+                };
                 Ok(NewPaneTarget {
                     session_id: pane_target.session_id,
                     source_pane_id: pane_target.pane_id,
@@ -1424,6 +1473,8 @@ impl Server {
     /// on the pane a keypress on that client acts on. A client with no such
     /// pane is [`RejectReason::TargetNotFound`] `no focused pane`. A stale
     /// tiled focus entry is rejected ([`Self::require_pane_in_active_tab`]).
+    /// The target client is the result's `focusing_client_id`; an explicit
+    /// pane and the in-session CLI's own pane give `None`.
     ///
     /// With clients A and B attached and B named as the target, the result is
     /// the pane that takes B's input; with neither named, it is
@@ -1458,6 +1509,7 @@ impl Server {
                     session_id: owning_session.session_id,
                     tab_id,
                     pane_id,
+                    focusing_client_id: None,
                 })
             }
             None => {
@@ -1472,6 +1524,7 @@ impl Server {
                             session_id: session.session_id,
                             tab_id,
                             pane_id: *pane_id,
+                            focusing_client_id: None,
                         })
                     }
                     _ => {
@@ -1483,12 +1536,14 @@ impl Server {
                                 session_id: session.session_id,
                                 tab_id: None,
                                 pane_id: floating_pane_id,
+                                focusing_client_id: Some(client_id),
                             });
                         }
                         Ok(PaneTarget {
                             session_id: session.session_id,
                             tab_id: Some(client.get_active_tab_id()),
                             pane_id: Self::resolve_active_tab_focused_pane(session, client_id)?,
+                            focusing_client_id: Some(client_id),
                         })
                     }
                 }
@@ -1788,8 +1843,10 @@ impl Server {
     /// tab when none is given. An in-session CLI defaults to the tab containing
     /// its command source `pane_id` (the command targets the command source pane's context, even
     /// if the client has since switched tabs); any other command source defaults to the
-    /// acting client's live `active_tab_id` ([`Self::resolve_acting_client`] — the
-    /// issuer while attached, else the session's sole attached client). Fails
+    /// live `active_tab_id` of the client the source names
+    /// ([`CommandSource::get_target_client_id`]), else of the acting client
+    /// ([`Self::resolve_view_client`]). With clients A and B attached,
+    /// `koshi actions run core:close-tab --client <A>` closes A's active tab. Fails
     /// with [`RejectReason::TargetNotFound`] when there is no session context,
     /// with [`Self::require_tab`]'s refusal when the tab is gone, and with
     /// [`RejectReason::InvalidState`]
@@ -1822,7 +1879,11 @@ impl Server {
                         )),
                     };
                 }
-                let client_id = Self::resolve_acting_client(command_source, session)?;
+                let client_id = Self::resolve_view_client(
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )?;
                 let client = Self::require_client(session, client_id)?;
                 let active_tab_id = client.get_active_tab_id();
                 Self::require_tab(session, active_tab_id)?;

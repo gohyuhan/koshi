@@ -158,8 +158,9 @@ pub struct ResumeBody {
     /// A quit that was applied and not yet carried out, and how it must be
     /// carried out.
     ///
-    /// A `core:quit` can land after the clients have been told the session is
-    /// restarting and are already waiting for its next socket. The swap runs to
+    /// A quit — `koshi kill-session`, or the last client leaving under
+    /// `auto-close-session` — can land after the clients have been told the
+    /// session is restarting and are already waiting for its next socket. The swap runs to
     /// the end, and the next image carries the quit out once every carried
     /// client is back or its window has closed.
     ///

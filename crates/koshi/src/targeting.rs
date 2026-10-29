@@ -43,7 +43,7 @@ use koshi_core::ids::{ClientId, OwnedSessionId, PaneId, SessionId, TabId};
 use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::remote_wire::RemoteSessionRow;
 
-use crate::cli::{CliCommand, ResolvedTargets, SessionReference, TabReference};
+use crate::cli::{CliCommand, ResolvedTargets, SessionReference, SessionRequest, TabReference};
 use koshi_link::discovery::{self, Discovered};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
@@ -221,11 +221,17 @@ fn resolve_command_route_in_runtime_directory(
 ///
 /// `new_pane_direction` is this CLI's own `layout.new-pane-direction` setting,
 /// put on a pane-opening verb that was given no `--direction`.
+/// `actions_run_request` is what [`build_actions_run_request`] built for
+/// `actions run`, and `None` for every other verb
+/// ([`CliCommand::build_session_request`]).
+///
+/// [`build_actions_run_request`]: crate::cli::build_actions_run_request
 pub fn submit_remote(
     server_reference: &str,
     certificate_fingerprint_text: Option<&str>,
     command: &CliCommand,
     new_pane_direction: Direction,
+    actions_run_request: Option<SessionRequest>,
 ) -> Result<CommandResult, CliError> {
     let saved_server =
         remote_client::resolve_server(server_reference, certificate_fingerprint_text)?;
@@ -247,15 +253,23 @@ pub fn submit_remote(
     let (target_session_id, resolved_targets) =
         resolve_command_targets(command, &discovered_sessions, None)?;
 
-    let (_, action) = command
-        .build_action_command(&resolved_targets, new_pane_direction)
-        .expect("only an action verb reaches the remote dispatch");
-    remote_client::submit_remote_command(
-        &saved_server_record,
-        target_session_id,
-        command.get_source_client_id(),
-        action,
-    )
+    match command.build_session_request(&resolved_targets, new_pane_direction, actions_run_request)
+    {
+        SessionRequest::Command(action_command) => remote_client::submit_remote_command(
+            &saved_server_record,
+            target_session_id,
+            command.get_source_client_id(),
+            action_command,
+        ),
+        SessionRequest::ClientAction(action_reference) => {
+            remote_client::submit_remote_client_action(
+                &saved_server_record,
+                target_session_id,
+                command.get_source_client_id(),
+                &action_reference,
+            )
+        }
+    }
 }
 
 /// Which remote session records the census must ask, given the `--session` flag.
@@ -333,6 +347,7 @@ fn resolve_command_targets(
         command.get_target_pane_id(),
         command.get_target_tab_reference(),
         command.get_target_client_id(),
+        command.list_session_choice_flags(),
         discovered_sessions,
     )?;
     let target_tab_id = resolve_command_tab(command, session_overview, in_session_context)?;
@@ -515,11 +530,17 @@ pub(crate) fn select_only_session<'a>(
 /// Every branch that would answer "nowhere", "there is only this one", or
 /// "exactly one has this name" needs a complete census: with a running
 /// session unasked ([`Discovered::is_complete`]), the command is refused.
+///
+/// A count rule refusal names `session_choice_flags`, the verb's own flags
+/// that pick a session ([`CliCommand::list_session_choice_flags`]): `koshi
+/// lock` with two sessions running gives `several sessions are running; name
+/// one with --client <client-id>`.
 fn select_target_session<'a>(
     session_reference: Option<&SessionReference>,
     target_pane_id: Option<PaneId>,
     target_tab_reference: Option<&TabReference>,
     target_client_id: Option<ClientId>,
+    session_choice_flags: &[&str],
     discovered_sessions: &'a Discovered,
 ) -> Result<&'a SessionOverview, CliError> {
     let session_overviews = discovered_sessions.sessions.as_slice();
@@ -566,10 +587,11 @@ fn select_target_session<'a>(
                 discovered_sessions.build_missing_target_error("client", &client_id.to_string())
             })?
     } else {
+        let session_choice_text = session_choice_flags.join(" or ");
         select_only_session(
             discovered_sessions,
-            "several sessions are running; name one with --session <name-or-id>",
-            "cannot tell which session to target; name one with --session <name-or-id>",
+            &format!("several sessions are running; name one with {session_choice_text}"),
+            &format!("cannot tell which session to target; name one with {session_choice_text}"),
         )?
     };
 
@@ -783,18 +805,13 @@ pub fn resolve_session_scope(
             owned_session_id.session_id,
             Some(owned_session_id.owner_user_id),
         ),
-        Some(session_reference) => {
+        Some(SessionReference::SessionName(session_name)) => {
             let discovered_sessions = discovery::fetch_all_session_overviews(
                 runtime_directory,
                 shared_sessions_base_directory,
             );
-            let selected_session_overview = select_target_session(
-                Some(session_reference),
-                None,
-                None,
-                None,
-                &discovered_sessions,
-            )?;
+            let selected_session_overview =
+                find_session_by_name(&discovered_sessions, session_name)?;
             Ok(Discovered::from_overview(
                 selected_session_overview.clone(),
                 discovered_sessions
