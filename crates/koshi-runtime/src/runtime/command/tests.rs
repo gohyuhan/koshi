@@ -1354,6 +1354,38 @@ fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
     );
 }
 
+#[test]
+fn an_external_write_naming_no_pane_snaps_the_sole_client_view_to_live_output() {
+    // `koshi input ls` typed outside koshi, with one client attached: the
+    // bytes reach the pane that takes that client's keys, and that client's
+    // view follows to live output, as when it types there.
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.scroll_up(client_id, split_pane_id, 3);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane_id: None,
+            pane_input_bytes: vec![b'l', b's', b'\n'],
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec![])
+    );
+    assert_eq!(
+        get_client_scroll_offset(&runtime, client_id, split_pane_id),
+        0
+    );
+}
+
 /// A client-sourced write drops that client's highlight in the target pane,
 /// the same as typing over a selection, and leaves the view at live output.
 #[test]
@@ -3446,6 +3478,119 @@ fn quit_from_an_external_cli_naming_no_client_among_two_is_ambiguous() {
     assert_eq!(
         runtime.session_by_id[&session_id].clients.count_clients(),
         2
+    );
+}
+
+#[test]
+fn a_command_that_removes_or_moves_a_reconnecting_client_is_refused_and_every_record_stays() {
+    // Alice's record came across a restart, and she has not attached again;
+    // bob is attached. A quit, a detach and a switch that name alice, and a
+    // detach of every client, are each refused, and both records stay.
+    let build_commands: [fn(ClientId) -> Command; 4] = [
+        |reconnecting_client_id| {
+            Command::Quit(QuitArgs {
+                client_id: Some(reconnecting_client_id),
+            })
+        },
+        |reconnecting_client_id| {
+            Command::Detach(DetachArgs {
+                client_id: Some(reconnecting_client_id),
+            })
+        },
+        |reconnecting_client_id| {
+            Command::SwitchSession(SwitchSessionArgs {
+                client_id: Some(reconnecting_client_id),
+                session_id: SessionId::new(),
+                owner_user_id: None,
+            })
+        },
+        |_| Command::DetachAll,
+    ];
+    for build_command in build_commands {
+        let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+        let alice_client_id = create_session_with_attached_client(
+            &mut runtime,
+            SessionId::new(),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            SystemTime::now(),
+        )
+        .expect("bootstrap the genesis client");
+        let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+        let bob_client_id = attach_second_client(&mut runtime, alice_client_id, None);
+        runtime
+            .client_ids_awaiting_reconnect
+            .insert(alice_client_id);
+        let command = build_command(alice_client_id);
+
+        let command_envelope = build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), None),
+            command.clone(),
+        );
+        let command_id = command_envelope.command_id;
+        assert_eq!(
+            runtime.dispatch(command_envelope),
+            CommandResult::Rejected {
+                command_id,
+                reason: RejectReason::InvalidState,
+                help: Some(format!("client {alice_client_id} is reconnecting")),
+            },
+            "{command:?}"
+        );
+        let mut remaining_client_ids: Vec<ClientId> = runtime.session_by_id[&session_id]
+            .clients
+            .list_attached_clients()
+            .map(Client::get_client_id)
+            .collect();
+        remaining_client_ids.sort();
+        let mut expected_client_ids = vec![alice_client_id, bob_client_id];
+        expected_client_ids.sort();
+        assert_eq!(remaining_client_ids, expected_client_ids, "{command:?}");
+        assert_eq!(
+            runtime.client_ids_awaiting_reconnect,
+            HashSet::from([alice_client_id]),
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn quit_from_an_external_cli_naming_no_client_whose_sole_client_is_reconnecting_is_refused() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let client_id = create_session_with_attached_client(
+        &mut runtime,
+        SessionId::new(),
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        SystemTime::now(),
+    )
+    .expect("bootstrap the genesis client");
+    let (session_id, _tab_id, _pane_id) = get_only_session_slot(&runtime);
+    runtime.client_ids_awaiting_reconnect.insert(client_id);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::Quit(QuitArgs::default()),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!("client {client_id} is reconnecting")),
+        }
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .map(Client::get_client_id),
+        Some(client_id)
     );
 }
 
@@ -6784,6 +6929,93 @@ fn new_pane_external_into_a_viewed_tab_adopts_no_one() {
             .get_focused_pane_id(tab_id),
         Some(root_pane_id)
     );
+}
+
+#[test]
+fn new_pane_external_naming_no_pane_and_no_client_is_focused_and_shown_by_the_sole_client() {
+    // `koshi actions run new-pane` and `koshi actions run new-pane-stacked`
+    // typed outside koshi, with one client attached: the new pane joins the
+    // pane that takes that client's keys, and that client focuses it and
+    // shows it, as its own key does.
+    let build_split_layout_tree: fn(PaneId, PaneId) -> LayoutNode = |root_pane_id, new_pane_id| {
+        split_leaf(
+            &LayoutNode::Pane(root_pane_id),
+            root_pane_id,
+            new_pane_id,
+            Direction::Right,
+        )
+        .expect("the root pane splits")
+    };
+    let build_stacked_layout_tree: fn(PaneId, PaneId) -> LayoutNode =
+        |root_pane_id, new_pane_id| {
+            add_pane_to_stack(&LayoutNode::Pane(root_pane_id), root_pane_id, new_pane_id)
+                .expect("the root pane takes a stack")
+        };
+    for (placement, build_expected_layout_tree) in [
+        (
+            NewPanePlacement::Split {
+                source_pane_id: None,
+                tab_id: None,
+                direction: Direction::Right,
+            },
+            build_split_layout_tree,
+        ),
+        (
+            NewPanePlacement::Stacked {
+                source_pane_id: None,
+                tab_id: None,
+            },
+            build_stacked_layout_tree,
+        ),
+    ] {
+        let (mut runtime, _runtime_event_sender) = build_runtime();
+        let client_id = ClientId::new();
+        let tab_id = TabId::new();
+        let root_pane_id = PaneId::new();
+        let mut session = build_bare_session(SessionId::new());
+        register_pane_record(&mut session, root_pane_id);
+        register_session_tab(&mut session, tab_id, root_pane_id);
+        attach_client(&mut session, client_id, tab_id, Some(root_pane_id));
+        let session_id = session.session_id;
+        runtime.session_by_id.insert(session_id, session);
+
+        let command_result = runtime.dispatch(build_command_envelope(
+            CommandSource::from_external_cli(Some(session_id), None),
+            Command::NewPane(NewPaneArgs {
+                placement,
+                ..build_new_pane_args()
+            }),
+        ));
+
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Ok(vec![
+                "PaneCreated",
+                "LayoutChanged",
+                "PaneFocused",
+                "PtyResized"
+            ]),
+            "{placement:?}"
+        );
+        let new_pane_id = find_other_pane_id(&runtime, session_id, &[root_pane_id]);
+        let session = &runtime.session_by_id[&session_id];
+        let layout_tree = session.tabs[&tab_id].get_layout_tree();
+        assert_eq!(
+            layout_tree,
+            &build_expected_layout_tree(root_pane_id, new_pane_id),
+            "{placement:?}"
+        );
+        let client = session.clients.get_client_by_id(client_id).unwrap();
+        assert_eq!(
+            client.get_active_focused_pane_id(),
+            Some(new_pane_id),
+            "{placement:?}"
+        );
+        assert!(
+            !layout_tree.is_pane_collapsed(new_pane_id, client.list_focus_history(tab_id)),
+            "{placement:?}: the new pane is shown"
+        );
+    }
 }
 
 #[test]
@@ -14211,6 +14443,46 @@ fn resize_pane_from_outside_drops_the_zoom_of_the_client_it_names() {
         runtime.pty_size_by_pane_id[&split_pane_id],
         PtySize {
             column_count: split_pane_pty_size.column_count + 10,
+            row_count: split_pane_pty_size.row_count,
+        }
+    );
+}
+
+#[test]
+fn resize_pane_from_outside_naming_no_pane_and_no_client_drops_the_sole_clients_zoom() {
+    // `koshi actions run resize-pane-left` typed outside koshi, with one
+    // zoomed client attached: the resize moves the border of the pane that
+    // client focuses, and that client sees it tiled, as its own key does.
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        split_pane_id,
+        split_pane_pty_size,
+        ..
+    } = build_fullscreen_fixture();
+    let tab_id = get_only_tab_id(&runtime, session_id);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::ResizePane(ResizePaneArgs {
+            pane_id: None,
+            direction: Direction::Left,
+            resize_amount_cells: 5,
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(command_envelope)),
+        Ok(vec!["LayoutChanged", "PtyResized"])
+    );
+    assert_eq!(
+        get_client_layout_mode(&runtime, session_id, client_id, tab_id),
+        LayoutMode::Tiled
+    );
+    assert_eq!(
+        runtime.pty_size_by_pane_id[&split_pane_id],
+        PtySize {
+            column_count: split_pane_pty_size.column_count + 5,
             row_count: split_pane_pty_size.row_count,
         }
     );

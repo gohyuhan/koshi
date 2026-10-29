@@ -1207,8 +1207,8 @@ impl Server {
     /// Tell every attached client that this session is replacing its own
     /// process image, so each one waits for it and attaches again, and return
     /// once every one of them holds that frame. A viewer action request that
-    /// waits for an answer keeps waiting: its client reads the request before
-    /// this frame.
+    /// waits for an answer keeps waiting: the client's writing thread writes
+    /// each queued request ahead of this frame.
     ///
     /// [`Event::Restarting`] is the stream's last frame for the clients that
     /// receive it, the same way [`Event::Quit`] is. Publishing it raises the

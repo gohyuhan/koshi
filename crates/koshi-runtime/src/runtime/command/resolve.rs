@@ -435,28 +435,39 @@ impl Server {
             }
             // Detach acts on one attached client, which
             // `resolve_target_client` resolves.
-            Command::Detach(command_args) => Self::resolve_target_client(
-                command_args.client_id,
-                command_source,
-                Self::require_session(session)?,
-            )
-            .map(drop),
+            Command::Detach(command_args) => self
+                .resolve_target_client(
+                    command_args.client_id,
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop),
             // The switch names one client the same way a detach does, and the
             // handler resolves it again through the same helper.
-            Command::SwitchSession(command_args) => Self::resolve_target_client(
-                command_args.client_id,
-                command_source,
-                Self::require_session(session)?,
-            )
-            .map(drop),
+            Command::SwitchSession(command_args) => self
+                .resolve_target_client(
+                    command_args.client_id,
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop),
             // A quit removes one client, resolved as a detach resolves it.
-            Command::Quit(command_args) => Self::resolve_target_client(
-                command_args.client_id,
-                command_source,
-                Self::require_session(session)?,
-            )
-            .map(drop),
-            Command::KillSession | Command::DetachAll => Ok(()),
+            Command::Quit(command_args) => self
+                .resolve_target_client(
+                    command_args.client_id,
+                    command_source,
+                    Self::require_session(session)?,
+                )
+                .map(drop),
+            // A detach of every client is refused while one of them is
+            // reconnecting, and then detaches no client.
+            Command::DetachAll => Self::require_session(session)?
+                .clients
+                .list_attached_clients()
+                .try_for_each(|client| {
+                    self.require_client_not_awaiting_reconnect(client.get_client_id())
+                }),
+            Command::KillSession => Ok(()),
         }
     }
 
@@ -969,18 +980,21 @@ impl Server {
     /// The client a command names in its own `client` argument, resolved by
     /// [`Self::resolve_view_client`]. A [`RejectReason::TargetAmbiguous`] hint
     /// from that call is replaced with one listing every attached client id to
-    /// choose from.
+    /// choose from. A client whose record came across a restart and has not
+    /// attached again is [`Self::require_client_not_awaiting_reconnect`]'s
+    /// refusal.
     ///
-    /// Shared by [`Command::Detach`], which removes the client it resolves, and
-    /// [`Command::SwitchSession`], which moves it to another session. Validation
-    /// and the handler both call it.
+    /// Shared by [`Command::Detach`] and [`Command::Quit`], which remove the
+    /// client it resolves, and [`Command::SwitchSession`], which moves it to
+    /// another session. Validation and the handler both call it.
     pub(super) fn resolve_target_client(
+        &self,
         explicit_client_id: Option<ClientId>,
         command_source: &CommandSource,
         session: &Session,
     ) -> Result<ClientId, Rejection> {
-        Self::resolve_view_client(explicit_client_id, command_source, session).map_err(
-            |rejection| {
+        let client_id = Self::resolve_view_client(explicit_client_id, command_source, session)
+            .map_err(|rejection| {
                 if rejection.reason == RejectReason::TargetAmbiguous {
                     let client_id_strings: Vec<String> = session
                         .clients
@@ -997,8 +1011,25 @@ impl Server {
                 } else {
                     rejection
                 }
-            },
-        )
+            })?;
+        self.require_client_not_awaiting_reconnect(client_id)?;
+        Ok(client_id)
+    }
+
+    /// Refuse `client_id` while its record came across a restart and it has
+    /// not attached again: [`RejectReason::InvalidState`] `client <id> is
+    /// reconnecting`.
+    pub(super) fn require_client_not_awaiting_reconnect(
+        &self,
+        client_id: ClientId,
+    ) -> Result<(), Rejection> {
+        if self.client_ids_awaiting_reconnect.contains(&client_id) {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                &format!("client {client_id} is reconnecting"),
+            ));
+        }
+        Ok(())
     }
 
     /// Resolve a [`Command::NewPane`] to its concrete target: the session and
@@ -1015,13 +1046,17 @@ impl Server {
     /// `explicit_client_id` names, else of the acting client
     /// ([`Self::resolve_pane_target`]).
     ///
-    /// The focus client is `explicit_client_id` when set, else the issuer
-    /// while it is attached to the session the new pane joins, else none
-    /// ([`Self::resolve_new_pane_focus_client_id`]).
+    /// The focus client is the client whose input the default pane takes, when
+    /// that client's focus picked the source pane (`focusing_client_id` of
+    /// [`Self::resolve_pane_target`]). Else it is `explicit_client_id` when
+    /// set, else the issuer while it is attached to the session the new pane
+    /// joins, else none ([`Self::resolve_new_pane_focus_client_id`]).
     ///
     /// With clients A and B attached and B named, an external CLI naming no
     /// pane and no tab splits the pane that takes B's input, and B focuses the
     /// new pane. With neither named, it is [`RejectReason::TargetAmbiguous`].
+    /// With A alone attached and no client named, it splits the pane that
+    /// takes A's input, and A focuses the new pane, as A's own key does.
     ///
     /// A source pane that floats is [`RejectReason::InvalidState`]:
     /// `<pane> is floating and has no split to divide; use new-pane --floating,
@@ -1057,8 +1092,9 @@ impl Server {
             // pane stands in — the in-session CLI's captured pane, else the
             // pane that takes the named or acting client's input. Both resolve
             // through [`Self::resolve_pane_target`], so the pane's own tab is
-            // the receiving tab. An in-session CLI whose client is gone still
-            // splits its pane, and focuses the new pane for no client.
+            // the receiving tab. The client whose input the default pane takes
+            // focuses the new pane. An in-session CLI whose client is gone
+            // still splits its pane, and focuses the new pane for no client.
             (source_pane_id, _) => {
                 let pane_target = self.resolve_pane_target(
                     source_pane_id,
@@ -1075,15 +1111,20 @@ impl Server {
                         ),
                     ));
                 };
-                let owner_session = self
-                    .session_by_id
-                    .get(&pane_target.session_id)
-                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-                let focus_client_id = Self::resolve_new_pane_focus_client_id(
-                    explicit_client_id,
-                    command_source,
-                    owner_session,
-                )?;
+                let focus_client_id = match pane_target.focusing_client_id {
+                    Some(focusing_client_id) => Some(focusing_client_id),
+                    None => {
+                        let owner_session = self
+                            .session_by_id
+                            .get(&pane_target.session_id)
+                            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+                        Self::resolve_new_pane_focus_client_id(
+                            explicit_client_id,
+                            command_source,
+                            owner_session,
+                        )?
+                    }
+                };
                 Ok(NewPaneTarget {
                     session_id: pane_target.session_id,
                     source_pane_id: pane_target.pane_id,
@@ -1432,6 +1473,8 @@ impl Server {
     /// on the pane a keypress on that client acts on. A client with no such
     /// pane is [`RejectReason::TargetNotFound`] `no focused pane`. A stale
     /// tiled focus entry is rejected ([`Self::require_pane_in_active_tab`]).
+    /// The target client is the result's `focusing_client_id`; an explicit
+    /// pane and the in-session CLI's own pane give `None`.
     ///
     /// With clients A and B attached and B named as the target, the result is
     /// the pane that takes B's input; with neither named, it is
@@ -1466,6 +1509,7 @@ impl Server {
                     session_id: owning_session.session_id,
                     tab_id,
                     pane_id,
+                    focusing_client_id: None,
                 })
             }
             None => {
@@ -1480,6 +1524,7 @@ impl Server {
                             session_id: session.session_id,
                             tab_id,
                             pane_id: *pane_id,
+                            focusing_client_id: None,
                         })
                     }
                     _ => {
@@ -1491,12 +1536,14 @@ impl Server {
                                 session_id: session.session_id,
                                 tab_id: None,
                                 pane_id: floating_pane_id,
+                                focusing_client_id: Some(client_id),
                             });
                         }
                         Ok(PaneTarget {
                             session_id: session.session_id,
                             tab_id: Some(client.get_active_tab_id()),
                             pane_id: Self::resolve_active_tab_focused_pane(session, client_id)?,
+                            focusing_client_id: Some(client_id),
                         })
                     }
                 }

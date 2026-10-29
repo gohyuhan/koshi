@@ -65,11 +65,14 @@ impl Server {
     /// that client's input. A client is designated to view and focus the new
     /// pane — an explicit `--client` target (which wins even over the issuer,
     /// and rejects outright if not attached), else the attached issuer, else
-    /// (an external command source, tab unviewed) the session's sole client; a
+    /// (an external command source naming no `--pane` or `--tab`) the
+    /// session's sole client, whose focused pane is the source pane, else (an
+    /// external command source, tab unviewed) the session's sole client; a
     /// session with several attached clients and no named target is rejected as
     /// ambiguous, and one with no attached client at all is rejected. An
-    /// external command source naming no client on a tab a client already
-    /// views designates no client, and no client's focus moves. The designated
+    /// external command source naming a `--pane` or `--tab` and no client on a
+    /// tab a client already views designates no client, and no client's focus
+    /// moves. The designated
     /// client is switched onto the tab (if not already there) and the tab it
     /// left is reflowed. That client's zoom drops at the commit, and the new
     /// pane shows in the tiled view it was sized against; any other client's
@@ -805,9 +808,10 @@ impl Server {
     /// On success the tab's tree is swapped in, [`Event::LayoutChanged`] is
     /// emitted, and every live PTY whose solved size changed is resized through
     /// the shared reflow path, one [`Event::PtyResized`] each. The resizing
-    /// client's zoom drops: the client the command source names
-    /// ([`CommandSource::get_target_client_id`]), else the issuing client. Any
-    /// other client's zoom stands.
+    /// client's zoom drops: the client whose focus picked the pane
+    /// (`focusing_client_id` of [`Self::resolve_pane_target`]), else the client
+    /// the command source names ([`CommandSource::get_target_client_id`]), else
+    /// the issuing client. Any other client's zoom stands.
     ///
     /// A border that cannot move one cell changes nothing: it is
     /// [`RejectReason::MinimumSize`] when the donor holds no cell above its
@@ -872,13 +876,15 @@ impl Server {
             other_resize_error => Err(other_resize_error),
         })
         .map_err(|resize_error| Self::resize_rejection(&resize_error))?;
-        let resizing_client_id = command_source
-            .get_target_client_id()
+        let resizing_client_id = pane_target
+            .focusing_client_id
+            .or(command_source.get_target_client_id())
             .or(command_source.get_client_id());
 
         // Resizing drops the zoom of the resizing client, and of that client
-        // only: the client the command source names, else the issuing client.
-        // It returns to the tiled view and sees the moved border. Another
+        // only: the client whose focus picked the pane, else the client the
+        // command source names, else the issuing client. It returns to the
+        // tiled view and sees the moved border. Another
         // client zoomed on a pane of this tab keeps its zoom.
         if let Some(client) =
             resizing_client_id.and_then(|client_id| session.clients.get_client_mut_by_id(client_id))
@@ -2106,11 +2112,15 @@ impl Server {
                 "pane is not accepting input",
             ));
         }
-        // Bytes that reach the child count as input from the acting client, the
-        // same as if typed there: the client's highlight drops and its view
-        // follows back to live output. An empty payload leaves both alone.
+        // Bytes that reach the child count as input from the acting client —
+        // the client whose focus picked the pane, else the issuing client —
+        // the same as if typed there: the client's highlight drops and its
+        // view follows back to live output. An empty payload leaves both alone.
         if !command_args.pane_input_bytes.is_empty() {
-            if let Some(client_id) = command_source.get_client_id() {
+            if let Some(client_id) = pane_target
+                .focusing_client_id
+                .or(command_source.get_client_id())
+            {
                 self.handle_input_reached_pane(client_id, pane_target.pane_id);
             }
         }
@@ -2119,18 +2129,19 @@ impl Server {
 
     /// Choose the tab size a new split is sized against, and the *designated*
     /// client — the one that will view the tab and focus the new pane, `None`
-    /// when the tab is already viewed and no client was named.
+    /// when the tab is already viewed and no client gave the source pane.
     ///
-    /// The designated client is `focus_client_id` when set: the client the
-    /// command names, else its issuer while attached
-    /// ([`Self::resolve_new_pane_source`]). The split is then sized to the
-    /// smallest of the tab's current viewers *and* that client, and fits every
-    /// client that shows it; the caller switches the client onto the tab if it
-    /// is not already there.
+    /// The designated client is `focus_client_id` when set: the client whose
+    /// input the default source pane takes, else the client the command names,
+    /// else its issuer while attached ([`Self::resolve_new_pane_source`]). The
+    /// split is then sized to the smallest of the tab's current viewers *and*
+    /// that client, and fits every client that shows it; the caller switches
+    /// the client onto the tab if it is not already there.
     ///
-    /// With no `focus_client_id` (an external command source that names no
-    /// client): an already-viewed tab sizes to its current viewers and
-    /// designates no one (the pane just appears, no view moves); an unviewed
+    /// With no `focus_client_id` (an external command source that names a
+    /// `--pane` or `--tab` and no client): an already-viewed tab sizes to its
+    /// current viewers and designates no one (the pane just appears, no view
+    /// moves); an unviewed
     /// tab defaults to the session's sole client, and a session with several
     /// attached clients is [`RejectReason::TargetAmbiguous`].
     ///

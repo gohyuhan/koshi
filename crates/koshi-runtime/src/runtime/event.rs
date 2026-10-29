@@ -479,8 +479,9 @@ impl RunningCount {
 /// session's last frame.
 ///
 /// Publishing that frame raises the notice. A writing thread reads it at the
-/// top of each turn: raised, it drops whatever is still queued for that client,
-/// writes the frame the notice names, and ends. The queue each client reads is
+/// top of each turn: raised, it writes each viewer action request still queued
+/// for that client, drops every other queued delivery, writes the frame the
+/// notice names, and ends. The queue each client reads is
 /// bounded: a published last frame does not reach a client whose queue is
 /// full, and the notice reaches that client instead. A client whose queue the
 /// server closed already left the session, and its writing thread writes its

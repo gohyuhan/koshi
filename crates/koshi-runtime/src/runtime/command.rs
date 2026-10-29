@@ -248,9 +248,10 @@ fn format_side_name(direction: Direction) -> &'static str {
 
 /// The resolved concrete target of a [`Command::NewPane`]: the session and tab
 /// the new pane joins, the command source pane it splits from, and the client to
-/// auto-focus it for: the client the command names, else its issuer while
-/// attached, else none. All fields are `Copy`: the target holds no borrow into
-/// the session map.
+/// auto-focus it for: the client whose input the default source pane takes,
+/// else the client the command names, else its issuer while attached, else
+/// none. All fields are `Copy`: the target holds no borrow into the session
+/// map.
 struct NewPaneTarget {
     session_id: SessionId,
     source_pane_id: PaneId,
@@ -349,13 +350,18 @@ enum PanePinChange {
 
 /// The resolved concrete target of a pane-addressed command
 /// ([`Command::ClosePane`], [`Command::ResizePane`]): the owning session, the
-/// tab whose layout holds the pane (`None` when the pane floats), and the pane
-/// itself. All fields are `Copy`: the target holds no borrow into the session
-/// map.
+/// tab whose layout holds the pane (`None` when the pane floats), the pane
+/// itself, and the client whose input the pane takes when that client's focus
+/// picked it. All fields are `Copy`: the target holds no borrow into the
+/// session map.
 struct PaneTarget {
     session_id: SessionId,
     tab_id: Option<TabId>,
     pane_id: PaneId,
+    /// The client whose focused pane `pane_id` is, when the command named no
+    /// pane and came from outside an in-session CLI. `None` for a pane the
+    /// command named and for an in-session CLI's own pane.
+    focusing_client_id: Option<ClientId>,
 }
 
 /// The resolved target of a [`Command::ScrollPane`]: the client whose view
@@ -769,7 +775,9 @@ impl Server {
     /// what happens to the session left behind: with the setting on and no
     /// other client attached the session ends, keeping the graceful window;
     /// with the setting off, or with another client still attached, the session
-    /// and its panes keep running.
+    /// and its panes keep running. A client whose record came across a restart
+    /// and has not attached again is refused with [`RejectReason::InvalidState`]
+    /// `client <id> is reconnecting`, and keeps its record.
     ///
     /// Example: with alice and bob attached,
     /// `koshi actions run core:quit --client <alice>` removes alice, and the
@@ -782,7 +790,7 @@ impl Server {
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         let client_id =
-            Self::resolve_target_client(command_args.client_id, command_source, session)?;
+            self.resolve_target_client(command_args.client_id, command_source, session)?;
 
         let emitted_events = self.handle_client_detach(client_id);
         Ok(self.commit_events(command_id, emitted_events))
@@ -804,7 +812,10 @@ impl Server {
     /// running; the other clients keep their records.
     ///
     /// The client is resolved through
-    /// [`Server::resolve_target_client`], the same call validation made.
+    /// [`Server::resolve_target_client`], the same call validation made. A
+    /// client whose record came across a restart and has not attached again is
+    /// refused with [`RejectReason::InvalidState`] `client <id> is
+    /// reconnecting`, and keeps its record.
     fn handle_detach(
         &mut self,
         command_id: CommandId,
@@ -813,7 +824,7 @@ impl Server {
     ) -> Result<CommandResult, Rejection> {
         let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         let client_id =
-            Self::resolve_target_client(command_args.client_id, command_source, session)?;
+            self.resolve_target_client(command_args.client_id, command_source, session)?;
 
         let emitted_events = self.handle_client_detach(client_id);
         Ok(self.commit_events(command_id, emitted_events))
@@ -824,7 +835,9 @@ impl Server {
     ///
     /// The client is resolved by [`Server::resolve_target_client`], the same
     /// call validation made: a named client must be attached here, and no name
-    /// means the issuing client. The caller resolved the target session, so this
+    /// means the issuing client. A client whose record came across a restart
+    /// and has not attached again is refused with [`RejectReason::InvalidState`]
+    /// `client <id> is reconnecting`. The caller resolved the target session, so this
     /// reads no other session and reaches no other process; it puts the move on
     /// the client's own subscriber queues and that client re-attaches from
     /// there.
@@ -851,7 +864,7 @@ impl Server {
             ));
         }
         let client_id =
-            Self::resolve_target_client(command_args.client_id, command_source, session)?;
+            self.resolve_target_client(command_args.client_id, command_source, session)?;
         if !self.send_switch(
             client_id,
             command_args.session_id,
@@ -878,6 +891,10 @@ impl Server {
     /// acting session, one [`Server::handle_client_detach`] each, and report
     /// the events they emitted together. A session with no attached client
     /// emits nothing.
+    ///
+    /// Validation refuses the command, and no client is detached, while a
+    /// client of the session came across a restart and has not attached again:
+    /// [`RejectReason::InvalidState`] `client <id> is reconnecting`.
     fn handle_detach_all(
         &mut self,
         command_id: CommandId,

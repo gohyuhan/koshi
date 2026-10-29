@@ -1610,12 +1610,14 @@ fn serve_connection(
 ///
 /// `ending_notice` is what the session raises when it ends — see
 /// [`EndingNotice`]. The writing thread reads it at the top of each turn. It
-/// writes the waiting host-write bytes, then the frame the notice names,
-/// [`SessionEvent::Quit`] or [`SessionEvent::Restarting`]. Every delivery still
-/// queued goes unwritten. A client whose queue the server closed before that
-/// reads [`SessionEvent::Detached`] instead, or no goodbye after a failed
-/// read: it left before the session did. The thread counts itself on the
-/// notice for as long as it runs.
+/// writes the waiting host-write bytes, then each
+/// [`SessionEvent::ClientActionRequested`] still queued, in queue order, then
+/// the frame the notice names, [`SessionEvent::Quit`] or
+/// [`SessionEvent::Restarting`]. Every other delivery still queued goes
+/// unwritten. A client whose queue the server closed before that reads
+/// [`SessionEvent::Detached`] in place of the session's frame, or nothing
+/// after a failed read: it left before the session did. The thread counts
+/// itself on the notice for as long as it runs.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
@@ -1665,13 +1667,24 @@ fn stream_events(
         let mut paint_window = PaintWindow::new();
         let should_close_read_direction = loop {
             // The session is ending. This client is told at once: the
-            // host-write bytes that wait for it go out first, and everything
-            // still queued goes unwritten. A queue the server already closed
-            // detached this client before the session ended: its own goodbye,
-            // or none after a failed read, is what it reads.
+            // host-write bytes that wait for it go out first, then each
+            // viewer action request still queued, in queue order. Everything
+            // else still queued goes unwritten. A queue the server already
+            // closed detached this client before the session ended: its own
+            // goodbye, or none after a failed read, is what it reads.
             if let Some(session_ending) = ending_notice.get_session_ending() {
+                let mut client_action_request_events = Vec::new();
                 let terminal_event = loop {
                     match deliveries.try_recv() {
+                        Ok(Delivery::ClientActionRequested {
+                            client_action_request_id,
+                            action_reference,
+                        }) => {
+                            client_action_request_events.push(SessionEvent::ClientActionRequested {
+                                client_action_request_id,
+                                action_reference,
+                            })
+                        }
                         Ok(_) => {}
                         Err(mpsc::TryRecvError::Empty) => {
                             break Some(match session_ending {
@@ -1685,7 +1698,13 @@ fn stream_events(
                     }
                 };
                 if let Some(terminal_event) = terminal_event {
-                    if send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_ok() {
+                    let has_written_waiting_frames =
+                        send_waiting_host_writes(&mut frame_writer, &writer_handoff).is_ok()
+                            && client_action_request_events
+                                .iter()
+                                .try_for_each(|request_event| frame_writer.send(request_event))
+                                .is_ok();
+                    if has_written_waiting_frames {
                         let _ = frame_writer.send(&terminal_event);
                     }
                 }

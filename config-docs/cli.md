@@ -625,7 +625,9 @@ reads `attach to which session? [1]`.
 detach` works only inside a koshi pane and detaches that terminal. Outside one,
 name the target: `koshi detach session-3f2a…` takes a client id, a session id,
 `<user id>/<session id>`, or a session name. `--all` detaches every terminal of
-one session.
+one session. A terminal that has not come back since its session restarted is
+refused with `client <id> is reconnecting`. `--all` is refused the same way
+while one terminal of the session has not come back, and detaches none.
 
 A session left with no terminal keeps running unless `auto-close-session` is on
 in `koshi.kdl`, which ends it once the last terminal leaves.
@@ -680,8 +682,9 @@ and no `--client`, the resize is refused. A floating pane grows only up to that
 client's pane area edge on the moved side: a 40-column pane at column 20 of 80
 columns, grown right by 30, becomes 60 columns wide. A pane that client pinned
 keeps its pinned cell. On a tiled pane, the resize ends the fullscreen view of
-the client `--client` names. A positive `scroll-pane --lines` moves toward
-history.
+the client `--client` names. Outside koshi without `--pane` or `--client`, it
+ends the fullscreen view of the session's only attached client, as that
+client's own key does. A positive `scroll-pane --lines` moves toward history.
 
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.
@@ -714,9 +717,11 @@ with `several clients are attached; name the target client`.
 The client that `--client` names shows and focuses the new pane. If that client
 views another tab, it moves onto the tab of the new pane first. Without
 `--client`, the client of the pane the command runs in does this. Outside koshi
-without `--client`, the new pane takes no client's focus on a tab that a client
-already views. On a tab that no client views, the session's only attached
-client moves onto the tab and focuses the new pane.
+without `--client`, `--pane` or `--tab`, the session's only attached client
+focuses the new pane, as its own key does. Outside koshi with `--pane` or
+`--tab` and no `--client`, the new pane takes no client's focus on a tab that a
+client already views. On a tab that no client views, the session's only
+attached client moves onto the tab and focuses the new pane.
 
 Example: terminal `client-1a2b…` views tab `logs`, and terminal `client-3c4d…`
 views tab `build`. `koshi new-pane --direction right --client client-3c4d…`,

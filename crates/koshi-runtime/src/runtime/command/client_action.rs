@@ -203,12 +203,7 @@ impl Server {
             command_source,
             session,
         )?;
-        if self.client_ids_awaiting_reconnect.contains(&client_id) {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                &format!("client {client_id} is reconnecting"),
-            ));
-        }
+        self.require_client_not_awaiting_reconnect(client_id)?;
         Ok(client_id)
     }
 
