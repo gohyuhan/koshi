@@ -164,16 +164,7 @@ fn resolve_core_action(
             spawn_spec: None,
             client_id: None,
         }),
-        "new-pane-floating" => Command::NewPane(NewPaneArgs {
-            placement: NewPanePlacement::Floating {
-                size: None,
-                top_left_cell: None,
-                is_pinned: false,
-            },
-            working_directory: None,
-            spawn_spec: None,
-            client_id: None,
-        }),
+        "new-pane-floating" => build_new_floating_pane_command(),
         "close-pane" => Command::ClosePane(ClosePaneArgs::default()),
         "close-pane-tree" => Command::ClosePane(ClosePaneArgs {
             pane_id: None,
@@ -199,6 +190,7 @@ fn resolve_core_action(
                 top_left_cell: None,
             },
         }),
+        "toggle-pane-floating" => Command::TogglePaneFloating,
         "pin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
             pane_id: None,
             is_pinned: true,
@@ -273,6 +265,22 @@ fn build_new_pane_command(direction: Direction) -> Command {
             source_pane_id: None,
             tab_id: None,
             direction,
+        },
+        working_directory: None,
+        spawn_spec: None,
+        client_id: None,
+    })
+}
+
+/// The command `core:new-pane-floating` and the floating pane tray's `+ new`
+/// tile build: a floating pane at the default size and placement, unpinned.
+#[must_use]
+pub fn build_new_floating_pane_command() -> Command {
+    Command::NewPane(NewPaneArgs {
+        placement: NewPanePlacement::Floating {
+            size: None,
+            top_left_cell: None,
+            is_pinned: false,
         },
         working_directory: None,
         spawn_spec: None,

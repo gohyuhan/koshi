@@ -909,8 +909,8 @@ to it runs it:
 - An action that applies only in one input mode is refused in every other
   mode, and changes nothing. In normal mode, `koshi actions run
   select-pane-target-left` prints `invalid in the current state`, then
-  `core:select-pane-target-left runs only in pane-placement or dock-undock
-  mode; the client is in normal mode`, and exits 1.
+  `core:select-pane-target-left runs only in pane-placement mode; the client
+  is in normal mode`, and exits 1.
   An action that closes a mode that is not open exits 0 and changes nothing.
 - An action whose command needs arguments exits 2 and names the verb that
   takes them: `koshi actions run focus-tab` prints `koshi: invalid arguments:

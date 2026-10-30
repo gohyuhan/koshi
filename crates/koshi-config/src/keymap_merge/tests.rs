@@ -110,8 +110,8 @@ fn no_layers_yield_an_empty_merged_keymap() {
 fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
     // A built-in mode never seeds an entry of its own. The shipped defaults
     // bind `normal`, `locked`, `pane-placement`, `pane-move-choice`,
-    // `floating-pane-move`, `dock-undock`, `floating-pane-tray` and
-    // `notification-center`; `resize` gets no entry.
+    // `floating-pane-move`, `floating-pane-tray` and `notification-center`;
+    // `resize` gets no entry.
     let merged_keymap = merge_test_keymaps(&[build_default_keymap_layer()]);
     assert_eq!(
         merged_keymap
@@ -120,7 +120,6 @@ fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_keymap() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
-            ModeName::from_text("dock-undock"),
             ModeName::from_text("floating-pane-move"),
             ModeName::from_text("floating-pane-tray"),
             ModeName::from_text("locked"),
@@ -892,7 +891,6 @@ fn unregistered_mode_is_skipped() {
             .cloned()
             .collect::<Vec<_>>(),
         vec![
-            ModeName::from_text("dock-undock"),
             ModeName::from_text("floating-pane-move"),
             ModeName::from_text("floating-pane-tray"),
             ModeName::from_text("locked"),

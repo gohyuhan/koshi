@@ -476,7 +476,6 @@ fn every_lock_mode_prints_its_keymap_name_in_the_table_and_in_json() {
         (LockMode::PanePlacement, "pane-placement"),
         (LockMode::PaneMoveChoice, "pane-move-choice"),
         (LockMode::FloatingPaneMove, "floating-pane-move"),
-        (LockMode::DockUndock, "dock-undock"),
         (LockMode::FloatingPaneTray, "floating-pane-tray"),
         (LockMode::NotificationCenter, "notification-center"),
     ];

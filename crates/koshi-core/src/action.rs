@@ -321,14 +321,6 @@ pub enum ClientActionKind {
     ConfirmFloatingPaneMove,
     /// Discard the draft and leave floating pane move mode.
     CancelFloatingPaneMove,
-    /// Open dock/undock mode with the pane that takes the viewer's input
-    /// selected.
-    BeginDockUndock,
-    /// In dock/undock mode, float the selected tiled pane where it is drawn,
-    /// or dock the selected floating pane at the selected target.
-    ConfirmDockUndock,
-    /// Leave dock/undock mode and return to the base input mode.
-    CancelDockUndock,
     /// Switch the selected placement target between a swap with a pane, or an
     /// insertion beside a pane or a whole stack, and the stack of that pane or
     /// that stack.
@@ -341,8 +333,9 @@ pub enum ClientActionKind {
     /// Select the tray tile one step in `direction` inside the tile grid.
     SelectTrayTile(Direction),
     /// Minimize the selected tray tile's floating pane when the viewer shows
-    /// it, and restore it when the viewer minimized it.
-    ToggleSelectedTrayTile,
+    /// it, and restore it when the viewer minimized it. On the `+ new` tile,
+    /// close the tray and create a floating pane.
+    ActivateSelectedTrayTile,
     /// Open the notification center, which then holds the viewer's keys, when
     /// it is closed, and close it when it is open.
     ToggleNotificationCenter,
@@ -473,7 +466,8 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `focus-next-floating-pane` and `focus-previous-floating-pane` build
 /// `FocusPane` with the floating pane target they name;
 /// `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`; `undock-pane`
-/// builds `PlacePane` with a floating target; `pin-pane`/`unpin-pane` both
+/// builds `PlacePane` with a floating target; `toggle-pane-floating` builds
+/// `TogglePaneFloating`; `pin-pane`/`unpin-pane` both
 /// build `SetPanePinned`; `toggle-pane-pinned` builds `TogglePanePinned`;
 /// `minimize-pane` builds `SetPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
@@ -631,14 +625,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::BeginPanePlacement),
         ),
         build_core_action_seed(
-            "begin-dock-undock",
-            "Dock Or Undock Pane",
-            "Open dock/undock mode for the pane that takes the input",
-            PaneSession,
-            vec![Pane],
-            CoreClient(ClientActionKind::BeginDockUndock),
-        ),
-        build_core_action_seed(
             "select-pane-target-left",
             "Select Pane Target Left",
             "Select the visible pane target to the left in placement mode",
@@ -749,22 +735,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::CancelPanePlacement),
-        ),
-        build_core_action_seed(
-            "confirm-dock-undock",
-            "Dock Or Undock",
-            "Float the selected tiled pane where it is, or dock the selected floating pane at its target",
-            Client,
-            vec![ClientTarget],
-            CoreClient(ClientActionKind::ConfirmDockUndock),
-        ),
-        build_core_action_seed(
-            "cancel-dock-undock",
-            "Cancel Dock Or Undock",
-            "Leave dock/undock mode and return to the base input mode",
-            Client,
-            vec![ClientTarget],
-            CoreClient(ClientActionKind::CancelDockUndock),
         ),
         build_core_action_seed(
             "begin-tiled-pane-placement",
@@ -911,12 +881,12 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::SelectTrayTile(Direction::Right)),
         ),
         build_core_action_seed(
-            "toggle-selected-tray-tile",
-            "Toggle Selected Tray Tile",
-            "Minimize or restore the selected tile's floating pane on this client's screen",
+            "activate-selected-tray-tile",
+            "Activate Selected Tray Tile",
+            "Minimize or restore the selected tile's floating pane on this client's screen; on the + new tile, close the tray and create a floating pane",
             Client,
             vec![ClientTarget],
-            CoreClient(ClientActionKind::ToggleSelectedTrayTile),
+            CoreClient(ClientActionKind::ActivateSelectedTrayTile),
         ),
         build_core_action_seed(
             "toggle-notification-center",
@@ -997,6 +967,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane, TabTarget],
             CoreCommand(CommandKind::PlacePane),
+        ),
+        build_core_action_seed(
+            "toggle-pane-floating",
+            "Toggle Pane Floating",
+            "Float the pane that takes the input where it is drawn, or dock a floating one beside the tiled pane under its center",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::TogglePaneFloating),
         ),
         build_core_action_seed(
             "move-floating-pane",

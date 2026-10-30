@@ -21,7 +21,7 @@ fn keys_list_refuses_a_mode_that_is_not_built_in_and_names_the_built_in_ones() {
             standard_output: String::new(),
             standard_error: "\
 error: invalid value 'bogus' for '--mode <MODE>'
-  [possible values: normal, locked, pane-placement, pane-move-choice, floating-pane-move, dock-undock, floating-pane-tray, notification-center]
+  [possible values: normal, locked, pane-placement, pane-move-choice, floating-pane-move, floating-pane-tray, notification-center]
 
 For more information, try '--help'.
 "

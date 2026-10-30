@@ -1998,7 +1998,11 @@ fn an_open_tray_hits_its_tiles_its_label_its_close_button_and_its_body_over_the_
             build_screen_point(25, 6),
             HitRegion::FloatingPaneTrayTile { tile_index: 1 },
         ),
-        (build_screen_point(37, 5), HitRegion::FloatingPaneTray),
+        (
+            build_screen_point(37, 5),
+            HitRegion::FloatingPaneTrayTile { tile_index: 2 },
+        ),
+        (build_screen_point(44, 5), HitRegion::FloatingPaneTray),
         (build_screen_point(20, 8), HitRegion::FloatingPaneTray),
         (build_screen_point(17, 5), HitRegion::FloatingPaneTray),
         (
@@ -2081,7 +2085,7 @@ fn a_closed_tray_leaves_its_cells_to_the_panes_and_keeps_its_button() {
 }
 
 #[test]
-fn a_session_with_no_floating_pane_leaves_the_button_cells_to_the_tabline() {
+fn a_session_with_no_floating_pane_hits_the_tray_button() {
     use crate::floating_pane_tray::tests::{
         build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
     };
@@ -2094,7 +2098,7 @@ fn a_session_with_no_floating_pane_leaves_the_button_cells_to_the_tabline() {
             render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions),
             build_screen_point(72, 0)
         ),
-        HitRegion::Tabline
+        HitRegion::FloatingPaneTrayButton
     );
 }
 
@@ -2119,9 +2123,9 @@ fn an_open_notification_center_hits_its_close_button_its_clear_all_label_and_its
             selected_notification_id: None,
             hidden_per_mille: 0,
         }),
-        notification_button: Some(NotificationButton {
+        notification_button: NotificationButton {
             unread_entry_count: 3,
-        }),
+        },
         ..ViewerChrome::default()
     };
     let frame_layout =
@@ -2358,7 +2362,7 @@ fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_un
 }
 
 #[test]
-fn the_notification_button_sits_left_of_the_mode_tag_with_no_tray_button() {
+fn the_notification_button_sits_left_of_the_tray_button_with_no_floating_pane() {
     use crate::floating_pane_tray::tests::{
         build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
     };
@@ -2367,19 +2371,19 @@ fn the_notification_button_sits_left_of_the_mode_tag_with_no_tray_button() {
     let render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
     let viewer_chrome = ViewerChrome {
-        notification_button: Some(NotificationButton {
+        notification_button: NotificationButton {
             unread_entry_count: 0,
-        }),
+        },
         ..ViewerChrome::default()
     };
     let frame_layout =
         render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
 
     for (screen_point, expected_hit_region) in [
-        (build_screen_point(70, 0), HitRegion::Tabline),
-        (build_screen_point(71, 0), HitRegion::NotificationButton),
-        (build_screen_point(73, 0), HitRegion::NotificationButton),
-        (build_screen_point(74, 0), HitRegion::Tabline),
+        (build_screen_point(67, 0), HitRegion::Tabline),
+        (build_screen_point(68, 0), HitRegion::NotificationButton),
+        (build_screen_point(70, 0), HitRegion::NotificationButton),
+        (build_screen_point(71, 0), HitRegion::FloatingPaneTrayButton),
     ] {
         assert_eq!(
             resolve_hit_region(frame_layout, screen_point),

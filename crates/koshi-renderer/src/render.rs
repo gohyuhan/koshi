@@ -276,10 +276,9 @@ pub fn build_frame_geometry<'a>(
 ///     `frame_geometry`'s `notification_toast_layout`, while
 ///     `notification_view.shown_toast` is `Some` and the toast has a drawn
 ///     cell.
-/// 12. Draws the tabline in the first committed region, over that margin. While
-///     the session holds a floating pane, it shows the tray button ` ⧉ `.
-///     While the viewer's notification center holds an entry, it shows the
-///     notification button ` ● `.
+/// 12. Draws the tabline in the first committed region, over that margin, with
+///     the tray button ` ⧉ ` and the notification button ` ● ` while the row
+///     has room for them.
 /// 13. Draws the statusline in the second committed region, over that margin.
 /// 14. Gives each cell of `viewport_area` whose symbol ratatui measures at
 ///     another width than [`compute_text_display_width`] gives it that width as
@@ -1472,7 +1471,6 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::PanePlacement => Some("PLACE PANE"),
         LockMode::PaneMoveChoice => Some("MOVE"),
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
-        LockMode::DockUndock => Some("DOCK"),
         LockMode::FloatingPaneTray => Some("TRAY"),
         LockMode::NotificationCenter => Some("NOTIFICATIONS"),
     }

@@ -134,6 +134,7 @@ impl Server {
                 | Command::ResizePane(_)
                 | Command::MovePane(_)
                 | Command::PlacePane(_)
+                | Command::TogglePaneFloating
                 | Command::ScrollPane(_)
                 | Command::MoveFloatingPane(_)
                 | Command::SetPanePinned(_)
@@ -294,6 +295,16 @@ impl Server {
                     .resolve_undock_pane_target(command_args, command_source, session)
                     .map(drop),
             },
+            // A toggle checks its pane here. Its handler checks the undock or
+            // the dock it runs as a `PlacePane` does.
+            Command::TogglePaneFloating => self
+                .resolve_pane_target(
+                    None,
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )
+                .map(drop),
             Command::ScrollPane(command_args) => self
                 .resolve_scroll_pane_target(command_args, command_source, session)
                 .map(drop),
@@ -610,6 +621,58 @@ impl Server {
             }),
         };
         Ok(resolved_tiled_placement)
+    }
+
+    /// The [`PlacePaneArgs`] that a [`Command::TogglePaneFloating`] runs as,
+    /// for the pane the command source acts on ([`Self::resolve_pane_target`]
+    /// with no pane id):
+    /// - a tiled or stacked pane gets [`PanePlacementTarget::Floating`] with
+    ///   no `top_left_cell`;
+    /// - a floating pane gets [`find_nearest_dock_target`] for the acting
+    ///   client ([`Self::resolve_view_client`]), else the insertion at the
+    ///   right edge of that client's active tab.
+    ///
+    /// The refusals are those of [`Self::resolve_pane_target`],
+    /// [`Self::resolve_view_client`] and [`Self::require_client`], and change
+    /// nothing.
+    pub(super) fn resolve_toggle_pane_floating_args(
+        &self,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<PlacePaneArgs, Rejection> {
+        let pane_target = self.resolve_pane_target(
+            None,
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
+        let placement_target = if pane_target.tab_id.is_some() {
+            PanePlacementTarget::Floating {
+                top_left_cell: None,
+            }
+        } else {
+            let owner_session = self
+                .session_by_id
+                .get(&pane_target.session_id)
+                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+            let client_id = Self::resolve_view_client(
+                command_source.get_target_client_id(),
+                command_source,
+                owner_session,
+            )?;
+            let client = Self::require_client(owner_session, client_id)?;
+            let dock_target = find_nearest_dock_target(owner_session, client, pane_target.pane_id)
+                .unwrap_or(TiledPlacementTarget::Split {
+                    destination_tab_id: client.get_active_tab_id(),
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Right,
+                });
+            PanePlacementTarget::Tiled(dock_target)
+        };
+        Ok(PlacePaneArgs {
+            source_pane_id: Some(pane_target.pane_id),
+            placement_target,
+        })
     }
 
     /// Resolve the source pane, its tab, and the acting client of an undock:

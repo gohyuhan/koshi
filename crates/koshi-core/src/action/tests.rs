@@ -523,6 +523,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane, TabTarget],
         ),
         (
+            "core:toggle-pane-floating",
+            CommandKind::TogglePaneFloating,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
             "core:move-floating-pane",
             CommandKind::MoveFloatingPane,
             Client,
@@ -749,12 +755,6 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
-            "core:begin-dock-undock".to_string(),
-            ClientActionKind::BeginDockUndock,
-            PaneSession,
-            vec![Pane],
-        ),
-        (
             "core:select-pane-target-left".to_string(),
             ClientActionKind::SelectPaneTarget(Direction::Left),
             Client,
@@ -835,18 +835,6 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
         (
             "core:cancel-pane-placement".to_string(),
             ClientActionKind::CancelPanePlacement,
-            Client,
-            vec![ClientTarget],
-        ),
-        (
-            "core:confirm-dock-undock".to_string(),
-            ClientActionKind::ConfirmDockUndock,
-            Client,
-            vec![ClientTarget],
-        ),
-        (
-            "core:cancel-dock-undock".to_string(),
-            ClientActionKind::CancelDockUndock,
             Client,
             vec![ClientTarget],
         ),
@@ -959,8 +947,8 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
         (
-            "core:toggle-selected-tray-tile".to_string(),
-            ClientActionKind::ToggleSelectedTrayTile,
+            "core:activate-selected-tray-tile".to_string(),
+            ClientActionKind::ActivateSelectedTrayTile,
             Client,
             vec![ClientTarget],
         ),
@@ -1192,7 +1180,6 @@ fn hint_tiers_are_stable() {
     hint_tier_by_action_name.sort();
 
     let essential_action_names = [
-        "core:cancel-dock-undock",
         "core:cancel-floating-pane-move",
         "core:cancel-pane-move-choice",
         "core:cancel-pane-placement",
@@ -1201,7 +1188,6 @@ fn hint_tiers_are_stable() {
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
-        "core:confirm-dock-undock",
         "core:confirm-floating-pane-move",
         "core:confirm-pane-move-choice",
         "core:confirm-pane-placement",
@@ -1275,11 +1261,10 @@ fn core_action_seed_name_snapshot_is_stable() {
     core_action_names.sort();
 
     let expected_core_action_names = vec![
-        "core:begin-dock-undock",
+        "core:activate-selected-tray-tile",
         "core:begin-floating-pane-move",
         "core:begin-pane-placement",
         "core:begin-tiled-pane-placement",
-        "core:cancel-dock-undock",
         "core:cancel-floating-pane-move",
         "core:cancel-pane-move-choice",
         "core:cancel-pane-placement",
@@ -1289,7 +1274,6 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
-        "core:confirm-dock-undock",
         "core:confirm-floating-pane-move",
         "core:confirm-pane-move-choice",
         "core:confirm-pane-placement",
@@ -1361,10 +1345,10 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:toggle-lock",
         "core:toggle-minimize-all-floating-panes",
         "core:toggle-notification-center",
+        "core:toggle-pane-floating",
         "core:toggle-pane-fullscreen",
         "core:toggle-pane-pinned",
         "core:toggle-pane-placement-stack",
-        "core:toggle-selected-tray-tile",
         "core:undock-pane",
         "core:unlock",
         "core:unpin-pane",

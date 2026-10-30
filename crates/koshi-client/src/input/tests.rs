@@ -1,8 +1,8 @@
 //! Tests for viewer-side key resolution: what a chord means in each mode,
 //! how an open sequence captures the keyboard, the ambiguity deadline and the
 //! hint deadline, and the input read times those deadlines are judged against. Tests for the
-//! viewer-local modes: pane placement mode, the move chooser, floating pane
-//! move mode, and dock/undock mode, with the commands each one sends.
+//! viewer-local modes: pane placement mode, the move chooser, and floating
+//! pane move mode, with the commands each one sends.
 
 use super::*;
 
@@ -12,7 +12,7 @@ use koshi_config::conflict::{KeymapLayer, KeymapVerdict, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
-use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
+use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{CommandId, PaneId, TabId};
 use koshi_core::mouse::{MouseButton, MouseKind, MouseTracking};
@@ -22,8 +22,8 @@ use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPane, FloatingPaneMoveDraft, FloatingPaneSlot, MousePane,
-    PlacementPreview, PlacementSnapshot,
+    ClientSnapshot, FloatingPane, FloatingPaneMoveDraft, MousePane, PlacementPreview,
+    PlacementSnapshot,
 };
 
 use crate::mouse::tests::{
@@ -40,7 +40,7 @@ use crate::tests::{
     build_whole_tab_insertion_target, float_placement_source_pane, get_destination_pane_id,
     hold_placement_snapshot, NO_ROOM_TAB_SIZE,
 };
-use crate::{Client, PlacementMode, PlacementModeLifetime};
+use crate::{Client, FloatingPaneTray, PlacementMode, PlacementModeLifetime};
 
 fn build_key_chord(modifier_flags: BindingModifierFlags, key_character: char) -> KeyChord {
     KeyChord::from_parts(modifier_flags, Key::Char(key_character))
@@ -3441,234 +3441,6 @@ fn a_selected_pane_that_cannot_move_hands_the_selection_to_the_first_or_last_mov
     }
 }
 
-#[test]
-fn begin_dock_undock_selects_the_focused_tiled_pane_and_enter_floats_it_once() {
-    let tiled_pane_id = PaneId::new();
-    let mouse_frame = build_mouse_frame(
-        &[build_plain_mouse_pane(tiled_pane_id)],
-        Some(tiled_pane_id),
-    );
-    let mut client = build_client_viewing(&mouse_frame);
-
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame)),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-    assert_eq!(
-        client.dock_undock_mode,
-        Some(DockUndockMode {
-            tiled_pane_selection: Some(TiledPaneSelection {
-                pane_id: tiled_pane_id,
-                pending_undock_command_id: None,
-            }),
-        })
-    );
-
-    let PlacementInputAction::SubmitCommand {
-        command_id,
-        command,
-    } = client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&mouse_frame))
-    else {
-        panic!("Enter on a selected tiled pane sends the undock");
-    };
-    assert_eq!(
-        command,
-        Command::PlacePane(PlacePaneArgs {
-            source_pane_id: Some(tiled_pane_id),
-            placement_target: PanePlacementTarget::Floating {
-                top_left_cell: None,
-            },
-        })
-    );
-    assert_eq!(
-        client.dock_undock_mode,
-        Some(DockUndockMode {
-            tiled_pane_selection: Some(TiledPaneSelection {
-                pane_id: tiled_pane_id,
-                pending_undock_command_id: Some(command_id),
-            }),
-        })
-    );
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&mouse_frame)),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::CancelDockUndock, Some(&mouse_frame)),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-}
-
-#[test]
-fn begin_dock_undock_on_a_focused_floating_pane_selects_the_dock_right_of_the_whole_tab() {
-    let tiled_pane_id = PaneId::new();
-    let floating_pane_id = PaneId::new();
-    let mouse_frame = build_one_floating_pane_frame(
-        tiled_pane_id,
-        floating_pane_id,
-        Rect::from_origin_and_size(Point { column: 10, row: 4 }, SMALL_FLOATING_PANE_SIZE),
-    );
-    let tab_id = mouse_frame.client_snapshot.active_tab_id;
-    let mut client = build_client_viewing(&mouse_frame);
-
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame)),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(
-        client.find_placement_preview_target(),
-        Some(PanePlacementPreviewTarget {
-            source_pane_id: floating_pane_id,
-            destination_tab_id: tab_id,
-        })
-    );
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
-    assert_eq!(
-        client
-            .placement_state
-            .placement_mode
-            .as_ref()
-            .map(|placement_mode| placement_mode.source_tab_id),
-        Some(None)
-    );
-    let whole_tab_target = build_whole_tab_insertion_target(tab_id);
-    assert_eq!(
-        client.get_placement_target().cloned(),
-        Some(whole_tab_target.clone())
-    );
-    assert!(client.is_pane_placement_visible());
-    apply_frame_keeping_view(
-        &mut client,
-        None,
-        Some(PlacementPreview::Available(Box::new(
-            build_floating_source_placement_snapshot(
-                floating_pane_id,
-                tab_id,
-                LayoutNode::Pane(tiled_pane_id),
-            ),
-        ))),
-    );
-    assert_eq!(
-        client.get_placement_target().cloned(),
-        Some(whole_tab_target.clone())
-    );
-
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&mouse_frame)),
-        build_expected_confirm_placement(&client, floating_pane_id, whole_tab_target)
-    );
-}
-
-#[test]
-fn begin_dock_undock_with_no_focused_pane_selects_nothing_and_esc_leaves_the_mode() {
-    let mut client = build_test_client();
-    client.set_frame_view(TabId::new(), None, None, Vec::new());
-
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::BeginDockUndock, None),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, None),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::CancelDockUndock, None),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(client.dock_undock_mode, None);
-    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
-}
-
-#[test]
-fn the_move_chooser_and_tiled_pane_placement_are_refused_in_dock_undock_mode() {
-    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
-    let mouse_frame = build_one_floating_pane_frame(
-        tiled_pane_id,
-        floating_pane_id,
-        Rect::from_origin_and_size(Point { column: 10, row: 4 }, SMALL_FLOATING_PANE_SIZE),
-    );
-    let mut tiled_selection_client = build_client_viewing(&mouse_frame);
-    tiled_selection_client.dock_undock_mode = Some(DockUndockMode {
-        tiled_pane_selection: Some(TiledPaneSelection {
-            pane_id: tiled_pane_id,
-            pending_undock_command_id: None,
-        }),
-    });
-    let mut floating_selection_client = build_client_docking(
-        floating_pane_id,
-        mouse_frame.client_snapshot.active_tab_id,
-        tiled_pane_id,
-        PaneId::new(),
-    );
-
-    for client in [&mut tiled_selection_client, &mut floating_selection_client] {
-        let dock_undock_mode_before = client.dock_undock_mode;
-        let placement_mode_before = client.placement_state.placement_mode.clone();
-        for client_action_kind in [
-            ClientActionKind::BeginPanePlacement,
-            ClientActionKind::BeginTiledPanePlacement,
-        ] {
-            assert_eq!(
-                client.apply_client_action(client_action_kind, Some(&mouse_frame)),
-                PlacementInputAction::Consumed
-            );
-            assert_eq!(client.dock_undock_mode, dock_undock_mode_before);
-            assert_eq!(client.placement_state.placement_mode, placement_mode_before);
-            assert_eq!(client.pane_move_mode, None);
-            assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-        }
-    }
-}
-
-#[test]
-fn floating_pane_move_ends_dock_undock_mode_unless_the_mode_waits_for_an_undock() {
-    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
-    let mouse_frame = build_one_floating_pane_frame(
-        tiled_pane_id,
-        floating_pane_id,
-        Rect::from_origin_and_size(Point { column: 10, row: 4 }, SMALL_FLOATING_PANE_SIZE),
-    );
-    let mut client = build_client_viewing(&mouse_frame);
-    let waiting_dock_undock_mode = DockUndockMode {
-        tiled_pane_selection: Some(TiledPaneSelection {
-            pane_id: tiled_pane_id,
-            pending_undock_command_id: Some(CommandId::new()),
-        }),
-    };
-    client.dock_undock_mode = Some(waiting_dock_undock_mode);
-
-    assert_eq!(
-        client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame)),
-        PlacementInputAction::Consumed
-    );
-    assert_eq!(client.dock_undock_mode, Some(waiting_dock_undock_mode));
-    assert_eq!(client.pane_move_mode, None);
-
-    client.dock_undock_mode = Some(DockUndockMode {
-        tiled_pane_selection: Some(TiledPaneSelection {
-            pane_id: tiled_pane_id,
-            pending_undock_command_id: None,
-        }),
-    });
-    assert_eq!(
-        find_submitted_command(
-            client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame))
-        ),
-        Some(build_focus_pane_key_command(&client, floating_pane_id))
-    );
-    assert_eq!(client.dock_undock_mode, None);
-    assert_eq!(
-        find_selected_floating_pane_id(&client),
-        Some(floating_pane_id)
-    );
-    assert_eq!(client.get_active_input_mode(), LockMode::FloatingPaneMove);
-}
-
 /// A preview of floating pane `floating_pane_id` docking into tab `tab_id`,
 /// which holds `layout_tree`, with every slot where the tiled solve over the
 /// test viewport puts it.
@@ -3683,16 +3455,16 @@ fn build_floating_source_placement_snapshot(
     placement_snapshot
 }
 
-/// A client in dock/undock mode placing floating pane `floating_pane_id` into
-/// tab `tab_id` of `[left_pane_id | right_pane_id]`, with the preview retained
-/// and no target selected.
-fn build_client_docking(
+/// A client in pane placement mode placing floating pane `floating_pane_id`
+/// into tab `tab_id` of `[left_pane_id | right_pane_id]`, with the preview
+/// retained and no target selected.
+fn build_client_placing_floating_source(
     floating_pane_id: PaneId,
     tab_id: TabId,
     left_pane_id: PaneId,
     right_pane_id: PaneId,
 ) -> Client {
-    build_client_docking_into_layout(
+    build_client_placing_floating_source_into_layout(
         floating_pane_id,
         tab_id,
         LayoutNode::Split(SplitNode::with_equal_weights(
@@ -3705,10 +3477,10 @@ fn build_client_docking(
     )
 }
 
-/// A client in dock/undock mode placing floating pane `floating_pane_id` into
-/// tab `tab_id` of `layout_tree`, whose first pane is the tab's focused pane,
-/// with the preview retained and no target selected.
-fn build_client_docking_into_layout(
+/// A client in pane placement mode placing floating pane `floating_pane_id`
+/// into tab `tab_id` of `layout_tree`, whose first pane is the tab's focused
+/// pane, with the preview retained and no target selected.
+fn build_client_placing_floating_source_into_layout(
     floating_pane_id: PaneId,
     tab_id: TabId,
     layout_tree: LayoutNode,
@@ -3720,7 +3492,6 @@ fn build_client_docking_into_layout(
         layout_tree.list_leaf_pane_ids().first().copied(),
         vec![tab_id],
     );
-    client.dock_undock_mode = Some(DockUndockMode::default());
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: floating_pane_id,
         source_tab_id: None,
@@ -3840,7 +3611,8 @@ fn a_floating_source_arrow_selects_an_insertion_and_the_stack_toggle_switches_it
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
-    let mut client = build_client_docking(floating_pane_id, tab_id, left_pane_id, right_pane_id);
+    let mut client =
+        build_client_placing_floating_source(floating_pane_id, tab_id, left_pane_id, right_pane_id);
     let insertion_right_of_right_pane = TiledPlacementTarget::Split {
         destination_tab_id: tab_id,
         anchor: PanePlacementAnchor::Pane(right_pane_id),
@@ -3885,7 +3657,8 @@ fn a_floating_source_arrow_on_the_whole_tab_target_selects_an_insertion_beside_a
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
-    let mut client = build_client_docking(floating_pane_id, tab_id, left_pane_id, right_pane_id);
+    let mut client =
+        build_client_placing_floating_source(floating_pane_id, tab_id, left_pane_id, right_pane_id);
     if let Some(placement_mode) = client.placement_state.placement_mode.as_mut() {
         placement_mode.placement_target = Some(build_whole_tab_insertion_target(tab_id));
     }
@@ -3911,7 +3684,7 @@ fn a_floating_source_arrow_on_the_whole_tab_target_selects_an_insertion_beside_a
         Some(insertion_right_of_right_pane.clone())
     );
     assert_eq!(
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, None),
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement, None),
         build_expected_confirm_placement(&client, floating_pane_id, insertion_right_of_right_pane)
     );
 }
@@ -3921,7 +3694,7 @@ fn a_floating_source_reaches_an_existing_stack_and_the_stack_toggle_docks_it_int
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let stack_layout = StackBesidePlainPane::new();
-    let mut client = build_client_docking_into_layout(
+    let mut client = build_client_placing_floating_source_into_layout(
         floating_pane_id,
         tab_id,
         stack_layout.build_layout_tree(),
@@ -3993,7 +3766,7 @@ fn a_floating_source_reaches_an_existing_stack_and_the_stack_toggle_docks_it_int
         ))
     );
     assert_eq!(
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, None),
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement, None),
         build_expected_confirm_placement(&client, floating_pane_id, stack_target)
     );
 }
@@ -4003,7 +3776,7 @@ fn a_floating_source_over_a_tab_that_is_one_stack_toggles_the_whole_tab_target_i
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let [first_stack_pane_id, open_stack_pane_id] = [PaneId::new(), PaneId::new()];
-    let mut client = build_client_docking_into_layout(
+    let mut client = build_client_placing_floating_source_into_layout(
         floating_pane_id,
         tab_id,
         LayoutNode::Split(SplitNode::from_stacked_pane_ids(
@@ -4054,17 +3827,18 @@ fn a_floating_source_over_a_tab_that_is_one_stack_toggles_the_whole_tab_target_i
         ))
     );
     assert_eq!(
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, None),
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement, None),
         build_expected_confirm_placement(&client, floating_pane_id, stack_target)
     );
 }
 
 #[test]
-fn confirming_a_dock_target_with_no_room_keeps_that_target_and_sends_no_command() {
+fn confirming_a_floating_source_target_with_no_room_keeps_that_target_and_sends_no_command() {
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
-    let mut client = build_client_docking(floating_pane_id, tab_id, left_pane_id, right_pane_id);
+    let mut client =
+        build_client_placing_floating_source(floating_pane_id, tab_id, left_pane_id, right_pane_id);
     let mut placement_snapshot = client
         .get_placement_snapshot()
         .expect("the preview is held")
@@ -4087,7 +3861,7 @@ fn confirming_a_dock_target_with_no_room_keeps_that_target_and_sends_no_command(
 
     for _ in 0..2 {
         assert_eq!(
-            client.apply_client_action(ClientActionKind::ConfirmDockUndock, None),
+            client.apply_client_action(ClientActionKind::ConfirmPanePlacement, None),
             PlacementInputAction::Consumed
         );
         assert_eq!(
@@ -4109,7 +3883,8 @@ fn a_floating_source_never_leaves_the_layout_as_it_is() {
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
-    let client = build_client_docking(floating_pane_id, tab_id, left_pane_id, right_pane_id);
+    let client =
+        build_client_placing_floating_source(floating_pane_id, tab_id, left_pane_id, right_pane_id);
     let placement_snapshot = client
         .get_placement_snapshot()
         .expect("the preview is held");
@@ -4135,12 +3910,11 @@ fn a_floating_source_preview_of_the_active_tab_selects_no_whole_tab_target_and_a
     let floating_pane_id = PaneId::new();
     let tab_id = TabId::new();
     let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
-    let mut client = build_client_docking(floating_pane_id, tab_id, left_pane_id, right_pane_id);
+    let mut client =
+        build_client_placing_floating_source(floating_pane_id, tab_id, left_pane_id, right_pane_id);
 
     client.select_whole_tab_insertion_target();
     assert_eq!(client.get_placement_target(), None);
-    assert!(client.is_floating_dock_selection_idle());
-    assert!(!client.is_pane_placement_visible());
 
     // The viewer draws another tab than `tab_id`, the tab the preview shows.
     client.active_tab_id = Some(TabId::new());
@@ -4153,202 +3927,71 @@ fn a_floating_source_preview_of_the_active_tab_selects_no_whole_tab_target_and_a
             direction: Direction::Right,
         })
     );
-    assert!(!client.is_floating_dock_selection_idle());
-    assert!(client.is_pane_placement_visible());
 }
 
 #[test]
-fn a_rejected_undock_keeps_the_tiled_pane_selected_and_enter_sends_it_again() {
-    let tiled_pane_id = PaneId::new();
-    let mouse_frame = build_mouse_frame(
-        &[build_plain_mouse_pane(tiled_pane_id)],
-        Some(tiled_pane_id),
+fn a_preview_that_floats_the_placement_source_pane_keeps_pane_placement_mode_with_no_source_tab() {
+    let [source_pane_id, other_pane_id] = [PaneId::new(), PaneId::new()];
+    let tab_id = TabId::new();
+    let mut client = build_test_client();
+    client.set_frame_view(
+        tab_id,
+        Some(source_pane_id),
+        Some(source_pane_id),
+        vec![tab_id],
     );
-    let mut client = build_client_viewing(&mouse_frame);
-    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame));
-    let PlacementInputAction::SubmitCommand { command_id, .. } =
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&mouse_frame))
-    else {
-        panic!("Enter on a selected tiled pane sends the undock");
-    };
-
-    // The mode waits for the answer: Esc and a lock change leave it open.
-    client.close_dock_undock_mode();
-    client.set_lock_mode(LockMode::Locked);
-    assert!(client.is_dock_undock_command_pending());
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-
-    assert!(!client.reject_undock_command(CommandId::new()));
-    assert!(client.reject_undock_command(command_id));
-    assert_eq!(
-        client.dock_undock_mode,
-        Some(DockUndockMode {
-            tiled_pane_selection: Some(TiledPaneSelection {
-                pane_id: tiled_pane_id,
-                pending_undock_command_id: None,
-            }),
-        })
-    );
-    assert_eq!(
-        find_submitted_command(
-            client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&mouse_frame))
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: Some(tab_id),
+        destination_tab_id: tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command_id: None,
+    });
+    hold_placement_snapshot(
+        &mut client,
+        build_solved_placement_snapshot(
+            source_pane_id,
+            tab_id,
+            LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Horizontal,
+                vec![
+                    LayoutNode::Pane(source_pane_id),
+                    LayoutNode::Pane(other_pane_id),
+                ],
+            )),
         ),
-        Some(Command::PlacePane(PlacePaneArgs {
-            source_pane_id: Some(tiled_pane_id),
-            placement_target: PanePlacementTarget::Floating {
-                top_left_cell: None,
-            },
-        }))
     );
-}
 
-#[test]
-fn a_frame_that_floats_the_selected_tiled_pane_makes_it_the_dock_source_with_no_target() {
-    let [tiled_pane_id, undocked_pane_id] = [PaneId::new(), PaneId::new()];
-    let tiled_frame = build_mouse_frame(
-        &[
-            build_plain_mouse_pane(tiled_pane_id),
-            build_plain_mouse_pane(undocked_pane_id),
-        ],
-        Some(undocked_pane_id),
-    );
-    let mut client = build_client_viewing(&tiled_frame);
-    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&tiled_frame));
-    let PlacementInputAction::SubmitCommand { .. } =
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&tiled_frame))
-    else {
-        panic!("Enter on a selected tiled pane sends the undock");
-    };
-    client.prepare_placement_reconciliation();
-
-    let mut floating_frame = tiled_frame.clone();
-    floating_frame
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-        .retain(|pane_slot| pane_slot.pane_id == tiled_pane_id);
-    floating_frame
-        .session_snapshot
-        .floating_panes
-        .push(FloatingPane::Shown {
-            pane_id: undocked_pane_id,
-        });
-    floating_frame
-        .session_snapshot
-        .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: undocked_pane_id,
-            outer_rect: Rect::from_origin_and_size(
-                Point { column: 40, row: 0 },
-                SMALL_FLOATING_PANE_SIZE,
-            ),
-            is_pinned: false,
-        });
-    floating_frame.client_snapshot.active_tab_focused_pane_id = Some(tiled_pane_id);
-    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&floating_frame));
-
-    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
-    assert_eq!(
-        client.placement_state.placement_mode,
-        Some(PlacementMode {
-            source_pane_id: undocked_pane_id,
-            source_tab_id: None,
-            destination_tab_id: tiled_frame.client_snapshot.active_tab_id,
-            placement_direction: Direction::Right,
-            placement_target: None,
-            pending_placement_command_id: None,
-        })
-    );
-    assert_eq!(
-        client.placement_state.placement_mode_lifetime,
-        PlacementModeLifetime::UntilCancelled
-    );
-    assert_eq!(
-        client.find_placement_preview_target(),
-        Some(PanePlacementPreviewTarget {
-            source_pane_id: undocked_pane_id,
-            destination_tab_id: tiled_frame.client_snapshot.active_tab_id,
-        })
-    );
-    assert!(client.is_floating_dock_selection_idle());
-    assert!(!client.is_pane_placement_visible());
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-}
-
-#[test]
-fn a_frame_whose_active_tab_draws_no_slot_of_the_selected_tiled_pane_drops_the_selection() {
-    let tiled_pane_id = PaneId::new();
-    let tiled_frame = build_mouse_frame(
-        &[build_plain_mouse_pane(tiled_pane_id)],
-        Some(tiled_pane_id),
-    );
-    let mut client = build_client_viewing(&tiled_frame);
-    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&tiled_frame));
-
-    let other_pane_id = PaneId::new();
-    let other_tab_frame = build_mouse_frame(
-        &[build_plain_mouse_pane(other_pane_id)],
-        Some(other_pane_id),
-    );
-    client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&other_tab_frame));
-
-    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
-    assert_eq!(client.placement_state.placement_mode, None);
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
-}
-
-#[test]
-fn a_committed_dock_ends_pane_placement_and_keeps_dock_undock_mode_open() {
-    let [tiled_pane_id, floating_pane_id] = [PaneId::new(), PaneId::new()];
-    let mouse_frame = build_one_floating_pane_frame(
-        tiled_pane_id,
-        floating_pane_id,
-        Rect::from_origin_and_size(Point { column: 10, row: 4 }, SMALL_FLOATING_PANE_SIZE),
-    );
-    let mut client = build_client_viewing(&mouse_frame);
-    client
-        .client_config
-        .should_stay_in_pane_placement_mode_after_placement = true;
-    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame));
+    // Another client floats the source pane: the next frame carries a
+    // preview with a floating source.
     apply_frame_keeping_view(
         &mut client,
         None,
         Some(PlacementPreview::Available(Box::new(
             build_floating_source_placement_snapshot(
-                floating_pane_id,
-                mouse_frame.client_snapshot.active_tab_id,
-                LayoutNode::Pane(tiled_pane_id),
+                source_pane_id,
+                tab_id,
+                LayoutNode::Pane(other_pane_id),
             ),
         ))),
     );
-    let PlacementInputAction::ConfirmPlacement { command_id, .. } =
-        client.apply_client_action(ClientActionKind::ConfirmDockUndock, Some(&mouse_frame))
-    else {
-        panic!("Enter on a floating pane with a target sends the dock");
-    };
-    assert!(client.is_dock_undock_command_pending());
 
-    apply_frame_keeping_view(&mut client, Some(command_id), None);
-
-    assert_eq!(client.placement_state.placement_mode, None);
-    assert_eq!(client.dock_undock_mode, Some(DockUndockMode::default()));
-    assert!(!client.is_dock_undock_command_pending());
-    assert_eq!(client.get_active_input_mode(), LockMode::DockUndock);
+    assert_eq!(
+        client.placement_state.placement_mode,
+        Some(PlacementMode {
+            source_pane_id,
+            source_tab_id: None,
+            destination_tab_id: tab_id,
+            placement_direction: Direction::Right,
+            placement_target: None,
+            pending_placement_command_id: None,
+        })
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
 }
 
 // --- Viewer-local actions `koshi actions run` asks for ---
-
-/// Every input mode a viewer has.
-const EVERY_INPUT_MODE: [LockMode; 8] = [
-    LockMode::Normal,
-    LockMode::Locked,
-    LockMode::PanePlacement,
-    LockMode::PaneMoveChoice,
-    LockMode::FloatingPaneMove,
-    LockMode::DockUndock,
-    LockMode::FloatingPaneTray,
-    LockMode::NotificationCenter,
-];
 
 /// The reference `core:<action_name>`.
 fn build_action_reference(action_name: &str) -> ActionReference {
@@ -4360,7 +4003,7 @@ fn every_viewer_local_action_a_default_key_fires_applies_in_that_keys_mode() {
     let keybindings_config = KeybindingsConfig::default();
     let action_registry = ActionRegistry::new();
     let mut checked_binding_count = 0;
-    for lock_mode in EVERY_INPUT_MODE {
+    for lock_mode in LockMode::ALL {
         let mode_name = ModeName::from_text(lock_mode.get_keymap_name());
         let Some(mode_bindings) = keybindings_config.mode_bindings_by_name.get(&mode_name) else {
             continue;
@@ -4402,8 +4045,8 @@ fn a_placement_action_asked_for_in_normal_mode_is_refused_naming_its_modes() {
             &build_action_reference("select-pane-target-left"),
         ),
         RequestedClientActionFit::RunsOnlyIn {
-            refusal_help: "core:select-pane-target-left runs only in pane-placement or \
-                           dock-undock mode; the client is in normal mode"
+            refusal_help: "core:select-pane-target-left runs only in pane-placement mode; the \
+                           client is in normal mode"
                 .to_string(),
         }
     );
@@ -4468,8 +4111,9 @@ fn a_mode_closing_action_asked_for_under_another_mode_is_refused() {
         placement_target: None,
         pending_placement_command_id: None,
     });
-    client.dock_undock_mode = Some(DockUndockMode {
-        tiled_pane_selection: None,
+    client.floating_pane_tray = Some(FloatingPaneTray {
+        selected_tile_index: 0,
+        hovered_tile_index: None,
     });
 
     assert_eq!(
@@ -4479,7 +4123,7 @@ fn a_mode_closing_action_asked_for_under_another_mode_is_refused() {
         ),
         RequestedClientActionFit::RunsOnlyIn {
             refusal_help: "core:cancel-pane-placement runs only in pane-placement mode; the \
-                           client is in dock-undock mode"
+                           client is in floating-pane-tray mode"
                 .to_string(),
         }
     );

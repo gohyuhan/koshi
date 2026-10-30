@@ -2299,6 +2299,7 @@ pub fn build_actions_run_request(
         | Command::ToggleMouseSelect
         | Command::Visual(_)
         | Command::TogglePaneFullscreen
+        | Command::TogglePaneFloating
         | Command::MoveTab(_)
         | Command::MovePane(_)
         | Command::PlacePane(_)

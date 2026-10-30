@@ -497,9 +497,8 @@ pub struct ModeBindings {
 /// unlock, quit, and mouse-select in `locked` mode, the placement actions in
 /// the `pane-placement` mode, the chooser actions in the `pane-move-choice`
 /// mode, the floating pane move actions in the `floating-pane-move` mode, the
-/// dock target and dock actions in the `dock-undock` mode, the tray actions
-/// in the `floating-pane-tray` mode, and the notification center actions in
-/// the `notification-center` mode.
+/// tray actions in the `floating-pane-tray` mode, and the notification center
+/// actions in the `notification-center` mode.
 ///
 /// Sequences written with `<leader>` resolve against `leader`: rebinding the
 /// leader moves them. Explicit chords — `<A-f>`, `<A-n>`, the reserved unlock, and
@@ -517,9 +516,9 @@ pub struct ModeBindings {
 /// under the `<C-p>` prefix, resize under `<C-s>`, and tab lifecycle under
 /// `<C-t>`. Placement actions live in the `pane-placement` mode, the
 /// chooser's `t`, `f`, Enter and Esc in the `pane-move-choice` mode, the
-/// floating pane move keys in the `floating-pane-move` mode, the dock keys in
-/// the `dock-undock` mode, the tray keys in the `floating-pane-tray` mode,
-/// and the notification center keys in the `notification-center` mode. An
+/// floating pane move keys in the `floating-pane-move` mode, the tray keys in
+/// the `floating-pane-tray` mode, and the notification center keys in the
+/// `notification-center` mode. An
 /// action choice with a fixed set of values is part of the action
 /// name (`new-pane-left`, `select-pane-target-left`). Any key here can be
 /// rebound from `keybinding.kdl`.
@@ -586,11 +585,11 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             parse_default_key_sequence("<leader>p m"),
             build_bound_action("begin-pane-placement"),
         ),
-        // `u` opens dock/undock mode: Enter floats the selected tiled pane,
-        // or docks the selected floating pane at its target.
+        // `u` floats the focused tiled pane where it is drawn, or docks the
+        // focused floating pane beside the tiled pane under its center.
         (
             parse_default_key_sequence("<leader>p u"),
-            build_bound_action("begin-dock-undock"),
+            build_bound_action("toggle-pane-floating"),
         ),
         // Tab and Shift+Tab under the pane prefix show and focus the next or
         // previous floating pane, in the order the panes became floating.
@@ -710,8 +709,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     .into_iter()
     .collect();
 
-    // The pane placement and dock/undock submodes select a target with the
-    // same keys.
+    // The pane placement submode selects a target with these keys.
     let placement_target_bindings: [(KeySequence, BoundAction); 12] = [
         (
             parse_default_key_sequence("<Left>"),
@@ -767,7 +765,6 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     // the base normal or locked mode while the placement interaction is open.
     let pane_placement_mode_bindings: BTreeMap<KeySequence, BoundAction> =
         placement_target_bindings
-            .clone()
             .into_iter()
             .chain([
                 (
@@ -780,22 +777,6 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
                 ),
             ])
             .collect();
-
-    // Dock/undock mode is a viewer-local submode too. It selects a dock target
-    // with the placement target keys, and has its own Enter and Esc.
-    let dock_undock_mode_bindings: BTreeMap<KeySequence, BoundAction> = placement_target_bindings
-        .into_iter()
-        .chain([
-            (
-                parse_default_key_sequence("<CR>"),
-                build_bound_action("confirm-dock-undock"),
-            ),
-            (
-                parse_default_key_sequence("<Esc>"),
-                build_bound_action("cancel-dock-undock"),
-            ),
-        ])
-        .collect();
 
     // The pane move chooser and floating pane move mode are viewer-local
     // submodes too, each overlaying the base mode while it is open.
@@ -876,7 +857,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         ),
         (
             parse_default_key_sequence("<CR>"),
-            build_bound_action("toggle-selected-tray-tile"),
+            build_bound_action("activate-selected-tray-tile"),
         ),
         (
             parse_default_key_sequence("a"),
@@ -956,13 +937,6 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             ModeName::from_text(LockMode::FloatingPaneMove.get_keymap_name()),
             ModeBindings {
                 bound_action_by_key_sequence: floating_pane_move_mode_bindings,
-                removed_key_sequences: BTreeSet::new(),
-            },
-        ),
-        (
-            ModeName::from_text(LockMode::DockUndock.get_keymap_name()),
-            ModeBindings {
-                bound_action_by_key_sequence: dock_undock_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),

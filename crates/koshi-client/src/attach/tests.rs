@@ -101,9 +101,7 @@ use crate::tests::{
     build_core_bound_action, build_test_client, create_session_with_attached_client,
     float_placement_source_pane, get_source_tab_snapshot_mut, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
-use crate::{
-    DockUndockMode, FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime,
-};
+use crate::{FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime};
 use koshi_runtime::runtime::painted_update::{PaintedUpdateSender, ReceivedPaintedFrame};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
@@ -8610,69 +8608,6 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints_at_its_hint_deadline() {
 }
 
 #[test]
-fn a_dock_undock_wait_moves_what_the_viewer_paints_only_when_it_hides_a_shown_handle() {
-    let pane_id = PaneId::new();
-    let mut client = build_test_client();
-    let render_snapshot = build_render_snapshot(&build_received_painted_frame(
-        build_test_painted_frame_with_lock_mode(LockMode::Normal),
-    ));
-    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
-    client.apply_client_action(ClientActionKind::BeginDockUndock, None);
-    let PlacementInputAction::SubmitCommand {
-        command_id: first_command_id,
-        ..
-    } = client.submit_undock_command(pane_id)
-    else {
-        panic!("an undock sends its command");
-    };
-    assert!(client.reject_undock_command(first_command_id));
-
-    for (placement_handle_hover, is_paint_moved) in [
-        (None, false),
-        (Some(PlacementHandleHover::TiledTopBorder { pane_id }), true),
-    ] {
-        client.placement_handle_hover = placement_handle_hover;
-        let paint_before_wait = ViewerPaint::from_client(
-            &client,
-            active_tab_id,
-            &render_snapshot,
-            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
-        );
-        let PlacementInputAction::SubmitCommand { command_id, .. } =
-            client.submit_undock_command(pane_id)
-        else {
-            panic!("an undock sends its command");
-        };
-        assert!(client.is_dock_undock_command_pending());
-        let paint_during_wait = ViewerPaint::from_client(
-            &client,
-            active_tab_id,
-            &render_snapshot,
-            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
-        );
-        assert!(client.reject_undock_command(command_id));
-        let paint_after_wait = ViewerPaint::from_client(
-            &client,
-            active_tab_id,
-            &render_snapshot,
-            &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
-        );
-
-        assert_eq!(
-            paint_before_wait.chrome.placement_handle_hover,
-            placement_handle_hover
-        );
-        assert_eq!(paint_during_wait.chrome.placement_handle_hover, None);
-        assert_eq!(
-            paint_during_wait != paint_before_wait,
-            is_paint_moved,
-            "{placement_handle_hover:?}"
-        );
-        assert_eq!(paint_after_wait, paint_before_wait);
-    }
-}
-
-#[test]
 fn dialing_again_moves_what_the_viewer_paints() {
     // No frame arrives while the link is down. A moved `ViewerPaint` fires the
     // repaint that draws the `RECONNECTING` tag.
@@ -9161,9 +9096,9 @@ fn a_restart_during_pane_placement_holds_nothing() {
 }
 
 /// One entry per viewer-local mode a client can be in with no frame: the move
-/// chooser, floating pane move mode of a floating pane that no frame names, and
-/// dock/undock mode. Each entry turns that mode on in the client it is given.
-fn list_local_mode_entries() -> [fn(&mut Client); 3] {
+/// chooser, and floating pane move mode of a floating pane that no frame
+/// names. Each entry turns that mode on in the client it is given.
+fn list_local_mode_entries() -> [fn(&mut Client); 2] {
     [
         |client| client.pane_move_mode = Some(PaneMoveMode::Choice),
         |client| {
@@ -9174,7 +9109,6 @@ fn list_local_mode_entries() -> [fn(&mut Client); 3] {
                     pending_move_command_id: None,
                 }));
         },
-        |client| client.dock_undock_mode = Some(DockUndockMode::default()),
     ]
 }
 
@@ -9289,10 +9223,7 @@ fn losing_the_outer_terminals_focus_ends_a_local_mode() {
         );
 
         assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
-        assert_eq!(
-            (client.pane_move_mode, client.dock_undock_mode),
-            (None, None)
-        );
+        assert_eq!(client.pane_move_mode, None);
     }
 }
 
@@ -9319,10 +9250,7 @@ fn losing_the_outer_terminals_focus_while_redialing_ends_a_local_mode() {
             stretch_result.err(),
             Some(AttachmentEnding::LeftWhileReconnecting)
         );
-        assert_eq!(
-            (viewer.client.pane_move_mode, viewer.client.dock_undock_mode),
-            (None, None)
-        );
+        assert_eq!(viewer.client.pane_move_mode, None);
     }
 }
 
@@ -12109,11 +12037,11 @@ fn get_displayed_tab_snapshot(placement_preview: &PlacementPreview) -> &Placemen
 }
 
 /// Paint the initial swapped-pane frame at `started_at`, then put `client` in
-/// dock/undock mode with a new floating pane selected over the active tab and
-/// no target, holding that pane's available preview of the active tab as the
-/// frame draws it. Returns the active tab id, the first tiled pane's id, and
-/// the held preview.
-fn select_idle_floating_dock_source(
+/// pane placement mode with a new floating pane as the source over the active
+/// tab and no target, holding that pane's available preview of the active tab
+/// as the frame draws it. Returns the active tab id, the first tiled pane's id,
+/// and the held preview.
+fn select_floating_placement_source(
     client: &mut Client,
     screen: &mut Screen<TestBackend>,
     started_at: Instant,
@@ -12136,9 +12064,6 @@ fn select_idle_floating_dock_source(
         swap_tab_sizes: Vec::new(),
     })));
     client.placement_state.placement_preview = Some(Arc::clone(&placement_preview));
-    client.dock_undock_mode = Some(DockUndockMode {
-        tiled_pane_selection: None,
-    });
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: floating_pane_id,
         source_tab_id: None,
@@ -12152,17 +12077,22 @@ fn select_idle_floating_dock_source(
 }
 
 #[test]
-fn a_floating_dock_selection_paints_no_placement_preview_until_it_selects_a_target() {
+fn a_floating_placement_source_paints_the_tab_as_it_is_until_it_selects_a_target() {
     let mut client = build_test_client();
     client.client_config.should_reduce_motion = true;
     let mut screen = build_test_screen();
     let started_at = Instant::now();
     let (active_tab_id, target_pane_id, placement_preview) =
-        select_idle_floating_dock_source(&mut client, &mut screen, started_at);
-    assert!(client.is_floating_dock_selection_idle());
+        select_floating_placement_source(&mut client, &mut screen, started_at);
 
     screen.refresh_at(&mut client, Some(active_tab_id), started_at);
-    assert_eq!(screen.shown_placement_display, None);
+    assert_eq!(
+        screen.shown_placement_display,
+        Some(PlacementDisplay {
+            placement_preview: Arc::clone(&placement_preview),
+            displayed_tab_snapshot: get_displayed_tab_snapshot(&placement_preview).clone(),
+        })
+    );
 
     let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: active_tab_id,
@@ -12196,13 +12126,13 @@ fn a_floating_dock_selection_paints_no_placement_preview_until_it_selects_a_targ
 }
 
 #[test]
-fn a_dock_target_with_no_room_paints_the_tab_as_it_is_and_names_the_refusal() {
+fn a_floating_source_target_with_no_room_paints_the_tab_as_it_is_and_names_the_refusal() {
     let mut client = build_test_client();
     client.client_config.should_reduce_motion = true;
     let mut screen = build_test_screen();
     let started_at = Instant::now();
     let (active_tab_id, target_pane_id, placement_preview) =
-        select_idle_floating_dock_source(&mut client, &mut screen, started_at);
+        select_floating_placement_source(&mut client, &mut screen, started_at);
     let floating_pane_id = client
         .get_placement_source_pane_id()
         .expect("the floating pane is the source");
@@ -12292,31 +12222,6 @@ fn a_dock_target_with_no_room_paints_the_tab_as_it_is_and_names_the_refusal() {
 }
 
 #[test]
-fn an_idle_floating_dock_selection_ends_a_running_placement_animation() {
-    let mut client = build_test_client();
-    client.client_config.should_reduce_motion = false;
-    let mut screen = build_test_screen();
-    let started_at = Instant::now();
-    let (_, _, placement_preview) =
-        select_idle_floating_dock_source(&mut client, &mut screen, started_at);
-    let destination_tab_snapshot = get_displayed_tab_snapshot(&placement_preview).clone();
-    screen.placement_view = PlacementView::build(Arc::clone(&placement_preview), None);
-    screen.placement_animation = Some(PlacementAnimation {
-        from_tab_snapshot: destination_tab_snapshot.clone(),
-        to_tab_snapshot: destination_tab_snapshot,
-        started_at,
-    });
-    assert!(client.is_floating_dock_selection_idle());
-
-    assert_eq!(
-        screen.update_previewed_placement_display(&mut client, started_at),
-        None
-    );
-    assert_eq!(screen.placement_animation, None);
-    assert_eq!(screen.placement_view, None);
-}
-
-#[test]
 fn a_new_preview_animation_starts_from_the_last_visible_layout() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
@@ -12338,7 +12243,7 @@ fn a_new_preview_animation_starts_from_the_last_visible_layout() {
         displayed_tab_snapshot: shown_tab_snapshot.clone(),
     });
 
-    let placement_display = screen.update_placement_display(&client, false, started_at);
+    let placement_display = screen.update_placement_display(&mut client, started_at);
 
     assert_eq!(
         placement_display,
@@ -16068,8 +15973,8 @@ fn a_requested_placement_action_in_normal_mode_is_refused_and_changes_nothing() 
         ),
         Some(ClientActionRefusal {
             reject_reason: RejectReason::InvalidState,
-            help: "core:select-pane-target-left runs only in pane-placement or dock-undock \
-                   mode; the client is in normal mode"
+            help: "core:select-pane-target-left runs only in pane-placement mode; the client \
+                   is in normal mode"
                 .to_string(),
         })
     );

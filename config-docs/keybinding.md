@@ -91,9 +91,9 @@ went before.
 
 A `mode` block holds the bindings for one built-in keymap — `"normal"`,
 `"locked"`, `"pane-placement"`, `"pane-move-choice"`, `"floating-pane-move"`,
-`"dock-undock"`, `"floating-pane-tray"`, or `"notification-center"`. Normal
-and locked are base modes. The other six are local modes. Each one takes
-priority over the base mode while it is open.
+`"floating-pane-tray"`, or `"notification-center"`. Normal and locked are base
+modes. The other five are local modes. Each one takes priority over the base
+mode while it is open.
 
 A block for any other mode name, such as `mode "resize"`, binds nothing. The
 rest of the file still applies, and `koshi keys conflicts` warns that the mode
@@ -140,7 +140,7 @@ mode "normal" {
     bind "<leader>p s" "core:new-pane-stacked"  // <C-p> s: a new pane in the focused pane's stack
     bind "<leader>p f" "core:new-pane-floating"
     bind "<leader>p m" "core:begin-pane-placement"
-    bind "<leader>p u" "core:begin-dock-undock"
+    bind "<leader>p u" "core:toggle-pane-floating"
     bind "<leader>p <Tab>" "core:focus-next-floating-pane"       // repeats: the prefix stays open
     bind "<leader>p <S-Tab>" "core:focus-previous-floating-pane"
     bind "<leader>p w" "core:toggle-floating-pane-tray"
@@ -209,31 +209,13 @@ mode "floating-pane-move" {
     bind "<Esc>" "core:cancel-floating-pane-move"
 }
 
-mode "dock-undock" {
-    // Dock/undock mode owns these keys while it is open.
-    bind "<Left>" "core:select-pane-target-left"
-    bind "<Down>" "core:select-pane-target-down"
-    bind "<Up>" "core:select-pane-target-up"
-    bind "<Right>" "core:select-pane-target-right"
-    bind "<S-Left>" "core:select-pane-insertion-left"
-    bind "<S-Down>" "core:select-pane-insertion-down"
-    bind "<S-Up>" "core:select-pane-insertion-up"
-    bind "<S-Right>" "core:select-pane-insertion-right"
-    bind "<Space>" "core:cycle-pane-placement-span"
-    bind "s" "core:toggle-pane-placement-stack"
-    bind "<Tab>" "core:select-next-placement-tab"
-    bind "<S-Tab>" "core:select-previous-placement-tab"
-    bind "<CR>" "core:confirm-dock-undock"
-    bind "<Esc>" "core:cancel-dock-undock"
-}
-
 mode "floating-pane-tray" {
     // The floating pane tray owns these keys while it is open.
     bind "<Left>" "core:select-tray-tile-left"
     bind "<Down>" "core:select-tray-tile-down"
     bind "<Up>" "core:select-tray-tile-up"
     bind "<Right>" "core:select-tray-tile-right"
-    bind "<CR>" "core:toggle-selected-tray-tile"
+    bind "<CR>" "core:activate-selected-tray-tile"
     bind "a" "core:toggle-minimize-all-floating-panes"
     bind "<Esc>" "core:close-floating-pane-tray"
     bind "<leader>p w" "core:toggle-floating-pane-tray"
@@ -335,7 +317,6 @@ The effective `pane-placement` map must keep one live
 action to another key rejects the keymap. The same rule holds for
 `core:cancel-pane-move-choice` in `pane-move-choice`,
 `core:cancel-floating-pane-move` in `floating-pane-move`,
-`core:cancel-dock-undock` in `dock-undock`,
 `core:close-floating-pane-tray` in `floating-pane-tray`, and
 `core:close-notification-center` in `notification-center`.
 
@@ -343,21 +324,14 @@ action to another key rejects the keymap. The same rule holds for
 running `core:focus-pane-right`. A normal-mode binding for `<leader>p
 <Right>` still applies before placement opens.
 
-## Dock/undock mode
+## Float and dock a pane
 
-`<leader>p u` (`core:begin-dock-undock`) opens the local `dock-undock` mode.
-The tabline shows the tag `DOCK`, and the hint bar lists the mode's keys. The
-mode selects the pane that holds this client's input. While the mode is open,
-the `dock-undock` keymap has priority over the normal or locked keymap, and
-the mode consumes every key it does not bind.
+`<leader>p u` (`core:toggle-pane-floating`) floats the pane that holds this
+client's input, or docks it when it floats. It opens no mode, and the session
+decides between the two when it runs the command.
 
-Bound in the `dock-undock` keymap, `core:begin-pane-placement` and
-`core:begin-tiled-pane-placement` do nothing. `core:begin-floating-pane-move`
-ends the mode and opens floating pane move mode. While the mode waits for the
-session to answer its undock or dock, it does nothing.
-
-With a tiled or stacked pane selected, Enter (`core:confirm-dock-undock`)
-floats the pane up where this client draws it:
+On a tiled or stacked pane, the key floats the pane up where this client draws
+it:
 
 - The pane keeps its id, its program and its scrollback. It keeps its top-left
   cell and its size. Each axis is cut to 90% of the smallest pane area of the
@@ -377,83 +351,48 @@ floats the pane up where this client draws it:
   every pane. That client also holds the pane minimized, and its input moves
   to the pane that inherits its focus in the tab. With motion on, the pane
   slides to its floating place in 160 ms.
-- The floating pane stays selected, with no dock target, and the mode stays
-  open.
 
 Example: tab `#1` holds `A | B` in an `80x22` pane area, with `B` focused.
-`<C-p> u` then Enter leaves `A` alone in tab `#1`, and `B` floats at `(40, 0)`
-with the size `40x19`.
+`<C-p> u` leaves `A` alone in tab `#1`, and `B` floats at `(40, 0)` with the
+size `40x19`.
 
-With a floating pane selected, the mode docks it into a tab:
+On a floating pane, the key docks the pane into this client's active tab:
 
-- `<C-p> u` on a focused floating pane selects the right edge of the whole
-  active tab as the dock target. Enter at once docks the pane there: tab `[A]`
-  and floating `F` give `[A | F]`.
-- While a dock target is selected, the frame shows the pane docked there, and
-  this client draws no other floating pane.
-- Arrow and Shift+Arrow keys pick the pane to dock beside, and the edge, as
-  Shift+Arrow does in pane placement mode. Toward a stacked pane, the edge
-  belongs to the whole stack. On the whole-tab target, an Arrow picks a pane
-  and Shift+Arrow picks another edge of the tab: in `[A | B]`, Right picks
-  the right edge of `B`. Space cycles the spans. `s` switches between the
-  edge of a pane and that pane's stack: in `[A | B]`, the target beside `B`
-  becomes the stack of `B`, and Enter gives `A` beside the stack `[B, F]`
-  with `F` open on this client's screen. On the edge of a whole stack, `s`
-  targets that stack: in `[stack(S1, S2) | P]`, Left from `P` picks the edge
-  of the stack, `s` targets the stack, and Enter gives the stack
-  `[S1, S2, F]`. On the whole-tab target, `s` targets the pane or the stack
-  that fills the tab: tab `[A]` gives the stack `[A, F]`, and a tab that a
-  split fills has no stack target. Tab and Shift+Tab preview
-  the next or previous tab with the pane at the right edge of that whole tab.
-- Enter docks the pane at the target, and the docked pane takes this
-  client's input: every other floating pane this client shows is minimized.
-  A dock into another tab moves this client to that tab. Every other client
-  whose input is on the pane moves with it in the same way. Every other
-  client keeps the stack member it shows open: a client that shows `A` open
-  in the stack `[A, F]` still shows `A` open. After the dock, nothing is
-  selected and the mode stays open.
-- If the destination tab has no room for the pane, the frame draws the tab as
-  it is. The pane reads `Moving pane cannot go there`, and the target's panes
-  read `No room for this pane in <name>`. Enter then changes nothing, and the
-  target stays selected until you pick another target or press Escape. If
-  the tab changes after the frame and before the session answers, the session
-  refuses the dock with `tab <name> has no room for another pane`, and
-  nothing changes.
+- The session takes the center cell of the box where this client draws the
+  pane. The pane docks beside the smallest pane, group or tab span under that
+  cell, on the edge of that span nearest the cell. Over a stack, the span is
+  the whole stack. Between spans of the same size, the span with fewer panes
+  wins. A center cell outside the tab counts from the nearest cell of the
+  tab.
+- If this client zooms a pane in the tab, the zoomed pane fills the tab, and
+  the other panes have no span. The pane docks beside the zoomed pane, or
+  beside the whole stack that holds it, and this client leaves the zoom.
+- When this client draws the pane nowhere, such as when this client
+  minimized it or has a pane area smaller than `5x6`, the pane docks at the
+  right edge of the whole tab.
+- The docked pane takes this client's input: every other floating pane this
+  client shows is minimized. Every other client whose input is on the pane
+  moves with it in the same way. Every other client keeps the stack member it
+  shows open.
+- If the tab has no room for the pane, the session refuses the dock with
+  `tab <name> has no room for another pane`, and nothing changes.
 
-With the mouse:
+Example: tab `A | B` fills an `80x22` pane area, and `B` is at `(40, 0)` with
+the size `40x22`. Floating pane `F` is drawn at `(62, 6)` with the size
+`16x10`. Its center cell `(70, 11)` is 9 cells from the right edge of `B` and
+10 cells from its bottom edge. `<C-p> u` docks `F` right of `B`. If this
+client zooms `A`, `A` fills the tab, and `<C-p> u` docks `F` right of `A`.
 
-- A press on a tiled pane, then a drag, floats the pane up where it is drawn
-  and selects it. The same drag goes on with the floating pane. A press on a
-  collapsed stack member's header, then a drag, floats that member up at the
-  rect it opens into in its stack.
-- A drag of the selected floating pane moves it with the pointer. The pane
-  under the pointer shows its edge nearest the pointer as the dock target,
-  and this client draws no other floating pane during the drag. A release
-  over a target docks the pane there. A release over no target, or over a
-  target with no room, leaves the pane floating where it was dropped. A
-  pinned floating pane stays at its
-  pinned cell during the drag: a release over a target docks it, and a
-  release over no target, or over a target with no room, leaves it where it
-  was.
-- A press on another floating pane selects it, and a drag moves it as above.
-
-During a drag, Escape ends only the drag, and the pane goes back to where it
-was. Otherwise, Escape (`core:cancel-dock-undock`) leaves the mode and changes
-nothing. While an undock or a dock waits for the session's answer, Enter,
-Escape and the mouse change nothing. A lock mode change, a mouse-select
-change, and the loss of the terminal's focus also end the mode, unless an
-undock or a dock waits.
-
-The session refuses an undock, and changes nothing, when the pane is the only
+The session refuses a float, and changes nothing, when the pane is the only
 pane of the only tab, or when the session already holds 12 floating panes.
 
 ## Floating pane tray
 
-The tabline shows the tray button `⧉` left of the mode tag while the session
-holds at least one floating pane. `<leader>p w`
+The tabline shows the tray button `⧉` left of the mode tag, also while the
+session holds no floating pane. `<leader>p w`
 (`core:toggle-floating-pane-tray`) or a click on the button opens the tray under
 the button. The tray lists every floating pane of the session as a tile, in the
-order the panes became floating:
+order the panes became floating, then the `+ new` tile:
 
 - A tile shows its number, `1` to `12`, on its top border, and the pane's
   title under it. A tile is 10 cells wide. A title of 8 cells or more shows
@@ -461,24 +400,32 @@ order the panes became floating:
   `logser…`. A pane with no title shows its number alone.
 - A lit tile is a pane that this client shows. A gray tile is a pane that
   this client minimized.
+- The `+ new` tile sits in the slot right after the last floating pane. With
+  no floating pane, it is the first tile. With 12 floating panes, every slot
+  holds a pane and the tray shows no `+ new` tile.
 - The tray holds 12 slots in 2 rows of 6. A narrow terminal puts fewer slots
   in each row.
 - The tray's titlebar, the row under its top border, shows the full title of
   the tile under the pointer, else of the selected tile. A title too long for
-  its cells ends in `…`. Right of the title, the titlebar reads `minimize all`
-  while this client shows a floating pane, and `restore all` while it shows
-  none, then the close button `✕`. A tray of one slot per row has no room for
-  this label and leaves it out.
+  its cells ends in `…`. The `+ new` tile has no title. Right of the title,
+  the titlebar reads `minimize all` while this client shows a floating pane,
+  and `restore all` while it shows none, then the close button `✕`. With no
+  floating pane in the session, and in a tray of one slot per row, the
+  titlebar has no label.
 
 While the tray is open, the tabline shows the tag `TRAY`. The
 `floating-pane-tray` keymap has priority over the normal or locked keymap, and
-the tray consumes every key it does not bind. The tray changes this client's
-screen only. Another client sees no change.
+the tray consumes every key it does not bind. Opening, selecting, minimizing
+and restoring change this client's screen only, and another client sees no
+change. The `+ new` tile creates a pane of the session, and every client
+gains a tile for it.
 
 - The arrow keys (`core:select-tray-tile-left`, `-down`, `-up`, `-right`)
   select the next tile in that direction.
-- Enter (`core:toggle-selected-tray-tile`) minimizes the pane of a lit tile.
-  On a gray tile, it shows the pane on top and focuses it.
+- Enter (`core:activate-selected-tray-tile`) minimizes the pane of a lit tile.
+  On a gray tile, it shows the pane on top and focuses it. On the `+ new`
+  tile, it closes the tray and creates a floating pane, as
+  `core:new-pane-floating` does.
 - `a` (`core:toggle-minimize-all-floating-panes`) minimizes every floating
   pane this client shows. When this client shows none, it shows every one, in
   the order the panes became floating, and focuses the last one. A click on
@@ -490,11 +437,11 @@ screen only. Another client sees no change.
   does with no tray open.
 
 The tray stays open after a tile changes, and it shows each change at once.
-It closes when the session holds no floating pane or the terminal has no room
-for it. A lock mode change, a mouse-select change, the loss of the terminal's
-focus, a lost link to the session and a session switch also close it. The tray
-and the notification center are never open together: while the center is
-open, the tray's actions do nothing.
+It closes when the terminal has no room for it. A lock mode change, a
+mouse-select change, the loss of the terminal's focus, a lost link to the
+session and a session switch also close it. The tray and the notification
+center are never open together: while the center is open, the tray's actions
+do nothing.
 
 A minimize shrinks the pane into its tile in 160 ms. With the tray closed, it
 shrinks into the cell under the glyph `⧉`, on the top row of the pane area. A
@@ -516,11 +463,12 @@ the session writes, the session keeps each refusal of this client's commands
 until the client catches up. Then equal refusals in a row show as one
 notification with their count: `[Koshi] Warning ×3`.
 
-The tabline shows the notification button `●` while this client holds at
-least one notification. The button sits left of the tray button, or left of
-the mode tag when the tabline shows no tray button. With unread notifications,
-the button shows their count: `●3`, and `●99+` above 99. A notification is
-read once the center opens after it arrives.
+The tabline shows the notification button `●` left of the tray button, also
+while this client holds no notification. A tabline with no room for the tray
+button shows no notification button. With unread notifications, the button
+shows their count: `●3`, and `●99+` above 99. A notification is read once the
+center opens after it arrives. With no notification, the center reads
+`No notifications`.
 
 `<A-n>` (`core:toggle-notification-center`) or a click on the button opens the
 center. The center covers the right side of the pane area and changes no pane.
@@ -568,8 +516,8 @@ on it does nothing. The center
 and the floating pane tray are never open together. While the tray is open,
 the center's actions do nothing, and a click on the notification button
 closes the tray and opens the center. While another local mode is on, such as
-dock/undock mode, pane placement, the move chooser, or floating pane move
-mode, the center does not open. It also does not open while the link to the
+pane placement, the move chooser, or floating pane move mode, the center does
+not open. It also does not open while the link to the
 session is lost. A pane area narrower than 10 columns or
 shorter than 6 rows has no room for the center. Then the center does not
 open, and a resize to such a size closes it at once. It stays closed when the
@@ -620,8 +568,8 @@ floating pane focused, the key is refused with `no floating pane is focused`.
 No default key runs these actions. Bind them in `normal` or `locked`:
 
 - `core:undock-pane` floats the pane that holds this client's input up where
-  this client draws it, as Enter does in dock/undock mode. A floating pane is
-  refused with `<pane-id> is already floating`.
+  this client draws it, as `<leader>p u` does on a tiled pane. A floating
+  pane is refused with `<pane-id> is already floating`.
 - `core:pin-pane` and `core:unpin-pane` pin and unpin the focused floating
   pane for this client.
 - `core:minimize-pane` minimizes the focused floating pane for this client.

@@ -233,8 +233,9 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
                 retry_in_seconds: Some(8),
             }),
             tabline_offset: Some(2),
-            has_floating_panes: false,
-            notification_button: None,
+            notification_button: NotificationButton {
+                unread_entry_count: 0,
+            },
         }
     );
     assert!(

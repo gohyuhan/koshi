@@ -473,10 +473,8 @@ pub struct ViewerChrome {
     /// area under the tray and hit-tested after it, while it is open and
     /// while it slides out. `None` while the center is closed.
     pub notification_center: Option<NotificationCenter>,
-    /// The tabline's notification button `●`, drawn while the viewer's
-    /// notification center holds at least one entry. `None` while it holds
-    /// none.
-    pub notification_button: Option<NotificationButton>,
+    /// The tabline's notification button `●` and the unread count it shows.
+    pub notification_button: NotificationButton,
     /// The viewer's toast as this frame draws it, over every other part of
     /// the pane area. `None` while no toast shows.
     pub notification_toast: Option<NotificationToast>,
@@ -499,9 +497,9 @@ pub struct NotificationCenter {
     pub hidden_per_mille: u16,
 }
 
-/// The tabline's notification button: ` ● ` while every entry of the viewer's
-/// notification center is read, and ` ●3 ` with 3 unread entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The tabline's notification button: ` ● ` while the viewer's notification
+/// center holds no unread entry, and ` ●3 ` with 3 unread entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NotificationButton {
     /// How many entries arrived since the viewer last opened its notification
     /// center.
@@ -525,13 +523,14 @@ pub struct NotificationToast {
 /// One viewer's open floating pane tray: the tile its keys act on, and the
 /// tile under its pointer.
 ///
-/// A tile index counts the session's
-/// [`floating_panes`](SessionSnapshot::floating_panes) from `0`: tile `1`
-/// shows the second floating pane. The viewer keeps both indexes below the
-/// number of floating panes.
+/// A tile index counts the tray's slots from `0`. Tile `i` shows the session's
+/// floating pane `i` ([`floating_panes`](SessionSnapshot::floating_panes)),
+/// and the tile right after the last floating pane is the `+ new` tile: with
+/// two floating panes, tile `2` is `+ new`. The viewer keeps both indexes
+/// below [`compute_tray_tile_count`](crate::floating_pane_tray::compute_tray_tile_count).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloatingPaneTray {
-    /// The tile that `core:toggle-selected-tray-tile` acts on, drawn with the
+    /// The tile that `core:activate-selected-tray-tile` acts on, drawn with the
     /// hover border.
     pub selected_tile_index: usize,
     /// The tile under the viewer's pointer, or `None` off every tile. The
@@ -544,8 +543,6 @@ pub struct FloatingPaneTray {
 /// tiled top border its pointer rests on: `pointer_hover` while a left press on
 /// that handle starts a drag of its pane, and `None` otherwise.
 /// `active_input_mode` is the mode that owns the viewer's keyboard.
-/// `is_dock_undock_command_pending` is `true` while dock/undock mode waits for
-/// the session's answer to the undock or the dock it sent.
 /// `is_floating_pane_move_waiting` is `true` while a floating pane move that
 /// the viewer sent waits for the session's answer.
 ///
@@ -554,15 +551,11 @@ pub struct FloatingPaneTray {
 /// - A [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) or
 ///   [`TiledHandle`](PlacementHandleHover::TiledHandle) hover shows in
 ///   `Normal`, `Locked`, `PaneMoveChoice`, `FloatingPaneTray` and
-///   `NotificationCenter`, and in `DockUndock` while
-///   `is_dock_undock_command_pending` is `false`.
+///   `NotificationCenter`.
 /// - A [`FloatingHandle`](PlacementHandleHover::FloatingHandle) hover of an
 ///   unpinned pane shows in `Normal`, `Locked`, `PaneMoveChoice`,
 ///   `FloatingPaneMove`, `FloatingPaneTray` and `NotificationCenter` while
-///   `is_floating_pane_move_waiting` is `false`. In
-///   `DockUndock`, a pinned or unpinned pane's hover shows while
-///   `is_dock_undock_command_pending` and `is_floating_pane_move_waiting` are
-///   both `false`.
+///   `is_floating_pane_move_waiting` is `false`.
 /// - No hover shows in `PanePlacement`.
 ///
 /// `TiledTopBorder { pane_id: pane-123 }` gives itself in `Normal` and `None`
@@ -573,7 +566,6 @@ pub fn find_shown_placement_handle_hover(
     active_input_mode: LockMode,
     link_status: LinkStatus,
     is_pane_placement_visible: bool,
-    is_dock_undock_command_pending: bool,
     is_floating_pane_move_waiting: bool,
 ) -> Option<PlacementHandleHover> {
     let placement_handle_hover = pointer_hover?;
@@ -588,7 +580,6 @@ pub fn find_shown_placement_handle_hover(
                 | LockMode::PaneMoveChoice
                 | LockMode::FloatingPaneTray
                 | LockMode::NotificationCenter => true,
-                LockMode::DockUndock => !is_dock_undock_command_pending,
                 LockMode::PanePlacement | LockMode::FloatingPaneMove => false,
             }
         }
@@ -599,9 +590,6 @@ pub fn find_shown_placement_handle_hover(
             | LockMode::FloatingPaneMove
             | LockMode::FloatingPaneTray
             | LockMode::NotificationCenter => !is_pinned && !is_floating_pane_move_waiting,
-            LockMode::DockUndock => {
-                !is_dock_undock_command_pending && !is_floating_pane_move_waiting
-            }
             LockMode::PanePlacement => false,
         },
     };
@@ -729,9 +717,8 @@ impl<'a> FrameLayout<'a> {
     /// A frame named `work` with tabs `shell` and `logs` yields those names and
     /// their tab state, but it does not yield a pane slot or terminal grid.
     /// The lock mode is the viewer's `active_input_mode` when one is set, and
-    /// the client's `lock_mode` otherwise. The tray button shows while the
-    /// session holds a floating pane, and is highlighted while the lock mode
-    /// is `FloatingPaneTray`.
+    /// the client's `lock_mode` otherwise. The tray button is highlighted while
+    /// the lock mode is `FloatingPaneTray`.
     #[must_use]
     pub(crate) fn get_tabline_inputs(&self) -> TablineInputs<'a> {
         TablineInputs {
@@ -747,7 +734,6 @@ impl<'a> FrameLayout<'a> {
                 LinkStatus::Linked | LinkStatus::AwaitingRestartedSession => None,
             },
             tabline_offset: self.viewer_chrome.tabline_offset,
-            has_floating_panes: !self.session_snapshot.floating_panes.is_empty(),
             notification_button: self.viewer_chrome.notification_button,
         }
     }

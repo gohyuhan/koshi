@@ -112,11 +112,11 @@ pub struct Surface {
 ///   the client's focused pane in its active tab, also while a floating pane
 ///   takes its input, or `null`. 4 has none of these fields.
 /// - The `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`,
-///   `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`
-///   and `ToggleAllFloatingPanesMinimized` commands, the `NextFloatingPane` and
-///   `PreviousFloatingPane` focus targets, and the `FloatingPaneMoved`,
-///   `PanePinChanged` and `PaneMinimizedChanged` events in a command result,
-///   exist in 5 only.
+///   `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`,
+///   `ToggleAllFloatingPanesMinimized` and `TogglePaneFloating` commands, the
+///   `NextFloatingPane` and `PreviousFloatingPane` focus targets, and the
+///   `FloatingPaneMoved`, `PanePinChanged` and `PaneMinimizedChanged` events
+///   in a command result, exist in 5 only.
 /// - A `HostWrite` event names its bytes `host_write_bytes` and carries at
 ///   most 12582879 of them; 4 named them `host_output_bytes`. A longer host
 ///   write goes as `HostWritePart` events, then one `HostWrite`. The

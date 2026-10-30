@@ -570,16 +570,12 @@ impl Client {
         }
     }
 
-    /// The tabline's notification button while the history holds an entry,
-    /// with the count of unread entries, or `None`.
+    /// The tabline's notification button, with the count of unread entries.
     #[must_use]
-    pub(crate) fn build_notification_button(&self) -> Option<NotificationButton> {
-        self.notification_history
-            .list_merged_entries()
-            .next()
-            .map(|_| NotificationButton {
-                unread_entry_count: self.notification_history.get_unread_entry_count(),
-            })
+    pub(crate) fn build_notification_button(&self) -> NotificationButton {
+        NotificationButton {
+            unread_entry_count: self.notification_history.get_unread_entry_count(),
+        }
     }
 
     /// The shown toast as this viewer draws it: in the corner its

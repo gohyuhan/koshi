@@ -479,34 +479,35 @@ fn one_region_solution_paints_no_statusline() {
     // the tabline leaves the bottom row to the pane area, and the hints the
     // caller passes are drawn nowhere.
     let pane_id = PaneId::new();
+    let column_count = compute_version_badge_column_count() + 30;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane_id, build_cell_rect(0, 0, 40, 6), true)],
+        &[(pane_id, build_cell_rect(0, 0, column_count, 6), true)],
         Some(pane_id),
         LockMode::Normal,
         Size {
-            column_count: 40,
+            column_count,
             row_count: 8,
         },
     );
     let committed_regions = CommittedRegions::from_solved_regions(
         Size {
-            column_count: 40,
+            column_count,
             row_count: 8,
         },
         SolvedRegions {
             region_rects: vec![Rect::from_origin_and_size(
                 Point { column: 0, row: 0 },
                 Size {
-                    column_count: 40,
+                    column_count,
                     row_count: 1,
                 },
             )],
             pane_rect: Rect::from_origin_and_size(
                 Point { column: 0, row: 1 },
                 Size {
-                    column_count: 40,
+                    column_count,
                     row_count: 7,
                 },
             ),
@@ -523,26 +524,29 @@ fn one_region_solution_paints_no_statusline() {
 
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format_session_shell_tabline(40)
+        format_session_shell_tabline(column_count)
     );
     // Rows 1..=6 are the pane box, shifted into the pane rectangle, and row 7
     // is the bottom of the pane area: every row is blank of the `Lock` hint.
     assert_eq!(
         format_rendered_row_text(&render_buffer, 1),
-        format!("┌{}┐", "─".repeat(38))
+        format!("┌{}┐", "─".repeat(usize::from(column_count - 2)))
     );
     for row_index in 2..=5 {
         assert_eq!(
             format_rendered_row_text(&render_buffer, row_index),
-            format!("│{}│", " ".repeat(38)),
+            format!("│{}│", " ".repeat(usize::from(column_count - 2))),
             "row {row_index}"
         );
     }
     assert_eq!(
         format_rendered_row_text(&render_buffer, 6),
-        format!("└{}┘", "─".repeat(38))
+        format!("└{}┘", "─".repeat(usize::from(column_count - 2)))
     );
-    assert_eq!(format_rendered_row_text(&render_buffer, 7), " ".repeat(40));
+    assert_eq!(
+        format_rendered_row_text(&render_buffer, 7),
+        " ".repeat(usize::from(column_count))
+    );
 }
 
 #[test]
@@ -764,6 +768,7 @@ fn hint_bar_paints_the_bottom_row_from_the_hints_it_is_given() {
 
 #[test]
 fn two_rows_is_enough_for_both_chrome_rows() {
+    let column_count = compute_version_badge_column_count() + 30;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -771,13 +776,13 @@ fn two_rows_is_enough_for_both_chrome_rows() {
         None,
         LockMode::Normal,
         Size {
-            column_count: 40,
+            column_count,
             row_count: 2,
         },
     );
     let render_buffer = render_frame_to_buffer(
         &render_snapshot,
-        &build_whole_viewport_regions(40, 2),
+        &build_whole_viewport_regions(column_count, 2),
         &Theme::default(),
         &build_lock_hint_keymap(),
         ViewerChrome::default(),
@@ -786,11 +791,14 @@ fn two_rows_is_enough_for_both_chrome_rows() {
     // Row 0 is the tabline, row 1 the hint row: the last height that fits both.
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format_session_shell_tabline(40)
+        format_session_shell_tabline(column_count)
     );
     assert_eq!(
         format_rendered_row_text(&render_buffer, 1),
-        format!(" Ctrl +  l  Lock{}", " ".repeat(24))
+        format!(
+            " Ctrl +  l  Lock{}",
+            " ".repeat(usize::from(column_count - 16))
+        )
     );
 }
 
@@ -812,14 +820,14 @@ fn tabline_lists_tabs_with_active_marker() {
     let render_buffer = render_test_snapshot(&render_snapshot, column_count, 8);
 
     // The session block ` sess `, then the version badge, a gap, each padded
-    // tab with one blank cell between them, blanks, and the ` BASE ` mode tag
-    // on the last six cells.
+    // tab with one blank cell between them, blanks, the notification and tray
+    // buttons, and the ` BASE ` mode tag on the last six cells.
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(
-            " sess {version_badge_text}  #1  code   #2  logs {}BASE ",
-            " ".repeat(18)
+            " sess {version_badge_text}  #1  code   #2  logs {} ●  ⧉  BASE ",
+            " ".repeat(11)
         )
     );
 
@@ -862,7 +870,7 @@ fn tabline_lists_tabs_with_active_marker() {
 #[test]
 fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     let pane_id = PaneId::new();
-    let column_count = compute_version_badge_column_count() + 31;
+    let column_count = compute_version_badge_column_count() + 37;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[
@@ -884,12 +892,13 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
 
     // The session block and the mode tag always render whole. The active tab
     // (alpha, index 0) fits from the left, so the window starts there and the
-    // four tabs hidden off the right sit behind a `▶` scroll arrow. The blank
-    // cell where a `◀` would sit stays blank: nothing is hidden to the left.
+    // four tabs hidden off the right sit behind a `▶` scroll arrow, before the
+    // notification and tray buttons. The blank cell where a `◀` would sit
+    // stays blank: nothing is hidden to the left.
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format!(" sess {version_badge_text}   #1  alpha      ▶ BASE ")
+        format!(" sess {version_badge_text}   #1  alpha      ▶ ●  ⧉  BASE ")
     );
 }
 
@@ -906,33 +915,35 @@ pub(crate) fn compute_version_badge_column_count() -> u16 {
 /// The whole tabline row a session named `sess` with the single active tab
 /// `shell` paints into a `column_count`-wide row, with ` BASE ` as the mode tag.
 ///
-/// `column_count` is at least `compute_version_badge_column_count() + 24`.
+/// `column_count` is at least `compute_version_badge_column_count() + 30`.
 fn format_session_shell_tabline(column_count: u16) -> String {
     format_session_shell_tabline_with_mode_tag(column_count, " BASE ")
 }
 
 /// The whole tabline row a session named `sess` with the single active tab
 /// `shell` paints into a `column_count`-wide row: the ` sess ` block, the
-/// version badge, one gap cell, the ` #1  shell ` ribbon, blank cells, then
-/// `mode_tag_text` right-aligned on the last cells.
+/// version badge, one gap cell, the ` #1  shell ` ribbon, blank cells, the
+/// notification button ` ● ` and the tray button ` ⧉ `, then `mode_tag_text`
+/// right-aligned on the last cells.
 ///
 /// `mode_tag_text` is the mode block with its own padding spaces, such as
 /// ` BASE ` or ` LOCK `. `column_count` leaves room for all of it.
 fn format_session_shell_tabline_with_mode_tag(column_count: u16, mode_tag_text: &str) -> String {
     let leading_text = format!(" sess {}  #1  shell ", format_version_badge_text());
+    let trailing_text = format!(" ●  ⧉ {mode_tag_text}");
     let blank_cell_count =
-        usize::from(column_count) - leading_text.chars().count() - mode_tag_text.chars().count();
+        usize::from(column_count) - leading_text.chars().count() - trailing_text.chars().count();
     format!(
-        "{leading_text}{}{mode_tag_text}",
+        "{leading_text}{}{trailing_text}",
         " ".repeat(blank_cell_count)
     )
 }
 
 /// A session `s` with eight tabs `t0` to `t7`, `t5` active, in a viewport
-/// `compute_version_badge_column_count() + 21` cells wide and 8 rows tall.
+/// `compute_version_badge_column_count() + 27` cells wide and 8 rows tall.
 fn build_eight_tab_render_snapshot() -> RenderSnapshot {
     let pane_id = PaneId::new();
-    let column_count = compute_version_badge_column_count() + 21;
+    let column_count = compute_version_badge_column_count() + 27;
     build_render_snapshot(
         "s",
         &[
@@ -963,7 +974,7 @@ fn tabline_follows_focus_into_the_overflow() {
     let tabline_text = format_rendered_row_text(
         &render_test_snapshot(
             &render_snapshot,
-            compute_version_badge_column_count() + 21,
+            compute_version_badge_column_count() + 27,
             8,
         ),
         0,
@@ -974,7 +985,7 @@ fn tabline_follows_focus_into_the_overflow() {
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         tabline_text,
-        format!(" s {version_badge_text} ◀ #6  t5  ▶ BASE ")
+        format!(" s {version_badge_text} ◀ #6  t5  ▶ ●  ⧉  BASE ")
     );
 }
 
@@ -992,7 +1003,7 @@ fn tabline_peek_offset_ignores_the_active_tab() {
         &render_snapshot_with_viewer_chrome(
             &render_snapshot,
             peeking_viewer_chrome,
-            compute_version_badge_column_count() + 21,
+            compute_version_badge_column_count() + 27,
             8,
         ),
         0,
@@ -1004,40 +1015,47 @@ fn tabline_peek_offset_ignores_the_active_tab() {
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         tabline_text,
-        format!(" s {version_badge_text}   #1  t0  ▶ BASE ")
+        format!(" s {version_badge_text}   #1  t0  ▶ ●  ⧉  BASE ")
     );
 }
 
 #[test]
 fn mode_tag_reflects_lock_mode() {
     let pane_id = PaneId::new();
+    let column_count = compute_version_badge_column_count() + 30;
     let build_snapshot_for_lock_mode = |lock_mode| {
         build_render_snapshot(
             "sess",
             &[("shell", true)],
-            &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+            &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
             Some(pane_id),
             lock_mode,
             Size {
-                column_count: 40,
+                column_count,
                 row_count: 8,
             },
         )
     };
 
-    let normal_mode_render_buffer =
-        render_test_snapshot(&build_snapshot_for_lock_mode(LockMode::Normal), 40, 8);
+    let normal_mode_render_buffer = render_test_snapshot(
+        &build_snapshot_for_lock_mode(LockMode::Normal),
+        column_count,
+        8,
+    );
     assert_eq!(
         format_rendered_row_text(&normal_mode_render_buffer, 0),
-        format_session_shell_tabline_with_mode_tag(40, " BASE ")
+        format_session_shell_tabline_with_mode_tag(column_count, " BASE ")
     );
 
     // The lock mode tag replaces the base one in the same six right-aligned cells.
-    let locked_mode_render_buffer =
-        render_test_snapshot(&build_snapshot_for_lock_mode(LockMode::Locked), 40, 8);
+    let locked_mode_render_buffer = render_test_snapshot(
+        &build_snapshot_for_lock_mode(LockMode::Locked),
+        column_count,
+        8,
+    );
     assert_eq!(
         format_rendered_row_text(&locked_mode_render_buffer, 0),
-        format_session_shell_tabline_with_mode_tag(40, " LOCK ")
+        format_session_shell_tabline_with_mode_tag(column_count, " LOCK ")
     );
 }
 
@@ -1045,9 +1063,10 @@ fn mode_tag_reflects_lock_mode() {
 fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
     // The mode block is right-aligned and takes the room it needs. The
     // reconnecting mode tag is 37 cells wide: on a row of the version badge
-    // plus 46 cells, it leaves no room for the tab ribbon.
+    // plus 52 cells, it leaves room for the notification and tray buttons and
+    // none for the tab ribbon.
     let pane_id = PaneId::new();
-    let column_count = compute_version_badge_column_count() + 46;
+    let column_count = compute_version_badge_column_count() + 52;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -1076,16 +1095,17 @@ fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format!(" sess {version_badge_text}  RECONNECTING (attempt 3, retry in 8s) ")
+        format!(" sess {version_badge_text}  ●  ⧉  RECONNECTING (attempt 3, retry in 8s) ")
     );
 }
 
 #[test]
 fn a_viewer_whose_dial_runs_puts_the_dialing_tag_in_the_tabline() {
     // `RECONNECTING (attempt 3, dialing)` is 33 cells wide: on a row of the
-    // version badge plus 42 cells, it leaves no room for the tab ribbon.
+    // version badge plus 48 cells, it leaves room for the notification and
+    // tray buttons and none for the tab ribbon.
     let pane_id = PaneId::new();
-    let column_count = compute_version_badge_column_count() + 42;
+    let column_count = compute_version_badge_column_count() + 48;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -1114,7 +1134,7 @@ fn a_viewer_whose_dial_runs_puts_the_dialing_tag_in_the_tabline() {
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format!(" sess {version_badge_text}  RECONNECTING (attempt 3, dialing) ")
+        format!(" sess {version_badge_text}  ●  ⧉  RECONNECTING (attempt 3, dialing) ")
     );
 }
 
@@ -1865,48 +1885,49 @@ fn hidden_pane_draws_no_border() {
 #[test]
 fn scroll_indicator_shown_only_when_scrolled_back() {
     let pane_id = PaneId::new();
+    let column_count = compute_version_badge_column_count() + 30;
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
         Some(pane_id),
         LockMode::Normal,
         Size {
-            column_count: 40,
+            column_count,
             row_count: 8,
         },
     );
 
     // At the live tail (offset 0): the pane's bottom border (row 6 — the box
     // spans rows 1..=6) is unbroken, and the tabline carries no indicator.
-    let live_tail_render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
+    let live_tail_render_buffer = render_test_snapshot(&render_snapshot, column_count, 8);
     assert_eq!(
         format_rendered_row_text(&live_tail_render_buffer, 6),
-        format!("└{}┘", "─".repeat(38))
+        format!("└{}┘", "─".repeat(usize::from(column_count - 2)))
     );
     assert_eq!(
         format_rendered_row_text(&live_tail_render_buffer, 0),
-        format_session_shell_tabline(40)
+        format_session_shell_tabline(column_count)
     );
 
     // Scrolled back three lines with 100 retained: the count sits right-aligned
     // in this pane's own bottom border. The tabline keeps the ` BASE ` mode tag.
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
-        &Grid::build_blank(6, 40, TermStyle::default()),
+        &Grid::build_blank(6, column_count, TermStyle::default()),
         3,
     ));
     render_snapshot.pane_snapshots[0]
         .scrollback_metadata
         .retained_line_count = 100;
-    let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
+    let render_buffer = render_test_snapshot(&render_snapshot, column_count, 8);
     assert_eq!(
         format_rendered_row_text(&render_buffer, 6),
-        format!("└{} 3/100 ┘", "─".repeat(31)),
+        format!("└{} 3/100 ┘", "─".repeat(usize::from(column_count - 9))),
         "the count is right-aligned and the corner glyph survives"
     );
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format_session_shell_tabline(40),
+        format_session_shell_tabline(column_count),
         "no global indicator"
     );
 }
@@ -3275,23 +3296,28 @@ fn too_small_overlay_clips_on_narrow_screen() {
 #[test]
 fn small_and_zero_size_areas_are_safe() {
     let pane_id = PaneId::new();
+    let tabline_column_count = compute_version_badge_column_count() + 30;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        &[(
+            pane_id,
+            build_cell_rect(0, 1, tabline_column_count, 6),
+            true,
+        )],
         Some(pane_id),
         LockMode::Normal,
         Size {
-            column_count: 40,
+            column_count: tabline_column_count,
             row_count: 1,
         },
     );
 
     // One row tall: only the tabline, no bottom row, no panic.
-    let one_row_render_buffer = render_test_snapshot(&render_snapshot, 40, 1);
+    let one_row_render_buffer = render_test_snapshot(&render_snapshot, tabline_column_count, 1);
     assert_eq!(
         format_rendered_row_text(&one_row_render_buffer, 0),
-        format_session_shell_tabline(40)
+        format_session_shell_tabline(tabline_column_count)
     );
 
     // Widths narrower than the tabline content (the mode tag is 6 cells): the
@@ -3547,7 +3573,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     // are skipped.
     let active_pane_id = PaneId::new();
     let collapsed_pane_id = PaneId::new();
-    let column_count = compute_version_badge_column_count() + 16;
+    let column_count = compute_version_badge_column_count() + 22;
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -3582,13 +3608,13 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     let render_buffer = render_test_snapshot(&render_snapshot, column_count, 5);
 
     // No panic, and the strip laid out at row 8 wrote nothing: row 0 is the
-    // tabline (too narrow for the tab: only the `▶` arrow and the mode tag),
-    // row 3 the pane box's top border, row 4 the blanked hint row, and the rest
-    // blank.
+    // tabline (too narrow for the tab: only the `▶` arrow, the notification
+    // and tray buttons and the mode tag), row 3 the pane box's top border, row
+    // 4 the blanked hint row, and the rest blank.
     let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
-        format!(" sess {version_badge_text}   ▶ BASE ")
+        format!(" sess {version_badge_text}   ▶ ●  ⧉  BASE ")
     );
     assert_eq!(
         format_rendered_row_text(&render_buffer, 1),
@@ -3714,7 +3740,7 @@ fn an_odd_letterbox_margin_is_one_cell_wider_right_and_below() {
 fn a_custom_theme_recolors_the_chrome() {
     let left_pane_id = PaneId::new();
     let right_pane_id = PaneId::new();
-    let column_count = compute_version_badge_column_count() + 31;
+    let column_count = compute_version_badge_column_count() + 37;
     let left_pane_column_count = column_count / 2;
     let render_snapshot = build_render_snapshot(
         "sess",
@@ -4480,7 +4506,6 @@ fn the_mode_indicator_names_every_lock_mode() {
         build_mode_tags(LockMode::FloatingPaneMove, false, None),
         "MOVE FLOAT"
     );
-    assert_eq!(build_mode_tags(LockMode::DockUndock, false, None), "DOCK");
 
     // Every non-plain mode joins the mouse-select mode tag the same way.
     assert_eq!(

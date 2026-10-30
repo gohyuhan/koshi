@@ -421,6 +421,41 @@ impl Rect {
             && u32::from(point.row) < self.get_bottom_edge()
     }
 
+    /// The side of this rect whose edge cells lie nearest `point`: the fewest
+    /// cells from `point` to the rect's first or last column, or its first or
+    /// last row. A tie goes to `Up`, then `Down`, then `Left`, then `Right`.
+    ///
+    /// Example: in the rect at `(40, 0)`, `40x22` cells, `(75, 10)` gives
+    /// `Right`, and `(60, 1)` gives `Up`.
+    #[must_use]
+    pub fn compute_nearest_edge_direction(&self, point: Point) -> Direction {
+        let last_column = self
+            .origin
+            .column
+            .saturating_add(self.size.column_count.saturating_sub(1));
+        let last_row = self
+            .origin
+            .row
+            .saturating_add(self.size.row_count.saturating_sub(1));
+        let left_distance = point.column.saturating_sub(self.origin.column);
+        let right_distance = last_column.saturating_sub(point.column);
+        let top_distance = point.row.saturating_sub(self.origin.row);
+        let bottom_distance = last_row.saturating_sub(point.row);
+        let nearest_edge_distance = left_distance
+            .min(right_distance)
+            .min(top_distance)
+            .min(bottom_distance);
+        if nearest_edge_distance == top_distance {
+            Direction::Up
+        } else if nearest_edge_distance == bottom_distance {
+            Direction::Down
+        } else if nearest_edge_distance == left_distance {
+            Direction::Left
+        } else {
+            Direction::Right
+        }
+    }
+
     /// The region of cells inside both `self` and `other_rect`, or `None` when they
     /// share no cell.
     ///
