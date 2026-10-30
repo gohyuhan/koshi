@@ -361,10 +361,15 @@ On a floating pane, the key docks the pane into this client's active tab:
 - The session takes the center cell of the box where this client draws the
   pane. The pane docks beside the smallest pane, group or tab span under that
   cell, on the edge of that span nearest the cell. Over a stack, the span is
-  the whole stack. A center cell outside the tab counts from the nearest cell
-  of the tab.
-- When this client draws the pane nowhere, such as with a pane area smaller
-  than `5x6`, the pane docks at the right edge of the whole tab.
+  the whole stack. Between spans of the same size, the span with fewer panes
+  wins. A center cell outside the tab counts from the nearest cell of the
+  tab.
+- If this client zooms a pane in the tab, the zoomed pane fills the tab, and
+  the other panes have no span. The pane docks beside the zoomed pane, or
+  beside the whole stack that holds it, and this client leaves the zoom.
+- When this client draws the pane nowhere, such as when this client
+  minimized it or has a pane area smaller than `5x6`, the pane docks at the
+  right edge of the whole tab.
 - The docked pane takes this client's input: every other floating pane this
   client shows is minimized. Every other client whose input is on the pane
   moves with it in the same way. Every other client keeps the stack member it
@@ -375,7 +380,8 @@ On a floating pane, the key docks the pane into this client's active tab:
 Example: tab `A | B` fills an `80x22` pane area, and `B` is at `(40, 0)` with
 the size `40x22`. Floating pane `F` is drawn at `(62, 6)` with the size
 `16x10`. Its center cell `(70, 11)` is 9 cells from the right edge of `B` and
-10 cells from its bottom edge. `<C-p> u` docks `F` right of `B`.
+10 cells from its bottom edge. `<C-p> u` docks `F` right of `B`. If this
+client zooms `A`, `A` fills the tab, and `<C-p> u` docks `F` right of `A`.
 
 The session refuses a float, and changes nothing, when the pane is the only
 pane of the only tab, or when the session already holds 12 floating panes.

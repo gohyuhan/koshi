@@ -21,12 +21,12 @@ use std::num::NonZeroU16;
 use koshi_core::command::TiledPlacementTarget;
 use koshi_core::event::{Event, LayoutChanged, PaneFocused, TabFocused};
 use koshi_core::geometry::{
-    FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, Point, Size,
+    FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, Point, Rect, Size,
 };
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::placement::{
-    find_insertion_at_point, list_shown_placement_destinations, solve_placed_tab,
-    CrossTabPlacement, PlacementTabSizes,
+    find_insertion_at_point, list_placement_destinations, solve_placed_tab, CrossTabPlacement,
+    PlacementTabSizes,
 };
 use koshi_layout::tree::LayoutNode;
 use thiserror::Error;
@@ -234,24 +234,31 @@ pub fn find_lifted_floating_pane_rect(
 /// `client`'s active tab beside the smallest pane, group or tab span under
 /// the center cell of the rect `client` draws the pane in
 /// ([`Session::find_client_floating_pane_rect`]), on that span's edge nearest
-/// the cell ([`find_insertion_at_point`]). The spans are those of the tab as
-/// `client` draws it: centered in its pane area
-/// ([`Size::compute_centered_origin`]), each stack showing the member that
-/// `client`'s focus history gives ([`list_shown_placement_destinations`]). A
-/// center cell outside the tab moves to the tab's nearest cell.
+/// the cell ([`find_insertion_at_point`]). The spans are those of the solve
+/// `client` draws the tab with ([`Session::compute_client_solve`]), centered
+/// in its pane area ([`Size::compute_centered_origin`]): each stack shows the
+/// member that `client`'s focus history gives, and a pane `client` zooms
+/// fills the tab while every other pane has no span. A center cell outside
+/// the tab moves to the tab's nearest cell.
 ///
 /// A `16x10` pane drawn at `(62, 6)`, over the tab `A | B` that fills an
 /// `80x22` pane area with `B` at `(40, 0)`, has the center cell `(70, 11)`:
-/// the insertion right of `B`.
+/// the insertion right of `B`. With `A` zoomed, it is the insertion right of
+/// `A`.
 ///
-/// `None` when `client` draws no rect for `pane_id`, such as with a pane area
-/// smaller than `5x6`, or views a tab with no cell.
+/// `None` when `client` does not show `pane_id`
+/// ([`Client::is_floating_pane_shown`]), such as a pane it minimized, draws
+/// no rect for it, such as with a pane area smaller than `5x6`, or views a
+/// tab with no cell.
 #[must_use]
 pub fn find_nearest_dock_target(
     session: &Session,
     client: &Client,
     pane_id: PaneId,
 ) -> Option<TiledPlacementTarget> {
+    if !client.is_floating_pane_shown(pane_id) {
+        return None;
+    }
     let floating_pane_rect = session.find_client_floating_pane_rect(client, pane_id)?;
     let pane_area = client.get_pane_area()?;
     let destination_tab_id = client.get_active_tab_id();
@@ -275,11 +282,11 @@ pub fn find_nearest_dock_target(
             .saturating_sub(tab_origin.row)
             .min(tab_size.row_count - 1),
     };
-    let placement_destinations = list_shown_placement_destinations(
+    let client_solve = session.compute_client_solve(client, destination_tab_id)?;
+    let placement_destinations = list_placement_destinations(
         tab.get_layout_tree(),
-        client.list_focus_history(destination_tab_id),
-        tab_size,
-        session.get_pane_sizing(),
+        &client_solve,
+        Rect::from_size_at_origin(tab_size),
         pane_id,
     );
     let span_rects = placement_destinations

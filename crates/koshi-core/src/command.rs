@@ -96,9 +96,10 @@ pub enum Command {
     /// - A floating pane gets an insertion into the acting client's active
     ///   tab: beside the smallest pane, group or tab span under the center
     ///   cell of the rect that client draws it in, on that span's edge
-    ///   nearest the cell. A center outside the tab counts from the tab's
-    ///   nearest cell. A pane the client draws nowhere docks at the right
-    ///   edge of the whole tab.
+    ///   nearest the cell. The spans are those the client draws: a pane it
+    ///   zooms fills the tab. A center outside the tab counts from the tab's
+    ///   nearest cell. A pane the client minimized or draws nowhere docks at
+    ///   the right edge of the whole tab.
     ///
     /// `core:toggle-pane-floating` sends it. Example: tab `A | B`, with a
     /// floating pane `F` centered near `B`'s right edge, gives `A | B | F`.

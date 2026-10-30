@@ -2282,3 +2282,42 @@ fn the_insertion_at_a_point_takes_the_smallest_covering_span_and_the_earlier_of_
         Some((&pane_a_anchor, Direction::Right))
     );
 }
+
+#[test]
+fn the_insertion_at_a_point_between_spans_of_equal_area_takes_the_span_with_fewer_panes() {
+    let [pane_a, pane_b, pane_c, _] = build_sorted_pane_ids();
+    let tab_anchor = PanePlacementAnchor::Tab;
+    let pane_a_anchor = PanePlacementAnchor::Pane(pane_a);
+    let outer_group_anchor = PanePlacementAnchor::Group(vec![pane_a, pane_b, pane_c]);
+    let inner_group_anchor = PanePlacementAnchor::Group(vec![pane_a, pane_b]);
+    // Every span covers the whole `80x22` tab, as when the tab is zoomed on
+    // `A`.
+    let whole_tab_rect = build_cell_rect(0, 0, 80, 22);
+    let point = Point {
+        column: 70,
+        row: 11,
+    };
+
+    assert_eq!(
+        find_insertion_at_point(
+            [
+                (&tab_anchor, whole_tab_rect),
+                (&outer_group_anchor, whole_tab_rect),
+                (&inner_group_anchor, whole_tab_rect),
+            ],
+            point,
+        ),
+        Some((&inner_group_anchor, Direction::Right))
+    );
+    assert_eq!(
+        find_insertion_at_point(
+            [
+                (&tab_anchor, whole_tab_rect),
+                (&inner_group_anchor, whole_tab_rect),
+                (&pane_a_anchor, whole_tab_rect),
+            ],
+            point,
+        ),
+        Some((&pane_a_anchor, Direction::Right))
+    );
+}

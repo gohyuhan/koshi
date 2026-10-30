@@ -2661,9 +2661,10 @@ fn placement_tab_sizes_of_a_floating_source_count_every_client_typing_in_it() {
 }
 
 /// A session whose tab `tab_id` holds `layout_tree` over `tiled_pane_ids`,
-/// viewed by `client_id` with a `pane_area_size` pane area and its input on
-/// the first tiled pane, and a floating pane that `client_id` draws at
-/// `floating_pane_rect`. Returns the session and the floating pane's id.
+/// viewed by `client_id` with a `pane_area_size` pane area and its tiled
+/// focus on the first tiled pane, and a floating pane that `client_id` shows
+/// at `floating_pane_rect` and focuses. Returns the session and the floating
+/// pane's id.
 fn build_nearest_dock_session(
     tab_id: TabId,
     tiled_pane_ids: &[PaneId],
@@ -2700,6 +2701,11 @@ fn build_nearest_dock_session(
             )],
         )
         .expect("the floating set has room");
+    assert!(session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached")
+        .focus_floating_pane(floating_pane_id));
     (session, floating_pane_id)
 }
 
@@ -2927,5 +2933,134 @@ fn a_client_that_draws_the_floating_pane_nowhere_has_no_nearest_dock_target() {
     assert_eq!(
         find_nearest_dock_target(&session, client, floating_pane_id),
         None
+    );
+}
+
+#[test]
+fn a_client_that_minimized_the_floating_pane_has_no_nearest_dock_target() {
+    // `F` keeps the rect `(62, 6)` `16x10` in the client's view, over `B` of
+    // the tab `A | B`, and the client minimized it.
+    let tab_id = TabId::new();
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let client_id = ClientId::new();
+    let (mut session, floating_pane_id) = build_nearest_dock_session(
+        tab_id,
+        &[left_pane_id, right_pane_id],
+        build_horizontal_split(left_pane_id, right_pane_id),
+        client_id,
+        build_size(80, 22),
+        build_rect_at(62, 6, 16, 10),
+    );
+    assert!(session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached")
+        .minimize_floating_pane(floating_pane_id));
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+    assert_eq!(
+        session.find_client_floating_pane_rect(client, floating_pane_id),
+        Some(build_rect_at(62, 6, 16, 10))
+    );
+
+    assert_eq!(
+        find_nearest_dock_target(&session, client, floating_pane_id),
+        None
+    );
+}
+
+#[test]
+fn a_client_zoomed_in_the_tab_docks_a_floating_pane_beside_the_zoomed_pane() {
+    // Tab `A | B` fills an `80x22` pane area, and the client zooms `A`, which
+    // then fills the tab. A `16x10` pane at `(62, 6)` has the center cell
+    // `(70, 11)`: over the hidden `B` in the tiled tab, 9 cells from the
+    // right edge of the zoomed `A`.
+    let tab_id = TabId::new();
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let client_id = ClientId::new();
+    let (mut session, floating_pane_id) = build_nearest_dock_session(
+        tab_id,
+        &[left_pane_id, right_pane_id],
+        build_horizontal_split(left_pane_id, right_pane_id),
+        client_id,
+        build_size(80, 22),
+        build_rect_at(62, 6, 16, 10),
+    );
+    session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached")
+        .zoom_pane(tab_id, left_pane_id);
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+
+    assert_eq!(
+        find_nearest_dock_target(&session, client, floating_pane_id),
+        Some(TiledPlacementTarget::Split {
+            destination_tab_id: tab_id,
+            anchor: PanePlacementAnchor::Pane(left_pane_id),
+            direction: Direction::Right,
+        })
+    );
+}
+
+#[test]
+fn a_client_zoomed_on_a_stack_member_docks_a_floating_pane_beside_the_whole_stack() {
+    // Tab `H[V[[A, B], C], D]` fills an `80x22` pane area, and the client
+    // zooms the stack member `A`. The group `[A, B, C]`, the stack `[A, B]`
+    // and the tab each span the whole tab; the stack holds the fewest panes.
+    let tab_id = TabId::new();
+    let (open_member_pane_id, collapsed_member_pane_id, lower_pane_id, right_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let client_id = ClientId::new();
+    let (mut session, floating_pane_id) = build_nearest_dock_session(
+        tab_id,
+        &[
+            open_member_pane_id,
+            collapsed_member_pane_id,
+            lower_pane_id,
+            right_pane_id,
+        ],
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Split(SplitNode::with_equal_weights(
+                    SplitDirection::Vertical,
+                    vec![
+                        LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                            vec![open_member_pane_id, collapsed_member_pane_id],
+                            0,
+                        )),
+                        LayoutNode::Pane(lower_pane_id),
+                    ],
+                )),
+                LayoutNode::Pane(right_pane_id),
+            ],
+        )),
+        client_id,
+        build_size(80, 22),
+        build_rect_at(62, 6, 16, 10),
+    );
+    session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached")
+        .zoom_pane(tab_id, open_member_pane_id);
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+
+    assert_eq!(
+        find_nearest_dock_target(&session, client, floating_pane_id),
+        Some(TiledPlacementTarget::Split {
+            destination_tab_id: tab_id,
+            anchor: PanePlacementAnchor::Group(vec![open_member_pane_id, collapsed_member_pane_id]),
+            direction: Direction::Right,
+        })
     );
 }

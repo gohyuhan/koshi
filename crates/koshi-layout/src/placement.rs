@@ -842,9 +842,13 @@ pub struct PlacementDestinations {
 ///
 /// A tree holding only the source lists nothing. A `source_pane_id` that no
 /// leaf of `layout_tree` holds, such as a floating pane, leaves every pane
-/// listed. `layout_solve` is the tiled solve of `layout_tree` itself: a leaf
-/// absent from `layout_solve.pane_rects` is listed nowhere and counts for no
-/// group rectangle.
+/// listed. `layout_solve` is a solve of `layout_tree`'s leaves: tiled, with
+/// each stack showing any one member, or zoomed on one pane
+/// ([`solve_layout_with_mode`](crate::solver::solve_layout_with_mode)). A
+/// leaf absent from `layout_solve.pane_rects`, or at zero area there, is
+/// listed nowhere and counts for no group rectangle: `H[A, V[B, C]]` zoomed
+/// on `A`, with a floating source, lists the target pane slot `A` and the
+/// spans `Pane(A)` and `Tab`, each over the whole tab.
 ///
 /// `H[A, V[B, H[C, D]]]` with source D lists target pane slots `A, B, C`, and
 /// spans `Pane(A), Pane(B), Pane(C), Group([B, C, D]), Group([C, D]), Tab`.
@@ -921,10 +925,13 @@ pub fn list_shown_placement_destinations(
 /// The insertion into the smallest span of `span_rects` that covers `point`:
 /// that span's anchor, and the side of the span nearest `point`
 /// ([`Rect::compute_nearest_edge_direction`]). Between spans of equal area,
-/// the earlier span wins. `None` when no span covers `point`.
+/// the span that holds fewer panes wins: a `Pane` holds one, a `Group` the
+/// panes it names, and the `Tab` every pane. Between spans of equal area and
+/// pane count, the earlier span wins. `None` when no span covers `point`.
 ///
 /// `Pane(B)` at `(40, 0)` `40x22` and `Tab` at `(0, 0)` `80x22`, with `point`
-/// `(75, 10)`, give `Pane(B)` and `Right`.
+/// `(75, 10)`, give `Pane(B)` and `Right`. `Group([A, B, C])` and
+/// `Group([A, B])`, both at `(0, 0)` `80x22`, give `Group([A, B])`.
 #[must_use]
 pub fn find_insertion_at_point<'span>(
     span_rects: impl IntoIterator<Item = (&'span PanePlacementAnchor, Rect)>,
@@ -933,7 +940,14 @@ pub fn find_insertion_at_point<'span>(
     span_rects
         .into_iter()
         .filter(|(_, span_rect)| span_rect.is_point_inside(point))
-        .min_by_key(|(_, span_rect)| span_rect.size.compute_cell_count())
+        .min_by_key(|(anchor, span_rect)| {
+            let anchor_pane_count = match anchor {
+                PanePlacementAnchor::Pane(_) => 1,
+                PanePlacementAnchor::Group(group_pane_ids) => group_pane_ids.len(),
+                PanePlacementAnchor::Tab => usize::MAX,
+            };
+            (span_rect.size.compute_cell_count(), anchor_pane_count)
+        })
         .map(|(anchor, span_rect)| (anchor, span_rect.compute_nearest_edge_direction(point)))
 }
 

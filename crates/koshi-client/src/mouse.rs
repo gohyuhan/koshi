@@ -2451,8 +2451,8 @@ fn find_wheel_target_pane(frame_layout: FrameLayout<'_>, hit_region: HitRegion) 
 
 /// Return an insertion into the smallest insertion span under `screen_point`,
 /// on that span's edge nearest the pointer
-/// ([`find_insertion_at_point`]). Between spans of equal area, the earlier span
-/// wins. Returns `None` when no span covers `screen_point`.
+/// ([`find_insertion_at_point`]). Between spans of equal area, the span that
+/// holds fewer panes wins. Returns `None` when no span covers `screen_point`.
 fn find_mouse_insertion_target(
     screen_point: Point,
     destination_layout_rect: RatatuiRect,

@@ -335,6 +335,18 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
     wait_for_session_server(&runtime_directory, session_id);
     let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
     wait_for_attached_client_count(&runtime_directory, session_id, 1, &mut attaching_client);
+    let attached_client_id = koshi_link::discovery::fetch_session_overview(
+        &runtime_directory,
+        None,
+        session_id,
+        None,
+        None,
+    )
+    .expect("the session server describes itself")
+    .clients
+    .first()
+    .expect("one client is attached")
+    .client_id;
 
     let endpoint_before_restart = EndpointFile::load_from_path(
         &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
@@ -368,9 +380,12 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
         );
         std::thread::sleep(POLL_INTERVAL_DURATION);
     }
-    // The record is carried across the swap, so it is there before the client
-    // comes back and a detach can land while nobody holds it. Asked for until
-    // the client takes it.
+    // The client's record is carried across the swap. Until the client attaches
+    // again on the new socket, `detach --all` refuses with `client <id> is
+    // reconnecting` and detaches nobody. Asked for until the client takes it.
+    let reconnecting_refusal_text = format!(
+        "koshi: invalid in the current state\n  client {attached_client_id} is reconnecting\n"
+    );
     let detach_deadline = Instant::now() + WAIT_DURATION;
     while attaching_client
         .child_process
@@ -384,11 +399,15 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
             .arg(session_id.to_string())
             .output()
             .expect("the koshi binary starts");
-        assert_eq!(
-            detach_output.status.code(),
-            Some(CliExitCode::Success.get_exit_code()),
-            "the detach left {}",
-            String::from_utf8_lossy(&detach_output.stderr)
+        let detach_exit_code = detach_output.status.code();
+        let detach_error_text = String::from_utf8_lossy(&detach_output.stderr);
+        let is_reconnecting_refusal = detach_exit_code
+            == Some(CliExitCode::RuntimeAction.get_exit_code())
+            && detach_error_text == reconnecting_refusal_text;
+        assert!(
+            detach_exit_code == Some(CliExitCode::Success.get_exit_code())
+                || is_reconnecting_refusal,
+            "the detach exited with {detach_exit_code:?} and left {detach_error_text}"
         );
         assert!(
             Instant::now() < detach_deadline,
