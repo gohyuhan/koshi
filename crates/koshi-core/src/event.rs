@@ -430,6 +430,9 @@ pub enum RejectReason {
     InvalidState,
     /// A resize would drop a pane below its minimum size.
     MinimumSize,
+    /// A command that acts on an attached client found no client attached to
+    /// the session.
+    NoClientAttached,
 }
 
 impl std::fmt::Display for RejectReason {
@@ -444,6 +447,9 @@ impl std::fmt::Display for RejectReason {
             RejectReason::Unauthorized => formatter.write_str("command not permitted"),
             RejectReason::InvalidState => formatter.write_str("invalid in the current state"),
             RejectReason::MinimumSize => formatter.write_str("below minimum size"),
+            RejectReason::NoClientAttached => {
+                formatter.write_str("no client is attached to the session")
+            }
         }
     }
 }

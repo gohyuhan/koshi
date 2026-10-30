@@ -3363,8 +3363,8 @@ fn quit_from_an_external_cli_with_no_client_attached_is_refused_and_the_session_
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!("attach one with `koshi attach {session_id}`")),
         }
     );
     assert!(!runtime.is_quit_requested());
@@ -4314,7 +4314,7 @@ fn focus_from_a_clientless_source_with_two_clients_is_ambiguous() {
 }
 
 #[test]
-fn focus_with_no_attached_client_at_all_is_stale() {
+fn focus_with_no_attached_client_at_all_is_refused_as_no_client_attached() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
@@ -4339,8 +4339,8 @@ fn focus_with_no_attached_client_at_all_is_stale() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!("attach one with `koshi attach {session_id}`")),
         }
     );
 }
@@ -4604,7 +4604,7 @@ fn in_session_cli_pane_command_with_a_detached_client_succeeds() {
 }
 
 #[test]
-fn in_session_cli_client_scoped_with_no_attached_client_is_stale() {
+fn in_session_cli_client_scoped_with_no_attached_client_is_refused_as_no_client_attached() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let session_id = SessionId::new();
     let tab_id = TabId::new();
@@ -4626,8 +4626,8 @@ fn in_session_cli_client_scoped_with_no_attached_client_is_stale() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!("attach one with `koshi attach {session_id}`")),
         }
     );
 }
@@ -4806,7 +4806,7 @@ fn in_session_cli_with_an_unknown_session_is_not_found() {
 }
 
 #[test]
-fn external_cli_default_pane_with_no_attached_client_is_stale() {
+fn external_cli_default_pane_with_no_attached_client_is_refused_as_no_client_attached() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let session_id = SessionId::new();
     runtime
@@ -4823,8 +4823,8 @@ fn external_cli_default_pane_with_no_attached_client_is_stale() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!("attach one with `koshi attach {session_id}`")),
         }
     );
 }
@@ -4946,8 +4946,10 @@ fn in_session_cli_session_id_is_authoritative_over_a_mismatched_client() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!(
+                "attach one with `koshi attach {claimed_session_id}`"
+            )),
         }
     );
 }
@@ -11915,7 +11917,7 @@ fn new_tab_external_source_with_two_clients_is_ambiguous() {
 }
 
 #[test]
-fn new_tab_with_no_attached_client_is_stale() {
+fn new_tab_with_no_attached_client_is_refused_as_no_client_attached() {
     let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let first_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
@@ -11937,8 +11939,8 @@ fn new_tab_with_no_attached_client_is_stale() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!("attach one with `koshi attach {session_id}`")),
         }
     );
     assert!(fake_pty_backend.list_spawned_pane_ids().is_empty());
@@ -13369,7 +13371,7 @@ fn focus_tab_external_source_with_two_clients_is_ambiguous() {
 }
 
 #[test]
-fn focus_tab_with_no_attached_client_is_stale() {
+fn focus_tab_with_no_attached_client_is_refused_as_no_client_attached() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let first_tab_id = TabId::new();
     let first_pane_id = PaneId::new();
@@ -13394,8 +13396,8 @@ fn focus_tab_with_no_attached_client_is_stale() {
         runtime.dispatch(command_envelope),
         CommandResult::Rejected {
             command_id,
-            reason: RejectReason::SourceClientStale,
-            help: Some("no client is attached to the session".to_string()),
+            reason: RejectReason::NoClientAttached,
+            help: Some(format!("attach one with `koshi attach {session_id}`")),
         }
     );
 }
@@ -18816,7 +18818,7 @@ fn no_flag_with_one_client_takes_that_client() {
 }
 
 #[test]
-fn no_flag_with_no_client_is_a_stale_source() {
+fn no_flag_with_no_client_is_no_client_attached() {
     let (runtime, session_id, _tab_id, _pane_id) = build_acting_client_fixture();
 
     // Nobody is attached, so there is no view to flip at all.
@@ -18826,7 +18828,11 @@ fn no_flag_with_no_client_is_a_stale_source() {
         .err()
         .expect("no attached client is no target");
 
-    assert_eq!(rejection.reason, RejectReason::SourceClientStale);
+    assert_eq!(rejection.reason, RejectReason::NoClientAttached);
+    assert_eq!(
+        rejection.help,
+        Some(format!("attach one with `koshi attach {session_id}`"))
+    );
 }
 
 /// Two clients share one tab, and `--client` names the second client. The

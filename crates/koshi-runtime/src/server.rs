@@ -445,9 +445,8 @@ impl Server {
     /// naming its id and presenting its resume token leaves that set, and
     /// whoever is left is detached when the grace window closes. The body's
     /// saved-view store becomes this server's: the views filed before the swap
-    /// and the hash minted for each carried client. A carried client with no
-    /// hash in it, as every client of a body converted from format 4 or older,
-    /// is not handed back by its id and waits for the grace window.
+    /// and the hash minted for each carried client. A body converted from
+    /// format 4 or older carries no client.
     ///
     /// After the panes are matched, every viewed tab of every carried session resizes each live
     /// PTY to the size its solve gives, and so does every floating pane: a pane whose size did
@@ -488,8 +487,7 @@ impl Server {
         }
         let mut resume_events = server.update_every_session_pane_sizing();
         // A quit applied before the swap comes back with its kind. The serve
-        // loop leaves it alone while any carried client is still expected, so
-        // the clients that were told to come back are the ones it ends for.
+        // loop ends the session once no carried client is awaited.
         if let Some(carried_quit) = body.carried_quit {
             server.is_quit_requested = true;
             server.should_shutdown_immediately = carried_quit == CarriedQuit::Immediate;

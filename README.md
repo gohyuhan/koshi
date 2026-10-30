@@ -590,7 +590,8 @@ floating panes, while the session still holds the client's record and its tab.
 The session holds the record of a client that has not come back until 60 seconds
 after it restarts. While `koshi update` or `koshi restart-servers` holds
 `update.lock`, the 60 seconds start when that command releases the lock. A
-client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. A client from
+client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. The restarted
+session holds no record of a client from koshi 0.5.0 or older. A client from
 koshi 0.5.0-pr.1 or earlier, and a client of a session on another machine,
 prints the attach command instead: start the installed build and run
 `koshi attach workspace` to reattach to a session named `workspace`.

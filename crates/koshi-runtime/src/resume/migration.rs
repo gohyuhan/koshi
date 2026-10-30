@@ -478,8 +478,8 @@ pub(super) fn migrate_resume_body(
             ),
         }
     }
-    // A body read from formats 1 through 4 comes back with an empty saved-view
-    // store and no child left running.
+    // A body read from formats 1 through 4 comes back with no client in any
+    // session, an empty saved-view store and no child left running.
     Ok(ResumeBody {
         session_by_id,
         carried_pane_state_by_pane_id,
@@ -493,20 +493,34 @@ pub(super) fn migrate_resume_body(
 /// `raw_session`, stored under `session_key`, and hand back the migrated
 /// session as JSON bytes in the current [`Session`] shape.
 ///
+/// Replaces the session's `clients` with `{"client_by_id":{}}` before the
+/// first step: the migrated session holds no client.
+///
 /// # Errors
-/// Returns an invalid-resume error when the session JSON cannot be read or a
-/// step cannot convert it.
+/// Returns an invalid-resume error when the session JSON cannot be read, is
+/// not an object, or a step cannot convert it.
 fn migrate_previous_session_json(
     source_resume_format: u32,
     session_key: &str,
     raw_session: &RawValue,
 ) -> Result<Vec<u8>, StorageError> {
     let mut opaque_byte_arrays = Vec::new();
-    let session_json =
-        parse_json_fragment(raw_session.get(), &mut opaque_byte_arrays).map_err(|parse_error| {
+    let mut session_json = parse_json_fragment(raw_session.get(), &mut opaque_byte_arrays)
+        .map_err(|parse_error| {
             build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
         })?;
     let body_field_names = get_resume_body_field_names(source_resume_format);
+    get_json_object(
+        &mut session_json,
+        &format!(
+            "body.{}.{session_key}",
+            body_field_names.sessions_field_name
+        ),
+    )?
+    .insert(
+        "clients".to_string(),
+        serde_json::json!({"client_by_id": {}}),
+    );
     let mut single_session_by_id = Map::new();
     single_session_by_id.insert(session_key.to_string(), session_json);
     let mut body_fields = Map::new();
@@ -681,13 +695,14 @@ fn write_migrated_json(
 }
 
 /// Runs the steps from `source_resume_format` up to [`RESUME_FORMAT`] on
-/// `resume_body`, in order. Step 1 converts format 1 to format 2. Step 2 adds
-/// the format-3 fields. Step 3 converts format 3 to format 4. Step 4 adds the
-/// format-5 floating fields, each session's notification queue and each
-/// tab's `solved_tab_size`, and removes each pane record's `lifecycle` and
-/// `close_policy`. A body saved at format 3 also
-/// gets the step-2 fields before step 3. Steps 2 and 4 add only the fields
-/// that are missing.
+/// `resume_body`, in order. Step 1 changes nothing: formats 1 and 2 differ
+/// only in their client records, which [`migrate_previous_session_json`]
+/// replaces. Step 2 adds the format-3 fields. Step 3 converts format 3 to
+/// format 4. Step 4 adds the format-5 floating fields, each session's
+/// notification queue and each tab's `solved_tab_size`, and removes each pane
+/// record's `lifecycle` and `close_policy`. A body saved at format 3 also gets
+/// the step-2 fields before step 3. Steps 2 and 4 add only the fields that are
+/// missing.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a step cannot convert `resume_body`.
@@ -697,7 +712,7 @@ fn apply_resume_migrations(
 ) -> Result<(), StorageError> {
     for migration_format in source_resume_format..RESUME_FORMAT {
         match migration_format {
-            1 => migrate_resume_one_to_two(resume_body)?,
+            1 => {}
             2 => migrate_resume_to_format_three_shape(resume_body)?,
             3 => {
                 if source_resume_format == 3 {
@@ -714,28 +729,6 @@ fn apply_resume_migrations(
         }
     }
     Ok(())
-}
-
-fn migrate_resume_one_to_two(resume_body: &mut Value) -> Result<(), StorageError> {
-    let sessions =
-        get_required_json_field(get_json_object(resume_body, "body")?, "sessions", "body")?;
-    migrate_json_object_members(sessions, "body.sessions", |session, session_path| {
-        let clients = get_required_json_field(
-            get_json_object(session, session_path)?,
-            "clients",
-            session_path,
-        )?;
-        let client_records_by_id =
-            get_required_json_field(get_json_object(clients, "clients")?, "records", "clients")?;
-        migrate_json_object_members(
-            client_records_by_id,
-            "clients.records",
-            |client, client_path| {
-                get_json_object(client, client_path)?.remove("tier");
-                Ok(())
-            },
-        )
-    })
 }
 
 /// The 16 VT340 Sixel register colors a format-3 terminal starts with, as RGB
@@ -1025,9 +1018,6 @@ fn migrate_session(session: &mut Value, json_path: &str) -> Result<(), StorageEr
             ("start_locked", "should_start_locked"),
         ],
     );
-    json_fields
-        .entry("placement_revision")
-        .or_insert(Value::from(0));
     let tabs = get_required_json_field(json_fields, "tabs", json_path)?;
     migrate_json_object_members(tabs, "session.tabs", migrate_tab)?;
     let panes = get_required_json_field(json_fields, "panes", json_path)?;
@@ -1039,16 +1029,6 @@ fn migrate_session(session: &mut Value, json_path: &str) -> Result<(), StorageEr
         pane_records_by_id,
         "session.panes.pane_record_by_id",
         migrate_pane,
-    )?;
-    let clients = get_required_json_field(json_fields, "clients", json_path)?;
-    let client_registry = get_json_object(clients, "session.clients")?;
-    rename_json_field(client_registry, "records", "client_by_id");
-    let client_records_by_id =
-        get_required_json_field(client_registry, "client_by_id", "session.clients")?;
-    migrate_json_object_members(
-        client_records_by_id,
-        "session.clients.client_by_id",
-        migrate_client,
     )?;
     Ok(())
 }
@@ -1121,78 +1101,13 @@ fn migrate_pane(pane: &mut Value, json_path: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageError> {
-    let json_fields = get_json_object(client, json_path)?;
-    rename_json_fields(
-        json_fields,
-        &[
-            ("id", "client_id"),
-            ("viewport", "viewport_size"),
-            ("active_tab", "active_tab_id"),
-            ("colour", "color_index"),
-            ("focus_by_tab", "focused_pane_id_by_tab_id"),
-            ("mouse_select", "is_mouse_selection_enabled"),
-            ("scroll_by_pane", "scroll_offset_by_pane_id"),
-            ("selection_by_pane", "selection_by_pane_id"),
-            ("zoom_by_tab", "zoomed_pane_id_by_tab_id"),
-        ],
-    );
-    json_fields.entry("cell_size").or_insert(Value::Null);
-    json_fields.entry("pane_area").or_insert(Value::Null);
-    json_fields
-        .entry("placement_revision")
-        .or_insert(Value::from(0));
-    if let Some(cell_size) = json_fields
-        .get_mut("cell_size")
-        .filter(|cell_size| !cell_size.is_null())
-    {
-        migrate_pixel_cell_size(cell_size)?;
-    }
-    migrate_size(get_required_json_field(
-        json_fields,
-        "viewport_size",
-        json_path,
-    )?)?;
-    if let Some(pane_area) = json_fields
-        .get_mut("pane_area")
-        .filter(|pane_area| !pane_area.is_null())
-    {
-        migrate_pane_area(pane_area)?;
-    }
-    let selections = get_required_json_field(json_fields, "selection_by_pane_id", json_path)?;
-    migrate_json_object_members(
-        selections,
-        "client.selection_by_pane_id",
-        |selection, selection_path| {
-            let selection_fields = get_json_object(selection, selection_path)?;
-            rename_json_field(selection_fields, "kind", "selection_kind");
-            for coordinate_name in ["anchor", "cursor"] {
-                rename_json_fields(
-                    get_json_object(
-                        get_required_json_field(selection_fields, coordinate_name, selection_path)?,
-                        coordinate_name,
-                    )?,
-                    &[("row", "row_index"), ("col", "column_index")],
-                );
-            }
-            Ok(())
-        },
-    )
-}
-
 /// Adds the format-5 fields that `resume_body` lacks: `floating_set`
 /// `{"members":[]}`, `starting_tab_id` `null`, and `notification_queue`, a
 /// queue in a new epoch owned by the session's `session_id`, on each
-/// session, `solved_tab_size`
-/// `{"column_count":0,"row_count":0}` on each of its tabs, and
-/// `floating_pane_view_by_pane_id` `{}`, `shown_floating_pane_ids` `[]` and
-/// `focused_floating_pane_id` `null` on each of its clients. A field that is
-/// present keeps its value. Replaces each client's
-/// `focused_pane_id_by_tab_id` with `focus_history_by_tab_id`, the same tabs
-/// each with a one-pane history: `{"t":"p"}` becomes `{"t":["p"]}`. Removes
-/// `lifecycle` and `close_policy` from each record in a session's
-/// `panes.pane_record_by_id`, and `placement_revision` from each session and
-/// each of its clients.
+/// session, and `solved_tab_size` `{"column_count":0,"row_count":0}` on each
+/// of its tabs. A field that is present keeps its value. Removes `lifecycle`
+/// and `close_policy` from each record in a session's
+/// `panes.pane_record_by_id`, and `placement_revision` from each session.
 ///
 /// Removes `is_recovery_notice_visible` from each session. The queue this step
 /// adds to a session whose `is_recovery_notice_visible` is `true` holds one
@@ -1201,12 +1116,11 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
 ///
 /// # Errors
 /// Returns an invalid-resume error when `body.session_by_id`, a session's
-/// `tabs`, `clients`, `clients.client_by_id`, `panes`,
-/// `panes.pane_record_by_id` or a client's `focused_pane_id_by_tab_id` is
-/// missing, or when the body, a value on that path, a tab, a client or a pane
-/// record is not an object. Also when a session's `is_recovery_notice_visible`
-/// is not a boolean, or when a session that lacks `notification_queue` has no
-/// `session_id`, or one that is not a session id.
+/// `tabs`, `panes` or `panes.pane_record_by_id` is missing, or when the body,
+/// a value on that path, a tab or a pane record is not an object. Also when a
+/// session's `is_recovery_notice_visible` is not a boolean, or when a session
+/// that lacks `notification_queue` has no `session_id`, or one that is not a
+/// session id.
 fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageError> {
     let sessions = get_required_json_field(
         get_json_object(resume_body, "body")?,
@@ -1238,49 +1152,6 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
                 .or_insert(serde_json::json!({"column_count": 0, "row_count": 0}));
             Ok(())
         })?;
-        let clients = get_required_json_field(session_fields, "clients", session_path)?;
-        let client_by_id = get_required_json_field(
-            get_json_object(clients, "session.clients")?,
-            "client_by_id",
-            "session.clients",
-        )?;
-        migrate_json_object_members(
-            client_by_id,
-            "session.clients.client_by_id",
-            |client, client_path| {
-                let client_fields = get_json_object(client, client_path)?;
-                client_fields
-                    .entry("floating_pane_view_by_pane_id")
-                    .or_insert(Value::Object(Map::new()));
-                client_fields
-                    .entry("shown_floating_pane_ids")
-                    .or_insert(Value::Array(Vec::new()));
-                client_fields
-                    .entry("focused_floating_pane_id")
-                    .or_insert(Value::Null);
-                client_fields.remove("placement_revision");
-                let focused_pane_ids = get_json_object(
-                    get_required_json_field(
-                        client_fields,
-                        "focused_pane_id_by_tab_id",
-                        client_path,
-                    )?,
-                    "client.focused_pane_id_by_tab_id",
-                )?;
-                let focus_history_by_tab_id: Map<String, Value> = std::mem::take(focused_pane_ids)
-                    .into_iter()
-                    .map(|(tab_key, focused_pane_id)| {
-                        (tab_key, Value::Array(vec![focused_pane_id]))
-                    })
-                    .collect();
-                client_fields.remove("focused_pane_id_by_tab_id");
-                client_fields.insert(
-                    "focus_history_by_tab_id".to_owned(),
-                    Value::Object(focus_history_by_tab_id),
-                );
-                Ok(())
-            },
-        )?;
         let panes = get_required_json_field(session_fields, "panes", session_path)?;
         let pane_record_by_id = get_required_json_field(
             get_json_object(panes, "session.panes")?,
@@ -1340,23 +1211,6 @@ fn migrate_pixel_cell_size(cell_size: &mut Value) -> Result<(), StorageError> {
         &[("width", "pixel_width"), ("height", "pixel_height")],
     );
     Ok(())
-}
-
-fn migrate_pane_area(pane_area: &mut Value) -> Result<(), StorageError> {
-    if pane_area == "Starving" {
-        return Ok(());
-    }
-    let pane_area_variants = get_json_object(pane_area, "client.pane_area")?;
-    if pane_area_variants.len() != 1 || !pane_area_variants.contains_key("Reported") {
-        return Err(build_invalid_resume_error(
-            "client.pane_area must be Reported or Starving",
-        ));
-    }
-    migrate_size(get_required_json_field(
-        pane_area_variants,
-        "Reported",
-        "client.pane_area",
-    )?)
 }
 
 fn migrate_terminal_state(terminal_state: &mut Value, json_path: &str) -> Result<(), StorageError> {
