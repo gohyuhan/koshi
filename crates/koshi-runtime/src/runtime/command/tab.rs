@@ -13,10 +13,9 @@ impl Server {
     ///
     /// Rejects with [`RejectReason::TargetNotFound`] when the command source names no
     /// live session or the tab is gone; [`RejectReason::TargetGone`] when the
-    /// issuing pane is gone; [`RejectReason::SourceClientStale`] when the
-    /// command source's client is no longer attached;
-    /// [`RejectReason::TargetAmbiguous`] when several clients
-    /// are attached and none is named.
+    /// issuing pane is gone; [`RejectReason::NoClientAttached`] when no client
+    /// is attached to the session; [`RejectReason::TargetAmbiguous`] when
+    /// several clients are attached and none is named.
     fn resolve_acting_tab_session(
         &mut self,
         requested_tab_id: Option<TabId>,

@@ -3,12 +3,12 @@
 //! drain leaves behind, a sequence the swap cut in half finishing in the next
 //! image, what the header still yields when the body cannot be read, what a
 //! body format this build does not know is answered with, what a body written
-//! in the older client format reads back as, what a carried pane's size, exit
+//! in an older format reads back as, what a carried pane's size, exit
 //! status and applied quit read back as, what the saved views and
 //! resume-token hashes the body carries read back as, and what a write over an
 //! existing file and a write into a directory that is not there each do.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
@@ -61,7 +61,7 @@ fn read_released_resume_fixture(fixture_bytes: &[u8]) -> (ResumeHeader, ResumeBo
 }
 
 #[test]
-fn migrate_format_two_restores_tabs_clients_selection_and_screens() {
+fn migrate_format_two_restores_tabs_and_screens_with_no_client() {
     let (resume_header, resume_body) =
         read_released_resume_fixture(include_bytes!("fixtures/format_two.json"));
     assert_eq!(resume_header.resume_format, 2);
@@ -72,35 +72,9 @@ fn migrate_format_two_restores_tabs_clients_selection_and_screens() {
     let session = &resumed_server.session_by_id[&resume_header.session_id];
     assert_eq!(session.tabs.len(), 2);
     assert_eq!(session.panes.count_pane_records(), 4);
-    assert_eq!(session.clients.count_clients(), 2);
+    assert_eq!(session.clients.count_clients(), 0);
+    assert!(!resumed_server.is_awaiting_client());
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
-    let session_json = serde_json::to_value(session).expect("serialize migrated session");
-    let client_records = session_json["clients"]["client_by_id"]
-        .as_object()
-        .expect("client records");
-    let selected_client = client_records
-        .values()
-        .find(|client| {
-            client["selection_by_pane_id"]
-                .as_object()
-                .is_some_and(|selections| !selections.is_empty())
-        })
-        .expect("selected client is restored");
-    let selection = selected_client["selection_by_pane_id"]
-        .as_object()
-        .expect("selection map")
-        .values()
-        .next()
-        .expect("selection");
-    assert_eq!(selection["selection_kind"], "Word");
-    assert_eq!(
-        selection["anchor"],
-        serde_json::json!({"row_index": 3, "column_index": 4})
-    );
-    assert_eq!(
-        selection["cursor"],
-        serde_json::json!({"row_index": 3, "column_index": 9})
-    );
     let first_pane_id = resume_header.carried_panes[0].pane_id;
     assert_eq!(
         get_joined_screen_text(
@@ -111,7 +85,7 @@ fn migrate_format_two_restores_tabs_clients_selection_and_screens() {
 }
 
 #[test]
-fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_client_views() {
+fn migrate_format_four_restores_the_session_with_no_floating_panes_and_no_client() {
     let (resume_header, resume_body) =
         read_released_resume_fixture(include_bytes!("fixtures/format_four.json"));
     assert_eq!(resume_header.resume_format, 4);
@@ -127,7 +101,8 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     let session = &resumed_server.session_by_id[&resume_header.session_id];
     assert_eq!(session.tabs.len(), 2);
     assert_eq!(session.panes.count_pane_records(), 4);
-    assert_eq!(session.clients.count_clients(), 2);
+    assert_eq!(session.clients.count_clients(), 0);
+    assert!(!resumed_server.is_awaiting_client());
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
     assert_eq!(session.validate_session_consistency(), Ok(()));
     assert_eq!(session.starting_tab_id, None);
@@ -137,43 +112,99 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_cli
     );
     assert_eq!(session.notification_queue.get_revision(), 0);
     assert_eq!(session.notification_queue.list_queued_entries().count(), 0);
-    assert_eq!(
-        session
-            .clients
-            .list_attached_clients()
-            .map(Client::get_label)
-            .collect::<BTreeSet<&str>>(),
-        BTreeSet::from(["C-silver-marble", "C-自在-月亮"])
-    );
     let session_json = serde_json::to_value(session).expect("serialize migrated session");
     assert_eq!(
         session_json["floating_set"],
         serde_json::json!({"members": []})
     );
-    let client_records = session_json["clients"]["client_by_id"]
-        .as_object()
-        .expect("client records");
-    assert_eq!(client_records.len(), 2);
-    for client_record in client_records.values() {
-        assert_eq!(
-            client_record["floating_pane_view_by_pane_id"],
-            serde_json::json!({})
-        );
-        assert_eq!(
-            client_record["shown_floating_pane_ids"],
-            serde_json::json!([])
-        );
-        assert_eq!(
-            client_record["focused_floating_pane_id"],
-            serde_json::Value::Null
-        );
-    }
     let first_pane_id = resume_header.carried_panes[0].pane_id;
     assert_eq!(
         get_joined_screen_text(
             resumed_server.terminal_engine_by_pane_id[&first_pane_id].get_terminal_state()
         ),
         "pane 0 output"
+    );
+}
+
+#[test]
+fn migrate_format_four_with_a_carried_quit_holds_the_quit_and_awaits_no_client() {
+    let (resume_header, resume_body) = read_edited_format_four_fixture(|fixture_json| {
+        fixture_json["raw_body"]["carried_quit"] = serde_json::json!("Graceful");
+    });
+    assert_eq!(resume_body.carried_quit, Some(CarriedQuit::Graceful));
+
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+
+    assert!(resumed_server.is_quit_requested());
+    assert!(!resumed_server.should_shutdown_immediately);
+    assert!(!resumed_server.is_awaiting_client());
+}
+
+#[test]
+fn migrate_format_four_then_an_attach_with_no_token_is_the_client_an_external_new_tab_acts_through()
+{
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(include_bytes!("fixtures/format_four.json"));
+    let session_id = resume_header.session_id;
+    let (mut resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let carried_tab_ids: Vec<TabId> = resumed_server.session_by_id[&session_id]
+        .tabs
+        .keys()
+        .copied()
+        .collect();
+
+    let attachment = resumed_server
+        .handle_ipc_attach(
+            None,
+            None,
+            FIRST_CLIENT_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            false,
+            60,
+            None,
+        )
+        .expect("the resumed session accepts the attach");
+    let command_envelope = CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_external_cli(Some(session_id), None),
+        Command::NewTab(NewTabArgs::default()),
+    );
+    let command_id = command_envelope.command_id;
+    let command_result = resumed_server.submit_command(command_envelope);
+
+    let CommandResult::Ok {
+        command_id: applied_command_id,
+        ..
+    } = command_result
+    else {
+        panic!("the new tab must be applied, got {command_result:?}");
+    };
+    assert_eq!(applied_command_id, command_id);
+    let session = &resumed_server.session_by_id[&session_id];
+    assert_eq!(
+        session
+            .clients
+            .list_attached_clients()
+            .map(Client::get_client_id)
+            .collect::<Vec<ClientId>>(),
+        vec![attachment.client_id]
+    );
+    let new_tab_ids: Vec<TabId> = session
+        .tabs
+        .keys()
+        .copied()
+        .filter(|tab_id| !carried_tab_ids.contains(tab_id))
+        .collect();
+    assert_eq!(new_tab_ids.len(), 1);
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(attachment.client_id)
+            .expect("the attached client")
+            .get_active_tab_id(),
+        new_tab_ids[0]
     );
 }
 
@@ -242,12 +273,12 @@ fn list_root_resize_deltas(layout_tree: &LayoutNode) -> Vec<i32> {
 
 #[test]
 fn migrate_format_four_keeps_the_pane_sizes_beside_a_preferred_size() {
-    // The first tab splits pane 4 beside a pair, and a 22x9 client views it.
-    // With pane 4 aiming for 6 columns and resize deltas `+3` and `-3`, the
-    // format-4 solve gave 6 and 16 of 22 columns: 4 and 14 inside the
-    // borders, as the header carries them. The deltas are rewritten to `0` and
-    // `0`, and the panes keep 6 and 16 columns. Left as `+3` and `-3`, the
-    // solve would give 9 and 13.
+    // The first tab splits pane 4 beside a pair, 22 columns wide. With pane 4
+    // aiming for 6 columns and resize deltas `+3` and `-3`, the format-4 solve
+    // gave 6 and 16 of 22 columns: 4 and 14 inside the borders, as the header
+    // carries them. The deltas are rewritten to `0` and `0`, and the panes
+    // keep 6 and 16 columns. Left as `+3` and `-3`, the solve would give 9 and
+    // 13.
     let (resume_header, resume_body) = read_edited_format_four_fixture(|fixture_json| {
         let root_weights = &mut fixture_json["raw_body"]["session_by_id"][FORMAT_FOUR_SESSION_KEY]
             ["tabs"][FORMAT_FOUR_FIRST_TAB_KEY]["layout"]["Split"]["weights"];
@@ -263,13 +294,21 @@ fn migrate_format_four_keeps_the_pane_sizes_beside_a_preferred_size() {
 
     let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
 
-    let first_tab = &resumed_server.session_by_id[&resume_header.session_id].tabs
-        [&get_format_four_first_tab_id()];
-    assert_eq!(list_root_resize_deltas(first_tab.get_layout_tree()), [0, 0]);
+    let first_layout_tree = resumed_server.session_by_id[&resume_header.session_id].tabs
+        [&get_format_four_first_tab_id()]
+        .get_layout_tree();
+    assert_eq!(list_root_resize_deltas(first_layout_tree), [0, 0]);
+    let layout_solve = solve_layout_with_sizing(
+        first_layout_tree,
+        Rect::from_size_at_origin(Size {
+            column_count: 22,
+            row_count: 9,
+        }),
+        resumed_server.get_pane_sizing(),
+    );
     let first_pane_id = resume_header.carried_panes[0].pane_id;
     assert_eq!(
-        first_tab
-            .get_layout_solve()
+        layout_solve
             .find_pane_rect(first_pane_id)
             .expect("pane 4 is solved")
             .size
@@ -372,7 +411,7 @@ fn migrate_format_four_keeps_other_panes_when_one_pane_state_is_unreadable() {
 }
 
 #[test]
-fn migrate_format_three_without_image_fields_restores_running_panes() {
+fn migrate_format_three_without_image_fields_restores_running_panes_and_no_client() {
     let mut fixture_json: serde_json::Value =
         serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
             .expect("parse format-three fixture");
@@ -427,12 +466,10 @@ fn migrate_format_three_without_image_fields_restores_running_panes() {
     let first_pane_id = resume_header.carried_panes[0].pane_id;
     let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
-    assert_eq!(
-        resumed_server.session_by_id[&resume_header.session_id]
-            .panes
-            .count_pane_records(),
-        4
-    );
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    assert_eq!(session.panes.count_pane_records(), 4);
+    assert_eq!(session.clients.count_clients(), 0);
+    assert!(!resumed_server.is_awaiting_client());
     assert_eq!(
         get_joined_screen_text(
             resumed_server.terminal_engine_by_pane_id[&first_pane_id].get_terminal_state()
@@ -442,7 +479,7 @@ fn migrate_format_three_without_image_fields_restores_running_panes() {
 }
 
 #[test]
-fn migrate_format_one_and_two_restores_clients_reported_directory_and_saved_cursor() {
+fn migrate_format_one_and_two_restores_reported_directory_and_saved_cursor_with_no_client() {
     for released_resume_format in [1, 2] {
         let mut released_fixture: serde_json::Value =
             serde_json::from_slice(include_bytes!("fixtures/format_two.json"))
@@ -466,21 +503,6 @@ fn migrate_format_one_and_two_restores_clients_reported_directory_and_saved_curs
             "pending_wrap": false,
             "render": saved_render
         });
-        if released_resume_format == 1 {
-            let released_session = released_fixture["body"]["sessions"]
-                .as_object_mut()
-                .expect("released sessions")
-                .values_mut()
-                .next()
-                .expect("released session");
-            for released_client in released_session["clients"]["records"]
-                .as_object_mut()
-                .expect("released clients")
-                .values_mut()
-            {
-                released_client["tier"] = serde_json::json!("Admin");
-            }
-        }
         let fixture_bytes =
             serde_json::to_vec(&released_fixture).expect("encode released resume fixture");
 
@@ -493,7 +515,7 @@ fn migrate_format_one_and_two_restores_clients_reported_directory_and_saved_curs
             resumed_server.session_by_id[&resume_header.session_id]
                 .clients
                 .count_clients(),
-            2
+            0
         );
         assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
         let terminal_state =
@@ -691,24 +713,10 @@ fn migrate_format_three_restores_saved_cursor_and_screen() {
 }
 
 #[test]
-fn migrate_format_three_restores_client_and_pane_pixel_cell_size() {
+fn migrate_format_three_restores_pane_pixel_cell_size() {
     let (mut fixture_json, first_pane_key, pane_id) = parse_format_three_fixture_with_first_pane();
     let released_terminal_state = &mut fixture_json["body"]["engines"][&first_pane_key];
     released_terminal_state["cell_size"] = serde_json::json!({"width": 10, "height": 20});
-    let released_sessions = fixture_json["body"]["sessions"]
-        .as_object_mut()
-        .expect("released sessions");
-    let released_session = released_sessions
-        .values_mut()
-        .next()
-        .expect("released session");
-    let released_clients = released_session["clients"]["records"]
-        .as_object_mut()
-        .expect("released clients");
-    let (client_key, released_client) =
-        released_clients.iter_mut().next().expect("released client");
-    let client_key = client_key.clone();
-    released_client["cell_size"] = serde_json::json!({"width": 10, "height": 20});
     let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode released resume fixture");
 
     let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
@@ -718,13 +726,6 @@ fn migrate_format_three_restores_client_and_pane_pixel_cell_size() {
     assert_eq!(
         terminal_state.get_cell_size(),
         PixelCellSize::from_pixel_dimensions(10, 20)
-    );
-    let session_json =
-        serde_json::to_value(&resumed_server.session_by_id[&resume_header.session_id])
-            .expect("serialize restored session");
-    assert_eq!(
-        session_json["clients"]["client_by_id"][&client_key]["cell_size"],
-        serde_json::json!({"pixel_width": 10, "pixel_height": 20})
     );
 }
 
@@ -947,40 +948,6 @@ fn migrate_format_three_discards_both_screens_with_the_same_pane_id() {
     assert!(!resume_body
         .carried_pane_state_by_pane_id
         .contains_key(&repeated_pane_id));
-}
-
-#[test]
-fn migrate_format_three_preserves_reported_and_starving_pane_areas() {
-    let mut fixture_json: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
-            .expect("format three fixture is JSON");
-    let sessions = fixture_json["body"]["sessions"]
-        .as_object_mut()
-        .expect("saved sessions");
-    let session = sessions.values_mut().next().expect("saved session");
-    let clients = session["clients"]["records"]
-        .as_object_mut()
-        .expect("saved clients");
-    let mut client_keys: Vec<String> = clients.keys().cloned().collect();
-    client_keys.sort();
-    assert_eq!(client_keys.len(), 2);
-    clients[&client_keys[0]]["pane_area"] =
-        serde_json::json!({"Reported": {"cols": 78, "rows": 20}});
-    clients[&client_keys[1]]["pane_area"] = serde_json::json!("Starving");
-
-    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved clients");
-    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
-    let session_json = serde_json::to_value(&resume_body.session_by_id[&resume_header.session_id])
-        .expect("serialize restored session");
-    let restored_clients = &session_json["clients"]["client_by_id"];
-    assert_eq!(
-        restored_clients[&client_keys[0]]["pane_area"],
-        serde_json::json!({"Reported": {"column_count": 78, "row_count": 20}})
-    );
-    assert_eq!(
-        restored_clients[&client_keys[1]]["pane_area"],
-        serde_json::json!("Starving")
-    );
 }
 
 #[test]

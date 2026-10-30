@@ -810,8 +810,12 @@ fn reject_reason_diagnostics_are_human() {
         (RejectReason::Unauthorized, "command not permitted"),
         (RejectReason::InvalidState, "invalid in the current state"),
         (RejectReason::MinimumSize, "below minimum size"),
+        (
+            RejectReason::NoClientAttached,
+            "no client is attached to the session",
+        ),
     ];
-    assert_eq!(reject_reason_cases.len(), 7);
+    assert_eq!(reject_reason_cases.len(), 8);
     for (reject_reason, expected_reject_reason_text) in &reject_reason_cases {
         assert_eq!(&reject_reason.to_string(), expected_reject_reason_text);
     }

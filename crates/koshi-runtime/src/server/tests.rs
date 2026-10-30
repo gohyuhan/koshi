@@ -3116,9 +3116,8 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
 
 #[test]
 fn after_a_swap_a_carried_client_with_no_token_hash_is_not_handed_back_by_its_id() {
-    // The booted client's attach minted no token, the same as every client of
-    // a body converted from format 4 or older. Its record waits for the grace
-    // window.
+    // The booted client's attach minted no token. Its record waits for the
+    // grace window.
     let (mut server, client_id) = boot_server();
     let pty_size_by_pane_id = server.pty_size_by_pane_id.clone();
     let (_header, body) = server.carry_out(&[]).expect("a session to carry");

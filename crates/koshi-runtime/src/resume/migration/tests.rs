@@ -576,6 +576,31 @@ fn migrate_resume_body_reads_each_format_by_its_own_field_names() {
 }
 
 #[test]
+fn migrate_resume_body_refuses_a_session_that_is_not_an_object() {
+    for (source_resume_format, resume_body, expected_detail) in [
+        (
+            3,
+            r#"{"sessions":{"S":7},"engines":{}}"#,
+            "body.sessions.S must be an object",
+        ),
+        (
+            4,
+            r#"{"session_by_id":{"S":7},"carried_pane_state_by_pane_id":{}}"#,
+            "body.session_by_id.S must be an object",
+        ),
+    ] {
+        match migrate_resume_body(source_resume_format, resume_body) {
+            Err(StorageError::Corrupt { detail }) => {
+                assert_eq!(detail, expected_detail, "{resume_body}");
+            }
+            unexpected_result => {
+                panic!("expected a corrupt body for {resume_body}, got {unexpected_result:?}")
+            }
+        }
+    }
+}
+
+#[test]
 fn migrate_resume_body_reads_a_format_four_carried_quit() {
     let migrated_body = migrate_resume_body(
         4,
@@ -659,14 +684,7 @@ fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
                         "solved_tab_size": {"column_count": 80, "row_count": 22}
                     }
                 },
-                "clients": {"client_by_id": {
-                    "fresh": {"label": "C-fresh", "focused_pane_id_by_tab_id": {}},
-                    "kept": {
-                        "label": "C-kept",
-                        "focused_pane_id_by_tab_id": {},
-                        "shown_floating_pane_ids": ["kept-pane"]
-                    }
-                }},
+                "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {}}
             },
             "second": {
@@ -703,22 +721,7 @@ fn step_four_adds_every_missing_format_five_field_and_keeps_the_ones_present() {
                             "solved_tab_size": {"column_count": 80, "row_count": 22}
                         }
                     },
-                    "clients": {"client_by_id": {
-                        "fresh": {
-                            "label": "C-fresh",
-                            "focus_history_by_tab_id": {},
-                            "floating_pane_view_by_pane_id": {},
-                            "shown_floating_pane_ids": [],
-                            "focused_floating_pane_id": null
-                        },
-                        "kept": {
-                            "label": "C-kept",
-                            "focus_history_by_tab_id": {},
-                            "floating_pane_view_by_pane_id": {},
-                            "shown_floating_pane_ids": ["kept-pane"],
-                            "focused_floating_pane_id": null
-                        }
-                    }},
+                    "clients": {"client_by_id": {}},
                     "panes": {"pane_record_by_id": {}}
                 },
                 "second": {
@@ -792,48 +795,7 @@ fn step_four_turns_a_shown_recovery_notice_into_one_session_not_restored_error()
 }
 
 #[test]
-fn step_four_turns_each_focused_pane_into_a_one_pane_focus_history() {
-    let mut resume_body = serde_json::json!({
-        "session_by_id": {
-            "first": {
-                "session_id": STEP_FOUR_SESSION_KEY,
-                "floating_set": {"members": []},
-                "tabs": {},
-                "clients": {"client_by_id": {
-                    "client": {
-                        "focused_pane_id_by_tab_id": {
-                            "code-tab": "vim-pane",
-                            "logs-tab": "tail-pane"
-                        },
-                        "floating_pane_view_by_pane_id": {},
-                        "shown_floating_pane_ids": [],
-                        "focused_floating_pane_id": null
-                    }
-                }},
-                "panes": {"pane_record_by_id": {}}
-            }
-        },
-        "carried_pane_state_by_pane_id": {}
-    });
-
-    migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
-
-    assert_eq!(
-        resume_body["session_by_id"]["first"]["clients"]["client_by_id"]["client"],
-        serde_json::json!({
-            "focus_history_by_tab_id": {
-                "code-tab": ["vim-pane"],
-                "logs-tab": ["tail-pane"]
-            },
-            "floating_pane_view_by_pane_id": {},
-            "shown_floating_pane_ids": [],
-            "focused_floating_pane_id": null
-        })
-    );
-}
-
-#[test]
-fn step_four_removes_the_placement_revision_of_each_session_and_client() {
+fn step_four_removes_the_placement_revision_of_each_session() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "first": {
@@ -841,15 +803,7 @@ fn step_four_removes_the_placement_revision_of_each_session_and_client() {
                 "placement_revision": 4,
                 "floating_set": {"members": []},
                 "tabs": {},
-                "clients": {"client_by_id": {
-                    "client": {
-                        "placement_revision": 2,
-                        "focused_pane_id_by_tab_id": {},
-                        "floating_pane_view_by_pane_id": {},
-                        "shown_floating_pane_ids": [],
-                        "focused_floating_pane_id": null
-                    }
-                }},
+                "clients": {"client_by_id": {}},
                 "panes": {"pane_record_by_id": {}}
             }
         },
@@ -868,14 +822,7 @@ fn step_four_removes_the_placement_revision_of_each_session_and_client() {
                     "floating_set": {"members": []},
                     "starting_tab_id": null,
                     "tabs": {},
-                    "clients": {"client_by_id": {
-                        "client": {
-                            "focus_history_by_tab_id": {},
-                            "floating_pane_view_by_pane_id": {},
-                            "shown_floating_pane_ids": [],
-                            "focused_floating_pane_id": null
-                        }
-                    }},
+                    "clients": {"client_by_id": {}},
                     "panes": {"pane_record_by_id": {}}
                 }
             },
@@ -963,33 +910,6 @@ fn step_four_names_the_missing_or_misshapen_field() {
         (
             serde_json::json!({"session_by_id": {"S": {"tabs": {"T": 7}}}}),
             "session.tabs.T must be an object",
-        ),
-        (
-            serde_json::json!({"session_by_id": {"S": {"tabs": {}}}}),
-            "body.session_by_id.S.clients is missing",
-        ),
-        (
-            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": 7}}}),
-            "session.clients must be an object",
-        ),
-        (
-            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {}}}}),
-            "session.clients.client_by_id is missing",
-        ),
-        (
-            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {"client_by_id": {"C": 7}}}}}),
-            "session.clients.client_by_id.C must be an object",
-        ),
-        (
-            serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {"client_by_id": {"C": {}}}}}}),
-            "session.clients.client_by_id.C.focused_pane_id_by_tab_id is missing",
-        ),
-        (
-            serde_json::json!({"session_by_id": {"S": {
-                "tabs": {},
-                "clients": {"client_by_id": {"C": {"focused_pane_id_by_tab_id": 7}}}
-            }}}),
-            "client.focused_pane_id_by_tab_id must be an object",
         ),
         (
             serde_json::json!({"session_by_id": {"S": {"tabs": {}, "clients": {"client_by_id": {}}}}}),

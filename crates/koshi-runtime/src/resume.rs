@@ -150,7 +150,8 @@ pub struct ResumeHeader {
 #[derive(Debug, Serialize)]
 pub struct ResumeBody {
     /// Every session the writing process held, keyed by id. Each one owns its
-    /// tabs, layout trees, pane records and attached clients.
+    /// tabs, layout trees, pane records and attached clients. A session of a
+    /// body converted from format 4 or older holds no client.
     pub session_by_id: HashMap<SessionId, Session>,
     /// Each pane's terminal, keyed by pane id. A pane with no entry comes back
     /// with a blank screen.

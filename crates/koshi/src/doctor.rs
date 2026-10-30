@@ -649,7 +649,9 @@ fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
 /// reason `"the router serves 0.0.0.0:7654 with the certificate fingerprint
 /// sha256:3f6a…"`. A [`DoctorContext::remote_config_mismatch`] makes the row `warn`:
 /// its facts follow the fingerprint, or stand alone while nothing listens, and
-/// the help names the step that makes the router read the file again.
+/// the help names the step that makes the router read the file again. A
+/// running router that gave no remote access status makes the row `warn` with
+/// [`build_unknown_remote_status_outcome`].
 fn check_remote_listener(doctor_context: &DoctorContext) -> DoctorOutcome {
     let remote_access_status = match &doctor_context.router_remote_status {
         RunningRouterRemoteStatus::Answered(remote_access_status) => remote_access_status,
@@ -661,9 +663,7 @@ fn check_remote_listener(doctor_context: &DoctorContext) -> DoctorOutcome {
         RunningRouterRemoteStatus::OlderBuild
         | RunningRouterRemoteStatus::PreviousRelease
         | RunningRouterRemoteStatus::NoAnswer { .. } => {
-            return DoctorOutcome::build_success_outcome(
-                "the running router did not answer, so this is not known".to_string(),
-            )
+            return build_unknown_remote_status_outcome()
         }
     };
     let serving_description = match (
@@ -751,10 +751,18 @@ fn check_remote_connections(doctor_context: &DoctorContext) -> DoctorOutcome {
         ),
         RunningRouterRemoteStatus::OlderBuild
         | RunningRouterRemoteStatus::PreviousRelease
-        | RunningRouterRemoteStatus::NoAnswer { .. } => DoctorOutcome::build_success_outcome(
-            "the running router did not answer, so this is not known".to_string(),
-        ),
+        | RunningRouterRemoteStatus::NoAnswer { .. } => build_unknown_remote_status_outcome(),
     }
+}
+
+/// The `warn` answer of a remote row when the running router gave no remote
+/// access status: the reason `the running router did not answer, so this is
+/// not known`, and help that points at the router row.
+fn build_unknown_remote_status_outcome() -> DoctorOutcome {
+    DoctorOutcome::build_warning_outcome(
+        "the running router did not answer, so this is not known".to_string(),
+        "follow the router row's help, then run: koshi doctor",
+    )
 }
 
 /// What state the runtime directory `runtime_directory` is in, with

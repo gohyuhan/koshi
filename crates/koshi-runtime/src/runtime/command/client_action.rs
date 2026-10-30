@@ -90,7 +90,8 @@ impl WaitingClientAction {
 
 impl Server {
     /// Ask one attached client to run `action_reference`, for a
-    /// [`RuntimeEvent::IpcClientAction`] from `command_source`. The answer for
+    /// [`RuntimeEvent::IpcClientAction`](crate::runtime::event::RuntimeEvent::IpcClientAction)
+    /// from `command_source`. The answer for
     /// `command_id` goes into `response_sender`.
     ///
     /// The checks run in this order, and the first failure is the answer:

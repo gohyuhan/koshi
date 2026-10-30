@@ -1479,7 +1479,7 @@ fn remote_listener_rates_each_state_of_a_router_with_no_mismatch() {
 }
 
 #[test]
-fn remote_listener_reports_no_router_and_an_unanswered_router_without_rating_them() {
+fn remote_listener_is_ok_with_no_router_and_warns_with_an_unanswered_router() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
 
@@ -1504,9 +1504,9 @@ fn remote_listener_reports_no_router_and_an_unanswered_router_without_rating_the
         assert_eq!(
             check_remote_listener(&doctor_context),
             DoctorOutcome {
-                verdict: Verdict::Ok,
+                verdict: Verdict::Warn,
                 reason: "the running router did not answer, so this is not known".to_string(),
-                help: None,
+                help: Some("follow the router row's help, then run: koshi doctor".to_string()),
                 detail: None,
             }
         );
@@ -1562,13 +1562,13 @@ fn remote_connections_is_ok_when_no_router_runs() {
 }
 
 #[test]
-fn remote_connections_reports_not_known_and_never_rates_a_router_that_did_not_answer() {
+fn remote_connections_warns_that_the_count_is_not_known_when_the_router_did_not_answer() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
     let expected_unknown_connection_outcome = DoctorOutcome {
-        verdict: Verdict::Ok,
+        verdict: Verdict::Warn,
         reason: "the running router did not answer, so this is not known".to_string(),
-        help: None,
+        help: Some("follow the router row's help, then run: koshi doctor".to_string()),
         detail: None,
     };
 
@@ -1627,21 +1627,27 @@ fn no_session_or_remote_access_check_ever_fails() {
         }
     }
 
-    for router_remote_status in [
-        RunningRouterRemoteStatus::Answered(build_remote_access_status(3)),
-        RunningRouterRemoteStatus::NotRunning,
-        RunningRouterRemoteStatus::OlderBuild,
-        RunningRouterRemoteStatus::PreviousRelease,
-        RunningRouterRemoteStatus::NoAnswer {
-            error_detail: "connection refused".to_string(),
-            router_process_id: Some(5000),
-        },
+    for (router_remote_status, expected_verdict) in [
+        (
+            RunningRouterRemoteStatus::Answered(build_remote_access_status(3)),
+            Verdict::Ok,
+        ),
+        (RunningRouterRemoteStatus::NotRunning, Verdict::Ok),
+        (RunningRouterRemoteStatus::OlderBuild, Verdict::Warn),
+        (RunningRouterRemoteStatus::PreviousRelease, Verdict::Warn),
+        (
+            RunningRouterRemoteStatus::NoAnswer {
+                error_detail: "connection refused".to_string(),
+                router_process_id: Some(5000),
+            },
+            Verdict::Warn,
+        ),
     ] {
         let mut doctor_context = build_doctor_context(test_directory.path());
         doctor_context.router_remote_status = router_remote_status;
         assert_eq!(
             check_remote_connections(&doctor_context).verdict,
-            Verdict::Ok
+            expected_verdict
         );
     }
 }

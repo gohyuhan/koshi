@@ -168,7 +168,8 @@ floating panes, while the session still holds the client's record and its tab.
 The session holds the record of a client that has not come back until 60 seconds
 after it restarts. While `koshi update` or `koshi restart-servers` holds
 `update.lock`, the 60 seconds start when that command releases the lock. A
-client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. A client from
+client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. The restarted
+session holds no record of a client from koshi 0.5.0 or older. A client from
 koshi 0.5.0-pr.1 or earlier prints the attach command instead. A client of a
 session on another machine prints the refusal, then the attach command. If the
 restarted session refuses a client for another reason, the client prints that
@@ -1679,14 +1680,16 @@ The checks run in this order:
 | `remote listener` | The address the running router read when it started, whether it serves on it, the fingerprint of the certificate it presents, and whether `koshi.kdl` names that address now |
 | `remote connections` | How many open connections the running router holds from another machine |
 
-The `router log file`, `session directory` and `remote connections` rows
-report facts and rate nothing. The `session log file` row reads `warn` when
-`KOSHI` is set and the rest of the pane identity is missing or malformed. The `remote access` row rates one thing: it reads `warn` when the
+The `router log file` and `session directory` rows report facts and rate
+nothing. The `remote connections` row reads `warn` when the running router
+did not answer, and rates nothing else. The `session log file` row reads
+`warn` when `KOSHI` is set and the rest of the pane identity is missing or
+malformed. The `remote access` row rates one thing: it reads `warn` when the
 grants could not be read. A format `1` grant file is counted without changing
 it; the router converts it when it starts. `koshi doctor` starts no koshi and
 creates no directory. The `log directory` row writes one empty file in the log
-directory and removes it again, which is how it reports whether that directory
-can be written.
+directory, removes it again, and reports whether that directory can be
+written.
 
 The `router` row rates whether the running router answers. A router whose
 build has no such question is `warn`, and its help reads `run: koshi
@@ -1694,11 +1697,12 @@ restart-servers`. A router that koshi 0.2.0 to 0.4.0 started is `fail`: `the
 running router runs koshi 0.4.0 or older, which this koshi cannot talk to`,
 and its help reads `run: koshi restart-servers`. Any other router that is
 listening and does not answer is `fail`. In each of these cases the `remote
-listener` and `remote connections` rows read `the running router did not
-answer, so this is not known`.
+listener` and `remote connections` rows are `warn`: `the running router did
+not answer, so this is not known`, and their help reads `follow the router
+row's help, then run: koshi doctor`.
 
-The `remote listener` row rates the remote listener of the router that
-answered. It never reads `fail`. Its reasons:
+The `remote listener` row rates the remote listener of the running router.
+It never reads `fail`. Its reasons:
 
 | Reason | Verdict | Help |
 |---|---|---|
@@ -1707,6 +1711,7 @@ answered. It never reads `fail`. Its reasons:
 | `the router read no remote listen address when it started, so nothing is listening` | `ok` | - |
 | `remote access is on, and nothing is listening on 0.0.0.0:7654: the router could not open it when it started` | `warn` | `run: koshi share open` |
 | `the router serves 0.0.0.0:7654 and names no certificate fingerprint`, from a koshi 0.5.0 router | `warn` | `run: koshi restart-servers` |
+| `the running router did not answer, so this is not known` | `warn` | `follow the router row's help, then run: koshi doctor` |
 
 The fingerprint is the one `koshi share grant` prints in its connect commands,
 so the row reads it again without a new grant. When `koshi.kdl` names another

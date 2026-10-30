@@ -213,6 +213,9 @@ pub struct Surface {
 /// - The `Quit` command is an object with `client_id`, the client that it
 ///   detaches, or `null`. 4 sent a bare `Quit` that ended the session. The
 ///   `KillSession` command exists in 5 only, and ends the session.
+/// - A `reject_reason` may be `NoClientAttached`: the command acts on an
+///   attached client, and no client is attached to the session. 4 has no
+///   such reason.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -347,9 +350,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// writes 5: format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views
 /// detached clients left with the resume-token hashes, and the process IDs of
-/// the children closed panes left running. It turns each client's focused pane
-/// in each tab into a one-pane focus history, and drops each pane record's
-/// lifecycle and close policy. Format 5 layout trees hold resize deltas that
+/// the children closed panes left running. It holds a focus history for each
+/// client in each tab, where format 4 held one focused pane, and drops each
+/// pane record's lifecycle and close policy. A session of format 4 or older
+/// comes back with no client. Format 5 layout trees hold resize deltas that
 /// the solve applies after the `preferred` targets, and formats 1 through 4
 /// hold resize deltas applied before them: a restored body of format 4 or
 /// older has its resize deltas rewritten from the terminal sizes the header
