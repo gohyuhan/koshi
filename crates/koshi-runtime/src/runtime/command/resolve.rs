@@ -76,8 +76,7 @@ impl Server {
     /// never named, which a pane spawned with no designated client sends — and
     /// for an external CLI, the session's sole attached client stands in.
     /// Several attached clients give [`RejectReason::TargetAmbiguous`]. No
-    /// attached client gives [`RejectReason::NoClientAttached`] with the help
-    /// ``attach one with `koshi attach <session id>` ``.
+    /// attached client gives [`RejectReason::NoClientAttached`] with no help.
     ///
     /// On a session whose sole client is `A`, a `koshi lock` issued from a pane
     /// whose own client has since detached resolves to `A`. Attach a second
@@ -109,10 +108,7 @@ impl Server {
                 RejectReason::TargetAmbiguous,
                 "several clients are attached; name the target client",
             )),
-            (None, _) => Err(Rejection::from_reason_and_help(
-                RejectReason::NoClientAttached,
-                &format!("attach one with `koshi attach {}`", session.session_id),
-            )),
+            (None, _) => Err(Rejection::from_reason(RejectReason::NoClientAttached)),
         }
     }
 

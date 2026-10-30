@@ -3364,7 +3364,7 @@ fn quit_from_an_external_cli_with_no_client_attached_is_refused_and_the_session_
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!("attach one with `koshi attach {session_id}`")),
+            help: None,
         }
     );
     assert!(!runtime.is_quit_requested());
@@ -4340,7 +4340,7 @@ fn focus_with_no_attached_client_at_all_is_refused_as_no_client_attached() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!("attach one with `koshi attach {session_id}`")),
+            help: None,
         }
     );
 }
@@ -4627,7 +4627,7 @@ fn in_session_cli_client_scoped_with_no_attached_client_is_refused_as_no_client_
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!("attach one with `koshi attach {session_id}`")),
+            help: None,
         }
     );
 }
@@ -4824,7 +4824,7 @@ fn external_cli_default_pane_with_no_attached_client_is_refused_as_no_client_att
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!("attach one with `koshi attach {session_id}`")),
+            help: None,
         }
     );
 }
@@ -4947,9 +4947,7 @@ fn in_session_cli_session_id_is_authoritative_over_a_mismatched_client() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!(
-                "attach one with `koshi attach {claimed_session_id}`"
-            )),
+            help: None,
         }
     );
 }
@@ -11940,7 +11938,7 @@ fn new_tab_with_no_attached_client_is_refused_as_no_client_attached() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!("attach one with `koshi attach {session_id}`")),
+            help: None,
         }
     );
     assert!(fake_pty_backend.list_spawned_pane_ids().is_empty());
@@ -13397,7 +13395,7 @@ fn focus_tab_with_no_attached_client_is_refused_as_no_client_attached() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::NoClientAttached,
-            help: Some(format!("attach one with `koshi attach {session_id}`")),
+            help: None,
         }
     );
 }
@@ -18829,10 +18827,7 @@ fn no_flag_with_no_client_is_no_client_attached() {
         .expect("no attached client is no target");
 
     assert_eq!(rejection.reason, RejectReason::NoClientAttached);
-    assert_eq!(
-        rejection.help,
-        Some(format!("attach one with `koshi attach {session_id}`"))
-    );
+    assert_eq!(rejection.help, None);
 }
 
 /// Two clients share one tab, and `--client` names the second client. The
