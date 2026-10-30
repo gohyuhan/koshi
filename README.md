@@ -569,11 +569,11 @@ so a session still on the old build shows beside the ones that moved.
 the koshi program on disk, and installs nothing. Use it after koshi is installed
 another way, such as by a package manager.
 
-Sessions started by koshi 0.3.0, 0.4.0, 0.5.0-pr.1, 0.5.0-pr.2, 0.5.0, or
-0.6.0-pr.1 support this live handoff. A session or router of koshi 0.3.0 or
-0.4.0 does not restart by itself after a package manager installs a new koshi:
-run `koshi restart-servers` once. A session started by koshi 0.2.0 or one of
-its pre-releases cannot move to a new build. `koshi update` and
+Sessions started by koshi 0.3.0, 0.4.0, 0.5.0-pr.1, 0.5.0-pr.2, 0.5.0,
+0.6.0-pr.1, or 0.6.0-pr.2 support this live handoff. A session or router of
+koshi 0.3.0 or 0.4.0 does not restart by itself after a package manager installs
+a new koshi: run `koshi restart-servers` once. A session started by koshi 0.2.0
+or one of its pre-releases cannot move to a new build. `koshi update` and
 `koshi restart-servers` name each such session and ask once whether to end it
 and the programs in its panes. If you answer in a pane of one of these sessions,
 that session ends last, and the terminal of that pane closes with it. A koshi
