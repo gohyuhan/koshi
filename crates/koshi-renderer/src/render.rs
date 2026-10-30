@@ -1471,7 +1471,6 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::PanePlacement => Some("PLACE PANE"),
         LockMode::PaneMoveChoice => Some("MOVE"),
         LockMode::FloatingPaneMove => Some("MOVE FLOAT"),
-        LockMode::DockUndock => Some("DOCK"),
         LockMode::FloatingPaneTray => Some("TRAY"),
         LockMode::NotificationCenter => Some("NOTIFICATIONS"),
     }

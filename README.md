@@ -309,7 +309,7 @@ The default leader is Ctrl.
 | `<C-p> s` | Open pane in the focused pane's stack |
 | `<C-p> f` | Open a floating pane above the tiled panes |
 | `<C-p> m` | Enter pane placement mode: pick a pane and a destination, then Enter |
-| `<C-p> u` | Enter dock/undock mode: float the selected tiled pane, or dock the selected floating pane |
+| `<C-p> u` | Float the focused pane, or dock a floating pane beside the tiled pane under its center |
 | `<C-p> x` | Close pane and its process tree |
 | `<C-p> ←` / `↓` / `↑` / `→` | Focus nearby pane |
 | `<C-p> Tab` / `Shift+Tab` | Show and focus the next / previous floating pane |

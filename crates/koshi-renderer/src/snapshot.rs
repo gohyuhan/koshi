@@ -543,8 +543,6 @@ pub struct FloatingPaneTray {
 /// tiled top border its pointer rests on: `pointer_hover` while a left press on
 /// that handle starts a drag of its pane, and `None` otherwise.
 /// `active_input_mode` is the mode that owns the viewer's keyboard.
-/// `is_dock_undock_command_pending` is `true` while dock/undock mode waits for
-/// the session's answer to the undock or the dock it sent.
 /// `is_floating_pane_move_waiting` is `true` while a floating pane move that
 /// the viewer sent waits for the session's answer.
 ///
@@ -553,15 +551,11 @@ pub struct FloatingPaneTray {
 /// - A [`TiledTopBorder`](PlacementHandleHover::TiledTopBorder) or
 ///   [`TiledHandle`](PlacementHandleHover::TiledHandle) hover shows in
 ///   `Normal`, `Locked`, `PaneMoveChoice`, `FloatingPaneTray` and
-///   `NotificationCenter`, and in `DockUndock` while
-///   `is_dock_undock_command_pending` is `false`.
+///   `NotificationCenter`.
 /// - A [`FloatingHandle`](PlacementHandleHover::FloatingHandle) hover of an
 ///   unpinned pane shows in `Normal`, `Locked`, `PaneMoveChoice`,
 ///   `FloatingPaneMove`, `FloatingPaneTray` and `NotificationCenter` while
-///   `is_floating_pane_move_waiting` is `false`. In
-///   `DockUndock`, a pinned or unpinned pane's hover shows while
-///   `is_dock_undock_command_pending` and `is_floating_pane_move_waiting` are
-///   both `false`.
+///   `is_floating_pane_move_waiting` is `false`.
 /// - No hover shows in `PanePlacement`.
 ///
 /// `TiledTopBorder { pane_id: pane-123 }` gives itself in `Normal` and `None`
@@ -572,7 +566,6 @@ pub fn find_shown_placement_handle_hover(
     active_input_mode: LockMode,
     link_status: LinkStatus,
     is_pane_placement_visible: bool,
-    is_dock_undock_command_pending: bool,
     is_floating_pane_move_waiting: bool,
 ) -> Option<PlacementHandleHover> {
     let placement_handle_hover = pointer_hover?;
@@ -587,7 +580,6 @@ pub fn find_shown_placement_handle_hover(
                 | LockMode::PaneMoveChoice
                 | LockMode::FloatingPaneTray
                 | LockMode::NotificationCenter => true,
-                LockMode::DockUndock => !is_dock_undock_command_pending,
                 LockMode::PanePlacement | LockMode::FloatingPaneMove => false,
             }
         }
@@ -598,9 +590,6 @@ pub fn find_shown_placement_handle_hover(
             | LockMode::FloatingPaneMove
             | LockMode::FloatingPaneTray
             | LockMode::NotificationCenter => !is_pinned && !is_floating_pane_move_waiting,
-            LockMode::DockUndock => {
-                !is_dock_undock_command_pending && !is_floating_pane_move_waiting
-            }
             LockMode::PanePlacement => false,
         },
     };

@@ -453,14 +453,14 @@ fn committed_regions_carries_the_exact_solve_it_was_built_from() {
 #[test]
 fn a_tiled_hover_shows_only_while_linked_in_a_mode_whose_handle_press_starts_a_drag() {
     let pane_id = PaneId::new();
-    for (active_input_mode, is_dock_undock_command_pending, is_shown) in [
-        (LockMode::Normal, false, true),
-        (LockMode::Locked, false, true),
-        (LockMode::PaneMoveChoice, false, true),
-        (LockMode::DockUndock, false, true),
-        (LockMode::DockUndock, true, false),
-        (LockMode::PanePlacement, false, false),
-        (LockMode::FloatingPaneMove, false, false),
+    for (active_input_mode, is_shown) in [
+        (LockMode::Normal, true),
+        (LockMode::Locked, true),
+        (LockMode::PaneMoveChoice, true),
+        (LockMode::FloatingPaneTray, true),
+        (LockMode::NotificationCenter, true),
+        (LockMode::PanePlacement, false),
+        (LockMode::FloatingPaneMove, false),
     ] {
         for tiled_hover in [
             PlacementHandleHover::TiledTopBorder { pane_id },
@@ -472,12 +472,10 @@ fn a_tiled_hover_shows_only_while_linked_in_a_mode_whose_handle_press_starts_a_d
                     active_input_mode,
                     LinkStatus::Linked,
                     false,
-                    is_dock_undock_command_pending,
                     false,
                 ),
                 is_shown.then_some(tiled_hover),
-                "{tiled_hover:?} in {active_input_mode:?} with a pending dock/undock \
-                 {is_dock_undock_command_pending}"
+                "{tiled_hover:?} in {active_input_mode:?}"
             );
         }
     }
@@ -486,31 +484,26 @@ fn a_tiled_hover_shows_only_while_linked_in_a_mode_whose_handle_press_starts_a_d
 #[test]
 fn a_floating_hover_shows_only_in_a_mode_whose_grab_handle_press_starts_a_drag() {
     let pane_id = PaneId::new();
-    for (
-        active_input_mode,
-        is_pinned,
-        is_dock_undock_command_pending,
-        is_floating_pane_move_waiting,
-        is_shown,
-    ) in [
-        (LockMode::Normal, false, false, false, true),
-        (LockMode::Normal, true, false, false, false),
-        (LockMode::Normal, false, false, true, false),
-        (LockMode::Locked, false, false, false, true),
-        (LockMode::Locked, true, false, false, false),
-        (LockMode::Locked, false, false, true, false),
-        (LockMode::PaneMoveChoice, false, false, false, true),
-        (LockMode::PaneMoveChoice, true, false, false, false),
-        (LockMode::PaneMoveChoice, false, false, true, false),
-        (LockMode::FloatingPaneMove, false, false, false, true),
-        (LockMode::FloatingPaneMove, true, false, false, false),
-        (LockMode::FloatingPaneMove, false, false, true, false),
-        (LockMode::DockUndock, false, false, false, true),
-        (LockMode::DockUndock, true, false, false, true),
-        (LockMode::DockUndock, false, true, false, false),
-        (LockMode::DockUndock, true, true, false, false),
-        (LockMode::DockUndock, false, false, true, false),
-        (LockMode::PanePlacement, false, false, false, false),
+    for (active_input_mode, is_pinned, is_floating_pane_move_waiting, is_shown) in [
+        (LockMode::Normal, false, false, true),
+        (LockMode::Normal, true, false, false),
+        (LockMode::Normal, false, true, false),
+        (LockMode::Locked, false, false, true),
+        (LockMode::Locked, true, false, false),
+        (LockMode::Locked, false, true, false),
+        (LockMode::PaneMoveChoice, false, false, true),
+        (LockMode::PaneMoveChoice, true, false, false),
+        (LockMode::PaneMoveChoice, false, true, false),
+        (LockMode::FloatingPaneMove, false, false, true),
+        (LockMode::FloatingPaneMove, true, false, false),
+        (LockMode::FloatingPaneMove, false, true, false),
+        (LockMode::FloatingPaneTray, false, false, true),
+        (LockMode::FloatingPaneTray, true, false, false),
+        (LockMode::FloatingPaneTray, false, true, false),
+        (LockMode::NotificationCenter, false, false, true),
+        (LockMode::NotificationCenter, true, false, false),
+        (LockMode::NotificationCenter, false, true, false),
+        (LockMode::PanePlacement, false, false, false),
     ] {
         let floating_hover = PlacementHandleHover::FloatingHandle { pane_id, is_pinned };
         assert_eq!(
@@ -519,13 +512,11 @@ fn a_floating_hover_shows_only_in_a_mode_whose_grab_handle_press_starts_a_drag()
                 active_input_mode,
                 LinkStatus::Linked,
                 false,
-                is_dock_undock_command_pending,
                 is_floating_pane_move_waiting,
             ),
             is_shown.then_some(floating_hover),
-            "{floating_hover:?} in {active_input_mode:?} with a pending dock/undock \
-             {is_dock_undock_command_pending} and a waiting floating pane move \
-             {is_floating_pane_move_waiting}"
+            "{floating_hover:?} in {active_input_mode:?} with a waiting floating pane \
+             move {is_floating_pane_move_waiting}"
         );
     }
 }
@@ -556,7 +547,6 @@ fn no_hover_shows_while_pane_placement_shows_or_the_link_is_down() {
                     LinkStatus::Linked,
                     true,
                     false,
-                    false,
                 ),
                 None,
                 "{pointer_hover:?} in {active_input_mode:?} while pane placement shows"
@@ -569,7 +559,6 @@ fn no_hover_shows_while_pane_placement_shows_or_the_link_is_down() {
                         link_status,
                         false,
                         false,
-                        false,
                     ),
                     None,
                     "{pointer_hover:?} in {active_input_mode:?} while {link_status:?}"
@@ -578,14 +567,7 @@ fn no_hover_shows_while_pane_placement_shows_or_the_link_is_down() {
         }
     }
     assert_eq!(
-        find_shown_placement_handle_hover(
-            None,
-            LockMode::Normal,
-            LinkStatus::Linked,
-            false,
-            false,
-            false
-        ),
+        find_shown_placement_handle_hover(None, LockMode::Normal, LinkStatus::Linked, false, false),
         None
     );
 }

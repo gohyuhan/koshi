@@ -82,7 +82,8 @@ use koshi_session::session::{
     pane_ops::{self, NewPaneSpec},
     placement::{
         commit_cross_tab_placement, commit_dock_placement, commit_undock_placement,
-        compute_placement_tab_sizes, find_lifted_floating_pane_rect, PlacementCommitError,
+        compute_placement_tab_sizes, find_lifted_floating_pane_rect, find_nearest_dock_target,
+        PlacementCommitError,
     },
     state::{compute_floating_pane_minimum_size, FloatingMember, Session},
     tab_ops,
@@ -498,6 +499,9 @@ impl Server {
             }
             Command::PlacePane(command_args) => {
                 self.apply_place_pane(command_id, &envelope.command_source, &command_args, None)
+            }
+            Command::TogglePaneFloating => {
+                self.handle_toggle_pane_floating(command_id, &envelope.command_source)
             }
             Command::ScrollPane(command_args) => {
                 self.handle_scroll_pane(command_id, &envelope.command_source, &command_args)

@@ -19,11 +19,11 @@ use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::ids::{PaneId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{
-    list_placement_destinations, place_floating_pane_in_tab, place_pane_across_tabs,
+    list_shown_placement_destinations, place_floating_pane_in_tab, place_pane_across_tabs,
     place_pane_within_tab, solve_placed_tab, PlacedTabLayout, PlacementDestinations,
     PlacementError, PlacementTarget,
 };
-use koshi_layout::solver::{is_layout_within_rect, solve_layout_with_sizing};
+use koshi_layout::solver::is_layout_within_rect;
 use koshi_layout::tree::LayoutNode;
 
 use crate::snapshot::{
@@ -77,25 +77,17 @@ pub enum PlacementPreviewError {
 impl PlacementSnapshot {
     /// Every destination the source pane may name in the displayed tab
     /// ([`Self::find_displayed_tab_snapshot`]), as that tab draws: each stack
-    /// shows the member the tab's focus history gives
-    /// ([`LayoutNode::build_shown_layout_tree`]), solved tiled at the tab's
-    /// size ([`list_placement_destinations`]). `None` when the preview holds
-    /// no displayed tab.
+    /// shows the member the tab's focus history gives, solved tiled at the
+    /// tab's size ([`list_shown_placement_destinations`]). `None` when the
+    /// preview holds no displayed tab.
     #[must_use]
     pub fn list_placement_destinations(&self) -> Option<PlacementDestinations> {
         let displayed_tab_snapshot = self.find_displayed_tab_snapshot()?;
-        let tab_rect = Rect::from_size_at_origin(displayed_tab_snapshot.tab_snapshot.tab_size);
-        let shown_layout_tree = displayed_tab_snapshot
-            .layout_tree
-            .build_shown_layout_tree(&displayed_tab_snapshot.focus_history);
-        let drawn_layout_tree: &LayoutNode = shown_layout_tree
-            .as_ref()
-            .unwrap_or(&displayed_tab_snapshot.layout_tree);
-        let layout_solve = solve_layout_with_sizing(drawn_layout_tree, tab_rect, self.pane_sizing);
-        Some(list_placement_destinations(
-            drawn_layout_tree,
-            &layout_solve,
-            tab_rect,
+        Some(list_shown_placement_destinations(
+            &displayed_tab_snapshot.layout_tree,
+            &displayed_tab_snapshot.focus_history,
+            displayed_tab_snapshot.tab_snapshot.tab_size,
+            self.pane_sizing,
             self.source_pane_id,
         ))
     }

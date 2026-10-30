@@ -321,14 +321,6 @@ pub enum ClientActionKind {
     ConfirmFloatingPaneMove,
     /// Discard the draft and leave floating pane move mode.
     CancelFloatingPaneMove,
-    /// Open dock/undock mode with the pane that takes the viewer's input
-    /// selected.
-    BeginDockUndock,
-    /// In dock/undock mode, float the selected tiled pane where it is drawn,
-    /// or dock the selected floating pane at the selected target.
-    ConfirmDockUndock,
-    /// Leave dock/undock mode and return to the base input mode.
-    CancelDockUndock,
     /// Switch the selected placement target between a swap with a pane, or an
     /// insertion beside a pane or a whole stack, and the stack of that pane or
     /// that stack.
@@ -474,7 +466,8 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `focus-next-floating-pane` and `focus-previous-floating-pane` build
 /// `FocusPane` with the floating pane target they name;
 /// `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`; `undock-pane`
-/// builds `PlacePane` with a floating target; `pin-pane`/`unpin-pane` both
+/// builds `PlacePane` with a floating target; `toggle-pane-floating` builds
+/// `TogglePaneFloating`; `pin-pane`/`unpin-pane` both
 /// build `SetPanePinned`; `toggle-pane-pinned` builds `TogglePanePinned`;
 /// `minimize-pane` builds `SetPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
@@ -632,14 +625,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             CoreClient(ClientActionKind::BeginPanePlacement),
         ),
         build_core_action_seed(
-            "begin-dock-undock",
-            "Dock Or Undock Pane",
-            "Open dock/undock mode for the pane that takes the input",
-            PaneSession,
-            vec![Pane],
-            CoreClient(ClientActionKind::BeginDockUndock),
-        ),
-        build_core_action_seed(
             "select-pane-target-left",
             "Select Pane Target Left",
             "Select the visible pane target to the left in placement mode",
@@ -750,22 +735,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::CancelPanePlacement),
-        ),
-        build_core_action_seed(
-            "confirm-dock-undock",
-            "Dock Or Undock",
-            "Float the selected tiled pane where it is, or dock the selected floating pane at its target",
-            Client,
-            vec![ClientTarget],
-            CoreClient(ClientActionKind::ConfirmDockUndock),
-        ),
-        build_core_action_seed(
-            "cancel-dock-undock",
-            "Cancel Dock Or Undock",
-            "Leave dock/undock mode and return to the base input mode",
-            Client,
-            vec![ClientTarget],
-            CoreClient(ClientActionKind::CancelDockUndock),
         ),
         build_core_action_seed(
             "begin-tiled-pane-placement",
@@ -998,6 +967,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane, TabTarget],
             CoreCommand(CommandKind::PlacePane),
+        ),
+        build_core_action_seed(
+            "toggle-pane-floating",
+            "Toggle Pane Floating",
+            "Float the pane that takes the input where it is drawn, or dock a floating one beside the tiled pane under its center",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::TogglePaneFloating),
         ),
         build_core_action_seed(
             "move-floating-pane",

@@ -35,9 +35,8 @@ const CLI_ONLY: [&str; 12] = [
 ];
 
 /// The viewer-local actions: each resolves to [`DispatchPlan::ClientAction`].
-const CLIENT_ACTIONS: [&str; 43] = [
+const CLIENT_ACTIONS: [&str; 40] = [
     "begin-pane-placement",
-    "begin-dock-undock",
     "select-pane-target-left",
     "select-pane-target-down",
     "select-pane-target-up",
@@ -52,8 +51,6 @@ const CLIENT_ACTIONS: [&str; 43] = [
     "select-previous-placement-tab",
     "confirm-pane-placement",
     "cancel-pane-placement",
-    "confirm-dock-undock",
-    "cancel-dock-undock",
     "begin-tiled-pane-placement",
     "begin-floating-pane-move",
     "confirm-pane-move-choice",
@@ -292,6 +289,7 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
                 },
             }),
         ),
+        ("toggle-pane-floating", Command::TogglePaneFloating),
         (
             "pin-pane",
             Command::SetPanePinned(SetPanePinnedArgs {
@@ -481,6 +479,7 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::MoveTab(_) => Some(CommandKind::MoveTab),
         Command::MovePane(_) => Some(CommandKind::MovePane),
         Command::PlacePane(_) => Some(CommandKind::PlacePane),
+        Command::TogglePaneFloating => Some(CommandKind::TogglePaneFloating),
         Command::ScrollPane(_) => Some(CommandKind::ScrollPane),
         Command::MoveFloatingPane(_) => Some(CommandKind::MoveFloatingPane),
         Command::SetPanePinned(_) => Some(CommandKind::SetPanePinned),

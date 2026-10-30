@@ -74,10 +74,9 @@ pub enum Command {
     /// floating source pane docks there. A `Floating` target undocks a tiled
     /// or stacked source pane.
     ///
-    /// - Pane placement mode and dock/undock mode send it when the user
-    ///   confirms with Enter or a mouse drop. `koshi place-pane`,
-    ///   `koshi undock-pane`, `koshi dock-pane` and `core:undock-pane` also
-    ///   send it.
+    /// - Pane placement mode sends it when the user confirms with Enter or a
+    ///   mouse drop. `koshi place-pane`, `koshi undock-pane`,
+    ///   `koshi dock-pane` and `core:undock-pane` also send it.
     /// - The preview before the confirm lives only in the client that is
     ///   placing. This command is the first change the session sees.
     /// - The session emits
@@ -86,6 +85,24 @@ pub enum Command {
     ///   slide. Every other viewer showing the source or destination tab
     ///   slides to the new layout.
     PlacePane(PlacePaneArgs),
+    /// Float the pane that the command source acts on while it is tiled or
+    /// stacked, and dock it while it floats, as one [`Command::PlacePane`].
+    /// The session reads the pane and the acting client's view when it runs
+    /// the command.
+    ///
+    /// - A tiled or stacked pane gets the target
+    ///   [`PanePlacementTarget::Floating`] with no `top_left_cell`: it floats
+    ///   where the acting client draws it.
+    /// - A floating pane gets an insertion into the acting client's active
+    ///   tab: beside the smallest pane, group or tab span under the center
+    ///   cell of the rect that client draws it in, on that span's edge
+    ///   nearest the cell. A center outside the tab counts from the tab's
+    ///   nearest cell. A pane the client draws nowhere docks at the right
+    ///   edge of the whole tab.
+    ///
+    /// `core:toggle-pane-floating` sends it. Example: tab `A | B`, with a
+    /// floating pane `F` centered near `B`'s right edge, gives `A | B | F`.
+    TogglePaneFloating,
     /// Move one client's view of a pane through its scrollback.
     ScrollPane(ScrollPaneArgs),
     /// Store a new top-left cell for a floating pane in one client's view.
@@ -172,6 +189,8 @@ pub enum CommandKind {
     MovePane,
     /// Names [`Command::PlacePane`].
     PlacePane,
+    /// Names [`Command::TogglePaneFloating`].
+    TogglePaneFloating,
     /// Names [`Command::ScrollPane`].
     ScrollPane,
     /// Names [`Command::MoveFloatingPane`].

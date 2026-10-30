@@ -335,7 +335,7 @@ struct ClientReport {
     focused_pane_id: Option<String>,
     /// The client's input mode, by its keymap name: `normal`, `locked`,
     /// `pane-placement`, `pane-move-choice`, `floating-pane-move`,
-    /// `dock-undock` or `floating-pane-tray`.
+    /// `floating-pane-tray` or `notification-center`.
     lock_mode: &'static str,
     /// Where the client connected from, as [`format_client_origin`] names
     /// it, or `None` when the session did not say.

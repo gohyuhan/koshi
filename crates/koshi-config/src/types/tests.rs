@@ -106,7 +106,6 @@ fn default_server_and_client_configs_match_expected_settings() {
             .keys()
             .collect::<Vec<_>>(),
         vec![
-            &ModeName::from_text("dock-undock"),
             &ModeName::from_text("floating-pane-move"),
             &ModeName::from_text("floating-pane-tray"),
             &ModeName::from_text("locked"),
@@ -441,7 +440,6 @@ fn the_default_modes_remove_no_sequences() {
         "pane-placement",
         "pane-move-choice",
         "floating-pane-move",
-        "dock-undock",
         "floating-pane-tray",
     ] {
         assert_eq!(
@@ -739,11 +737,11 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "begin-pane-placement",
             ClientActionKind::BeginPanePlacement,
         ),
-        build_expected_client_binding(
+        build_expected_binding(
             "normal",
             "<C-p> u",
-            "begin-dock-undock",
-            ClientActionKind::BeginDockUndock,
+            "toggle-pane-floating",
+            Ok(Command::TogglePaneFloating),
         ),
         build_expected_binding(
             "normal",
@@ -1046,90 +1044,6 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             ClientActionKind::CancelFloatingPaneMove,
         ),
         build_expected_client_binding(
-            "dock-undock",
-            "<Left>",
-            "select-pane-target-left",
-            ClientActionKind::SelectPaneTarget(Direction::Left),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<Down>",
-            "select-pane-target-down",
-            ClientActionKind::SelectPaneTarget(Direction::Down),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<Up>",
-            "select-pane-target-up",
-            ClientActionKind::SelectPaneTarget(Direction::Up),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<Right>",
-            "select-pane-target-right",
-            ClientActionKind::SelectPaneTarget(Direction::Right),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<S-Left>",
-            "select-pane-insertion-left",
-            ClientActionKind::SelectPaneInsertion(Direction::Left),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<S-Down>",
-            "select-pane-insertion-down",
-            ClientActionKind::SelectPaneInsertion(Direction::Down),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<S-Up>",
-            "select-pane-insertion-up",
-            ClientActionKind::SelectPaneInsertion(Direction::Up),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<S-Right>",
-            "select-pane-insertion-right",
-            ClientActionKind::SelectPaneInsertion(Direction::Right),
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<Space>",
-            "cycle-pane-placement-span",
-            ClientActionKind::CyclePanePlacementSpan,
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "s",
-            "toggle-pane-placement-stack",
-            ClientActionKind::TogglePanePlacementStack,
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<Tab>",
-            "select-next-placement-tab",
-            ClientActionKind::SelectNextPlacementTab,
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<S-Tab>",
-            "select-previous-placement-tab",
-            ClientActionKind::SelectPreviousPlacementTab,
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<CR>",
-            "confirm-dock-undock",
-            ClientActionKind::ConfirmDockUndock,
-        ),
-        build_expected_client_binding(
-            "dock-undock",
-            "<Esc>",
-            "cancel-dock-undock",
-            ClientActionKind::CancelDockUndock,
-        ),
-        build_expected_client_binding(
             "floating-pane-tray",
             "<Left>",
             "select-tray-tile-left",
@@ -1324,7 +1238,6 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
             "pane-placement",
             "pane-move-choice",
             "floating-pane-move",
-            "dock-undock",
             "floating-pane-tray",
             "notification-center",
         ]

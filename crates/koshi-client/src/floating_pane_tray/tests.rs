@@ -21,9 +21,7 @@ use koshi_core::command::{ClearSelectionArgs, FocusPaneArgs, FocusTarget, Visual
 use koshi_core::ids::SessionId;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use koshi_core::mouse::{MouseTracking, ScrollDirection};
-use koshi_renderer::snapshot::{
-    FloatingPane, FloatingPaneMoveDraft, PlacementHandleHover, Reconnecting,
-};
+use koshi_renderer::snapshot::{FloatingPane, PlacementHandleHover, Reconnecting};
 
 use crate::attach::tests::build_plain_chord;
 use crate::input::tests::{build_client_viewing, find_submitted_command};
@@ -243,7 +241,7 @@ fn a_viewer_action_outside_the_tray_closes_it() {
     let mut client = build_client_with_open_tray(&mouse_frame);
 
     assert_eq!(
-        client.apply_client_action(ClientActionKind::CancelDockUndock, Some(&mouse_frame)),
+        client.apply_client_action(ClientActionKind::CancelPanePlacement, Some(&mouse_frame)),
         PlacementInputAction::Consumed
     );
     assert_eq!(client.floating_pane_tray, None);
@@ -970,42 +968,6 @@ fn a_tray_closed_before_its_frame_repaints_leaves_its_cells_to_the_panes_under_t
             modifier_flags: BindingModifierFlags::NONE,
             pane_local_cell: Point { column: 7, row: 3 },
         }]
-    );
-}
-
-#[test]
-fn a_dock_press_on_a_tray_closed_before_its_frame_repaints_drags_the_pane_under_it() {
-    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
-    let tiled_pane_id = mouse_frame
-        .client_snapshot
-        .focused_pane_id
-        .expect("the tiled pane is focused");
-    mouse_frame.viewer_chrome.floating_pane_tray = build_open_floating_pane_tray(0, None);
-    let mut client = build_client_viewing(&mouse_frame);
-    client.apply_client_action(ClientActionKind::BeginDockUndock, Some(&mouse_frame));
-    // Tile 0 takes (7, 4) 10x3 in the painted frame, over the tiled pane,
-    // which the frame draws at (0, 0).
-    let tile_cell = Point { column: 8, row: 5 };
-
-    assert_eq!(
-        client.handle_placement_mouse(
-            build_left_mouse_press(tile_cell),
-            &mouse_frame,
-            Instant::now()
-        ),
-        Some(PlacementInputAction::Consumed)
-    );
-    assert_eq!(
-        client
-            .build_viewer_chrome(
-                mouse_frame.client_snapshot.active_tab_id,
-                &mouse_frame.committed_regions
-            )
-            .floating_pane_move_draft,
-        Some(FloatingPaneMoveDraft {
-            pane_id: tiled_pane_id,
-            top_left_cell: Point { column: 0, row: 0 },
-        })
     );
 }
 

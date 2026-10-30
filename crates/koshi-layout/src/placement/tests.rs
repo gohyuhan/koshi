@@ -2231,3 +2231,54 @@ fn a_floating_pane_anchored_on_itself_is_refused_as_anchor_is_source() {
         })
     );
 }
+
+#[test]
+fn the_insertion_at_a_point_takes_the_smallest_covering_span_and_the_earlier_of_two_equal_ones() {
+    let [pane_a, pane_b, _, _] = build_sorted_pane_ids();
+    let tab_anchor = PanePlacementAnchor::Tab;
+    let pane_a_anchor = PanePlacementAnchor::Pane(pane_a);
+    let pane_b_anchor = PanePlacementAnchor::Pane(pane_b);
+    // `Tab` at `(0, 0)` `80x22`, and `Pane(B)` at `(40, 0)` `40x22`.
+    let tab_and_pane_b_spans = [
+        (&tab_anchor, build_cell_rect(0, 0, 80, 22)),
+        (&pane_b_anchor, build_cell_rect(40, 0, 40, 22)),
+    ];
+
+    assert_eq!(
+        find_insertion_at_point(
+            tab_and_pane_b_spans,
+            Point {
+                column: 75,
+                row: 10
+            }
+        ),
+        Some((&pane_b_anchor, Direction::Right))
+    );
+    assert_eq!(
+        find_insertion_at_point(tab_and_pane_b_spans, Point { column: 3, row: 10 }),
+        Some((&tab_anchor, Direction::Left))
+    );
+    assert_eq!(
+        find_insertion_at_point(
+            tab_and_pane_b_spans,
+            Point {
+                column: 80,
+                row: 10
+            }
+        ),
+        None
+    );
+    assert_eq!(
+        find_insertion_at_point(
+            [
+                (&pane_a_anchor, build_cell_rect(40, 0, 40, 22)),
+                (&pane_b_anchor, build_cell_rect(40, 0, 40, 22)),
+            ],
+            Point {
+                column: 75,
+                row: 10
+            },
+        ),
+        Some((&pane_a_anchor, Direction::Right))
+    );
+}

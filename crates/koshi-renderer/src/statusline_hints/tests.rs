@@ -1607,17 +1607,6 @@ fn the_shipped_floating_pane_move_row_at_40_columns_shows_confirm() {
 }
 
 #[test]
-fn the_shipped_dock_undock_row_at_80_columns_leads_with_confirm_cancel_and_the_targets() {
-    assert_eq!(
-        format_rendered_row(&render_statusline(
-            &build_shipped_keymap_hints(LockMode::DockUndock),
-            80
-        )),
-        " ENTER  Dock Or Undock  ESC  Cancel Dock Or Undock  ←↓↑→  Select Pane Target …"
-    );
-}
-
-#[test]
 fn an_alt_unlock_alternative_keeps_the_pinned_unlock_first_at_40_and_80_columns() {
     // `unlock-alternative "<A-u>"`, with the locked block binding `<A-u>` to
     // `core:unlock` and removing `<C-l>`. Conflict detection applies it.

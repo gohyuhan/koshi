@@ -506,7 +506,7 @@ fn build_command_matrix_server(client_origin: ClientOrigin) -> CommandMatrixFixt
 
 /// How many [`Command`] variants this build has. [`build_every_command`] lists one
 /// command of each.
-const COMMAND_VARIANT_COUNT: usize = 29;
+const COMMAND_VARIANT_COUNT: usize = 30;
 
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
@@ -570,6 +570,7 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
                 direction: Direction::Right,
             }),
         }),
+        Command::TogglePaneFloating,
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(pane_id),
             scroll_line_count: 3,
@@ -624,6 +625,7 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::MoveTab(_) => "MoveTab",
         Command::MovePane(_) => "MovePane",
         Command::PlacePane(_) => "PlacePane",
+        Command::TogglePaneFloating => "TogglePaneFloating",
         Command::ScrollPane(_) => "ScrollPane",
         Command::MoveFloatingPane(_) => "MoveFloatingPane",
         Command::SetPanePinned(_) => "SetPanePinned",
@@ -1068,6 +1070,7 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             "TogglePaneFullscreen",
             "MoveTab",
             "PlacePane",
+            "TogglePaneFloating",
             "ScrollPane",
             "SetAllFloatingPanesMinimized",
             "ToggleAllFloatingPanesMinimized",
@@ -27727,6 +27730,212 @@ fn docking_into_a_tab_with_no_room_is_refused_with_the_tab_name() {
             ),
         ))),
         Err((RejectReason::InvalidState, Some(expected_help.as_str())))
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+// --- Toggle pane floating -----------------------------------------------------
+
+#[test]
+fn toggling_a_tiled_pane_floats_it_where_the_issuer_draws_it() {
+    // `T | P` fills alice's `80x22` pane area, and the split pane `P` takes
+    // alice's input.
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let split_pane_id =
+        split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::TogglePaneFloating,
+    );
+    let command_id = command_envelope.command_id;
+    let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(command_envelope) else {
+        panic!("expected the toggle to float the pane");
+    };
+
+    assert_eq!(
+        emitted_events.first(),
+        Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
+            command_id,
+            source_pane_id: split_pane_id,
+            source_tab_id: Some(tab_id),
+            destination_tab_id: None,
+            placement_target: PanePlacementTarget::Floating {
+                top_left_cell: None
+            },
+        }))
+    );
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree(),
+        &LayoutNode::Pane(tiled_pane_id)
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(split_pane_id)
+    );
+    assert_eq!(
+        alice_client.get_floating_pane_view(split_pane_id),
+        Some(FloatingPaneView {
+            position: FloatingPanePosition::Moved(Point { column: 40, row: 0 }),
+            is_minimized: false,
+        })
+    );
+}
+
+#[test]
+fn toggling_a_floating_pane_docks_it_beside_the_pane_under_its_center() {
+    // `T | P` fills alice's `80x22` pane area, with `P` at `(40, 0)`. The
+    // `16x10` floating pane `F` at `(62, 6)` takes alice's input. Its center
+    // cell `(70, 11)` is 9 cells from the right edge of `P`.
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let split_pane_id =
+        split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
+    let floating_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(
+            Some(build_cells_floating_pane_size(16, 10)),
+            Some(Point { column: 62, row: 6 }),
+            false,
+        ),
+    );
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::TogglePaneFloating,
+    );
+    let command_id = command_envelope.command_id;
+    let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(command_envelope) else {
+        panic!("expected the toggle to dock the pane");
+    };
+
+    assert_eq!(
+        emitted_events.first(),
+        Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
+            command_id,
+            source_pane_id: floating_pane_id,
+            source_tab_id: None,
+            destination_tab_id: Some(tab_id),
+            placement_target: PanePlacementTarget::Tiled(build_dock_beside_pane_target(
+                tab_id,
+                split_pane_id,
+                Direction::Right,
+            )),
+        }))
+    );
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
+        vec![tiled_pane_id, split_pane_id, floating_pane_id]
+    );
+    assert_eq!(session.floating_set.list_members(), &[]);
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(alice_client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        alice_client.get_focused_pane_id(tab_id),
+        Some(floating_pane_id)
+    );
+}
+
+#[test]
+fn toggling_a_floating_pane_for_a_client_that_draws_it_nowhere_docks_it_at_the_right_edge_of_the_tab(
+) {
+    // `F` runs `koshi actions run toggle-pane-floating` for bob, who reports a
+    // starving pane area and so draws no floating pane.
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session exists")
+        .clients
+        .get_client_mut_by_id(bob_client_id)
+        .expect("bob is attached")
+        .update_pane_area(Some(PaneArea::Starving));
+
+    let command_envelope = build_command_envelope(
+        build_in_session_source(session_id, Some(bob_client_id), floating_pane_id),
+        Command::TogglePaneFloating,
+    );
+    let command_id = command_envelope.command_id;
+    let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(command_envelope) else {
+        panic!("expected the toggle to dock the pane");
+    };
+
+    assert_eq!(
+        emitted_events.first(),
+        Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
+            command_id,
+            source_pane_id: floating_pane_id,
+            source_tab_id: None,
+            destination_tab_id: Some(tab_id),
+            placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
+                destination_tab_id: tab_id,
+                anchor: PanePlacementAnchor::Tab,
+                direction: Direction::Right,
+            }),
+        }))
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id].tabs[&tab_id]
+            .get_layout_tree()
+            .list_leaf_pane_ids(),
+        vec![tiled_pane_id, floating_pane_id]
+    );
+}
+
+#[test]
+fn toggling_the_last_tiled_pane_is_refused_and_changes_nothing() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let session_records_before = serialize_session_records(&runtime);
+
+    assert_eq!(
+        get_command_outcome(&runtime.dispatch(build_command_envelope(
+            CommandSource::from_key_binding(alice_client_id),
+            Command::TogglePaneFloating,
+        ))),
+        Err((
+            RejectReason::InvalidState,
+            Some(
+                "the last pane of the last tab cannot be undocked; a session needs one tiled pane"
+            )
+        ))
     );
     assert_eq!(serialize_session_records(&runtime), session_records_before);
 }

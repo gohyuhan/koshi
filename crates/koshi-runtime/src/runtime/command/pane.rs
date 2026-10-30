@@ -1275,6 +1275,22 @@ impl Server {
         Ok(self.commit_events(command_id, emitted_events))
     }
 
+    /// Handle [`Command::TogglePaneFloating`]: run the [`Command::PlacePane`]
+    /// that [`Self::resolve_toggle_pane_floating_args`] gives, as
+    /// [`Self::apply_place_pane`] runs it: the undock of a tiled or stacked
+    /// pane, or the dock of a floating pane. A refusal is that undock's or
+    /// that dock's, and changes nothing.
+    pub(super) fn handle_toggle_pane_floating(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let place_pane_args =
+            self.resolve_toggle_pane_floating_args(command_source, acting_session)?;
+        self.apply_place_pane(command_id, command_source, &place_pane_args, None)
+    }
+
     /// Undock the tiled or stacked pane `undock_target.source_pane_id`: make it
     /// a floating pane of its session. The target comes from
     /// [`Self::resolve_undock_pane_target`].

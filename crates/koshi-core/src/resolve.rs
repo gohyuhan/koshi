@@ -190,6 +190,7 @@ fn resolve_core_action(
                 top_left_cell: None,
             },
         }),
+        "toggle-pane-floating" => Command::TogglePaneFloating,
         "pin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
             pane_id: None,
             is_pinned: true,

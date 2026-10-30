@@ -7,7 +7,7 @@ use koshi_core::command::PanePlacementAnchor;
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::TabId;
 use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
-use koshi_layout::solver::{LayoutSolve, PaneSizing};
+use koshi_layout::solver::{solve_layout_with_sizing, LayoutSolve, PaneSizing};
 use koshi_layout::tree::SplitNode;
 use koshi_test_support::fixtures::build_cell_rect;
 

@@ -207,6 +207,63 @@ fn empty_rect_contains_nothing() {
 }
 
 #[test]
+fn the_nearest_edge_is_the_side_fewest_cells_away_and_a_tie_goes_up_down_left_then_right() {
+    let pane_rect = build_rect(40, 0, 40, 22);
+    let narrow_rect = build_rect(40, 0, 3, 22);
+    let expected_directions = [
+        (
+            pane_rect,
+            Point {
+                column: 75,
+                row: 10,
+            },
+            Direction::Right,
+        ),
+        (pane_rect, Point { column: 60, row: 1 }, Direction::Up),
+        (
+            pane_rect,
+            Point {
+                column: 41,
+                row: 10,
+            },
+            Direction::Left,
+        ),
+        (
+            pane_rect,
+            Point {
+                column: 60,
+                row: 20,
+            },
+            Direction::Down,
+        ),
+        (pane_rect, Point { column: 40, row: 0 }, Direction::Up),
+        (
+            pane_rect,
+            Point {
+                column: 40,
+                row: 21,
+            },
+            Direction::Down,
+        ),
+        (
+            narrow_rect,
+            Point {
+                column: 41,
+                row: 10,
+            },
+            Direction::Left,
+        ),
+    ];
+    for (rect, point, expected_direction) in expected_directions {
+        assert_eq!(
+            rect.compute_nearest_edge_direction(point),
+            expected_direction,
+            "{point:?} in {rect:?}"
+        );
+    }
+}
+
+#[test]
 fn rect_intersection_returns_each_expected_relationship() {
     let base_rect = build_rect(2, 2, 4, 4);
 

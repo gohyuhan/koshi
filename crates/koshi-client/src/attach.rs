@@ -44,9 +44,8 @@
 //! the same way. Keys and pastes typed while the client comes back are held in
 //! the order typed and sent after the size report on the new link. The hold
 //! keeps at most 1024 inputs and one frame of paste text: past either, every
-//! input typed during that restart is dropped. While dock/undock mode, pane
-//! placement mode, the move chooser, or floating pane move mode is on, nothing
-//! is held.
+//! input typed during that restart is dropped. While pane placement mode, the
+//! move chooser, or floating pane move mode is on, nothing is held.
 //!
 //! A viewer of a session on a server sends a `Ping` every third of
 //! `remote-link-timeout-ms` while it waits for the session's answer to its
@@ -955,13 +954,12 @@ impl<B: Backend> Screen<B> {
     /// Apply the pending frame to `client` and paint it from the result. A
     /// rejected paint puts `client` back as it was before the frame and keeps
     /// the frame pending. Before a native image retry is due, it paints nothing
-    /// and changes nothing. The paint shows no placement preview while
-    /// [`Client::is_floating_dock_selection_idle`] is `true`. The frame starts
-    /// the floating pane slides of an undock, a restore and a minimize only
-    /// while it shows no placement preview and reduced motion is off. It
-    /// starts restore and minimize slides only when the pending frame and the
-    /// last frame differ in which floating panes they list or which of them
-    /// are minimized ([`SessionSnapshot::has_same_floating_pane_visibility`]),
+    /// and changes nothing. The frame starts the floating pane slides of an
+    /// undock, a restore and a minimize only while it shows no placement
+    /// preview and reduced motion is off. It starts restore and minimize
+    /// slides only when the pending frame and the last frame differ in which
+    /// floating panes they list or which of them are minimized
+    /// ([`SessionSnapshot::has_same_floating_pane_visibility`]),
     /// all from one tray anchor ([`Client::find_floating_pane_tray_anchor`]).
     /// The tray layout that keeps the open tray in step with the pending frame
     /// ([`Client::update_floating_pane_tray`]) is the one that anchor uses.
@@ -991,7 +989,7 @@ impl<B: Backend> Screen<B> {
         let open_floating_pane_tray_layout =
             client.update_floating_pane_tray(self.pending_snapshot.as_ref()?, &committed_regions);
         client.update_notification_center(self.pending_snapshot.as_ref()?, &committed_regions);
-        let placement_display = self.update_previewed_placement_display(client, current_time);
+        let placement_display = self.update_placement_display(client, current_time);
         let committed_placement_tab_ids = std::mem::take(&mut self.committed_placement_tab_ids);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
             client,
@@ -1121,9 +1119,7 @@ impl<B: Backend> Screen<B> {
     /// `active_tab_id` is `Some` after the first frame has been drawn. A viewer
     /// with no changed local state, and no finished image request since its
     /// last paint, draws nothing. A viewer whose viewport no longer matches the
-    /// committed region solve draws nothing until the next session frame. No
-    /// placement preview is drawn while
-    /// [`Client::is_floating_dock_selection_idle`] is `true`.
+    /// committed region solve draws nothing until the next session frame.
     ///
     /// Each refresh first advances the toast's clock and the notification
     /// center's slide ([`Client::advance_notification_clocks`]). The toast's
@@ -1164,7 +1160,7 @@ impl<B: Backend> Screen<B> {
             return None;
         }
         self.last_snapshot.as_ref()?;
-        let placement_display = self.update_previewed_placement_display(client, current_time);
+        let placement_display = self.update_placement_display(client, current_time);
         let committed_placement_tab_snapshot = self.update_committed_placement_animation(
             client,
             &[],
@@ -1258,43 +1254,16 @@ impl<B: Backend> Screen<B> {
         ))
     }
 
-    /// [`Self::update_placement_display`] with the selected placement target
-    /// placed, or with no target placed while the held left button drives a
-    /// floating pane's grab-handle drag
-    /// ([`Client::is_floating_pane_move_drag_active`]). The session's answer to
-    /// the selected target is built first
-    /// ([`Client::update_placement_target_outcome`]). While
-    /// [`Client::is_floating_dock_selection_idle`] is `true`, the placement
-    /// view and its animation end, and the result is `None`.
-    fn update_previewed_placement_display(
-        &mut self,
-        client: &mut Client,
-        current_time: Instant,
-    ) -> Option<PlacementDisplay> {
-        client.update_placement_target_outcome();
-        if client.is_floating_dock_selection_idle() {
-            self.placement_view = None;
-            self.placement_animation = None;
-            return None;
-        }
-        self.update_placement_display(
-            client,
-            !client.is_floating_pane_move_drag_active(),
-            current_time,
-        )
-    }
-
-    /// Update the placement view, with the selected target placed when
-    /// `is_target_placed` is `true`, and return what a paint at
-    /// `current_time` draws for it:
+    /// Update the placement view and return what a paint at `current_time`
+    /// draws for it. The session's answer to the selected target is built
+    /// first ([`Client::update_placement_target_outcome`]).
     ///
     /// - With an available held preview
     ///   ([`Client::find_held_placement_preview`]), the view is that preview
     ///   with the target of the held answer
     ///   ([`Client::get_placement_target_outcome`]) placed, or with no target
-    ///   placed when `is_target_placed` is `false` or no answer is held
-    ///   ([`PlacementView::build`]). It is built again only when the preview or
-    ///   the placed target changes.
+    ///   placed when no answer is held ([`PlacementView::build`]). It is built
+    ///   again only when the preview or the placed target changes.
     /// - With none, the view settles on its preview's tab as it is, and ends
     ///   once the paint shows that tab.
     /// - A view built again starts an animation from the tab drawn now to the
@@ -1304,16 +1273,14 @@ impl<B: Backend> Screen<B> {
     /// its tab at `current_time`, and after it ends, the view's tab.
     fn update_placement_display(
         &mut self,
-        client: &Client,
-        is_target_placed: bool,
+        client: &mut Client,
         current_time: Instant,
     ) -> Option<PlacementDisplay> {
+        client.update_placement_target_outcome();
         let held_placement_preview = client
             .find_held_placement_preview()
             .filter(|placement_preview| placement_preview.find_placement_snapshot().is_some());
-        let placement_target_outcome = client
-            .get_placement_target_outcome()
-            .filter(|_| is_target_placed);
+        let placement_target_outcome = client.get_placement_target_outcome();
         let placement_target = placement_target_outcome
             .map(|placement_target_outcome| &placement_target_outcome.placement_target);
         let is_view_current =
@@ -2251,7 +2218,7 @@ impl Uplink {
 
     /// Queue `command` under `command_id`, issued by `client`'s key binding,
     /// naming `fired_action`, the action the key fired, or `None` when a mouse
-    /// event in dock/undock mode built the command.
+    /// event built the command.
     fn submit_key_binding_command(
         &mut self,
         client: &Client,
@@ -3556,9 +3523,8 @@ fn run_attachment<B: Backend, W: Write>(
                                     .note_committed_placement([source_tab_id, destination_tab_id]);
                             }
                         }
-                        // A rejection ends the placement, move or undock that
-                        // waits for it, and posts one `Warning` in this viewer
-                        // alone.
+                        // A rejection ends the placement or move that waits
+                        // for it, and posts one `Warning` in this viewer alone.
                         Ok(SessionEvent::CommandRejected {
                             command_id,
                             fired_action,
@@ -4616,8 +4582,8 @@ enum LinkRecovery {
 
 impl LinkRecovery {
     /// Hold `held_input` for a restarted session, oldest first. A redial drops
-    /// it, and so does a rejoin while dock/undock mode, pane placement mode,
-    /// the move chooser, or floating pane move mode is on for `client`. An
+    /// it, and so does a rejoin while pane placement mode, the move chooser, or
+    /// floating pane move mode is on for `client`. An
     /// input past [`MAX_HELD_INPUT_COUNT`] keys, fired bindings and pastes, or
     /// past [`MAX_FRAME_BYTE_COUNT`] bytes of paste text, drops everything
     /// held, and everything typed after it during this rejoin.
@@ -6206,9 +6172,9 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
-            // A release has no binding chord. Dock/undock mode, pane placement
-            // mode, the move chooser, and floating pane move mode own releases
-            // while on; every other release goes to the focused pane.
+            // A release has no binding chord. Pane placement mode, the move
+            // chooser, and floating pane move mode own releases while on; every
+            // other release goes to the focused pane.
             let Some(chord) = key_input.to_binding_chord() else {
                 if client.find_viewer_local_input_mode().is_none() {
                     pane_key_inputs.push(key_input);

@@ -895,6 +895,48 @@ pub fn list_placement_destinations(
     }
 }
 
+/// List the destinations `source_pane_id` may move to in `layout_tree` as one
+/// client draws it at `tab_size`: each stack shows the member that
+/// `focus_history` gives ([`LayoutNode::build_shown_layout_tree`]), and that
+/// tree is solved tiled over the `tab_size` rect at the origin with
+/// `pane_sizing` ([`list_placement_destinations`]).
+///
+/// `H[A, stack[B active, C]]` with focus history `[C]` lists the spans of
+/// `H[A, stack[B, C active]]`.
+#[must_use]
+pub fn list_shown_placement_destinations(
+    layout_tree: &LayoutNode,
+    focus_history: &[PaneId],
+    tab_size: Size,
+    pane_sizing: PaneSizing,
+    source_pane_id: PaneId,
+) -> PlacementDestinations {
+    let tab_rect = Rect::from_size_at_origin(tab_size);
+    let shown_layout_tree = layout_tree.build_shown_layout_tree(focus_history);
+    let drawn_layout_tree = shown_layout_tree.as_ref().unwrap_or(layout_tree);
+    let layout_solve = solve_layout_with_sizing(drawn_layout_tree, tab_rect, pane_sizing);
+    list_placement_destinations(drawn_layout_tree, &layout_solve, tab_rect, source_pane_id)
+}
+
+/// The insertion into the smallest span of `span_rects` that covers `point`:
+/// that span's anchor, and the side of the span nearest `point`
+/// ([`Rect::compute_nearest_edge_direction`]). Between spans of equal area,
+/// the earlier span wins. `None` when no span covers `point`.
+///
+/// `Pane(B)` at `(40, 0)` `40x22` and `Tab` at `(0, 0)` `80x22`, with `point`
+/// `(75, 10)`, give `Pane(B)` and `Right`.
+#[must_use]
+pub fn find_insertion_at_point<'span>(
+    span_rects: impl IntoIterator<Item = (&'span PanePlacementAnchor, Rect)>,
+    point: Point,
+) -> Option<(&'span PanePlacementAnchor, Direction)> {
+    span_rects
+        .into_iter()
+        .filter(|(_, span_rect)| span_rect.is_point_inside(point))
+        .min_by_key(|(_, span_rect)| span_rect.size.compute_cell_count())
+        .map(|(anchor, span_rect)| (anchor, span_rect.compute_nearest_edge_direction(point)))
+}
+
 /// The pre-order walk that lists pane spans and group spans.
 struct InsertionSpanWalk<'solve> {
     source_pane_id: PaneId,

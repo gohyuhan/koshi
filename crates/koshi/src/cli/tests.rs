@@ -5144,7 +5144,7 @@ fn build_actions_run_request_for(action_reference_text: &str) -> Result<SessionR
 fn every_registered_action_runs_as_its_key_does_or_names_the_verb_that_takes_its_arguments() {
     let action_registry = ActionRegistry::new();
     let action_seeds = build_core_action_seeds();
-    assert_eq!(action_seeds.len(), 94);
+    assert_eq!(action_seeds.len(), 92);
     for (action_reference, action_metadata) in &action_seeds {
         let key_dispatch_plan = koshi_core::resolve::resolve_action_with_scroll_line_count(
             action_reference,

@@ -4506,7 +4506,6 @@ fn the_mode_indicator_names_every_lock_mode() {
         build_mode_tags(LockMode::FloatingPaneMove, false, None),
         "MOVE FLOAT"
     );
-    assert_eq!(build_mode_tags(LockMode::DockUndock, false, None), "DOCK");
 
     // Every non-plain mode joins the mouse-select mode tag the same way.
     assert_eq!(

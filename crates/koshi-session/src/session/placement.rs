@@ -18,12 +18,16 @@ use std::collections::HashSet;
 use std::iter;
 use std::num::NonZeroU16;
 
+use koshi_core::command::TiledPlacementTarget;
 use koshi_core::event::{Event, LayoutChanged, PaneFocused, TabFocused};
 use koshi_core::geometry::{
     FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, Point, Size,
 };
 use koshi_core::ids::{ClientId, PaneId, TabId};
-use koshi_layout::placement::{solve_placed_tab, CrossTabPlacement, PlacementTabSizes};
+use koshi_layout::placement::{
+    find_insertion_at_point, list_shown_placement_destinations, solve_placed_tab,
+    CrossTabPlacement, PlacementTabSizes,
+};
 use koshi_layout::tree::LayoutNode;
 use thiserror::Error;
 
@@ -224,6 +228,70 @@ pub fn find_lifted_floating_pane_rect(
         row: pane_rect.origin.row.saturating_add(tab_origin.row),
     };
     Some((desired_size, top_left_cell))
+}
+
+/// Where the floating pane `pane_id` docks for `client`: an insertion into
+/// `client`'s active tab beside the smallest pane, group or tab span under
+/// the center cell of the rect `client` draws the pane in
+/// ([`Session::find_client_floating_pane_rect`]), on that span's edge nearest
+/// the cell ([`find_insertion_at_point`]). The spans are those of the tab as
+/// `client` draws it: centered in its pane area
+/// ([`Size::compute_centered_origin`]), each stack showing the member that
+/// `client`'s focus history gives ([`list_shown_placement_destinations`]). A
+/// center cell outside the tab moves to the tab's nearest cell.
+///
+/// A `16x10` pane drawn at `(62, 6)`, over the tab `A | B` that fills an
+/// `80x22` pane area with `B` at `(40, 0)`, has the center cell `(70, 11)`:
+/// the insertion right of `B`.
+///
+/// `None` when `client` draws no rect for `pane_id`, such as with a pane area
+/// smaller than `5x6`, or views a tab with no cell.
+#[must_use]
+pub fn find_nearest_dock_target(
+    session: &Session,
+    client: &Client,
+    pane_id: PaneId,
+) -> Option<TiledPlacementTarget> {
+    let floating_pane_rect = session.find_client_floating_pane_rect(client, pane_id)?;
+    let pane_area = client.get_pane_area()?;
+    let destination_tab_id = client.get_active_tab_id();
+    let tab = session.tabs.get(&destination_tab_id)?;
+    let tab_size = tab.get_solved_tab_size();
+    if tab_size.column_count == 0 || tab_size.row_count == 0 {
+        return None;
+    }
+    let tab_origin = pane_area.compute_centered_origin(tab_size);
+    let center_cell = Point {
+        column: floating_pane_rect
+            .origin
+            .column
+            .saturating_add(floating_pane_rect.size.column_count / 2)
+            .saturating_sub(tab_origin.column)
+            .min(tab_size.column_count - 1),
+        row: floating_pane_rect
+            .origin
+            .row
+            .saturating_add(floating_pane_rect.size.row_count / 2)
+            .saturating_sub(tab_origin.row)
+            .min(tab_size.row_count - 1),
+    };
+    let placement_destinations = list_shown_placement_destinations(
+        tab.get_layout_tree(),
+        client.list_focus_history(destination_tab_id),
+        tab_size,
+        session.get_pane_sizing(),
+        pane_id,
+    );
+    let span_rects = placement_destinations
+        .insertion_spans
+        .iter()
+        .map(|insertion_span| (&insertion_span.anchor, insertion_span.span_rect));
+    let (anchor, direction) = find_insertion_at_point(span_rects, center_cell)?;
+    Some(TiledPlacementTarget::Split {
+        destination_tab_id,
+        anchor: anchor.clone(),
+        direction,
+    })
 }
 
 /// Dock the floating pane `source_pane_id` into `destination_tab_id`: take it

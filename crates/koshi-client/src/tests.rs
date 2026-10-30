@@ -2331,7 +2331,6 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Begin Pane Placement",
             "Close Pane Tree",
             "Close Tab",
-            "Dock Or Undock Pane",
             "Focus Next Floating Pane",
             "Focus Pane",
             "Focus Pane",
@@ -2357,6 +2356,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Split Pane",
             "Toggle Floating Pane Tray",
             "Toggle Notification Center",
+            "Toggle Pane Floating",
             "Toggle Pane Fullscreen",
             "Toggle Pane Pinned",
         ]
