@@ -2,6 +2,34 @@
 
 Notable user-facing changes are recorded here.
 
+## v0.6.0 (coming soon)
+
+- Floating panes: a pane can float above its tab, fit each attached client, move and pin by keyboard or chooser, focus, minimize and restore, resize by mouse, and dock back into a tab. The floating pane tray lists and minimizes floats, and the tray and notification buttons are always shown. One key floats or docks a pane.
+- Notification center: a toast and a bell button show session notifications.
+- Every key action runs from the CLI, so any keybinding can be invoked as `koshi <action>`.
+- A relaunched viewer keeps its client and its place in the session.
+- The session keeps sending data to every attached client even when one client reads slowly, so a slow reader no longer stalls the session.
+- Each config file is read and parsed once per command, so startup and repeated commands are faster.
+
+Performance (v0.5.0 → 0.6.0-pr.2, measured on a Linux VM):
+
+| Area | v0.5.0 | 0.6.0-pr.2 | Change |
+|------|--------|------------|--------|
+| Warm start to a prompt | 506 ms | 81 ms | 6.2× faster |
+| Output through a pane, plain | 1529 ms | 280 ms | 5.5× faster |
+| Output through a pane, fullscreen | 1217 ms | 227 ms | 5.4× faster |
+| Output through a pane, colour | 774–973 ms | 393–459 ms | 2.0–2.1× faster |
+| Output through a pane, Unicode/CJK | 1644 ms | 1265 ms | 1.3× faster |
+| Parser speed, ASCII and colour | 10.5–22.5 MB/s | 51–254 MB/s | 2.7–18× faster |
+| Parser speed, Unicode | 9.8 MB/s | 11.5–16.4 MB/s | 1.2–1.7× faster |
+| Scrollback memory, 200,000 lines | 780.8 MiB | 78.5 MiB | 10× less |
+| Session memory under load | 88–93 MiB | 16–26 MiB | 3.4× less |
+| Idle CPU | 0% | 0% | same |
+| Remote attach (direct link) | 575 ms | 235 ms | 2.4× faster |
+| Remote flood, time / bytes | 754 ms / 47 KiB | 254 ms / 8 KiB | 3× faster, 6× fewer bytes |
+| Remote CLI command, 100 ms RTT | n/v | 1272 ms | — |
+| Slow-client stall after flood | stalls, 5 of 5 runs | stays responsive | fixed |
+
 ## v0.5.0
 
 - Pane placement mode moves tiled or stacked panes by keyboard or mouse. It previews the affected panes and supports swaps and insertions within or across tabs.
