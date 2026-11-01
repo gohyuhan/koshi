@@ -68,10 +68,12 @@ same machine or another one, and the panes are where you left them.
 - 🔍 **Fullscreen pane** — fill the tab with one pane and restore the prior layout.
 - 📐 **Resize** — move borders by keyboard or drag them with the mouse.
 - ↔️ **Pane placement** — move tiled and stacked panes with keyboard or mouse, preview affected panes, and swap or insert panes within or across tabs.
+- 🎈 **Floating panes** — float a pane above its tab, move and pin it by keyboard, resize it with the mouse, minimize and restore it, and dock it back into a tab; the floating pane tray lists every floating pane.
 - ↔️ **Pane gaps** — `pane { gap N }` leaves blank cells between split panes; every attached terminal sees the same gaps.
 - 📑 **Tabs** — create, close, move, and switch tabs.
 - ⌨️ **Multi-key shortcuts** — use key sequences, a configurable leader, hints, and conflict checks.
 - 🎹 **Complete keyboard events** — preserve key presses, repeats, releases, text, and modifiers from the outer terminal to pane programs through the kitty keyboard protocol.
+- ▶️ **Actions from the shell** — `koshi actions run <ACTION>` runs any action a key can be bound to.
 - 🔒 **Lock mode** — send keys directly to the active program.
 - 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text; `Shift`+drag selects even while a program owns the mouse.
 - 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions. With `pane-clipboard-writes` on, a copy that a program in a pane makes, through OSC 52 or `pbcopy`, `xclip`, `xsel` or `wl-copy`, reaches your clipboard too.
@@ -80,6 +82,7 @@ same machine or another one, and the panes are where you left them.
 - 📜 **Per-pane history** — keep separate scrollback and scroll positions.
 - 🧾 **Terminal support** — true color, text styles, alternate screens, CJK, emoji, and box drawing.
 - 🖼️ **Terminal images** — programs draw Sixel, Kitty, and iTerm2 images; each image stays at its cells through scrolling, resizing, and reattaching, and paints in every terminal that can show it.
+- 🔔 **Notification center** — a toast and a bell button show session notifications; `Alt+n` opens the notification center.
 - 🐚 **Shell integration** — a shell that prints OSC 133 prompt markers gives each command a start and end event; koshi never records the command line or its output.
 - 🔎 **Event log** — `koshi debug events` prints the last 1000 events a session published, filtered by age or name, with ids only and never typed text.
 - 🎨 **Themes** — use the built-in colors or copy one of 25 included themes.
@@ -570,14 +573,14 @@ the koshi program on disk, and installs nothing. Use it after koshi is installed
 another way, such as by a package manager.
 
 Sessions started by koshi 0.3.0, 0.4.0, 0.5.0-pr.1, 0.5.0-pr.2, 0.5.0,
-0.6.0-pr.1, or 0.6.0-pr.2 support this live handoff. A session or router of
-koshi 0.3.0 or 0.4.0 does not restart by itself after a package manager installs
-a new koshi: run `koshi restart-servers` once. A session started by koshi 0.2.0
-or one of its pre-releases cannot move to a new build. `koshi update` and
-`koshi restart-servers` name each such session and ask once whether to end it
-and the programs in its panes. If you answer in a pane of one of these sessions,
-that session ends last, and the terminal of that pane closes with it. A koshi
-0.1.0 window keeps its build until its terminal closes.
+0.6.0-pr.1, 0.6.0-pr.2, or 0.6.0 support this live handoff. A session or router
+of koshi 0.3.0 or 0.4.0 does not restart by itself after a package manager
+installs a new koshi: run `koshi restart-servers` once. A session started by
+koshi 0.2.0 or one of its pre-releases cannot move to a new build.
+`koshi update` and `koshi restart-servers` name each such session and ask once
+whether to end it and the programs in its panes. If you answer in a pane of one
+of these sessions, that session ends last, and the terminal of that pane closes
+with it. A koshi 0.1.0 window keeps its build until its terminal closes.
 
 A client attached while the update runs comes back to its session by itself. If
 the restarted session does not speak that client's protocol version, the client

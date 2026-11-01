@@ -50,7 +50,7 @@ esac
 write_installation_message "Detected OS: linux, Architecture: ${architecture_slug}"
 
 # The release this script installs
-release_version="v0.5.0"
+release_version="v0.6.0"
 
 write_installation_message "Installing koshi version: ${release_version}"
 

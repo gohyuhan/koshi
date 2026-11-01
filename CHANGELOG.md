@@ -2,18 +2,18 @@
 
 Notable user-facing changes are recorded here.
 
-## v0.6.0 (coming soon)
+## v0.6.0
 
 - Floating panes: a pane can float above its tab, fit each attached client, move and pin by keyboard or chooser, focus, minimize and restore, resize by mouse, and dock back into a tab. The floating pane tray lists and minimizes floats, and the tray and notification buttons are always shown. One key floats or docks a pane.
 - Notification center: a toast and a bell button show session notifications.
-- Every key action runs from the CLI, so any keybinding can be invoked as `koshi <action>`.
+- Every key action runs from the CLI: `koshi actions run <ACTION>` runs any action a key can be bound to, and `koshi actions list` names the command for each action.
 - A relaunched viewer keeps its client and its place in the session.
 - The session keeps sending data to every attached client even when one client reads slowly, so a slow reader no longer stalls the session.
 - Each config file is read and parsed once per command, so startup and repeated commands are faster.
 
-Performance (v0.5.0 → 0.6.0-pr.2, measured on a Linux VM):
+Performance (v0.5.0 → v0.6.0, measured on a Linux VM):
 
-| Area | v0.5.0 | 0.6.0-pr.2 | Change |
+| Area | v0.5.0 | v0.6.0 | Change |
 |------|--------|------------|--------|
 | Warm start to a prompt | 506 ms | 81 ms | 6.2× faster |
 | Output through a pane, plain | 1529 ms | 280 ms | 5.5× faster |
