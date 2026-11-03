@@ -50,172 +50,26 @@ pub struct Surface {
 /// The session protocol: what an attached client and a session server speak
 /// over that session's control socket.
 ///
-/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` spoke 2, `v0.4.0` spoke 3, and
-/// `v0.5.0` speaks 4. This build speaks 5. The floor is 5: a peer that speaks 4
-/// is refused at the handshake.
+/// `v0.1.0` spoke 1, `v0.2.0` and `v0.3.0` spoke 2, `v0.4.0` spoke 3, `v0.5.0`
+/// spoke 4, and `v0.6.0` speaks 5. This build speaks 6. The floor is 6: a peer
+/// that speaks 5 is refused at the handshake.
 ///
-/// The following shapes differ between 4 and 5. This build writes version 5 on
+/// The following shapes differ between 5 and 6. This build writes version 6 on
 /// every session connection:
 ///
-/// - A new-pane command carries `placement`: a split, a stack, or a floating
-///   pane. 4 carried `source_pane_id`, `tab_id`, `direction` and
-///   `should_stack` on the command itself, and had a separate run-command
-///   command; `koshi run` sends a new-pane command with a spawn spec.
-/// - The session sends an attached client no `PaneCreated`,
-///   `PaneProcessExited`, `PaneClosing`, `PaneRemoved`, `PaneFocused`,
-///   `LayoutChanged`, `TabCreated`, `TabClosed`, `TabFocused` or `TabMoved`
-///   event; 4 sent each of them. `PanePlacementCommitted` carries a
-///   `source_tab_id` and a `destination_tab_id` that are `null` for a
-///   floating pane.
-/// - The `placement_target` of a `PlacePane` command and of a
-///   `PanePlacementCommitted` event is `{"Tiled": {"Swap": …}}`,
-///   `{"Tiled": {"Split": …}}`, `{"Tiled": {"Stack": …}}`, which puts the
-///   source pane into a tiled pane's stack, or `{"Floating": {"top_left_cell":
-///   …}}`, which makes a tiled or stacked pane a floating pane. 4 carried the
-///   swap or split target with no `Tiled` wrapper, and had no `Stack` and no
-///   `Floating` target. A `PlacePane` command's `source_pane_id` is `null` for
-///   the pane the command source acts on; 4 required a pane id.
-/// - A client names the placement target it previews with the
-///   `SetPanePlacementPreview` request, and with the `placement_preview_target`
-///   of its `Attach`, which 4 has not. The target's preview rides that
-///   client's painted updates: a part whose `part_flags` set bit 2 carries the
-///   preview's JSON after the frame's JSON, and a byte count of `0` drops the
-///   preview. A preview carries `source`: `{"Tiled": …}` with the source tab's
-///   tree and solved slots, or `"Floating"`. It carries no pane content: the
-///   frame's own panes carry it. The `ConfirmPanePlacement` request runs a
-///   tiled placement only when the destination tab's solve for its client
-///   equals the request's `expected_placed_tab_layout`. 4 read a preview with
-///   the `ReadPanePlacement` request and answered it with a
-///   `PanePlacementSnapshot` or `PanePlacementRefused` event that carried
-///   `source_tab_id`, `source_tab_snapshot` and each pane's rows; 5 has none
-///   of them. A `PaintedUpdate` request carries only `update_sequence`.
-/// - A frame carries no session or client revision; 4 carried both. An image
-///   placement's `is_available`, a close command's
-///   `should_kill_process_tree`, and a terminal-too-small event's cause are
-///   required. 4 read a message without them.
-/// - A frame carries `floating_pane_slots`: the floating panes its client
-///   shows, back to front, each with its outer rect and pin state. It also
-///   carries `floating_panes`: every floating pane of the session, in the
-///   order the panes became floating, each as
-///   `{"Shown": {"pane_id": …}}` while the client shows it, or as
-///   `{"Minimized": {"pane_id": …, "pane_title": …}}`, with its title or
-///   `null`, while the client minimized it. Both fields are required, and 4
-///   has neither.
-/// - A frame's client carries `last_applied_lock_command_id`: the last lock
-///   command that the client's own connection sent and the session ran, or
-///   `null`. It also carries `last_applied_floating_pane_move_command_id`: the
-///   last floating pane move that the client's mouse or key binding sent and
-///   the session ran, or `null`. It also carries
-///   `last_applied_placement_command_id`: the last pane placement that the
-///   client confirmed and the session ran, or `null`. It also carries
-///   `active_tab_focused_pane_id`:
-///   the client's focused pane in its active tab, also while a floating pane
-///   takes its input, or `null`. 4 has none of these fields.
-/// - The `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`,
-///   `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`,
-///   `ToggleAllFloatingPanesMinimized` and `TogglePaneFloating` commands, the
-///   `NextFloatingPane` and `PreviousFloatingPane` focus targets, and the
-///   `FloatingPaneMoved`, `PanePinChanged` and `PaneMinimizedChanged` events
-///   in a command result, exist in 5 only.
-/// - A `HostWrite` event names its bytes `host_write_bytes` and carries at
-///   most 12582879 of them; 4 named them `host_output_bytes`. A longer host
-///   write goes as `HostWritePart` events, then one `HostWrite`. The
-///   `HostWritePart` event, the `ClipboardCopyPart` and `ClipboardCopy`
-///   requests, and their `ClipboardCopyPartTaken` and `ClipboardCopyRouted`
-///   answers exist in 5 only.
-/// - An `Attach` request carries `link_timeout_ms`, which a client on another
-///   machine sets and a client on this machine leaves out. A session refuses a
-///   `link_timeout_ms` below `1000` with the `RequestFailed` code. `Leaving`
-///   carries `is_returning`; 4 sent a bare `Leaving`. The `Ping` request and
-///   the `Pong` event exist in 5 only.
-/// - A `Keyboard` request carries `key_inputs`: the keys of one read of the
-///   client's terminal that go to the pane, oldest first, which the session
-///   writes to the pane in one write. 4 carried one key in `key_input`.
-/// - A mouse round's `Forward` carries the event's `mouse_kind`, its
-///   `modifier_flags` and `pane_local_cell`, the cell in the pane's content
-///   that the client resolved; 4 carried the client's screen cell in
-///   `mouse_input`. The `MoveFloatingPane` mouse action exists in 5 only.
-/// - The `Prepare` and `Commit` requests and the `Prepared` answer exist in 5
-///   only. A `SubmitCommand`, an `Attach`, a `ClipboardCopy` and a `Restart`
-///   run only as the request a `Prepare` holds, once its `Commit` arrives, and
-///   one sent alone is refused with the `RequestFailed` code. A
-///   `SubmitCommand` on a connection that carries an attached client's event
-///   stream runs as it arrives. 4 ran `SubmitCommand`, `Attach` and `Restart`
-///   as they arrived.
-/// - The `Hello` answer carries `process_image_id`: the id of the answering
-///   session's process image, which a restart into a new image changes. The
-///   field is required, and 4 has no such field.
-/// - A frame travels as a painted update in binary frames, whose length
-///   prefix has bit 31 set: the frame's JSON only when it changed, and each
-///   pane's cursor, scroll position and rows in the row encoding, with only
-///   the rows the client does not hold. A frame that changes nothing is not
-///   sent. 4 sent every frame as one `Painted` JSON event that carried every
-///   row as cell runs.
-/// - The `PaintedUpdate` request exists in 5 only. An attached client sends it
-///   after each paint, naming the last painted update it applied, and nothing
-///   answers it. The session sends the next painted update once the bytes in
-///   flight past the last reported update fit the connection's window, and
-///   one that names an update not sent closes the connection. 4 sent every
-///   frame as it was composed.
-/// - The `Attach` request carries `max_frames_per_second`, from `30` to `120`:
-///   the session sends the attached client at most that many frames a second,
-///   and refuses an `Attach` with a value outside that range with the
-///   `RequestFailed` code. The field is required, and 4 has no such field.
-/// - Each chunk of an image record's RGBA bytes travels as a binary frame of
-///   kind `2`: the transfer id and the byte offset as 8 big-endian bytes each,
-///   the last-chunk flag as one byte, then the raw bytes. The
-///   `ImageContentChunk` event exists in 4 only, and carried the bytes as
-///   base64 text in JSON.
-/// - A `SwitchSession` command and a `SwitchTo` event carry `owner_user_id`:
-///   the user id whose folder of the shared directory advertises the session,
-///   or `null`. The field is required, and 4 has no such field.
-/// - A pane row of an `Overview` answer carries the lifecycle `Running` only.
-///   4 also carried `Spawning`, `Exited` with the child's `exit_code`, and
-///   `Closing`. The answer lists the floating panes after the tiled panes,
-///   each with a `tab_id` of `null`; 4 has no floating pane.
-/// - A `Layout` answer carries `floating_panes`: each floating pane's desired
-///   size, solved size, and every attached client's stored position and what
-///   that client draws for it. The field is required, and 4 has no such field.
-/// - The `Attached` answer carries no `session_structure`; 4 carried one with
-///   the session's id, name and tabs. The `Attached` answer and the `Resync`
-///   event carry `notification_queue`: the session's whole notification
-///   queue. The `NotificationPosted` event exists in 5 only: one entry the
-///   queue took, with the queue's `revision` after it. 4 has no notification
-///   queue.
-/// - The `Resync` event carries `held_command_rejections`, the rejections of
-///   the client's commands since its queue overflowed: each run of equal
-///   rejections in a row as `fired_action`, `reject_reason`, `help` and
-///   `repeat_count`, at least 1. It also carries
-///   `dropped_command_rejection_count`, the runs dropped for room. Both fields
-///   are required. 4 dropped a rejection that found the queue full.
-/// - The `CommandRejected` event names a command from the client's key
-///   binding, its pane placement confirmation, or a floating pane move from
-///   its mouse round, that the session refused. It carries `command_id`,
-///   `fired_action`, the action the key fired or `null`, `reject_reason`, and
-///   `help`, the session's hint or `null`. 4 sent `PlacementCommandRejected`
-///   with `command_id` alone, for a pane placement only.
-/// - A `SubmitCommand` request is an object with `command_envelope` and
-///   `fired_action`, and a `ConfirmPanePlacement` request carries
-///   `fired_action`: the action the client's key fired, or `null`. The field
-///   is required in both. 4 carried the command envelope as the whole
-///   `SubmitCommand` value, and has no `fired_action`.
-/// - A frame carries no `is_recovery_notice_visible`. A session that cannot
-///   restore its saved state after a restart posts the `Error` notification
-///   `the session could not be restored after the restart; a new shell
-///   started`. 4 carried the field, and left it out while it was `false`.
-/// - The `RunClientAction` request, the `ClientActionRequested` event and the
-///   `ClientActionAnswer` request exist in 5 only. A `RunClientAction` runs
-///   only as the request a `Prepare` holds, and its `Commit` is answered once
-///   the client answered, or the session answered for that client. The
-///   attached client answers a `ClientActionRequested` with a
-///   `ClientActionAnswer` that carries `client_action_request_id` and
-///   `refusal`, the refusal or `null`. The field is required.
-/// - The `Quit` command is an object with `client_id`, the client that it
-///   detaches, or `null`. 4 sent a bare `Quit` that ended the session. The
-///   `KillSession` command exists in 5 only, and ends the session.
-/// - A `reject_reason` may be `NoClientAttached`: the command acts on an
-///   attached client, and no client is attached to the session. 4 has no
-///   such reason.
+/// - The `SetFloatingPanePinned`, `ToggleFloatingPanePinned`,
+///   `SetFloatingPaneMinimized` and `ToggleFloatingPaneMinimized` commands
+///   carry the fields that 5's `SetFloatingPanePinned`, `ToggleFloatingPanePinned`,
+///   `SetFloatingPaneMinimized` and `ToggleFloatingPaneMinimized` carried. Each acts on the
+///   floating pane that holds the pane it names. 6 has none of the four names
+///   of 5.
+/// - The `FloatingPaneMoved`, `FloatingPanePinChanged` and
+///   `FloatingPaneMinimizedChanged` events in a command result carry
+///   `pane_ids`: every pane of the floating pane, in layout order. 5 carried
+///   one `pane_id`, and named the last two `FloatingPanePinChanged` and
+///   `FloatingPaneMinimizedChanged`.
+/// - A floating pane of a `Layout` answer carries `pane_ids`: every pane of the
+///   floating pane, in layout order. 5 carried one `pane_id`.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -223,9 +77,9 @@ pub struct Surface {
 /// it with the `MalformedRequest` code and the same kind of sentence.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
-    minimum_version: 5,
-    maximum_version: 5,
-    released_version: Some(4),
+    minimum_version: 6,
+    maximum_version: 6,
+    released_version: Some(5),
 };
 
 /// The control plane: what a caller and the router speak over the router's
@@ -255,7 +109,7 @@ pub const CONTROL_PROTOCOL: Surface = Surface {
 /// The supervisor link: what a session server and the process holding its panes
 /// speak.
 ///
-/// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2.
+/// `v0.4.0` speaks 1, `v0.5.0` speaks 2, and `v0.6.0` speaks 3. The floor is 2.
 ///
 /// Version 3 gives each pane an output window: the supervisor sends at most
 /// that many bytes of one pane's output ahead of the session's
@@ -264,7 +118,7 @@ pub const SUPERVISOR_PROTOCOL: Surface = Surface {
     surface_name: "supervisor link",
     minimum_version: 2,
     maximum_version: 3,
-    released_version: Some(2),
+    released_version: Some(3),
 };
 
 /// The remote access token store: the file this machine keeps its grants in.
@@ -346,35 +200,43 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// The resume file: the state a session server writes before it replaces its
 /// own process image, and the next image reads back.
 ///
-/// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. This build
-/// writes 5: format 5 adds each session's floating panes, each client's view of
+/// `v0.3.0` writes 2, `v0.4.0` writes 3, `v0.5.0` writes 4, and `v0.6.0` writes
+/// 5. This build writes 6: format 6 holds each floating pane as a floating pane
+/// id, a layout tree, a desired size and a solved size, where format 5 held one
+/// pane id with the two sizes. Each client's view of a floating pane, each
+/// client's shown floating panes and floating focus, and each detached client's
+/// saved view are keyed by floating pane id, and each view holds the client's
+/// focus history inside the floating pane and its zoom there. Each tab holds
+/// its layout tree and solved size in `layout_area`. A session of format 5
+/// keeps its clients, and the body keeps its saved views and resume-token
+/// hashes. Format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views
 /// detached clients left with the resume-token hashes, and the process IDs of
 /// the children closed panes left running. It holds a focus history for each
 /// client in each tab, where format 4 held one focused pane, and drops each
 /// pane record's lifecycle and close policy. A session of format 4 or older
-/// comes back with no client. Format 5 layout trees hold resize deltas that
-/// the solve applies after the `preferred` targets, and formats 1 through 4
-/// hold resize deltas applied before them: a restored body of format 4 or
-/// older has its resize deltas rewritten from the terminal sizes the header
-/// carries. A tab whose sizes give back the rect it was last drawn at keeps
-/// every pane's size. In every other tab, the resize delta of each child with
-/// a `preferred` target moves onto its trailing-most flexible sibling.
-/// Format 5 also adds each session's notification queue, and drops each
-/// session's `is_recovery_notice_visible`. A pane's held shell-integration
-/// finish loses the exit code it carried in format 4. A format 4 session gets
-/// a queue in a new epoch, which holds one `Error` entry when its
-/// `is_recovery_notice_visible` was `true`, and is empty otherwise.
-/// Formats 4 and 5 use the declared field names in the saved records. Formats 1
-/// through 4 pass through the ordered migration steps before they are restored.
+/// comes back with no client. Format 5 layout trees hold resize deltas that the
+/// solve applies after the `preferred` targets, and formats 1 through 4 hold
+/// resize deltas applied before them: a restored body of format 4 or older has
+/// its resize deltas rewritten from the terminal sizes the header carries. A
+/// tab whose sizes give back the rect it was last drawn at keeps every pane's
+/// size. In every other tab, the resize delta of each child with a `preferred`
+/// target moves onto its trailing-most flexible sibling. Format 5 also adds
+/// each session's notification queue, and drops each session's
+/// `is_recovery_notice_visible`. A pane's held shell-integration finish loses
+/// the exit code it carried in format 4. A format 4 session gets a queue in a
+/// new epoch, which holds one `Error` entry when its
+/// `is_recovery_notice_visible` was `true`, and is empty otherwise. Formats 4
+/// through 6 use the declared field names in the saved records. Formats 1
+/// through 5 pass through the ordered migration steps before they are restored.
 ///
 /// The build being installed states which format it writes. The running server
 /// reads that answer before it commits to the swap.
 pub const RESUME_FORMAT: Surface = Surface {
     surface_name: "resume file format",
     minimum_version: 1,
-    maximum_version: 5,
-    released_version: Some(4),
+    maximum_version: 6,
+    released_version: Some(5),
 };
 
 /// The config schema: the shape of the files under the config directory.

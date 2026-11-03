@@ -449,9 +449,9 @@ fn no_floating_pane_is_placed_while_every_pane_is_suppressed() {
 #[test]
 fn a_floating_pane_draws_its_box_titlebar_separator_and_cells_over_the_tiled_pane() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
-    let floating_pane_id =
+    let floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
-    get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id).terminal_grid_view =
+    get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id).terminal_grid_view =
         Some(build_text_grid_view(2, 24, "top"));
 
     let render_buffer = render_default_core_frame(&render_snapshot);
@@ -478,14 +478,14 @@ fn a_floating_pane_draws_its_box_titlebar_separator_and_cells_over_the_tiled_pan
 #[test]
 fn a_hovered_grab_handle_leaves_the_floating_pane_title_whole() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
-    let floating_pane_id =
+    let floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
 
     let render_buffer = render_core_frame(
         &render_snapshot,
         ViewerChrome {
             placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
-                pane_id: floating_pane_id,
+                pane_id: floating_slot_pane_id,
                 is_pinned: false,
             }),
             ..ViewerChrome::default()
@@ -511,7 +511,7 @@ fn a_handle_hover_that_names_a_pane_of_the_other_kind_or_pin_state_changes_no_ce
         .active_tab_snapshot
         .pane_slots[0]
         .pane_id;
-    let floating_pane_id =
+    let floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
     render_snapshot.client_snapshot.focused_pane_id = None;
     let unhovered_render_buffer = render_default_core_frame(&render_snapshot);
@@ -522,14 +522,14 @@ fn a_handle_hover_that_names_a_pane_of_the_other_kind_or_pin_state_changes_no_ce
             is_pinned: false,
         },
         PlacementHandleHover::FloatingHandle {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             is_pinned: true,
         },
         PlacementHandleHover::TiledTopBorder {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
         },
         PlacementHandleHover::TiledHandle {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
         },
     ] {
         let render_buffer = render_core_frame(
@@ -781,7 +781,7 @@ fn no_floating_pane_draws_while_pane_placement_shows() {
 fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
     let theme = Theme::default();
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
-    let floating_pane_id =
+    let floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
 
     // `(6, 3)` is the top-left corner and `(8, 4)` the grab handle.
@@ -794,7 +794,7 @@ fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
     let hovered_render_buffer = render_core_frame(
         &render_snapshot,
         ViewerChrome {
-            hovered_pane_id: Some(floating_pane_id),
+            hovered_pane_id: Some(floating_slot_pane_id),
             ..ViewerChrome::default()
         },
         ImageRenderMode::Placeholder,
@@ -811,7 +811,7 @@ fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
         &render_snapshot,
         ViewerChrome {
             placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
-                pane_id: floating_pane_id,
+                pane_id: floating_slot_pane_id,
                 is_pinned: false,
             }),
             ..ViewerChrome::default()
@@ -834,11 +834,11 @@ fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
     );
     assert_eq!(render_buffer[(7, 6)].bg, Color::Reset);
 
-    render_snapshot.client_snapshot.focused_pane_id = Some(floating_pane_id);
+    render_snapshot.client_snapshot.focused_pane_id = Some(floating_slot_pane_id);
     let focused_render_buffer = render_core_frame(
         &render_snapshot,
         ViewerChrome {
-            hovered_pane_id: Some(floating_pane_id),
+            hovered_pane_id: Some(floating_slot_pane_id),
             ..ViewerChrome::default()
         },
         ImageRenderMode::Placeholder,
@@ -855,9 +855,9 @@ fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
 #[test]
 fn a_scrolled_back_floating_pane_shows_its_scroll_position_in_its_bottom_border() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
-    let floating_pane_id =
+    let floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "htop");
-    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
+    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
     floating_pane_snapshot.terminal_grid_view = Some(GridView {
         view_row_offset: 5,
         ..build_text_grid_view(2, 18, "")
@@ -959,9 +959,9 @@ fn a_floating_pane_shorter_than_four_rows_draws_a_plain_box() {
 #[test]
 fn a_floating_panes_image_shows_the_unavailable_text_in_its_content() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
-    let floating_pane_id =
+    let floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
-    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
+    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
     floating_pane_snapshot.terminal_grid_view = Some(build_text_grid_view(2, 24, ""));
     floating_pane_snapshot.image_placement_snapshots = vec![
         ImagePlacementSnapshot::build_unavailable(1, 1, (0, 0), 12, 1).expect("valid placement"),
@@ -978,10 +978,10 @@ fn a_floating_panes_image_shows_the_unavailable_text_in_its_content() {
 #[test]
 fn a_higher_floating_pane_covers_a_lower_ones_unavailable_text_in_placeholder_mode() {
     let mut render_snapshot = build_forty_by_twelve_render_snapshot();
-    let lower_floating_pane_id =
+    let lower_floating_slot_pane_id =
         push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 26, 6), "htop");
     let lower_floating_pane_snapshot =
-        get_pane_snapshot_mut(&mut render_snapshot, lower_floating_pane_id);
+        get_pane_snapshot_mut(&mut render_snapshot, lower_floating_slot_pane_id);
     lower_floating_pane_snapshot.terminal_grid_view = Some(build_text_grid_view(2, 24, ""));
     lower_floating_pane_snapshot.image_placement_snapshots = vec![
         ImagePlacementSnapshot::build_unavailable(1, 1, (0, 0), 24, 1).expect("valid placement"),

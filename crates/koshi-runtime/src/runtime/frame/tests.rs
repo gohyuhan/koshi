@@ -535,21 +535,21 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             is_pinned: true,
         },
     ];
-    let minimized_floating_pane_id = PaneId::new();
-    let untitled_minimized_floating_pane_id = PaneId::new();
+    let minimized_pane_id = PaneId::new();
+    let untitled_minimized_pane_id = PaneId::new();
     render_snapshot.session_snapshot.floating_panes = vec![
         FloatingPane::Shown {
             pane_id: upper_floating_pane_id,
         },
         FloatingPane::Minimized {
-            pane_id: minimized_floating_pane_id,
+            pane_id: minimized_pane_id,
             pane_title: Some("htop".to_string()),
         },
         FloatingPane::Shown {
             pane_id: lower_floating_pane_id,
         },
         FloatingPane::Minimized {
-            pane_id: untitled_minimized_floating_pane_id,
+            pane_id: untitled_minimized_pane_id,
             pane_title: None,
         },
     ];
@@ -578,14 +578,14 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
                 pane_id: upper_floating_pane_id,
             },
             FrameFloatingPane::Minimized {
-                pane_id: minimized_floating_pane_id,
+                pane_id: minimized_pane_id,
                 pane_title: Some("htop".to_string()),
             },
             FrameFloatingPane::Shown {
                 pane_id: lower_floating_pane_id,
             },
             FrameFloatingPane::Minimized {
-                pane_id: untitled_minimized_floating_pane_id,
+                pane_id: untitled_minimized_pane_id,
                 pane_title: None,
             },
         ]

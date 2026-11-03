@@ -480,7 +480,7 @@ pub fn place_pane_across_tabs(
     }
 }
 
-/// Place `floating_pane_id`, a pane that no leaf of `layout_tree` holds, at
+/// Place `docking_pane_id`, a pane that no leaf of `layout_tree` holds, at
 /// `placement_target` in `layout_tree`, the tree of the tab that receives it.
 ///
 /// `tab_rect` is the rectangle `layout_tree` solves into and `pane_sizing` the
@@ -495,12 +495,12 @@ pub fn place_pane_across_tabs(
 /// # Errors
 ///
 /// - [`PlacementError::PaneInBothTrees`]: `layout_tree` already holds
-///   `floating_pane_id`.
+///   `docking_pane_id`.
 /// - [`PlacementError::SourcePaneNotFound`]: `placement_target` is a swap,
 ///   which needs a source leaf.
 /// - [`PlacementError::TargetPaneNotFound`]: the stack target, or a pane the
 ///   anchor names, is not a leaf of `layout_tree`.
-/// - [`PlacementError::AnchorIsSource`]: the anchor is `Pane(floating_pane_id)`.
+/// - [`PlacementError::AnchorIsSource`]: the anchor is `Pane(docking_pane_id)`.
 /// - The anchor errors of an insertion: [`PlacementError::GroupPaneDuplicated`],
 ///   [`PlacementError::GroupIsNotOneSubtree`] and
 ///   [`PlacementError::AnchorInsideStack`].
@@ -508,36 +508,36 @@ pub fn place_pane_across_tabs(
 ///   fit `tab_rect`.
 pub fn place_floating_pane_in_tab(
     layout_tree: &LayoutNode,
-    floating_pane_id: PaneId,
+    docking_pane_id: PaneId,
     placement_target: &PlacementTarget,
     tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, PlacementError> {
-    if layout_tree.has_pane(floating_pane_id) {
+    if layout_tree.has_pane(docking_pane_id) {
         return Err(PlacementError::PaneInBothTrees {
-            pane_id: floating_pane_id,
+            pane_id: docking_pane_id,
         });
     }
     let placed_layout_tree = match placement_target {
         PlacementTarget::Swap { .. } => {
             return Err(PlacementError::SourcePaneNotFound {
-                pane_id: floating_pane_id,
+                pane_id: docking_pane_id,
             });
         }
         PlacementTarget::Insert {
             anchor: placement_anchor,
             direction,
         } => {
-            validate_placement_anchor(layout_tree, floating_pane_id, placement_anchor)?;
+            validate_placement_anchor(layout_tree, docking_pane_id, placement_anchor)?;
             insert_pane_beside_anchor(
                 layout_tree.clone(),
-                floating_pane_id,
+                docking_pane_id,
                 placement_anchor,
                 *direction,
             )
         }
         PlacementTarget::Stack { target_pane_id } => {
-            stack_pane_onto_target(layout_tree, floating_pane_id, *target_pane_id)?
+            stack_pane_onto_target(layout_tree, docking_pane_id, *target_pane_id)?
         }
     };
     validate_layout_fit(placed_layout_tree, tab_rect, pane_sizing)

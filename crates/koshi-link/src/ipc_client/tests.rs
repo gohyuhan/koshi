@@ -3106,7 +3106,7 @@ fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
     let (session_thread, received_requests) = spawn_settled_session(
         runtime_directory.path(),
         session_id,
-        5,
+        PROTOCOL_VERSION,
         HelloTiming::AfterTheNextRequest,
     );
 

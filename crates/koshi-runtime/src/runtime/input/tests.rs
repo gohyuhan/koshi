@@ -1668,7 +1668,7 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
 fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_draw_it() {
     let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
     let tiled_pane_id = get_only_pane_id(&server);
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(client_id),
         build_floating_new_pane_args(None, None, false),
@@ -1683,7 +1683,7 @@ fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_dra
 
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(floating_pane_id)
+            .list_pane_write_bytes(htop_pane_id)
             .expect("writes"),
         vec![vec![b'l']]
     );
@@ -1716,7 +1716,7 @@ fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_dra
 
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(floating_pane_id)
+            .list_pane_write_bytes(htop_pane_id)
             .expect("writes"),
         vec![vec![b'l']]
     );
@@ -1886,7 +1886,7 @@ fn each_client_types_into_the_stack_member_its_own_view_opens() {
 fn a_key_reaches_a_floating_pane_docked_onto_the_stack_of_the_focused_pane() {
     let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
     let tiled_pane_id = get_only_pane_id(&server);
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(client_id),
         build_floating_new_pane_args(None, None, false),
@@ -1896,7 +1896,7 @@ fn a_key_reaches_a_floating_pane_docked_onto_the_stack_of_the_focused_pane() {
         &mut server,
         client_id,
         Command::PlacePane(PlacePaneArgs {
-            source_pane_id: Some(floating_pane_id),
+            source_pane_id: Some(htop_pane_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
                 target_pane_id: tiled_pane_id,
             }),
@@ -1917,7 +1917,7 @@ fn a_key_reaches_a_floating_pane_docked_onto_the_stack_of_the_focused_pane() {
 
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(floating_pane_id)
+            .list_pane_write_bytes(htop_pane_id)
             .expect("writes"),
         vec![vec![b'z']]
     );

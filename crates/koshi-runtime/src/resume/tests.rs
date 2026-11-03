@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::runtime::command::tests::{
     attach_client_to_only_tab, build_floating_new_pane_args, create_floating_pane,
+    get_floating_pane_id_holding,
 };
 use crate::runtime::event::RuntimeEvent;
 use crate::runtime::pty_inbox::InboxSink;
@@ -31,9 +32,10 @@ use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize,
     PixelCellSize, Point, Size,
 };
-use koshi_core::ids::{ClientId, CommandId, TabId};
+use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, TabId};
 use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_ipc::protocol::ConnectionToken;
 use koshi_layout::content::find_content_rect;
 use koshi_layout::solver::solve_layout_with_sizing;
 use koshi_layout::tree::LayoutNode;
@@ -115,7 +117,7 @@ fn migrate_format_four_restores_the_session_with_no_floating_panes_and_no_client
     let session_json = serde_json::to_value(session).expect("serialize migrated session");
     assert_eq!(
         session_json["floating_set"],
-        serde_json::json!({"members": []})
+        serde_json::json!({"floating_panes": []})
     );
     let first_pane_id = resume_header.carried_panes[0].pane_id;
     assert_eq!(
@@ -269,6 +271,298 @@ fn list_root_resize_deltas(layout_tree: &LayoutNode) -> Vec<i32> {
         .iter()
         .map(|size_weight| size_weight.resize_delta)
         .collect()
+}
+
+/// The format-5 fixture's id `00000000-0000-7000-8000-abcd5000<suffix_number>`:
+/// `1` the session, `2` the first tab, `5` the first client, `9` the second
+/// tab, `10` the second client, `11` the pane of the `60%` floating pane and
+/// `12` the pane of the `40x10` floating pane.
+fn parse_format_five_id<Id: serde::de::DeserializeOwned>(suffix_number: u16) -> Id {
+    serde_json::from_value(serde_json::json!(format!(
+        "00000000-0000-7000-8000-abcd5000{suffix_number:04}"
+    )))
+    .expect("a format-5 fixture id")
+}
+
+/// The format-5 fixture after `edit_fixture_json` changes its JSON, read back
+/// as a header and the result of reading its body.
+fn read_edited_format_five_fixture(
+    edit_fixture_json: impl FnOnce(&mut serde_json::Value),
+) -> (ResumeHeader, Result<ResumeBody, StorageError>) {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_five.json"))
+            .expect("the format-5 fixture is JSON");
+    edit_fixture_json(&mut fixture_json);
+    let resume_test_directory = TempDir::new().expect("create resume test directory");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
+    std::fs::write(
+        &resume_file_path,
+        serde_json::to_vec(&fixture_json).expect("the edited fixture serializes"),
+    )
+    .expect("write the edited fixture");
+    let (resume_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read the edited header");
+    let resume_body = read_resume_body(resume_header.resume_format, &raw_body);
+    (resume_header, resume_body)
+}
+
+/// The format-5 fixture holds a `60%` floating pane the first client pinned at
+/// `(10, 3)` and the second client minimized, and a `40x10` floating pane both
+/// clients show, the second client at `(2, 1)`. It also holds a standing token
+/// hash for the first client and a saved view of the second client.
+#[test]
+fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_views() {
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(include_bytes!("fixtures/format_five.json"));
+    let fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_five.json"))
+            .expect("the format-5 fixture is JSON");
+    let session_id: SessionId = parse_format_five_id(1);
+    let first_tab_id: TabId = parse_format_five_id(2);
+    let first_client_id: ClientId = parse_format_five_id(5);
+    let second_tab_id: TabId = parse_format_five_id(9);
+    let second_client_id: ClientId = parse_format_five_id(10);
+    let percent_pane_id: PaneId = parse_format_five_id(11);
+    let cells_pane_id: PaneId = parse_format_five_id(12);
+    let percent_floating_pane_id: FloatingPaneId = parse_format_five_id(11);
+    let cells_floating_pane_id: FloatingPaneId = parse_format_five_id(12);
+    assert_eq!(resume_header.resume_format, 5);
+    assert_eq!(resume_header.session_id, session_id);
+    assert_eq!(resume_header.carried_panes.len(), 6);
+    assert_eq!(resume_body.carried_quit, None);
+    assert_eq!(
+        resume_body.left_running_child_process_ids,
+        Vec::<u32>::new()
+    );
+
+    let (mut resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+
+    let session = &resumed_server.session_by_id[&session_id];
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+    assert_eq!(
+        serde_json::to_value(&session.floating_set).expect("the floating set encodes"),
+        serde_json::json!({"floating_panes": [
+            {
+                "floating_pane_id": "00000000-0000-7000-8000-abcd50000011",
+                "layout_area": {
+                    "layout": {"Pane": "00000000-0000-7000-8000-abcd50000011"},
+                    "solved_size": {"column_count": 48, "row_count": 12}
+                },
+                "desired_size": {"width": {"Percent": 60}, "height": {"Percent": 60}},
+                "solved_size": {"column_count": 48, "row_count": 13}
+            },
+            {
+                "floating_pane_id": "00000000-0000-7000-8000-abcd50000012",
+                "layout_area": {
+                    "layout": {"Pane": "00000000-0000-7000-8000-abcd50000012"},
+                    "solved_size": {"column_count": 40, "row_count": 9}
+                },
+                "desired_size": {"width": {"Cells": 40}, "height": {"Cells": 10}},
+                "solved_size": {"column_count": 40, "row_count": 10}
+            }
+        ]})
+    );
+    let saved_session_json =
+        &fixture_json["raw_body"]["session_by_id"]["00000000-0000-7000-8000-abcd50000001"];
+    for tab_id in [first_tab_id, second_tab_id] {
+        let saved_tab_json = &saved_session_json["tabs"][tab_id.get_uuid().to_string()];
+        assert_eq!(
+            serde_json::to_value(&session.tabs[&tab_id]).expect("the tab encodes")["layout_area"],
+            serde_json::json!({
+                "layout": saved_tab_json["layout"],
+                "solved_size": saved_tab_json["solved_tab_size"]
+            })
+        );
+    }
+    assert_eq!(
+        [percent_pane_id, cells_pane_id]
+            .map(|pane_id| resumed_server.pty_size_by_pane_id[&pane_id]),
+        [
+            PtySize {
+                column_count: 46,
+                row_count: 9,
+            },
+            PtySize {
+                column_count: 38,
+                row_count: 6,
+            },
+        ]
+    );
+    assert_eq!(
+        [percent_pane_id, cells_pane_id].map(|pane_id| get_joined_screen_text(
+            resumed_server.terminal_engine_by_pane_id[&pane_id].get_terminal_state()
+        )),
+        ["percent output", "cells output"]
+    );
+
+    let first_client = session
+        .clients
+        .get_client_by_id(first_client_id)
+        .expect("the first client");
+    assert_eq!(
+        first_client.list_floating_pane_views(),
+        &HashMap::from([
+            (
+                percent_floating_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Pinned(Point { column: 10, row: 3 }),
+                    is_minimized: false,
+                    focus_history: vec![percent_pane_id],
+                    zoomed_pane_id: None,
+                },
+            ),
+            (
+                cells_floating_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: false,
+                    focus_history: vec![cells_pane_id],
+                    zoomed_pane_id: None,
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        first_client.list_shown_floating_pane_ids(),
+        [percent_floating_pane_id, cells_floating_pane_id]
+    );
+    assert_eq!(
+        first_client.get_focused_floating_pane_id(),
+        Some(cells_floating_pane_id)
+    );
+    assert_eq!(
+        first_client.get_active_focused_pane_id(),
+        Some(cells_pane_id)
+    );
+    let second_client = session
+        .clients
+        .get_client_by_id(second_client_id)
+        .expect("the second client");
+    assert_eq!(
+        second_client.list_floating_pane_views(),
+        &HashMap::from([
+            (
+                percent_floating_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Default,
+                    is_minimized: true,
+                    focus_history: vec![percent_pane_id],
+                    zoomed_pane_id: None,
+                },
+            ),
+            (
+                cells_floating_pane_id,
+                FloatingPaneView {
+                    position: FloatingPanePosition::Moved(Point { column: 2, row: 1 }),
+                    is_minimized: false,
+                    focus_history: vec![cells_pane_id],
+                    zoomed_pane_id: None,
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        second_client.list_shown_floating_pane_ids(),
+        [cells_floating_pane_id]
+    );
+    assert_eq!(
+        second_client.get_focused_floating_pane_id(),
+        Some(cells_floating_pane_id)
+    );
+    assert_eq!(
+        second_client.get_active_focused_pane_id(),
+        Some(cells_pane_id)
+    );
+
+    assert_eq!(
+        resumed_server
+            .saved_view_store
+            .find_client_id_by_resume_token(&ConnectionToken::from_secret(
+                "format-five-first-client-token"
+            )),
+        Some(first_client_id)
+    );
+    let first_tab_pane_ids: [PaneId; 3] = [3, 6, 7].map(parse_format_five_id);
+    assert_eq!(
+        resumed_server.saved_view_store.take_saved_view(
+            &ConnectionToken::from_secret("format-five-second-client-token"),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(101),
+        ),
+        Some(SavedView {
+            active_tab_id: first_tab_id,
+            focus_history_by_tab_id: HashMap::from([(
+                first_tab_id,
+                vec![first_tab_pane_ids[2], first_tab_pane_ids[0]]
+            )]),
+            zoomed_pane_id_by_tab_id: HashMap::from([(first_tab_id, first_tab_pane_ids[2])]),
+            scroll_offset_by_pane_id: HashMap::from([(first_tab_pane_ids[0], 12)]),
+            floating_pane_view_by_floating_pane_id: HashMap::from([
+                (
+                    percent_floating_pane_id,
+                    FloatingPaneView {
+                        position: FloatingPanePosition::Default,
+                        is_minimized: true,
+                        focus_history: vec![percent_pane_id],
+                        zoomed_pane_id: None,
+                    },
+                ),
+                (
+                    cells_floating_pane_id,
+                    FloatingPaneView {
+                        position: FloatingPanePosition::Moved(Point { column: 2, row: 1 }),
+                        is_minimized: false,
+                        focus_history: vec![cells_pane_id],
+                        zoomed_pane_id: None,
+                    },
+                ),
+            ]),
+            shown_floating_pane_ids: vec![cells_floating_pane_id],
+        })
+    );
+}
+
+#[test]
+fn migrate_format_five_keeps_a_carried_quit_and_the_children_left_running() {
+    let (_, resume_body) = read_edited_format_five_fixture(|fixture_json| {
+        fixture_json["raw_body"]["carried_quit"] = serde_json::json!("Graceful");
+        fixture_json["raw_body"]["left_running_child_process_ids"] =
+            serde_json::json!([5100, 5101]);
+    });
+    let resume_body = resume_body.expect("the edited body reads");
+
+    assert_eq!(resume_body.carried_quit, Some(CarriedQuit::Graceful));
+    assert_eq!(resume_body.left_running_child_process_ids, [5100, 5101]);
+}
+
+#[test]
+fn migrate_format_five_refuses_a_floating_member_that_misses_a_field_or_is_not_an_object() {
+    let session_path = "body.session_by_id.00000000-0000-7000-8000-abcd50000001";
+    for (replace_first_member, expected_detail) in [
+        (
+            (|first_member: &mut serde_json::Value| {
+                first_member
+                    .as_object_mut()
+                    .expect("a member is an object")
+                    .remove("solved_size");
+            }) as fn(&mut serde_json::Value),
+            format!("{session_path}.floating_set.members[0].solved_size is missing"),
+        ),
+        (
+            |first_member: &mut serde_json::Value| *first_member = serde_json::json!(7),
+            format!("{session_path}.floating_set.members[0] must be an object"),
+        ),
+    ] {
+        let (_, resume_body) = read_edited_format_five_fixture(|fixture_json| {
+            replace_first_member(
+                &mut fixture_json["raw_body"]["session_by_id"]
+                    ["00000000-0000-7000-8000-abcd50000001"]["floating_set"]["members"][0],
+            );
+        });
+        match resume_body {
+            Err(StorageError::Corrupt { detail }) => assert_eq!(detail, expected_detail),
+            unexpected_result => panic!("expected a corrupt body, got {unexpected_result:?}"),
+        }
+    }
 }
 
 #[test]
@@ -1336,7 +1630,7 @@ fn list_tab_pane_ids(server: &Server, session_id: SessionId, tab_id: TabId) -> V
 }
 
 /// Return every pane id of `session_id`: the tiled panes in tab order then
-/// layout order, then the floating panes in the order they became floating.
+/// layout order, then the floating panes in the order they were created.
 fn list_session_pane_ids(server: &Server, session_id: SessionId) -> Vec<PaneId> {
     let session = &server.session_by_id[&session_id];
     session
@@ -1624,8 +1918,8 @@ fn list_carried_pty_pane_ids(carried_pty_panes: &[CarriedPtyPane]) -> HashSet<Pa
 
 /// A `60%x100%` floating pane the first client pinned at `(10, 3)` and a
 /// `40x10` floating pane it minimized cross the resume file. Both come back as
-/// members at their desired sizes, in the order they became floating, live at
-/// their carried PTY sizes with their screens. The first client's pin,
+/// floating panes at their desired sizes, in the order they were added, live
+/// at their carried PTY sizes with their screens. The first client's pin,
 /// minimize, shown order and floating focus come back as they went out.
 #[test]
 fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_file() {
@@ -1654,13 +1948,15 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
         CommandSource::from_key_binding(first_client_id),
         build_floating_new_pane_args(Some(cells_floating_pane_size), None, false),
     );
+    let [pinned_floating_pane_id, minimized_floating_pane_id] = [pinned_pane_id, minimized_pane_id]
+        .map(|pane_id| get_floating_pane_id_holding(&populated_server.server, pane_id));
     {
         let first_client = populated_server
             .server
             .get_client_mut(first_client_id)
             .expect("the first client");
-        first_client.pin_floating_pane(pinned_pane_id, Point { column: 10, row: 3 });
-        assert!(first_client.minimize_floating_pane(minimized_pane_id));
+        first_client.pin_floating_pane(pinned_floating_pane_id, Point { column: 10, row: 3 });
+        assert!(first_client.minimize_floating_pane(minimized_floating_pane_id));
     }
     populated_server
         .server
@@ -1668,18 +1964,30 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
     populated_server
         .server
         .handle_pty_output(minimized_pane_id, b"minimized output");
-    let expected_floating_members = populated_server.server.session_by_id[&session_id]
+    let expected_floating_panes = populated_server.server.session_by_id[&session_id]
         .floating_set
-        .list_members()
+        .list_floating_panes()
         .to_vec();
     assert_eq!(
-        expected_floating_members
+        expected_floating_panes
             .iter()
-            .map(|floating_member| (floating_member.pane_id, floating_member.desired_size))
+            .map(|floating_pane| (
+                floating_pane.get_floating_pane_id(),
+                floating_pane.list_pane_ids(),
+                floating_pane.get_desired_size()
+            ))
             .collect::<Vec<_>>(),
         [
-            (pinned_pane_id, percent_floating_pane_size),
-            (minimized_pane_id, cells_floating_pane_size),
+            (
+                pinned_floating_pane_id,
+                vec![pinned_pane_id],
+                percent_floating_pane_size
+            ),
+            (
+                minimized_floating_pane_id,
+                vec![minimized_pane_id],
+                cells_floating_pane_size
+            ),
         ]
     );
     let first_client = populated_server.server.session_by_id[&session_id]
@@ -1691,25 +1999,32 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
         expected_floating_pane_views,
         HashMap::from([
             (
-                pinned_pane_id,
+                pinned_floating_pane_id,
                 FloatingPaneView {
                     position: FloatingPanePosition::Pinned(Point { column: 10, row: 3 }),
                     is_minimized: false,
+                    focus_history: vec![pinned_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
             (
-                minimized_pane_id,
+                minimized_floating_pane_id,
                 FloatingPaneView {
                     position: FloatingPanePosition::Default,
                     is_minimized: true,
+                    focus_history: vec![minimized_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
         ])
     );
     let expected_shown_floating_pane_ids = first_client.list_shown_floating_pane_ids().to_vec();
-    assert_eq!(expected_shown_floating_pane_ids, [pinned_pane_id]);
+    assert_eq!(expected_shown_floating_pane_ids, [pinned_floating_pane_id]);
     let expected_focused_floating_pane_id = first_client.get_focused_floating_pane_id();
-    assert_eq!(expected_focused_floating_pane_id, Some(pinned_pane_id));
+    assert_eq!(
+        expected_focused_floating_pane_id,
+        Some(pinned_floating_pane_id)
+    );
     let expected_pty_size_by_pane_id = populated_server.server.pty_size_by_pane_id.clone();
     let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
 
@@ -1727,8 +2042,8 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
 
     let resumed_session = &resumed_server.session_by_id[&session_id];
     assert_eq!(
-        resumed_session.floating_set.list_members(),
-        expected_floating_members.as_slice()
+        resumed_session.floating_set.list_floating_panes(),
+        expected_floating_panes.as_slice()
     );
     let resumed_first_client = resumed_session
         .clients
@@ -2980,7 +3295,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
         assert_eq!(read_header.resume_format, RESUME_FORMAT);
-        assert_eq!(RESUME_FORMAT, 5);
+        assert_eq!(RESUME_FORMAT, 6);
         let resumed_session = &read_body.session_by_id[&session_id];
         assert_eq!(resumed_session.session_id, session_id);
         let resumed_client = resumed_session
@@ -3074,7 +3389,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
             focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
-            floating_pane_view_by_pane_id: HashMap::new(),
+            floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
         })
     );

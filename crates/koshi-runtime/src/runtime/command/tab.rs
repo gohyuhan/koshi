@@ -215,7 +215,7 @@ impl Server {
             command_args.should_force_close,
             command_args.should_kill_process_tree,
         );
-        let floating_pane_ids = session.floating_set.list_pane_ids();
+        let floating_set_pane_ids = session.floating_set.list_pane_ids();
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.
@@ -245,7 +245,7 @@ impl Server {
         for &pane_id in &pane_ids {
             self.kill_pane_off_thread(pane_id, kill_policy);
         }
-        self.end_removed_floating_panes(session_id, floating_pane_ids, kill_policy);
+        self.end_removed_floating_panes(session_id, floating_set_pane_ids, kill_policy);
 
         Ok(self.commit_events(command_id, emitted_events))
     }

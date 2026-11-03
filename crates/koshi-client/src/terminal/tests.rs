@@ -2364,7 +2364,7 @@ fn window_title_reads_a_focused_floating_panes_title() {
     render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
     render_snapshot.pane_snapshots[0].pane_id = pane_id;
     render_snapshot.pane_snapshots[0].pane_title = Some("bash".to_string());
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let floating_outer_rect = CoreRect::from_origin_and_size(
         Point { column: 4, row: 2 },
         Size {
@@ -2376,15 +2376,15 @@ fn window_title_reads_a_focused_floating_panes_title() {
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: floating_outer_rect,
             is_pinned: false,
         });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
-    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
     render_snapshot.pane_snapshots.push(floating_pane_snapshot);
-    render_snapshot.client_snapshot.focused_pane_id = Some(floating_pane_id);
+    render_snapshot.client_snapshot.focused_pane_id = Some(floating_slot_pane_id);
 
     assert_eq!(build_window_title(&render_snapshot), "quiet-lake | htop");
 }
@@ -4191,7 +4191,7 @@ fn placement_render_snapshot_shows_a_cross_tab_destination_in_the_pane_area() {
 fn placement_render_snapshot_keeps_the_floating_panes_and_their_content() {
     let (session_server, client_id, source_pane_id) = build_test_server_with_pane();
     let mut render_snapshot = build_render_snapshot(&session_server, client_id);
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let floating_outer_rect = CoreRect::from_origin_and_size(
         Point { column: 4, row: 2 },
         Size {
@@ -4203,12 +4203,12 @@ fn placement_render_snapshot_keeps_the_floating_panes_and_their_content() {
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: floating_outer_rect,
             is_pinned: true,
         });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
-    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
     render_snapshot
         .pane_snapshots
@@ -5219,12 +5219,12 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
 fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_frame_content() {
     let (session_server, client_id, _tiled_pane_id) = build_test_server_with_pane();
     let mut render_snapshot = build_render_snapshot(&session_server, client_id);
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     render_snapshot
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: CoreRect::from_origin_and_size(
                 Point { column: 4, row: 2 },
                 Size {
@@ -5235,7 +5235,7 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
             is_pinned: true,
         });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
-    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
     render_snapshot
         .pane_snapshots
@@ -5244,7 +5244,7 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
     let [left_pane_id, right_pane_id] = [PaneId::new(), PaneId::new()];
     let mut placement_snapshot = build_cross_tab_placement_snapshot(
         render_snapshot.client_snapshot.active_tab_id,
-        floating_pane_id,
+        floating_slot_pane_id,
         destination_tab_id,
         [left_pane_id, right_pane_id],
     );
@@ -5258,8 +5258,11 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
         .expect("the floating pane fits the 48x8 tab")
         .placed_tab_snapshot;
 
-    let displayed_render_snapshot =
-        build_placement_render_snapshot(&render_snapshot, &placed_tab_snapshot, floating_pane_id);
+    let displayed_render_snapshot = build_placement_render_snapshot(
+        &render_snapshot,
+        &placed_tab_snapshot,
+        floating_slot_pane_id,
+    );
 
     assert_eq!(
         displayed_render_snapshot
@@ -5269,11 +5272,11 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
             .iter()
             .map(|pane_slot| pane_slot.pane_id)
             .collect::<Vec<_>>(),
-        vec![left_pane_id, right_pane_id, floating_pane_id]
+        vec![left_pane_id, right_pane_id, floating_slot_pane_id]
     );
     assert_eq!(
         displayed_render_snapshot.client_snapshot.focused_pane_id,
-        Some(floating_pane_id)
+        Some(floating_slot_pane_id)
     );
     assert_eq!(
         displayed_render_snapshot.pane_snapshots,

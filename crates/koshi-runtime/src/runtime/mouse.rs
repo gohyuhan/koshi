@@ -167,11 +167,11 @@ impl Server {
             })
     }
 
-    /// The outer cell count of the floating pane `pane_id` from its last size
-    /// solve, on the axis its `border_side` border moves along: its width for
-    /// `Left` and `Right`, its height for `Up` and `Down`. `None` when no
-    /// session holds `client_id` or `pane_id` is no floating member of that
-    /// session.
+    /// The outer cell count of the floating pane that holds `pane_id` from its
+    /// last size solve, on the axis its `border_side` border moves along: its
+    /// width for `Left` and `Right`, its height for `Up` and `Down`. `None`
+    /// when no session holds `client_id` or no floating pane of that session
+    /// holds `pane_id`.
     ///
     /// A `40x12` float → `Right` `40`, `Down` `12`.
     fn find_floating_pane_axis_cell_count(
@@ -180,13 +180,14 @@ impl Server {
         pane_id: PaneId,
         border_side: Direction,
     ) -> Option<u16> {
-        let (_, floating_member) = self
+        let (_, floating_pane) = self
             .get_session_for_client(client_id)?
             .floating_set
-            .find_member(pane_id)?;
+            .find_floating_pane_by_pane_id(pane_id)?;
+        let solved_size = floating_pane.get_solved_size();
         Some(match border_side {
-            Direction::Left | Direction::Right => floating_member.solved_size.column_count,
-            Direction::Up | Direction::Down => floating_member.solved_size.row_count,
+            Direction::Left | Direction::Right => solved_size.column_count,
+            Direction::Up | Direction::Down => solved_size.row_count,
         })
     }
 

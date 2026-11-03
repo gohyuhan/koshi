@@ -2,7 +2,7 @@
 
 use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId};
 use thiserror::Error;
 
 use crate::session::lifecycle::{SessionLifecycle, SessionLifecycleEvent};
@@ -17,13 +17,13 @@ pub struct InvalidTransition {
     pub lifecycle_event: SessionLifecycleEvent,
 }
 
-/// Why [`Session::add_floating_member`](crate::session::state::Session::add_floating_member)
-/// refused a member. The set is unchanged.
+/// Why [`Session::add_floating_pane`](crate::session::state::Session::add_floating_pane)
+/// refused a floating pane. The set is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum FloatingSetError {
-    /// The member's pane is already a floating pane of the session. `PaneId`
-    /// displays as `pane-<uuid>`, so the message reads `pane-<uuid> is already
-    /// a floating pane`.
+    /// A pane of the floating pane is already a pane of a floating pane of the
+    /// session. `PaneId` displays as `pane-<uuid>`, so the message reads
+    /// `pane-<uuid> is already a floating pane`.
     #[error("{pane_id} is already a floating pane")]
     DuplicatePane { pane_id: PaneId },
 
@@ -36,11 +36,12 @@ pub enum FloatingSetError {
     TooManyPanes,
 }
 
-/// A way a session's tabs, layout trees, stored tab solves, floating panes, pane registry, and
+/// A way a session's tabs, layout trees, stored solves, floating panes, pane registry, and
 /// client focus, zoom and floating views can disagree with one another.
 /// [`Session::validate_session_consistency`](crate::session::state::Session::validate_session_consistency)
 /// returns every violation it finds in one pass. Each variant names what it found: the offending
-/// pane, tab or client, the bar index two tabs claim, or the number of floating members.
+/// pane, tab, floating pane or client, the bar index two tabs claim, or the number of floating
+/// panes.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionConsistencyError {
     /// A layout leaf references a pane with no record in the registry.
@@ -128,86 +129,144 @@ pub enum SessionConsistencyError {
     DuplicateTabIndex { tab_index: usize },
 
     /// The floating panes number more than [`MAX_FLOATING_PANES_PER_SESSION`].
-    /// `member_count` counts every entry, a repeated pane included.
     #[error(
-        "floating panes list {member_count} panes, more than {}",
+        "the session holds {floating_pane_count} floating panes, more than {}",
         MAX_FLOATING_PANES_PER_SESSION
     )]
-    TooManyFloatingPanes { member_count: usize },
+    TooManyFloatingPanes { floating_pane_count: usize },
 
-    /// A floating pane has no record in the registry.
-    #[error("floating pane {pane_id:?} has no registry record")]
+    /// A floating pane's tree holds no pane.
+    #[error("floating pane {floating_pane_id:?} holds no pane")]
+    EmptyFloatingPane { floating_pane_id: FloatingPaneId },
+
+    /// Two or more floating panes carry the same id. Reported once per id.
+    #[error("more than one floating pane carries the id {floating_pane_id:?}")]
+    DuplicateFloatingPaneId { floating_pane_id: FloatingPaneId },
+
+    /// A floating pane's tree is solved at a size other than its outer size
+    /// less its titlebar strip,
+    /// [`compute_floating_layout_size`](crate::session::state::compute_floating_layout_size).
+    #[error("floating pane {floating_pane_id:?} is solved at {solved_layout_size:?}, and its tree size is {floating_layout_size:?}")]
+    FloatingPaneSolveSizeStale {
+        floating_pane_id: FloatingPaneId,
+        solved_layout_size: Size,
+        floating_layout_size: Size,
+    },
+
+    /// A floating pane's stored solve differs from a fresh solve of its tree
+    /// at the size it is solved at, with the session's pane sizing.
+    #[error("floating pane {floating_pane_id:?} stores a solve that its tree does not give")]
+    FloatingPaneSolveStale { floating_pane_id: FloatingPaneId },
+
+    /// A pane of a floating pane has no record in the registry.
+    #[error("floating pane holds pane {pane_id:?} with no registry record")]
     FloatingPaneNotInRegistry { pane_id: PaneId },
 
-    /// The floating panes list the same pane more than once.
-    #[error("floating panes list pane {pane_id:?} more than once")]
-    DuplicateFloatingPane { pane_id: PaneId },
+    /// A pane is a leaf of more than one floating pane's tree, or twice of one
+    /// tree. `floating_pane_ids` names the floating pane of each leaf, one
+    /// entry per leaf.
+    #[error("pane {pane_id:?} is a leaf of floating panes {floating_pane_ids:?}")]
+    PaneInMultipleFloatingPanes {
+        pane_id: PaneId,
+        floating_pane_ids: Vec<FloatingPaneId>,
+    },
 
-    /// A floating pane is also a leaf in the layout of each tab in `tab_ids`.
-    #[error("floating pane {pane_id:?} is also a layout leaf in tabs {tab_ids:?}")]
+    /// A pane of a floating pane is also a leaf in the layout of each tab in
+    /// `tab_ids`.
+    #[error(
+        "floating pane holds pane {pane_id:?}, which is also a layout leaf in tabs {tab_ids:?}"
+    )]
     FloatingPaneInLayout {
         pane_id: PaneId,
         tab_ids: Vec<TabId>,
     },
 
-    /// A client stores a floating view of a pane that is not a floating pane.
+    /// A client stores a floating view of a floating pane the session does not
+    /// hold.
     #[error(
-        "client {client_id:?} stores a floating view of pane {pane_id:?}, which is not floating"
+        "client {client_id:?} stores a view of floating pane {floating_pane_id:?}, which the session does not hold"
     )]
     FloatingViewTargetMissing {
         client_id: ClientId,
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
     },
 
     /// A client holds no floating view of a floating pane of its session.
-    #[error("client {client_id:?} holds no floating view of floating pane {pane_id:?}")]
+    #[error("client {client_id:?} holds no view of floating pane {floating_pane_id:?}")]
     FloatingViewMissing {
         client_id: ClientId,
+        floating_pane_id: FloatingPaneId,
+    },
+
+    /// A client's view of a floating pane holds an empty focus history.
+    #[error("client {client_id:?} view of floating pane {floating_pane_id:?} focuses no pane")]
+    FloatingFocusHistoryEmpty {
+        client_id: ClientId,
+        floating_pane_id: FloatingPaneId,
+    },
+
+    /// A pane of a client's focus history inside a floating pane is not a leaf
+    /// of that floating pane's tree.
+    #[error("client {client_id:?} remembers pane {pane_id:?} in floating pane {floating_pane_id:?}, whose tree does not hold it")]
+    FloatingFocusTargetMissing {
+        client_id: ClientId,
+        floating_pane_id: FloatingPaneId,
         pane_id: PaneId,
     },
 
-    /// A client's shown floating panes list a pane that is not a floating
-    /// pane.
-    #[error("client {client_id:?} shows pane {pane_id:?} as floating, and it is not floating")]
+    /// A client is zoomed inside a floating pane on a pane that is not a leaf
+    /// of that floating pane's tree.
+    #[error("client {client_id:?} is zoomed on pane {pane_id:?} in floating pane {floating_pane_id:?}, whose tree does not hold it")]
+    FloatingZoomTargetMissing {
+        client_id: ClientId,
+        floating_pane_id: FloatingPaneId,
+        pane_id: PaneId,
+    },
+
+    /// A client's shown floating panes list a floating pane the session does
+    /// not hold.
+    #[error(
+        "client {client_id:?} shows floating pane {floating_pane_id:?}, which the session does not hold"
+    )]
     ShownFloatingPaneMissing {
         client_id: ClientId,
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
     },
 
-    /// A client's shown floating panes list the same pane more than once.
-    /// Reported once for each repeat after the first entry.
-    #[error("client {client_id:?} shows floating pane {pane_id:?} more than once")]
+    /// A client's shown floating panes list the same floating pane more than
+    /// once. Reported once for each repeat after the first entry.
+    #[error("client {client_id:?} shows floating pane {floating_pane_id:?} more than once")]
     DuplicateShownFloatingPane {
         client_id: ClientId,
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
     },
 
     /// A client's view of a floating pane says minimized while its shown
     /// floating panes list it, or says not minimized while they do not.
-    #[error("client {client_id:?} view of floating pane {pane_id:?} says is_minimized {is_minimized}, which its shown floating panes contradict")]
+    #[error("client {client_id:?} view of floating pane {floating_pane_id:?} says is_minimized {is_minimized}, which its shown floating panes contradict")]
     FloatingPaneShownStateMismatch {
         client_id: ClientId,
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
         is_minimized: bool,
     },
 
-    /// A client's floating focus is not the newest pane it shows: a focus set
-    /// while it shows none, a focus on another pane, or no focus while it
-    /// shows one.
-    #[error("client {client_id:?} focuses floating pane {focused_pane_id:?}, and the newest floating pane it shows is {newest_shown_pane_id:?}")]
+    /// A client's floating focus is not the newest floating pane it shows: a
+    /// focus set while it shows none, a focus on another floating pane, or no
+    /// focus while it shows one.
+    #[error("client {client_id:?} focuses floating pane {focused_floating_pane_id:?}, and the newest floating pane it shows is {newest_shown_floating_pane_id:?}")]
     FloatingFocusNotNewestShown {
         client_id: ClientId,
-        focused_pane_id: Option<PaneId>,
-        newest_shown_pane_id: Option<PaneId>,
+        focused_floating_pane_id: Option<FloatingPaneId>,
+        newest_shown_floating_pane_id: Option<FloatingPaneId>,
     },
 
     /// A client that cannot draw floating panes shows one: it reports a
     /// `Starving` pane area or one smaller than `5x6` on either axis, or its
     /// own view of its active tab has every pane suppressed.
-    #[error("client {client_id:?} cannot draw floating panes and shows floating pane {pane_id:?}")]
+    #[error("client {client_id:?} cannot draw floating panes and shows floating pane {floating_pane_id:?}")]
     UndrawableFloatingPaneShown {
         client_id: ClientId,
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
     },
 
     /// A tab's stored solve differs from a fresh solve of its tree at the tab

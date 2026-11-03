@@ -132,7 +132,7 @@ pub struct SessionOverview {
     /// The session's tabs, in tab-bar order.
     pub tabs: Vec<TabDiscovery>,
     /// Every pane of the session: the panes of its tabs in tab-bar order, then
-    /// its floating panes in the order they became floating.
+    /// its floating panes in the order they were created.
     pub panes: Vec<PaneDiscovery>,
     /// The clients currently attached to the session.
     pub clients: Vec<ClientDiscovery>,

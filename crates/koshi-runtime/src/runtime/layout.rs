@@ -26,7 +26,7 @@ use koshi_ipc::layout::{
     SolvedPane, SolvedTab, TabLayout,
 };
 use koshi_session::client::Client;
-use koshi_session::session::state::{FloatingMember, Session, Tab};
+use koshi_session::session::state::{FloatingPane, Session, Tab};
 
 use crate::server::Server;
 
@@ -108,17 +108,17 @@ impl Server {
 
         let floating_pane_layouts = session
             .floating_set
-            .list_members()
+            .list_floating_panes()
             .iter()
-            .map(|floating_member| FloatingPaneLayout {
-                pane_id: floating_member.pane_id,
-                desired_size: floating_member.desired_size,
-                solved_size: floating_member.solved_size,
+            .map(|floating_pane| FloatingPaneLayout {
+                pane_ids: floating_pane.list_pane_ids(),
+                desired_size: floating_pane.get_desired_size(),
+                solved_size: floating_pane.get_solved_size(),
                 client_views: session
                     .clients
                     .list_attached_clients()
                     .filter_map(|client_record| {
-                        build_floating_pane_client_view(session, client_record, floating_member)
+                        build_floating_pane_client_view(session, client_record, floating_pane)
                     })
                     .collect(),
             })
@@ -144,36 +144,38 @@ impl Server {
     }
 }
 
-/// `client_record`'s view of the floating pane of `floating_member`, or `None`
-/// when the client holds no view of it.
+/// `client_record`'s view of `floating_pane`, or `None` when the client holds
+/// no view of it.
 ///
 /// The visibility follows the client's shown floating panes
 /// ([`Client::list_shown_floating_pane_ids`]):
-/// - a shown pane is [`FloatingPaneVisibility::Drawn`] at the top-left cell of
-///   the rectangle the session places it in for the client
-///   ([`Session::find_client_floating_pane_rect`]), with its index in the shown
-///   list as its layer;
-/// - every other pane is [`FloatingPaneVisibility::Minimized`].
+/// - a shown floating pane is [`FloatingPaneVisibility::Drawn`] at the
+///   top-left cell of the rectangle the session places it in for the client
+///   ([`Session::find_client_floating_pane_rect`]), with its index in the
+///   shown list as its layer;
+/// - every other floating pane is [`FloatingPaneVisibility::Minimized`].
 fn build_floating_pane_client_view(
     session: &Session,
     client_record: &Client,
-    floating_member: &FloatingMember,
+    floating_pane: &FloatingPane,
 ) -> Option<FloatingPaneClientView> {
-    let pane_id = floating_member.pane_id;
-    let floating_pane_view = client_record.get_floating_pane_view(pane_id)?;
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    let floating_pane_view = client_record.get_floating_pane_view(floating_pane_id)?;
     let shown_layer_index = client_record
         .list_shown_floating_pane_ids()
         .iter()
-        .position(|&shown_pane_id| shown_pane_id == pane_id);
+        .position(|&shown_floating_pane_id| shown_floating_pane_id == floating_pane_id);
     let visibility = match shown_layer_index {
         None => FloatingPaneVisibility::Minimized,
-        Some(layer_index) => match session.find_client_floating_pane_rect(client_record, pane_id) {
-            Some(drawn_rect) => FloatingPaneVisibility::Drawn {
-                top_left_cell: drawn_rect.origin,
-                layer_index,
-            },
-            None => FloatingPaneVisibility::Minimized,
-        },
+        Some(layer_index) => {
+            match session.find_client_floating_pane_rect(client_record, floating_pane_id) {
+                Some(drawn_rect) => FloatingPaneVisibility::Drawn {
+                    top_left_cell: drawn_rect.origin,
+                    layer_index,
+                },
+                None => FloatingPaneVisibility::Minimized,
+            }
+        }
     };
     Some(FloatingPaneClientView {
         client_id: client_record.get_client_id(),

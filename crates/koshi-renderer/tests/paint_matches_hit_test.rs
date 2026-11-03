@@ -532,7 +532,7 @@ fn a_shown_tiled_handle_paints_and_hits_the_three_cells_before_the_title() {
 #[test]
 fn every_floating_pane_cell_classifies_as_what_was_painted() {
     let (mut render_snapshot, left_pane_id, ..) = build_tiled_frame();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     // Pane-area (1, 0) is screen (1, 1): the float covers letterbox margin
     // cells and the left tiled pane.
     let floating_outer_rect = build_cell_rect(1, 0, 24, 8);
@@ -540,12 +540,16 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: floating_outer_rect,
             is_pinned: false,
         });
-    let mut floating_pane_snapshot =
-        build_pane_snapshot(floating_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
+    let mut floating_pane_snapshot = build_pane_snapshot(
+        floating_slot_pane_id,
+        Some(build_filled_grid(22, 4, 'f')),
+        0,
+        0,
+    );
     floating_pane_snapshot.pane_title = Some("htop".to_string());
     render_snapshot.pane_snapshots.push(floating_pane_snapshot);
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
@@ -561,7 +565,7 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
         DrawnNotifications::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
-    let floating_content_rect = find_pane_content_rect(frame_layout, floating_pane_id)
+    let floating_content_rect = find_pane_content_rect(frame_layout, floating_slot_pane_id)
         .unwrap_or_else(|| panic!("the floating pane has no content rect"));
     assert_eq!(floating_content_rect, build_cell_rect(2, 4, 22, 4));
 
@@ -599,7 +603,7 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
                     }
                 };
             assert_eq!(
-                pane_id, floating_pane_id,
+                pane_id, floating_slot_pane_id,
                 "({column_index}, {row_index}) inside the float hit another pane"
             );
             assert!(
@@ -923,24 +927,24 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
 #[test]
 fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     let (mut render_snapshot, ..) = build_tiled_frame();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     render_snapshot
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: build_cell_rect(1, 0, 24, 8),
             is_pinned: false,
         });
     render_snapshot.pane_snapshots.push(build_pane_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         Some(build_filled_grid(22, 4, 'f')),
         0,
         0,
     ));
     let viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             top_left_cell: Point { column: 50, row: 9 },
         }),
         ..ViewerChrome::default()
@@ -957,7 +961,7 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
 
     // The 24x8 pane in the 60x12 pane area, which starts at screen row 1,
     // draws with its top-left cell at pane-area (36, 4).
-    let floating_content_rect = find_pane_content_rect(frame_layout, floating_pane_id)
+    let floating_content_rect = find_pane_content_rect(frame_layout, floating_slot_pane_id)
         .unwrap_or_else(|| panic!("the floating pane has no content rect"));
     assert_eq!(floating_content_rect, build_cell_rect(37, 8, 22, 4));
     for row_index in 8..12 {
@@ -969,7 +973,7 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
             assert_eq!(
                 resolve_hit_region(frame_layout, screen_point),
                 HitRegion::PaneContent {
-                    pane_id: floating_pane_id
+                    pane_id: floating_slot_pane_id
                 },
                 "({column_index}, {row_index}) does not hit the moved pane"
             );

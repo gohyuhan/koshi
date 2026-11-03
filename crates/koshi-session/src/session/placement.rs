@@ -36,9 +36,9 @@ use crate::error::FloatingSetError;
 use crate::session::cascade::{
     list_focused_client_rects, remove_pane_from_tab, repair_focus_after_pane_left,
 };
-use crate::session::focus::build_pane_minimized_changed_events;
+use crate::session::focus::build_floating_pane_minimized_changed_events;
 use crate::session::pane_ops::show_new_floating_pane;
-use crate::session::state::{FloatingMember, Session, Tab};
+use crate::session::state::{FloatingPane, Session, Tab};
 use crate::session::tab_ops::{close_and_refocus_tab, find_nearest_surviving_tab};
 
 /// A checked placement could not be installed because its tabs or source pane
@@ -71,12 +71,15 @@ pub enum PlacementCommitError {
     LastTiledPane,
     /// The floating set refused the undocked pane.
     #[error(transparent)]
-    FloatingMemberRefused(#[from] FloatingSetError),
+    FloatingPaneRefused(#[from] FloatingSetError),
 }
 
-/// Undock `floating_member.pane_id`, a leaf of `source_tab_id`: add
-/// `floating_member` to the session's floating panes, take the pane's leaf
-/// out of the tab, and show the pane for the acting client and for every
+/// Undock `source_pane_id`, a leaf of `source_tab_id`: add a new floating pane
+/// whose tree is `Pane(source_pane_id)`, asking for `desired_size` and holding
+/// `solved_size`, its tree solved with [`Session::get_pane_sizing`] over
+/// [`compute_floating_layout_size`](crate::session::state::compute_floating_layout_size)
+/// of `solved_size`, to the session's floating panes, take the pane's leaf out
+/// of the tab, and show the floating pane for the acting client and for every
 /// client whose input is on the pane ([`Client::get_active_focused_pane_id`]).
 /// Returns the ordered events.
 ///
@@ -84,9 +87,9 @@ pub enum PlacementCommitError {
 /// its id. The pane is never closed: no [`Event::PaneClosing`] and no
 /// [`Event::PaneRemoved`] is emitted.
 ///
-/// 1. The member joins the floating set as its newest member, with a
-///    minimized view of it for every attached client
-///    ([`Session::add_floating_member`]): at `acting_view`'s position for
+/// 1. The floating pane joins the floating set as its newest floating pane,
+///    with a minimized view of it for every attached client
+///    ([`Session::add_floating_pane`]): at `acting_view`'s position for
 ///    `acting_view`'s client, at the top-left cell of the rect the pane holds
 ///    in its own view of the tab ([`find_lifted_floating_pane_rect`]) for a
 ///    client whose input is on the pane, else at the default placement.
@@ -97,11 +100,11 @@ pub enum PlacementCommitError {
 ///    inheriting focus from its own focus history. A tab left with no pane
 ///    closes, and its viewers move to the nearest surviving tab.
 /// 3. The acting client, then each client whose input was on the pane, in
-///    client id order, shows the pane above its other floating panes and
-///    focuses it, when it can draw floating panes
+///    client id order, shows the floating pane above its other floating panes
+///    and focuses it, when it can draw floating panes
 ///    ([`Session::can_client_draw_floating_panes`]). A client that cannot
-///    keeps the pane minimized and the focus step 2 gave it. No other client
-///    shows or focuses the pane.
+///    keeps the floating pane minimized and the focus step 2 gave it. No other
+///    client shows or focuses the floating pane.
 ///
 /// Events: step 2's [`Event::LayoutChanged`] and focus events, or its
 /// [`Event::TabClosed`] and the events of the viewers that move, then one
@@ -120,15 +123,15 @@ pub enum PlacementCommitError {
 ///   session's only tab;
 /// - [`PlacementCommitError::ActingClientNotFound`]: `acting_view`'s client is
 ///   not attached;
-/// - [`PlacementCommitError::FloatingMemberRefused`]: the floating set
-///   refuses the member ([`Session::add_floating_member`]).
+/// - [`PlacementCommitError::FloatingPaneRefused`]: the floating set
+///   refuses the floating pane ([`Session::add_floating_pane`]).
 pub fn commit_undock_placement(
     session: &mut Session,
     source_tab_id: TabId,
-    floating_member: FloatingMember,
+    source_pane_id: PaneId,
+    (desired_size, solved_size): (FloatingPaneSize, Size),
     acting_view: (ClientId, FloatingPanePosition),
 ) -> Result<Vec<Event>, PlacementCommitError> {
-    let source_pane_id = floating_member.pane_id;
     let (acting_client_id, _) = acting_view;
     let source_leaf_pane_ids = session
         .tabs
@@ -159,11 +162,18 @@ pub fn commit_undock_placement(
         });
         client_positions.push((following_client_id, lifted_position));
     }
-    session.add_floating_member(floating_member, &client_positions)?;
+    let floating_pane = FloatingPane::from_pane(
+        source_pane_id,
+        desired_size,
+        solved_size,
+        session.get_pane_sizing(),
+    );
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    session.add_floating_pane(floating_pane, &client_positions)?;
 
     let mut emitted_events = remove_pane_from_tab(session, source_tab_id, source_pane_id, None);
     for &(client_id, _) in &client_positions {
-        emitted_events.extend(show_new_floating_pane(session, client_id, source_pane_id));
+        emitted_events.extend(show_new_floating_pane(session, client_id, floating_pane_id));
     }
     Ok(emitted_events)
 }
@@ -230,9 +240,10 @@ pub fn find_lifted_floating_pane_rect(
     Some((desired_size, top_left_cell))
 }
 
-/// Where the floating pane `pane_id` docks for `client`: an insertion into
-/// `client`'s active tab beside the smallest pane, group or tab span under
-/// the center cell of the rect `client` draws the pane in
+/// Where `pane_id`, a pane of a floating pane, docks for `client`: an
+/// insertion into `client`'s active tab beside the smallest pane, group or tab
+/// span under the center cell of the rect `client` draws the floating pane
+/// that holds `pane_id` in
 /// ([`Session::find_client_floating_pane_rect`]), on that span's edge nearest
 /// the cell ([`find_insertion_at_point`]). The spans are those of the solve
 /// `client` draws the tab with ([`Session::compute_client_solve`]), centered
@@ -246,20 +257,24 @@ pub fn find_lifted_floating_pane_rect(
 /// the insertion right of `B`. With `A` zoomed, it is the insertion right of
 /// `A`.
 ///
-/// `None` when `client` does not show `pane_id`
-/// ([`Client::is_floating_pane_shown`]), such as a pane it minimized, draws
-/// no rect for it, such as with a pane area smaller than `5x6`, or views a
-/// tab with no cell.
+/// `None` when no floating pane holds `pane_id`, when `client` does not show
+/// the floating pane that holds it ([`Client::is_floating_pane_shown`]), such
+/// as one it minimized, draws no rect for it, such as with a pane area smaller
+/// than `5x6`, or views a tab with no cell.
 #[must_use]
 pub fn find_nearest_dock_target(
     session: &Session,
     client: &Client,
     pane_id: PaneId,
 ) -> Option<TiledPlacementTarget> {
-    if !client.is_floating_pane_shown(pane_id) {
+    let (_, floating_pane) = session
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)?;
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    if !client.is_floating_pane_shown(floating_pane_id) {
         return None;
     }
-    let floating_pane_rect = session.find_client_floating_pane_rect(client, pane_id)?;
+    let floating_pane_rect = session.find_client_floating_pane_rect(client, floating_pane_id)?;
     let pane_area = client.get_pane_area()?;
     let destination_tab_id = client.get_active_tab_id();
     let tab = session.tabs.get(&destination_tab_id)?;
@@ -301,8 +316,9 @@ pub fn find_nearest_dock_target(
     })
 }
 
-/// Dock the floating pane `source_pane_id` into `destination_tab_id`: take it
-/// out of the session's floating panes and install `destination_tree`, the
+/// Dock `source_pane_id`, the pane of a floating pane, into
+/// `destination_tab_id`: take the floating pane that holds it out of the
+/// session's floating panes and install `destination_tree`, the
 /// destination tab's tree with the pane placed in it
 /// ([`place_floating_pane_in_tab`](koshi_layout::placement::place_floating_pane_in_tab)).
 /// Returns the ordered events.
@@ -311,8 +327,8 @@ pub fn find_nearest_dock_target(
 /// its id. The pane is never closed: no [`Event::PaneClosing`] and no
 /// [`Event::PaneRemoved`] is emitted.
 ///
-/// 1. The pane leaves the floating set and every client's floating view
-///    ([`Session::remove_floating_member`]).
+/// 1. The floating pane that holds the pane leaves the floating set and every
+///    client's floating view ([`Session::remove_floating_pane`]).
 /// 2. `destination_tree` becomes the destination tab's tree, solved again
 ///    ([`Session::update_tab_layout`]).
 /// 3. The acting client, then each client whose input was on the pane, in
@@ -333,8 +349,8 @@ pub fn find_nearest_dock_target(
 /// # Errors
 ///
 /// Checked in this order, before any change:
-/// - [`PlacementCommitError::FloatingSourceNotFound`]: `source_pane_id` is
-///   no floating pane of the session;
+/// - [`PlacementCommitError::FloatingSourceNotFound`]: no floating pane of
+///   the session holds `source_pane_id`;
 /// - [`PlacementCommitError::DestinationTabNotFound`]: the session holds no
 ///   `destination_tab_id`;
 /// - [`PlacementCommitError::PaneOwnershipConflict`]: the tree
@@ -349,9 +365,13 @@ pub fn commit_dock_placement(
     destination_tree: LayoutNode,
     acting_client_id: ClientId,
 ) -> Result<Vec<Event>, PlacementCommitError> {
-    if !session.floating_set.has_pane(source_pane_id) {
+    let Some((_, source_floating_pane)) = session
+        .floating_set
+        .find_floating_pane_by_pane_id(source_pane_id)
+    else {
         return Err(PlacementCommitError::FloatingSourceNotFound);
-    }
+    };
+    let source_floating_pane_id = source_floating_pane.get_floating_pane_id();
     let mut expected_pane_ids: HashSet<PaneId> = session
         .tabs
         .get(&destination_tab_id)
@@ -379,23 +399,23 @@ pub fn commit_dock_placement(
                 Some((
                     client_id,
                     client.get_active_tab_id(),
-                    client.get_focused_floating_pane_id(),
+                    client.find_focused_floating_pane_input_pane_id(),
                 ))
             })
             .collect();
 
-    let _ = session.remove_floating_member(source_pane_id);
+    let _ = session.remove_floating_pane(source_floating_pane_id);
     let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged {
         tab_id: destination_tab_id,
     })];
     emitted_events.extend(session.update_tab_layout(destination_tab_id, destination_tree));
-    for &(client_id, _, previous_floating_pane_id) in &moving_clients {
+    for &(client_id, _, previous_floating_focused_pane_id) in &moving_clients {
         emitted_events.extend(move_client_onto_tiled_pane(
             session,
             client_id,
             destination_tab_id,
             source_pane_id,
-            previous_floating_pane_id,
+            previous_floating_focused_pane_id,
         ));
     }
     let left_tab_ids = moving_clients
@@ -794,13 +814,13 @@ pub fn compute_placement_tab_sizes(
 /// most-recent focus.
 ///
 /// Returns [`Event::TabFocused`] when the client's active tab changed, one
-/// [`Event::PaneMinimizedChanged`] per floating pane minimized, oldest shown
+/// [`Event::FloatingPaneMinimizedChanged`] per floating pane minimized, oldest shown
 /// first, then [`Event::PaneFocused`] with `tab_id: Some(tab_id)`. Its
-/// `previous_pane_id` is `previous_floating_pane_id`, the floating pane that
-/// held the client's input before the placement, else the floating pane that
-/// held it now, else the pane the client focused in `tab_id` before. A client
-/// whose input was on the docked pane `htop` gets `PaneFocused { pane_id:
-/// htop, previous_pane_id: Some(htop) }`.
+/// `previous_pane_id` is `previous_floating_focused_pane_id`, the pane that
+/// held the client's input inside its focused floating pane before the
+/// placement, else the pane that holds it there now, else the pane the client
+/// focused in `tab_id` before. A client whose input was on the docked pane
+/// `htop` gets `PaneFocused { pane_id: htop, previous_pane_id: Some(htop) }`.
 ///
 /// A client that is not attached changes nothing and returns no events.
 fn move_client_onto_tiled_pane(
@@ -808,7 +828,7 @@ fn move_client_onto_tiled_pane(
     client_id: ClientId,
     tab_id: TabId,
     pane_id: PaneId,
-    previous_floating_pane_id: Option<PaneId>,
+    previous_floating_focused_pane_id: Option<PaneId>,
 ) -> Vec<Event> {
     let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
         return Vec::new();
@@ -825,8 +845,9 @@ fn move_client_onto_tiled_pane(
             previous_tab_id,
         }));
     }
-    emitted_events.extend(build_pane_minimized_changed_events(
+    emitted_events.extend(build_floating_pane_minimized_changed_events(
         client_id,
+        &session.floating_set,
         &tiled_pane_focus_change.minimized_floating_pane_ids,
         true,
     ));
@@ -834,7 +855,8 @@ fn move_client_onto_tiled_pane(
         client_id,
         tab_id: Some(tab_id),
         pane_id,
-        previous_pane_id: previous_floating_pane_id.or(tiled_pane_focus_change.previous_pane_id),
+        previous_pane_id: previous_floating_focused_pane_id
+            .or(tiled_pane_focus_change.previous_pane_id),
     }));
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.record_focus_mru(pane_id);

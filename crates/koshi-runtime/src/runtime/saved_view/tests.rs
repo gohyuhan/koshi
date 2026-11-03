@@ -5,9 +5,11 @@
 //! round-trips, which saved view records a save drops, and which attached
 //! client a token finds.
 
-use koshi_core::geometry::{FloatingPanePosition, Point, Size};
+use koshi_core::geometry::{FloatingPanePosition, Point, Size, DEFAULT_FLOATING_PANE_SIZE};
 use koshi_core::ids::SessionId;
-use koshi_session::client::ClientOrigin;
+use koshi_session::client::{ClientOrigin, ClientRegistry};
+use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
+use koshi_session::session::state::{FloatingPane, Session};
 
 use super::*;
 
@@ -35,6 +37,32 @@ fn build_client(client_id: ClientId, active_tab_id: TabId) -> Client {
     )
 }
 
+/// One floating pane per pane of `pane_ids`, in that order, each holding its
+/// pane alone at the default size, solved to `48x13`.
+fn build_floating_panes(pane_ids: &[PaneId]) -> Vec<FloatingPane> {
+    let mut session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "s".to_owned(),
+        build_system_time_at_seconds(0),
+        ClientRegistry::new(),
+    );
+    for &pane_id in pane_ids {
+        commit_new_floating_pane(
+            &mut session,
+            pane_id,
+            DEFAULT_FLOATING_PANE_SIZE,
+            Size {
+                column_count: 48,
+                row_count: 13,
+            },
+            None,
+            NewPaneSpec::default(),
+        )
+        .expect("the floating set has room");
+    }
+    session.floating_set.list_floating_panes().to_vec()
+}
+
 #[test]
 fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     let tab_id = TabId::new();
@@ -42,7 +70,12 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     let (earlier_focused_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
     let zoomed_pane_id = PaneId::new();
     let scrolled_pane_id = PaneId::new();
-    let (minimized_floating_pane_id, focused_floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (htop_pane_id, logs_pane_id) = (PaneId::new(), PaneId::new());
+    let floating_panes = build_floating_panes(&[htop_pane_id, logs_pane_id]);
+    let (minimized_floating_pane_id, focused_floating_pane_id) = (
+        floating_panes[0].get_floating_pane_id(),
+        floating_panes[1].get_floating_pane_id(),
+    );
 
     let mut client = build_client(ClientId::new(), tab_id);
     client.update_focused_pane(tab_id, earlier_focused_pane_id);
@@ -50,9 +83,9 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
     client.update_focused_pane(other_tab_id, zoomed_pane_id);
     client.zoom_pane(other_tab_id, zoomed_pane_id);
     client.set_scroll_offset(scrolled_pane_id, 7);
-    for floating_pane_id in [minimized_floating_pane_id, focused_floating_pane_id] {
-        client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
-        assert!(client.focus_floating_pane(floating_pane_id));
+    for floating_pane in &floating_panes {
+        client.add_floating_pane_view(floating_pane, FloatingPanePosition::Default);
+        assert!(client.focus_floating_pane(floating_pane.get_floating_pane_id()));
     }
     assert!(client.minimize_floating_pane(minimized_floating_pane_id));
     client.pin_floating_pane(focused_floating_pane_id, Point { column: 4, row: 2 });
@@ -81,13 +114,15 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
         HashMap::from([(scrolled_pane_id, 7)])
     );
     assert_eq!(
-        saved_view.floating_pane_view_by_pane_id,
+        saved_view.floating_pane_view_by_floating_pane_id,
         HashMap::from([
             (
                 minimized_floating_pane_id,
                 FloatingPaneView {
                     position: FloatingPanePosition::Default,
                     is_minimized: true,
+                    focus_history: vec![htop_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
             (
@@ -95,6 +130,8 @@ fn a_minted_token_takes_back_every_part_of_the_saved_view() {
                 FloatingPaneView {
                     position: FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
                     is_minimized: false,
+                    focus_history: vec![logs_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
         ])
@@ -310,7 +347,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
             focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             scroll_offset_by_pane_id: HashMap::new(),
-            floating_pane_view_by_pane_id: HashMap::new(),
+            floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
         })
     );

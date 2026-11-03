@@ -2,6 +2,8 @@
 //! panes its frames carry, and which session changes build it again and mark
 //! the client's frame.
 
+use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
+
 use super::*;
 
 use std::sync::mpsc;
@@ -12,7 +14,6 @@ use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
-use koshi_session::session::state::FloatingMember;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::runtime::command::tests::{
@@ -743,27 +744,26 @@ fn a_starving_sole_viewers_preview_draws_no_pane() {
 #[test]
 fn a_floating_source_previews_the_destination_tab_only() {
     let mut preview_fixture = build_preview_fixture();
-    let floating_pane_id = PaneId::new();
+    let htop_pane_id = PaneId::new();
     let session = preview_fixture.get_session_mut();
-    register_pane_records(session, &[floating_pane_id]);
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: DEFAULT_FLOATING_PANE_SIZE,
-                solved_size: Size {
-                    column_count: 48,
-                    row_count: 13,
-                },
-            },
-            &[],
-        )
-        .expect("the set has room");
+    register_pane_records(session, &[htop_pane_id]);
+    commit_new_floating_pane(
+        session,
+        htop_pane_id,
+        DEFAULT_FLOATING_PANE_SIZE,
+        Size {
+            column_count: 48,
+            row_count: 13,
+        },
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the set has room");
 
     preview_fixture.server.set_pane_placement_preview(
         preview_fixture.alice_client_id,
         Some(PanePlacementPreviewTarget {
-            source_pane_id: floating_pane_id,
+            source_pane_id: htop_pane_id,
             destination_tab_id: preview_fixture.source_tab_id,
         }),
     );
@@ -786,7 +786,7 @@ fn a_floating_source_previews_the_destination_tab_only() {
         vec![
             preview_fixture.vim_pane_id,
             preview_fixture.top_pane_id,
-            floating_pane_id
+            htop_pane_id
         ]
     );
 }

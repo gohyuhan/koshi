@@ -85,9 +85,9 @@ pub enum Event {
     /// view.
     FloatingPaneMoved(FloatingPaneMoved),
     /// A client pinned or unpinned a floating pane in its own view.
-    PanePinChanged(PanePinChanged),
+    FloatingPanePinChanged(FloatingPanePinChanged),
     /// A client minimized or restored a floating pane in its own view.
-    PaneMinimizedChanged(PaneMinimizedChanged),
+    FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged),
 
     // Session lifecycle.
     /// The session is over. The payload names what ended it: a quit request,
@@ -127,8 +127,8 @@ impl Event {
             Event::PaneCommandFinished(_) => "PaneCommandFinished",
             Event::SelectionChanged(_) => "SelectionChanged",
             Event::FloatingPaneMoved(_) => "FloatingPaneMoved",
-            Event::PanePinChanged(_) => "PanePinChanged",
-            Event::PaneMinimizedChanged(_) => "PaneMinimizedChanged",
+            Event::FloatingPanePinChanged(_) => "FloatingPanePinChanged",
+            Event::FloatingPaneMinimizedChanged(_) => "FloatingPaneMinimizedChanged",
             Event::Quit(_) => "Quit",
             Event::Restarting => "Restarting",
         }
@@ -531,44 +531,45 @@ pub struct SelectionChanged {
 /// Payload for [`Event::FloatingPaneMoved`].
 ///
 /// A floating pane's position is per-client state: `client_id` names the
-/// client whose view changed. Every other client's view of the pane stays as
-/// it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// client whose view changed. Every other client's view of the floating pane
+/// stays as it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingPaneMoved {
-    /// The client whose view of the pane moved.
+    /// The client whose view of the floating pane moved.
     pub client_id: ClientId,
-    /// The floating pane that moved.
-    pub pane_id: PaneId,
-    /// The pane's stored top-left cell, counted from the client's pane-area
-    /// origin, exactly as the command named it.
+    /// Every pane of the floating pane that moved, in layout order.
+    pub pane_ids: Vec<PaneId>,
+    /// The floating pane's stored top-left cell, counted from the client's
+    /// pane-area origin, exactly as the command named it.
     pub top_left_cell: Point,
 }
 
-/// Payload for [`Event::PanePinChanged`].
+/// Payload for [`Event::FloatingPanePinChanged`].
 ///
 /// A pin is per-client state: `client_id` names the client whose view
-/// changed. Every other client's view of the pane stays as it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PanePinChanged {
-    /// The client that pinned or unpinned the pane.
+/// changed. Every other client's view of the floating pane stays as it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPanePinChanged {
+    /// The client that pinned or unpinned the floating pane.
     pub client_id: ClientId,
-    /// The floating pane whose pin changed.
-    pub pane_id: PaneId,
-    /// Whether the client now has the pane pinned.
+    /// Every pane of the floating pane whose pin changed, in layout order.
+    pub pane_ids: Vec<PaneId>,
+    /// Whether the client now has the floating pane pinned.
     pub is_pinned: bool,
 }
 
-/// Payload for [`Event::PaneMinimizedChanged`].
+/// Payload for [`Event::FloatingPaneMinimizedChanged`].
 ///
 /// Minimizing is per-client state: `client_id` names the client whose view
-/// changed. Every other client's view of the pane stays as it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneMinimizedChanged {
-    /// The client that minimized or restored the pane.
+/// changed. Every other client's view of the floating pane stays as it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPaneMinimizedChanged {
+    /// The client that minimized or restored the floating pane.
     pub client_id: ClientId,
-    /// The floating pane whose minimized state changed.
-    pub pane_id: PaneId,
-    /// Whether the client now has the pane minimized.
+    /// Every pane of the floating pane whose minimized state changed, in
+    /// layout order.
+    pub pane_ids: Vec<PaneId>,
+    /// Whether the client now has the floating pane minimized.
     pub is_minimized: bool,
 }
 

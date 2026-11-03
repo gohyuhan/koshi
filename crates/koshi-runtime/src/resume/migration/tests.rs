@@ -113,6 +113,7 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
         (2, "body", include_str!("../fixtures/format_two.json")),
         (3, "body", include_str!("../fixtures/format_three.json")),
         (4, "raw_body", include_str!("../fixtures/format_four.json")),
+        (5, "raw_body", include_str!("../fixtures/format_five.json")),
     ] {
         let body_field_names = get_resume_body_field_names(source_resume_format);
         let fixture_fields =
@@ -154,6 +155,18 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
         )
         .expect("read the pane states");
         for (pane_key, raw_pane_state) in pane_states {
+            if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+                let saved_pane: Value =
+                    serde_json::from_str(raw_pane_state.get()).expect("read the saved pane");
+                let decoded_pane: CarriedPaneState =
+                    serde_json::from_str(raw_pane_state.get()).expect("decode the saved pane");
+                lost_json_paths.extend(list_json_paths_lost_by_decoding(
+                    &saved_pane,
+                    &serde_json::to_value(&decoded_pane).expect("encode the decoded pane"),
+                    &format!("format {source_resume_format} pane"),
+                ));
+                continue;
+            }
             let migrated_pane_bytes =
                 if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS {
                     raw_pane_state.get().as_bytes().to_vec()
@@ -967,6 +980,294 @@ fn step_four_names_the_missing_or_misshapen_field() {
     ] {
         let mut resume_body = resume_body;
         match migrate_resume_four_to_five(&mut resume_body) {
+            Err(StorageError::Corrupt { detail }) => assert_eq!(detail, expected_detail),
+            unexpected_result => panic!("expected a corrupt body, got {unexpected_result:?}"),
+        }
+    }
+}
+
+#[test]
+fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view_its_history() {
+    let mut resume_body = serde_json::json!({
+        "session_by_id": {
+            "S": {
+                "floating_set": {"members": [
+                    {
+                        "pane_id": "P1",
+                        "desired_size": {"width": {"Percent": 60}, "height": {"Percent": 60}},
+                        "solved_size": {"column_count": 48, "row_count": 13}
+                    },
+                    {
+                        "pane_id": "P2",
+                        "desired_size": {"width": {"Cells": 40}, "height": {"Cells": 10}},
+                        "solved_size": {"column_count": 0, "row_count": 0}
+                    }
+                ]},
+                "tabs": {"T": {
+                    "tab_name": "code",
+                    "layout": {"Pane": "P0"},
+                    "solved_tab_size": {"column_count": 80, "row_count": 22}
+                }},
+                "clients": {"client_by_id": {"C": {
+                    "floating_pane_view_by_pane_id": {
+                        "P1": {"position": {"Pinned": {"column": 10, "row": 3}}, "is_minimized": false},
+                        "P2": {"position": "Default", "is_minimized": true}
+                    },
+                    "shown_floating_pane_ids": ["P1"],
+                    "focused_floating_pane_id": "P1"
+                }}}
+            }
+        },
+        "carried_pane_state_by_pane_id": {},
+        "saved_view_store": {
+            "connection_token_hash_by_client_id": {"C": "first-hash"},
+            "saved_view_records": [{
+                "connection_token_hash": "second-hash",
+                "expires_at": {"secs_since_epoch": 86500, "nanos_since_epoch": 0},
+                "saved_view": {
+                    "active_tab_id": "T",
+                    "floating_pane_view_by_pane_id": {
+                        "P2": {"position": {"Moved": {"column": 2, "row": 1}}, "is_minimized": false}
+                    },
+                    "shown_floating_pane_ids": ["P2"]
+                }
+            }]
+        }
+    });
+
+    migrate_resume_five_to_six(&mut resume_body).expect("step 5 converts the body");
+
+    assert_eq!(
+        resume_body,
+        serde_json::json!({
+            "session_by_id": {
+                "S": {
+                    "floating_set": {"floating_panes": [
+                        {
+                            "floating_pane_id": "P1",
+                            "layout_area": {
+                                "layout": {"Pane": "P1"},
+                                "solved_size": {"column_count": 48, "row_count": 12}
+                            },
+                            "desired_size": {"width": {"Percent": 60}, "height": {"Percent": 60}},
+                            "solved_size": {"column_count": 48, "row_count": 13}
+                        },
+                        {
+                            "floating_pane_id": "P2",
+                            "layout_area": {
+                                "layout": {"Pane": "P2"},
+                                "solved_size": {"column_count": 0, "row_count": 0}
+                            },
+                            "desired_size": {"width": {"Cells": 40}, "height": {"Cells": 10}},
+                            "solved_size": {"column_count": 0, "row_count": 0}
+                        }
+                    ]},
+                    "tabs": {"T": {
+                        "tab_name": "code",
+                        "layout_area": {
+                            "layout": {"Pane": "P0"},
+                            "solved_size": {"column_count": 80, "row_count": 22}
+                        }
+                    }},
+                    "clients": {"client_by_id": {"C": {
+                        "floating_pane_view_by_floating_pane_id": {
+                            "P1": {
+                                "position": {"Pinned": {"column": 10, "row": 3}},
+                                "is_minimized": false,
+                                "focus_history": ["P1"],
+                                "zoomed_pane_id": null
+                            },
+                            "P2": {
+                                "position": "Default",
+                                "is_minimized": true,
+                                "focus_history": ["P2"],
+                                "zoomed_pane_id": null
+                            }
+                        },
+                        "shown_floating_pane_ids": ["P1"],
+                        "focused_floating_pane_id": "P1"
+                    }}}
+                }
+            },
+            "carried_pane_state_by_pane_id": {},
+            "saved_view_store": {
+                "connection_token_hash_by_client_id": {"C": "first-hash"},
+                "saved_view_records": [{
+                    "connection_token_hash": "second-hash",
+                    "expires_at": {"secs_since_epoch": 86500, "nanos_since_epoch": 0},
+                    "saved_view": {
+                        "active_tab_id": "T",
+                        "floating_pane_view_by_floating_pane_id": {
+                            "P2": {
+                                "position": {"Moved": {"column": 2, "row": 1}},
+                                "is_minimized": false,
+                                "focus_history": ["P2"],
+                                "zoomed_pane_id": null
+                            }
+                        },
+                        "shown_floating_pane_ids": ["P2"]
+                    }
+                }]
+            }
+        })
+    );
+}
+
+/// A format-5 session holding `session_fields`, with an empty floating set,
+/// no tab and no client wherever `session_fields` names none of them.
+fn build_step_five_session(session_fields: Value) -> Value {
+    let mut session = serde_json::json!({
+        "floating_set": {"members": []},
+        "tabs": {},
+        "clients": {"client_by_id": {}}
+    });
+    let Value::Object(session_fields) = session_fields else {
+        panic!("the session fields are an object");
+    };
+    for (field_name, field_value) in session_fields {
+        session[field_name] = field_value;
+    }
+    serde_json::json!({"session_by_id": {"S": session}})
+}
+
+#[test]
+fn step_five_names_the_missing_or_misshapen_field() {
+    let invalid_solved_size_detail = format!(
+        "body.session_by_id.S.floating_set.members[0].solved_size: {}",
+        Size::deserialize(&serde_json::json!("large")).expect_err("the text is not a size")
+    );
+    let build_member = |solved_size: Value| {
+        serde_json::json!({"floating_set": {"members": [{
+            "pane_id": "P",
+            "desired_size": {"width": {"Cells": 40}, "height": {"Cells": 10}},
+            "solved_size": solved_size
+        }]}})
+    };
+    let build_saved_view_body = |saved_view_store: Value| serde_json::json!({"session_by_id": {}, "saved_view_store": saved_view_store});
+    for (resume_body, expected_detail) in [
+        (serde_json::json!(7), "body must be an object"),
+        (serde_json::json!({}), "body.session_by_id is missing"),
+        (
+            serde_json::json!({"session_by_id": {"S": 7}}),
+            "body.session_by_id.S must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {}}}),
+            "body.session_by_id.S.floating_set is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": 7})),
+            "body.session_by_id.S.floating_set must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": {}})),
+            "body.session_by_id.S.floating_set.members is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": {"members": 7}})),
+            "body.session_by_id.S.floating_set.members must be an array",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": {"members": [7]}})),
+            "body.session_by_id.S.floating_set.members[0] must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": {"members": [{}]}})),
+            "body.session_by_id.S.floating_set.members[0].pane_id is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": {"members": [
+                {"pane_id": "P"}
+            ]}})),
+            "body.session_by_id.S.floating_set.members[0].desired_size is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"floating_set": {"members": [
+                {"pane_id": "P", "desired_size": {}}
+            ]}})),
+            "body.session_by_id.S.floating_set.members[0].solved_size is missing",
+        ),
+        (
+            build_step_five_session(build_member(serde_json::json!("large"))),
+            invalid_solved_size_detail.as_str(),
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"floating_set": {"members": []}}}}),
+            "body.session_by_id.S.tabs is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"tabs": {"T": 7}})),
+            "body.session_by_id.S.tabs.T must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"tabs": {"T": {}}})),
+            "body.session_by_id.S.tabs.T.layout is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"tabs": {"T": {"layout": {"Pane": "P"}}}})),
+            "body.session_by_id.S.tabs.T.solved_tab_size is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "floating_set": {"members": []},
+                "tabs": {}
+            }}}),
+            "body.session_by_id.S.clients is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {}})),
+            "body.session_by_id.S.clients.client_by_id is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": 7}}})),
+            "body.session_by_id.S.clients.client_by_id.C must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {}}}})),
+            "body.session_by_id.S.clients.client_by_id.C.floating_pane_view_by_pane_id is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "floating_pane_view_by_pane_id": 7
+            }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.floating_pane_view_by_pane_id must be \
+             an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "floating_pane_view_by_pane_id": {"P": 7}
+            }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.floating_pane_view_by_pane_id.P must \
+             be an object",
+        ),
+        (
+            build_saved_view_body(serde_json::json!(7)),
+            "body.saved_view_store must be an object",
+        ),
+        (
+            build_saved_view_body(serde_json::json!({})),
+            "body.saved_view_store.saved_view_records is missing",
+        ),
+        (
+            build_saved_view_body(serde_json::json!({"saved_view_records": 7})),
+            "body.saved_view_store.saved_view_records must be an array",
+        ),
+        (
+            build_saved_view_body(serde_json::json!({"saved_view_records": [7]})),
+            "body.saved_view_store.saved_view_records[0] must be an object",
+        ),
+        (
+            build_saved_view_body(serde_json::json!({"saved_view_records": [{}]})),
+            "body.saved_view_store.saved_view_records[0].saved_view is missing",
+        ),
+        (
+            build_saved_view_body(serde_json::json!({"saved_view_records": [{"saved_view": {}}]})),
+            "body.saved_view_store.saved_view_records[0].saved_view.floating_pane_view_by_pane_id \
+             is missing",
+        ),
+    ] {
+        let mut resume_body = resume_body;
+        match migrate_resume_five_to_six(&mut resume_body) {
             Err(StorageError::Corrupt { detail }) => assert_eq!(detail, expected_detail),
             unexpected_result => panic!("expected a corrupt body, got {unexpected_result:?}"),
         }

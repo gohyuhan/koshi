@@ -844,7 +844,7 @@ fn the_exit_of_a_tiled_pane_and_of_a_floating_pane_each_mark_every_view() {
             _ => None,
         })
         .expect("the split creates a pane");
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut server,
         CommandSource::KeyBinding { client_id },
         build_floating_new_pane_args(None, None, false),
@@ -865,10 +865,7 @@ fn the_exit_of_a_tiled_pane_and_of_a_floating_pane_each_mark_every_view() {
         mark_changed_views_then_compute_frame_wait(&mut server, client_id, second_exit_time),
         None
     );
-    let _ = server.handle_child_exit(
-        floating_pane_id,
-        koshi_core::process::ExitStatus::ExitCode(0),
-    );
+    let _ = server.handle_child_exit(htop_pane_id, koshi_core::process::ExitStatus::ExitCode(0));
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut server, client_id, second_exit_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
@@ -1516,14 +1513,19 @@ fn a_merged_resize_run_leaves_the_layout_that_every_size_in_turn_leaves() {
     assert_eq!(list_pty_sizes(&server), pty_sizes_after_each_size);
 }
 
-/// Each floating pane of `session_id` and its solved size, in the order the
-/// panes became floating.
-fn list_floating_solved_sizes(server: &Server, session_id: SessionId) -> Vec<(PaneId, Size)> {
+/// The panes of each floating pane of `session_id` and its solved size, in
+/// the order the floating panes were added.
+fn list_floating_solved_sizes(server: &Server, session_id: SessionId) -> Vec<(Vec<PaneId>, Size)> {
     server.session_by_id[&session_id]
         .floating_set
-        .list_members()
+        .list_floating_panes()
         .iter()
-        .map(|floating_member| (floating_member.pane_id, floating_member.solved_size))
+        .map(|floating_pane| {
+            (
+                floating_pane.list_pane_ids(),
+                floating_pane.get_solved_size(),
+            )
+        })
         .collect()
 }
 

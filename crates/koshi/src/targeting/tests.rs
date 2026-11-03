@@ -1769,7 +1769,7 @@ fn a_bare_dock_pane_typed_in_a_tiled_pane_docks_into_that_panes_tab() {
 fn a_bare_dock_pane_typed_in_a_floating_pane_docks_into_the_tab_its_client_views() {
     let first_tab_id = TabId::new();
     let second_tab_id = TabId::new();
-    let floating_pane_id = PaneId::new();
+    let htop_pane_id = PaneId::new();
     let first_client_id = ClientId::new();
     let second_client_id = ClientId::new();
     let mut session_overview = build_session_overview(
@@ -1781,13 +1781,13 @@ fn a_bare_dock_pane_typed_in_a_floating_pane_docks_into_the_tab_its_client_views
     );
     session_overview.clients[1].active_tab_id = second_tab_id;
     session_overview.panes.push(build_floating_pane_discovery(
-        floating_pane_id,
+        htop_pane_id,
         session_overview.session.session_id,
     ));
     let in_session_context = InSessionContext {
         session_id: session_overview.session.session_id,
         client_id: Some(second_client_id),
-        pane_id: floating_pane_id,
+        pane_id: htop_pane_id,
     };
     assert_eq!(
         resolve_command_tab(
@@ -2007,13 +2007,13 @@ fn a_client_flag_naming_another_sessions_client_carries_no_default_pane() {
 #[test]
 fn an_explicit_floating_pane_picks_its_owning_session() {
     let target_session_id = SessionId::new();
-    let floating_pane_id = PaneId::new();
+    let htop_pane_id = PaneId::new();
     let mut target_session_overview =
         build_session_overview("blue-owl", target_session_id, &[], &[], &[]);
     target_session_overview
         .panes
         .push(build_floating_pane_discovery(
-            floating_pane_id,
+            htop_pane_id,
             target_session_id,
         ));
     let discovered_sessions = build_complete_discovery([
@@ -2022,7 +2022,7 @@ fn an_explicit_floating_pane_picks_its_owning_session() {
     ]);
     let selected_session_overview = select_target_session(
         None,
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         None,
         None,
         SESSION_FLAG_ONLY,
@@ -2039,8 +2039,8 @@ fn an_explicit_floating_pane_picks_its_owning_session() {
 fn every_pane_verb_naming_a_floating_pane_goes_to_the_session_holding_it() {
     let owner_session_id = SessionId::new();
     let owner_tab_id = TabId::new();
-    let floating_pane_id = PaneId::new();
-    let floating_pane_text = floating_pane_id.to_string();
+    let htop_pane_id = PaneId::new();
+    let floating_pane_text = htop_pane_id.to_string();
     let owner_tab_text = owner_tab_id.to_string();
     let floating_pane_argument = floating_pane_text.as_str();
     let owner_tab_argument = owner_tab_text.as_str();
@@ -2138,7 +2138,7 @@ fn every_pane_verb_naming_a_floating_pane_goes_to_the_session_holding_it() {
         owner_session_overview
             .panes
             .push(build_floating_pane_discovery(
-                floating_pane_id,
+                htop_pane_id,
                 owner_session_id,
             ));
         let other_tab_id = TabId::new();

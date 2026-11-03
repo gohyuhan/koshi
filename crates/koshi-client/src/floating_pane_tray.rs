@@ -2,13 +2,13 @@
 //! act on, and the command a key or a click on it sends.
 //!
 //! The tray is this viewer's alone. Opening, closing and selecting send
-//! nothing. A pane's tile sends `TogglePaneMinimized` for that pane, and the
+//! nothing. A pane's tile sends `ToggleFloatingPaneMinimized` for that pane, and the
 //! header label sends `ToggleAllFloatingPanesMinimized`. The session reads
 //! this client's view when it runs each, and changes the view of this client
 //! only. The `+ new` tile closes the tray and sends the `NewPane` of
 //! `core:new-pane-floating`.
 
-use koshi_core::command::{Command, TogglePaneMinimizedArgs};
+use koshi_core::command::{Command, ToggleFloatingPaneMinimizedArgs};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{CommandId, PaneId};
 use koshi_core::lock::LockMode;
@@ -158,7 +158,7 @@ impl Client {
 
     /// The command tile `tile_index` of the open tray sends for
     /// `session_snapshot`'s floating panes. A pane's tile gives
-    /// `TogglePaneMinimized` for that pane: the session minimizes the pane
+    /// `ToggleFloatingPaneMinimized` for that pane: the session minimizes the pane
     /// while this client shows it, and restores it on top and focuses it while
     /// this client minimized it. The `+ new` tile closes the tray
     /// ([`close_floating_pane_tray`](Self::close_floating_pane_tray)) and gives
@@ -175,9 +175,11 @@ impl Client {
         tile_index: usize,
     ) -> Option<Command> {
         if let Some(floating_pane) = session_snapshot.floating_panes.get(tile_index) {
-            return Some(Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-                pane_id: Some(floating_pane.get_pane_id()),
-            }));
+            return Some(Command::ToggleFloatingPaneMinimized(
+                ToggleFloatingPaneMinimizedArgs {
+                    pane_id: Some(floating_pane.get_pane_id()),
+                },
+            ));
         }
         if tile_index >= compute_tray_tile_count(session_snapshot.floating_panes.len()) {
             return None;
@@ -291,7 +293,7 @@ impl Client {
     ///   placement handle hover, and sends nothing.
     /// - A left press on a tile selects it and sends its command
     ///   ([`activate_tray_tile`](Self::activate_tray_tile)): a pane's tile
-    ///   sends `TogglePaneMinimized`, and the `+ new` tile closes the tray and
+    ///   sends `ToggleFloatingPaneMinimized`, and the `+ new` tile closes the tray and
     ///   sends `NewPane`. A left press on the titlebar label sends
     ///   `ToggleAllFloatingPanesMinimized`. A left press on the
     ///   close button `✕` closes the tray and sends nothing. A left press on

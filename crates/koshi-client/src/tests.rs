@@ -2279,14 +2279,14 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
 #[test]
 fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
     let tiled_pane_id = PaneId::new();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(ClientId::new(), LockMode::Normal, false);
     render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
         pane_title: None,
     }];
     for (focused_pane_id, expected_is_focused_pane_floating) in [
-        (Some(floating_pane_id), true),
+        (Some(floating_slot_pane_id), true),
         (Some(tiled_pane_id), false),
         (None, false),
     ] {

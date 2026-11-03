@@ -8,20 +8,95 @@ use std::time::SystemTime;
 use koshi_core::command::PanePlacementAnchor;
 use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::event::{
-    Event, LayoutChanged, PaneFocused, PaneMinimizedChanged, TabClosed, TabFocused,
+    Event, FloatingPaneMinimizedChanged, LayoutChanged, PaneFocused, TabClosed, TabFocused,
 };
 use koshi_core::geometry::{
-    Direction, FloatingPanePosition, PaneArea, Point, Rect, Size, SplitDirection,
+    Direction, FloatingPanePosition, FloatingPaneSize, PaneArea, Point, Rect, Size, SplitDirection,
     DEFAULT_FLOATING_PANE_SIZE,
 };
-use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::{Client, ClientOrigin, FloatingPaneView};
 use crate::error::FloatingSetError;
-use crate::session::state::tests::{build_default_floating_member, build_empty_session, build_tab};
-use crate::session::state::Session;
+use crate::session::state::tests::{build_default_floating_pane, build_empty_session, build_tab};
+use crate::session::state::{FloatingPane, Session};
+
+/// The `48x13` size a floating pane that asks for the default size holds in
+/// these tests.
+const DEFAULT_FLOATING_SOLVED_SIZE: Size = Size {
+    column_count: 48,
+    row_count: 13,
+};
+
+/// The desired size and the solved size an undocked pane takes in these
+/// tests.
+const DEFAULT_UNDOCK_SIZES: (FloatingPaneSize, Size) =
+    (DEFAULT_FLOATING_PANE_SIZE, DEFAULT_FLOATING_SOLVED_SIZE);
+
+/// Add a floating pane holding `pane_id` alone ([`build_default_floating_pane`])
+/// to `session`, minimized for every attached client. Returns its id.
+fn add_default_floating_pane(session: &mut Session, pane_id: PaneId) -> FloatingPaneId {
+    let floating_pane = build_default_floating_pane(pane_id);
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    session
+        .add_floating_pane(floating_pane, &[])
+        .expect("the floating set has room");
+    floating_pane_id
+}
+
+/// The id of the floating pane of `session` that holds `pane_id`.
+fn get_floating_pane_id_holding(session: &Session, pane_id: PaneId) -> FloatingPaneId {
+    session
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .map(|(_, floating_pane)| floating_pane.get_floating_pane_id())
+        .expect("a floating pane holds the pane")
+}
+
+/// Show and focus, for `client_id`, the floating pane of `session` that holds
+/// `pane_id`.
+fn focus_floating_pane_holding(session: &mut Session, client_id: ClientId, pane_id: PaneId) {
+    let floating_pane_id = get_floating_pane_id_holding(session, pane_id);
+    assert!(session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached")
+        .focus_floating_pane(floating_pane_id));
+}
+
+/// The view at `position`, minimized when `is_minimized`, whose focus history
+/// is `[input_pane_id]` and whose zoom is `None`.
+fn build_floating_pane_view(
+    position: FloatingPanePosition,
+    is_minimized: bool,
+    input_pane_id: PaneId,
+) -> FloatingPaneView {
+    FloatingPaneView {
+        position,
+        is_minimized,
+        focus_history: vec![input_pane_id],
+        zoomed_pane_id: None,
+    }
+}
+
+/// Each floating pane of `session`, in the order the floating panes were
+/// created, as its panes, its desired size and its solved size.
+fn list_floating_pane_shapes(session: &Session) -> Vec<(Vec<PaneId>, FloatingPaneSize, Size)> {
+    session
+        .floating_set
+        .list_floating_panes()
+        .iter()
+        .map(|floating_pane| {
+            (
+                floating_pane.list_pane_ids(),
+                floating_pane.get_desired_size(),
+                floating_pane.get_solved_size(),
+            )
+        })
+        .collect()
+}
 
 /// The [`Event::PaneFocused`] events of `emitted_events` that name
 /// `client_id`, in emitted order.
@@ -87,20 +162,15 @@ fn build_horizontal_split(first_pane_id: PaneId, second_pane_id: PaneId) -> Layo
     ))
 }
 
-/// Add a new floating pane to `session`, minimized for every attached client,
-/// and give `client_id`'s input to it. Returns the floating pane's id.
+/// Add a new floating pane holding a new pane alone to `session`, minimized
+/// for every attached client, and give `client_id`'s input to it. Returns the
+/// pane's id.
 fn focus_new_floating_pane(session: &mut Session, client_id: ClientId) -> PaneId {
-    let floating_pane_id = PaneId::new();
-    register_pane(session, floating_pane_id);
-    session
-        .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-        .expect("the floating set has room");
-    assert!(session
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("the client is attached")
-        .focus_floating_pane(floating_pane_id));
-    floating_pane_id
+    let pane_id = PaneId::new();
+    register_pane(session, pane_id);
+    add_default_floating_pane(session, pane_id);
+    focus_floating_pane_holding(session, client_id, pane_id);
+    pane_id
 }
 
 /// A session whose tab `tab_id` holds `staying_pane_id | undocked_pane_id`,
@@ -718,7 +788,7 @@ fn commit_rejects_a_prepared_tree_that_moves_more_than_the_source_pane() {
 fn the_placed_pane_takes_over_the_acting_clients_input_from_a_focused_floating_pane() {
     let source_tab_id = TabId::new();
     let destination_tab_id = TabId::new();
-    let (staying_pane_id, placed_pane_id, destination_pane_id, floating_pane_id) =
+    let (staying_pane_id, placed_pane_id, destination_pane_id, htop_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
     let mut session = build_empty_session();
@@ -726,7 +796,7 @@ fn the_placed_pane_takes_over_the_acting_clients_input_from_a_focused_floating_p
         staying_pane_id,
         placed_pane_id,
         destination_pane_id,
-        floating_pane_id,
+        htop_pane_id,
     ] {
         register_pane(&mut session, pane_id);
     }
@@ -738,14 +808,10 @@ fn the_placed_pane_takes_over_the_acting_clients_input_from_a_focused_floating_p
     register_tab(&mut session, destination_tab_id, &[destination_pane_id]);
     session
         .floating_set
-        .add_member(build_default_floating_member(floating_pane_id))
+        .add_floating_pane(build_default_floating_pane(htop_pane_id))
         .expect("the floating set is empty");
     attach_client(&mut session, client_id, source_tab_id, staying_pane_id);
-    assert!(session
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("acting client")
-        .focus_floating_pane(floating_pane_id));
+    focus_floating_pane_holding(&mut session, client_id, htop_pane_id);
 
     let emitted_events = commit_cross_tab_placement(
         &mut session,
@@ -774,16 +840,16 @@ fn the_placed_pane_takes_over_the_acting_clients_input_from_a_focused_floating_p
                 tab_id: destination_tab_id,
                 previous_tab_id: source_tab_id,
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(destination_tab_id),
                 pane_id: placed_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
@@ -792,7 +858,10 @@ fn the_placed_pane_takes_over_the_acting_clients_input_from_a_focused_floating_p
         .get_client_by_id(client_id)
         .expect("acting client");
     assert_eq!(client.get_focused_floating_pane_id(), None);
-    assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        &[] as &[FloatingPaneId]
+    );
     assert_eq!(client.get_active_focused_pane_id(), Some(placed_pane_id));
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -813,7 +882,8 @@ fn undock_floats_the_pane_and_hands_its_tab_focus_to_the_survivor() {
     let emitted_events = commit_undock_placement(
         &mut session,
         tab_id,
-        build_default_floating_member(undocked_pane_id),
+        undocked_pane_id,
+        DEFAULT_UNDOCK_SIZES,
         (client_id, FloatingPanePosition::Moved(top_left_cell)),
     )
     .expect("undock commits");
@@ -841,8 +911,12 @@ fn undock_floats_the_pane_and_hands_its_tab_focus_to_the_survivor() {
         vec![staying_pane_id]
     );
     assert_eq!(
-        session.floating_set.list_members(),
-        &[build_default_floating_member(undocked_pane_id)]
+        list_floating_pane_shapes(&session),
+        [(
+            vec![undocked_pane_id],
+            DEFAULT_FLOATING_PANE_SIZE,
+            DEFAULT_FLOATING_SOLVED_SIZE
+        )]
     );
     assert_eq!(
         session
@@ -856,16 +930,20 @@ fn undock_floats_the_pane_and_hands_its_tab_focus_to_the_survivor() {
         .get_client_by_id(client_id)
         .expect("acting client");
     assert_eq!(
-        client.get_floating_pane_view(undocked_pane_id),
-        Some(FloatingPaneView {
-            position: FloatingPanePosition::Moved(top_left_cell),
-            is_minimized: false,
-        })
+        client.get_floating_pane_view(get_floating_pane_id_holding(&session, undocked_pane_id)),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Moved(top_left_cell),
+            false,
+            undocked_pane_id
+        ))
     );
-    assert_eq!(client.list_shown_floating_pane_ids(), &[undocked_pane_id]);
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        &[get_floating_pane_id_holding(&session, undocked_pane_id)]
+    );
     assert_eq!(
         client.get_focused_floating_pane_id(),
-        Some(undocked_pane_id)
+        Some(get_floating_pane_id_holding(&session, undocked_pane_id))
     );
     assert_eq!(client.get_focused_pane_id(tab_id), Some(staying_pane_id));
     assert_eq!(client.get_zoomed_pane_id(tab_id), None);
@@ -887,7 +965,8 @@ fn undock_moves_a_background_clients_tab_focus_and_gives_it_a_minimized_view() {
     let emitted_events = commit_undock_placement(
         &mut session,
         tab_id,
-        build_default_floating_member(undocked_pane_id),
+        undocked_pane_id,
+        DEFAULT_UNDOCK_SIZES,
         (acting_client_id, FloatingPanePosition::Default),
     )
     .expect("undock commits");
@@ -913,18 +992,26 @@ fn undock_moves_a_background_clients_tab_focus_and_gives_it_a_minimized_view() {
     );
     assert_eq!(
         background_client.get_focused_floating_pane_id(),
-        Some(background_floating_pane_id)
+        Some(get_floating_pane_id_holding(
+            &session,
+            background_floating_pane_id
+        ))
     );
     assert_eq!(
         background_client.list_shown_floating_pane_ids(),
-        &[background_floating_pane_id]
+        &[get_floating_pane_id_holding(
+            &session,
+            background_floating_pane_id
+        )]
     );
     assert_eq!(
-        background_client.get_floating_pane_view(undocked_pane_id),
-        Some(FloatingPaneView {
-            position: FloatingPanePosition::Default,
-            is_minimized: true,
-        })
+        background_client
+            .get_floating_pane_view(get_floating_pane_id_holding(&session, undocked_pane_id)),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Default,
+            true,
+            undocked_pane_id
+        ))
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -948,7 +1035,8 @@ fn undock_shows_the_pane_for_a_client_whose_input_is_on_it_at_the_spot_it_held_t
     let emitted_events = commit_undock_placement(
         &mut session,
         tab_id,
-        build_default_floating_member(undocked_pane_id),
+        undocked_pane_id,
+        DEFAULT_UNDOCK_SIZES,
         (acting_client_id, FloatingPanePosition::Default),
     )
     .expect("undock commits");
@@ -977,15 +1065,17 @@ fn undock_shows_the_pane_for_a_client_whose_input_is_on_it_at_the_spot_it_held_t
         .get_client_by_id(following_client_id)
         .expect("following client");
     assert_eq!(
-        following_client.get_floating_pane_view(undocked_pane_id),
-        Some(FloatingPaneView {
-            position: FloatingPanePosition::Moved(following_top_left_cell),
-            is_minimized: false,
-        })
+        following_client
+            .get_floating_pane_view(get_floating_pane_id_holding(&session, undocked_pane_id)),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Moved(following_top_left_cell),
+            false,
+            undocked_pane_id
+        ))
     );
     assert_eq!(
         following_client.get_focused_floating_pane_id(),
-        Some(undocked_pane_id)
+        Some(get_floating_pane_id_holding(&session, undocked_pane_id))
     );
     assert_eq!(
         following_client.get_focused_pane_id(tab_id),
@@ -1049,7 +1139,8 @@ fn undocking_the_only_pane_of_a_tab_closes_the_tab_and_moves_its_viewer() {
     let emitted_events = commit_undock_placement(
         &mut session,
         undock_tab_id,
-        build_default_floating_member(undocked_pane_id),
+        undocked_pane_id,
+        DEFAULT_UNDOCK_SIZES,
         (client_id, FloatingPanePosition::Default),
     )
     .expect("undock commits");
@@ -1087,7 +1178,7 @@ fn undocking_the_only_pane_of_a_tab_closes_the_tab_and_moves_its_viewer() {
     assert_eq!(client.get_active_tab_id(), landing_tab_id);
     assert_eq!(
         client.get_focused_floating_pane_id(),
-        Some(undocked_pane_id)
+        Some(get_floating_pane_id_holding(&session, undocked_pane_id))
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -1108,7 +1199,7 @@ fn undock_refusals_change_nothing() {
     for _ in 0..MAX_FLOATING_PANES_PER_SESSION {
         full_floating_set_session
             .floating_set
-            .add_member(build_default_floating_member(PaneId::new()))
+            .add_floating_pane(build_default_floating_pane(PaneId::new()))
             .expect("the floating set has room");
     }
 
@@ -1146,7 +1237,7 @@ fn undock_refusals_change_nothing() {
             tab_id,
             undocked_pane_id,
             client_id,
-            PlacementCommitError::FloatingMemberRefused(FloatingSetError::TooManyPanes),
+            PlacementCommitError::FloatingPaneRefused(FloatingSetError::TooManyPanes),
         ),
     ];
     for (mut session, source_tab_id, source_pane_id, acting_client_id, expected_error) in
@@ -1159,7 +1250,8 @@ fn undock_refusals_change_nothing() {
             commit_undock_placement(
                 &mut session,
                 source_tab_id,
-                build_default_floating_member(source_pane_id),
+                source_pane_id,
+                DEFAULT_UNDOCK_SIZES,
                 (acting_client_id, FloatingPanePosition::Default),
             ),
             Err(expected_error)
@@ -1172,46 +1264,40 @@ fn undock_refusals_change_nothing() {
 }
 
 /// A session whose tab `tab_id` holds `tiled_pane_id`, with `client_id`
-/// attached to the tab and showing and focusing the floating pane
-/// `floating_pane_id`.
+/// attached to the tab and showing and focusing the floating pane that holds
+/// `htop_pane_id` alone.
 fn build_dock_session(
     tab_id: TabId,
     tiled_pane_id: PaneId,
-    floating_pane_id: PaneId,
+    htop_pane_id: PaneId,
     client_id: ClientId,
 ) -> Session {
     let mut session = build_empty_session();
     register_pane(&mut session, tiled_pane_id);
-    register_pane(&mut session, floating_pane_id);
+    register_pane(&mut session, htop_pane_id);
     register_tab(&mut session, tab_id, &[tiled_pane_id]);
     attach_client(&mut session, client_id, tab_id, tiled_pane_id);
-    session
-        .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-        .expect("the floating set has room");
-    assert!(session
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("the client is attached")
-        .focus_floating_pane(floating_pane_id));
+    add_default_floating_pane(&mut session, htop_pane_id);
+    focus_floating_pane_holding(&mut session, client_id, htop_pane_id);
     session
 }
 
 #[test]
 fn dock_refusals_change_nothing() {
     let tab_id = TabId::new();
-    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (tiled_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
-    let docked_tree = build_horizontal_split(tiled_pane_id, floating_pane_id);
+    let docked_tree = build_horizontal_split(tiled_pane_id, htop_pane_id);
     let repeating_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
             LayoutNode::Pane(tiled_pane_id),
-            LayoutNode::Pane(floating_pane_id),
-            LayoutNode::Pane(floating_pane_id),
+            LayoutNode::Pane(htop_pane_id),
+            LayoutNode::Pane(htop_pane_id),
         ],
     ));
     assert_eq!(
-        build_dock_session(tab_id, tiled_pane_id, floating_pane_id, client_id)
+        build_dock_session(tab_id, tiled_pane_id, htop_pane_id, client_id)
             .validate_session_consistency(),
         Ok(())
     );
@@ -1225,28 +1311,28 @@ fn dock_refusals_change_nothing() {
             PlacementCommitError::FloatingSourceNotFound,
         ),
         (
-            floating_pane_id,
+            htop_pane_id,
             TabId::new(),
             docked_tree.clone(),
             client_id,
             PlacementCommitError::DestinationTabNotFound,
         ),
         (
-            floating_pane_id,
+            htop_pane_id,
             tab_id,
             repeating_tree,
             client_id,
             PlacementCommitError::PaneOwnershipConflict,
         ),
         (
-            floating_pane_id,
+            htop_pane_id,
             tab_id,
-            LayoutNode::Pane(floating_pane_id),
+            LayoutNode::Pane(htop_pane_id),
             client_id,
             PlacementCommitError::PaneOwnershipConflict,
         ),
         (
-            floating_pane_id,
+            htop_pane_id,
             tab_id,
             docked_tree,
             ClientId::new(),
@@ -1256,7 +1342,7 @@ fn dock_refusals_change_nothing() {
     for (source_pane_id, destination_tab_id, destination_tree, acting_client_id, expected_error) in
         refusal_cases
     {
-        let mut session = build_dock_session(tab_id, tiled_pane_id, floating_pane_id, client_id);
+        let mut session = build_dock_session(tab_id, tiled_pane_id, htop_pane_id, client_id);
         let serialized_session_before =
             serde_json::to_string(&session).expect("session serializes");
 
@@ -1280,15 +1366,11 @@ fn dock_refusals_change_nothing() {
 #[test]
 fn docking_into_another_tab_solves_the_tab_the_acting_client_left_at_its_other_viewers_size() {
     let (source_tab_id, destination_tab_id) = (TabId::new(), TabId::new());
-    let (source_tab_pane_id, destination_tab_pane_id, floating_pane_id) =
+    let (source_tab_pane_id, destination_tab_pane_id, htop_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let (acting_client_id, viewer_client_id) = (ClientId::new(), ClientId::new());
     let mut session = build_empty_session();
-    for pane_id in [
-        source_tab_pane_id,
-        destination_tab_pane_id,
-        floating_pane_id,
-    ] {
+    for pane_id in [source_tab_pane_id, destination_tab_pane_id, htop_pane_id] {
         register_pane(&mut session, pane_id);
     }
     register_tab(&mut session, source_tab_id, &[source_tab_pane_id]);
@@ -1320,14 +1402,8 @@ fn docking_into_another_tab_solves_the_tab_the_acting_client_left_at_its_other_v
         source_tab_id,
         source_tab_pane_id,
     );
-    session
-        .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-        .expect("the floating set has room");
-    assert!(session
-        .clients
-        .get_client_mut_by_id(acting_client_id)
-        .expect("the acting client is attached")
-        .focus_floating_pane(floating_pane_id));
+    add_default_floating_pane(&mut session, htop_pane_id);
+    focus_floating_pane_holding(&mut session, acting_client_id, htop_pane_id);
     assert_eq!(session.update_tab_solve(source_tab_id), Vec::<Event>::new());
     assert_eq!(
         session.tabs[&source_tab_id].get_solved_tab_size(),
@@ -1340,9 +1416,9 @@ fn docking_into_another_tab_solves_the_tab_the_acting_client_left_at_its_other_v
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        floating_pane_id,
+        htop_pane_id,
         destination_tab_id,
-        build_horizontal_split(destination_tab_pane_id, floating_pane_id),
+        build_horizontal_split(destination_tab_pane_id, htop_pane_id),
         acting_client_id,
     )
     .expect("dock commits");
@@ -1361,8 +1437,8 @@ fn docking_into_another_tab_solves_the_tab_the_acting_client_left_at_its_other_v
             Event::PaneFocused(PaneFocused {
                 client_id: acting_client_id,
                 tab_id: Some(destination_tab_id),
-                pane_id: floating_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
@@ -1424,7 +1500,8 @@ fn undocking_a_stack_member_collapses_the_stack_to_its_survivor() {
     let emitted_events = commit_undock_placement(
         &mut session,
         tab_id,
-        build_default_floating_member(undocked_member_pane_id),
+        undocked_member_pane_id,
+        DEFAULT_UNDOCK_SIZES,
         (client_id, FloatingPanePosition::Default),
     )
     .expect("undock commits");
@@ -1543,28 +1620,22 @@ fn build_stack_dock_tree(target_pane_id: PaneId, docked_pane_id: PaneId) -> Layo
 #[test]
 fn docking_onto_the_stack_of_the_focused_pane_gives_the_docked_pane_its_focus_and_input() {
     let tab_id = TabId::new();
-    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (tiled_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
     let (acting_client_id, viewer_client_id) = (ClientId::new(), ClientId::new());
     let mut session = build_empty_session();
     register_pane(&mut session, tiled_pane_id);
-    register_pane(&mut session, floating_pane_id);
+    register_pane(&mut session, htop_pane_id);
     register_tab(&mut session, tab_id, &[tiled_pane_id]);
     attach_client(&mut session, acting_client_id, tab_id, tiled_pane_id);
     attach_client(&mut session, viewer_client_id, tab_id, tiled_pane_id);
-    session
-        .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-        .expect("the floating set has room");
-    assert!(session
-        .clients
-        .get_client_mut_by_id(acting_client_id)
-        .expect("the acting client is attached")
-        .focus_floating_pane(floating_pane_id));
+    add_default_floating_pane(&mut session, htop_pane_id);
+    focus_floating_pane_holding(&mut session, acting_client_id, htop_pane_id);
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        floating_pane_id,
+        htop_pane_id,
         tab_id,
-        build_stack_dock_tree(tiled_pane_id, floating_pane_id),
+        build_stack_dock_tree(tiled_pane_id, htop_pane_id),
         acting_client_id,
     )
     .expect("dock commits");
@@ -1576,8 +1647,8 @@ fn docking_onto_the_stack_of_the_focused_pane_gives_the_docked_pane_its_focus_an
             Event::PaneFocused(PaneFocused {
                 client_id: acting_client_id,
                 tab_id: Some(tab_id),
-                pane_id: floating_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
@@ -1588,15 +1659,13 @@ fn docking_onto_the_stack_of_the_focused_pane_gives_the_docked_pane_its_focus_an
         .expect("the acting client is attached");
     assert_eq!(
         acting_client.get_focused_pane_id(tab_id),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(
         acting_client.get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
-    assert!(
-        !layout_tree.is_pane_collapsed(floating_pane_id, acting_client.list_focus_history(tab_id))
-    );
+    assert!(!layout_tree.is_pane_collapsed(htop_pane_id, acting_client.list_focus_history(tab_id)));
     // The other client keeps its focus on the stack's first member, and its
     // view keeps that member open.
     let viewer_client = session
@@ -1608,32 +1677,28 @@ fn docking_onto_the_stack_of_the_focused_pane_gives_the_docked_pane_its_focus_an
         Some(tiled_pane_id)
     );
     assert!(!layout_tree.is_pane_collapsed(tiled_pane_id, viewer_client.list_focus_history(tab_id)));
-    assert!(
-        layout_tree.is_pane_collapsed(floating_pane_id, viewer_client.list_focus_history(tab_id))
-    );
-    assert_eq!(session.tabs[&tab_id].list_focus_mru(), [floating_pane_id]);
+    assert!(layout_tree.is_pane_collapsed(htop_pane_id, viewer_client.list_focus_history(tab_id)));
+    assert_eq!(session.tabs[&tab_id].list_focus_mru(), [htop_pane_id]);
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
 fn docking_onto_the_stack_of_the_typed_in_pane_reports_the_focus_once() {
     let tab_id = TabId::new();
-    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (tiled_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
     let mut session = build_empty_session();
     register_pane(&mut session, tiled_pane_id);
-    register_pane(&mut session, floating_pane_id);
+    register_pane(&mut session, htop_pane_id);
     register_tab(&mut session, tab_id, &[tiled_pane_id]);
     attach_client(&mut session, client_id, tab_id, tiled_pane_id);
-    session
-        .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-        .expect("the floating set has room");
+    add_default_floating_pane(&mut session, htop_pane_id);
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        floating_pane_id,
+        htop_pane_id,
         tab_id,
-        build_stack_dock_tree(tiled_pane_id, floating_pane_id),
+        build_stack_dock_tree(tiled_pane_id, htop_pane_id),
         client_id,
     )
     .expect("dock commits");
@@ -1645,7 +1710,7 @@ fn docking_onto_the_stack_of_the_typed_in_pane_reports_the_focus_once() {
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(tab_id),
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 previous_pane_id: Some(tiled_pane_id),
             }),
         ]
@@ -1656,7 +1721,7 @@ fn docking_onto_the_stack_of_the_typed_in_pane_reports_the_focus_once() {
             .get_client_by_id(client_id)
             .expect("the client is attached")
             .get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -1673,16 +1738,10 @@ fn docking_minimizes_the_acting_clients_shown_floating_panes_and_gives_it_the_do
     }
     register_tab(&mut session, tab_id, &[tiled_pane_id]);
     attach_client(&mut session, client_id, tab_id, tiled_pane_id);
-    for floating_pane_id in [docked_pane_id, shown_pane_id] {
-        session
-            .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-            .expect("the floating set has room");
+    for htop_pane_id in [docked_pane_id, shown_pane_id] {
+        add_default_floating_pane(&mut session, htop_pane_id);
     }
-    assert!(session
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("the client is attached")
-        .focus_floating_pane(shown_pane_id));
+    focus_floating_pane_holding(&mut session, client_id, shown_pane_id);
 
     let emitted_events = commit_dock_placement(
         &mut session,
@@ -1697,9 +1756,9 @@ fn docking_minimizes_the_acting_clients_shown_floating_panes_and_gives_it_the_do
         emitted_events,
         vec![
             Event::LayoutChanged(LayoutChanged { tab_id }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: shown_pane_id,
+                pane_ids: vec![shown_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
@@ -1716,42 +1775,39 @@ fn docking_minimizes_the_acting_clients_shown_floating_panes_and_gives_it_the_do
         .expect("the client is attached");
     assert_eq!(client.get_focused_pane_id(tab_id), Some(docked_pane_id));
     assert_eq!(client.get_focused_floating_pane_id(), None);
-    assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        &[] as &[FloatingPaneId]
+    );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
 fn docking_into_another_tab_onto_the_stack_of_its_remembered_focus_focuses_the_docked_pane() {
     let (source_tab_id, destination_tab_id) = (TabId::new(), TabId::new());
-    let (source_tab_pane_id, destination_tab_pane_id, floating_pane_id) =
+    let (source_tab_pane_id, destination_tab_pane_id, htop_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
     let mut session = build_empty_session();
-    for pane_id in [
-        source_tab_pane_id,
-        destination_tab_pane_id,
-        floating_pane_id,
-    ] {
+    for pane_id in [source_tab_pane_id, destination_tab_pane_id, htop_pane_id] {
         register_pane(&mut session, pane_id);
     }
     register_tab(&mut session, source_tab_id, &[source_tab_pane_id]);
     register_tab(&mut session, destination_tab_id, &[destination_tab_pane_id]);
     attach_client(&mut session, client_id, source_tab_id, source_tab_pane_id);
-    session
-        .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-        .expect("the floating set has room");
+    let htop_floating_pane_id = add_default_floating_pane(&mut session, htop_pane_id);
     let client = session
         .clients
         .get_client_mut_by_id(client_id)
         .expect("the client is attached");
     client.update_focused_pane(destination_tab_id, destination_tab_pane_id);
-    assert!(client.focus_floating_pane(floating_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        floating_pane_id,
+        htop_pane_id,
         destination_tab_id,
-        build_stack_dock_tree(destination_tab_pane_id, floating_pane_id),
+        build_stack_dock_tree(destination_tab_pane_id, htop_pane_id),
         client_id,
     )
     .expect("dock commits");
@@ -1770,8 +1826,8 @@ fn docking_into_another_tab_onto_the_stack_of_its_remembered_focus_focuses_the_d
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(destination_tab_id),
-                pane_id: floating_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
@@ -1781,7 +1837,7 @@ fn docking_into_another_tab_onto_the_stack_of_its_remembered_focus_focuses_the_d
             .get_client_by_id(client_id)
             .expect("the client is attached")
             .get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -1821,22 +1877,12 @@ fn docking_moves_a_client_whose_input_is_on_the_pane_to_its_tab_and_leaves_other
         destination_tab_id,
         vim_pane_id,
     );
-    for floating_pane_id in [htop_pane_id, logs_pane_id] {
-        session
-            .add_floating_member(build_default_floating_member(floating_pane_id), &[])
-            .expect("the floating set has room");
+    for pane_id in [htop_pane_id, logs_pane_id] {
+        add_default_floating_pane(&mut session, pane_id);
     }
-    let following_client = session
-        .clients
-        .get_client_mut_by_id(following_client_id)
-        .expect("the following client is attached");
-    assert!(following_client.focus_floating_pane(logs_pane_id));
-    assert!(following_client.focus_floating_pane(htop_pane_id));
-    assert!(session
-        .clients
-        .get_client_mut_by_id(staying_client_id)
-        .expect("the staying client is attached")
-        .focus_floating_pane(logs_pane_id));
+    focus_floating_pane_holding(&mut session, following_client_id, logs_pane_id);
+    focus_floating_pane_holding(&mut session, following_client_id, htop_pane_id);
+    focus_floating_pane_holding(&mut session, staying_client_id, logs_pane_id);
 
     let emitted_events = commit_dock_placement(
         &mut session,
@@ -1864,9 +1910,9 @@ fn docking_moves_a_client_whose_input_is_on_the_pane_to_its_tab_and_leaves_other
                 tab_id: destination_tab_id,
                 previous_tab_id: other_tab_id,
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id: following_client_id,
-                pane_id: logs_pane_id,
+                pane_ids: vec![logs_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
@@ -1893,7 +1939,7 @@ fn docking_moves_a_client_whose_input_is_on_the_pane_to_its_tab_and_leaves_other
     assert_eq!(following_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         following_client.list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
     let staying_client = session
         .clients
@@ -1906,11 +1952,11 @@ fn docking_moves_a_client_whose_input_is_on_the_pane_to_its_tab_and_leaves_other
     );
     assert_eq!(
         staying_client.get_focused_floating_pane_id(),
-        Some(logs_pane_id)
+        Some(get_floating_pane_id_holding(&session, logs_pane_id))
     );
     assert_eq!(
         staying_client.list_shown_floating_pane_ids(),
-        &[logs_pane_id]
+        &[get_floating_pane_id_holding(&session, logs_pane_id)]
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -2638,17 +2684,13 @@ fn placement_tab_sizes_of_a_floating_source_count_every_client_typing_in_it() {
         destination_pane_id,
         build_size(90, 25),
     );
-    let floating_pane_id = focus_new_floating_pane(&mut session, alice_client_id);
-    assert!(session
-        .clients
-        .get_client_mut_by_id(grace_client_id)
-        .expect("Grace is attached")
-        .focus_floating_pane(floating_pane_id));
+    let htop_pane_id = focus_new_floating_pane(&mut session, alice_client_id);
+    focus_floating_pane_holding(&mut session, grace_client_id, htop_pane_id);
 
     assert_eq!(
         compute_placement_tab_sizes(
             &session,
-            floating_pane_id,
+            htop_pane_id,
             destination_tab_id,
             None,
             alice_client_id,
@@ -2663,8 +2705,8 @@ fn placement_tab_sizes_of_a_floating_source_count_every_client_typing_in_it() {
 /// A session whose tab `tab_id` holds `layout_tree` over `tiled_pane_ids`,
 /// viewed by `client_id` with a `pane_area_size` pane area and its tiled
 /// focus on the first tiled pane, and a floating pane that `client_id` shows
-/// at `floating_pane_rect` and focuses. Returns the session and the floating
-/// pane's id.
+/// at `floating_pane_rect` and focuses. Returns the session and the id of the
+/// floating pane's one pane.
 fn build_nearest_dock_session(
     tab_id: TabId,
     tiled_pane_ids: &[PaneId],
@@ -2686,27 +2728,25 @@ fn build_nearest_dock_session(
         tiled_pane_ids[0],
         pane_area_size,
     );
-    let floating_pane_id = PaneId::new();
-    register_pane(&mut session, floating_pane_id);
+    let htop_pane_id = PaneId::new();
+    register_pane(&mut session, htop_pane_id);
+    let floating_pane = FloatingPane::from_pane(
+        htop_pane_id,
+        DEFAULT_FLOATING_PANE_SIZE,
+        floating_pane_rect.size,
+        session.get_pane_sizing(),
+    );
     session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: DEFAULT_FLOATING_PANE_SIZE,
-                solved_size: floating_pane_rect.size,
-            },
+        .add_floating_pane(
+            floating_pane,
             &[(
                 client_id,
                 FloatingPanePosition::Moved(floating_pane_rect.origin),
             )],
         )
         .expect("the floating set has room");
-    assert!(session
-        .clients
-        .get_client_mut_by_id(client_id)
-        .expect("the client is attached")
-        .focus_floating_pane(floating_pane_id));
-    (session, floating_pane_id)
+    focus_floating_pane_holding(&mut session, client_id, htop_pane_id);
+    (session, htop_pane_id)
 }
 
 /// The rect at `(column, row)` of `column_count` by `row_count` cells.
@@ -2736,7 +2776,7 @@ fn a_floating_pane_docks_beside_the_pane_under_its_center_on_that_panes_nearest_
         ),
     ];
     for (floating_pane_rect, expected_anchor, expected_direction) in expected_insertions {
-        let (session, floating_pane_id) = build_nearest_dock_session(
+        let (session, htop_pane_id) = build_nearest_dock_session(
             tab_id,
             &[left_pane_id, right_pane_id],
             build_horizontal_split(left_pane_id, right_pane_id),
@@ -2750,7 +2790,7 @@ fn a_floating_pane_docks_beside_the_pane_under_its_center_on_that_panes_nearest_
             .expect("the client is attached");
 
         assert_eq!(
-            find_nearest_dock_target(&session, client, floating_pane_id),
+            find_nearest_dock_target(&session, client, htop_pane_id),
             Some(TiledPlacementTarget::Split {
                 destination_tab_id: tab_id,
                 anchor: expected_anchor,
@@ -2769,7 +2809,7 @@ fn a_floating_pane_centered_over_a_stack_docks_beside_the_whole_stack() {
     let (left_pane_id, open_member_pane_id, collapsed_member_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
-    let (session, floating_pane_id) = build_nearest_dock_session(
+    let (session, htop_pane_id) = build_nearest_dock_session(
         tab_id,
         &[left_pane_id, open_member_pane_id, collapsed_member_pane_id],
         LayoutNode::Split(SplitNode::with_equal_weights(
@@ -2792,7 +2832,7 @@ fn a_floating_pane_centered_over_a_stack_docks_beside_the_whole_stack() {
         .expect("the client is attached");
 
     assert_eq!(
-        find_nearest_dock_target(&session, client, floating_pane_id),
+        find_nearest_dock_target(&session, client, htop_pane_id),
         Some(TiledPlacementTarget::Split {
             destination_tab_id: tab_id,
             anchor: PanePlacementAnchor::Group(vec![open_member_pane_id, collapsed_member_pane_id]),
@@ -2830,7 +2870,7 @@ fn a_center_cell_outside_the_tab_counts_from_the_nearest_cell_of_the_tab() {
         ),
     ];
     for (floating_pane_rect, expected_anchor, expected_direction) in expected_insertions {
-        let (session, floating_pane_id) = build_nearest_dock_session(
+        let (session, htop_pane_id) = build_nearest_dock_session(
             tab_id,
             &[left_pane_id, right_pane_id],
             build_horizontal_split(left_pane_id, right_pane_id),
@@ -2857,7 +2897,7 @@ fn a_center_cell_outside_the_tab_counts_from_the_nearest_cell_of_the_tab() {
         );
 
         assert_eq!(
-            find_nearest_dock_target(&session, client, floating_pane_id),
+            find_nearest_dock_target(&session, client, htop_pane_id),
             Some(TiledPlacementTarget::Split {
                 destination_tab_id: tab_id,
                 anchor: expected_anchor,
@@ -2883,7 +2923,7 @@ fn a_center_cell_counts_from_the_top_left_cell_of_a_tab_centered_in_a_larger_pan
         (build_rect_at(15, 10, 10, 6), Direction::Up),
     ];
     for (floating_pane_rect, expected_direction) in expected_insertions {
-        let (session, floating_pane_id) = build_nearest_dock_session(
+        let (session, htop_pane_id) = build_nearest_dock_session(
             tab_id,
             &[left_pane_id, right_pane_id],
             build_horizontal_split(left_pane_id, right_pane_id),
@@ -2897,7 +2937,7 @@ fn a_center_cell_counts_from_the_top_left_cell_of_a_tab_centered_in_a_larger_pan
             .expect("the client is attached");
 
         assert_eq!(
-            find_nearest_dock_target(&session, client, floating_pane_id),
+            find_nearest_dock_target(&session, client, htop_pane_id),
             Some(TiledPlacementTarget::Split {
                 destination_tab_id: tab_id,
                 anchor: PanePlacementAnchor::Pane(left_pane_id),
@@ -2913,9 +2953,9 @@ fn a_client_that_draws_the_floating_pane_nowhere_has_no_nearest_dock_target() {
     // A client that reports `Starving` has no floating viewport and draws no
     // floating pane.
     let tab_id = TabId::new();
-    let (tiled_pane_id, floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (tiled_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
-    let mut session = build_dock_session(tab_id, tiled_pane_id, floating_pane_id, client_id);
+    let mut session = build_dock_session(tab_id, tiled_pane_id, htop_pane_id, client_id);
     session
         .clients
         .get_client_mut_by_id(client_id)
@@ -2926,12 +2966,15 @@ fn a_client_that_draws_the_floating_pane_nowhere_has_no_nearest_dock_target() {
         .get_client_by_id(client_id)
         .expect("the client is attached");
     assert_eq!(
-        session.find_client_floating_pane_rect(client, floating_pane_id),
+        session.find_client_floating_pane_rect(
+            client,
+            get_floating_pane_id_holding(&session, htop_pane_id)
+        ),
         None
     );
 
     assert_eq!(
-        find_nearest_dock_target(&session, client, floating_pane_id),
+        find_nearest_dock_target(&session, client, htop_pane_id),
         None
     );
 }
@@ -2943,7 +2986,7 @@ fn a_client_that_minimized_the_floating_pane_has_no_nearest_dock_target() {
     let tab_id = TabId::new();
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
-    let (mut session, floating_pane_id) = build_nearest_dock_session(
+    let (mut session, htop_pane_id) = build_nearest_dock_session(
         tab_id,
         &[left_pane_id, right_pane_id],
         build_horizontal_split(left_pane_id, right_pane_id),
@@ -2951,22 +2994,23 @@ fn a_client_that_minimized_the_floating_pane_has_no_nearest_dock_target() {
         build_size(80, 22),
         build_rect_at(62, 6, 16, 10),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&session, htop_pane_id);
     assert!(session
         .clients
         .get_client_mut_by_id(client_id)
         .expect("the client is attached")
-        .minimize_floating_pane(floating_pane_id));
+        .minimize_floating_pane(htop_floating_pane_id));
     let client = session
         .clients
         .get_client_by_id(client_id)
         .expect("the client is attached");
     assert_eq!(
-        session.find_client_floating_pane_rect(client, floating_pane_id),
+        session.find_client_floating_pane_rect(client, htop_floating_pane_id),
         Some(build_rect_at(62, 6, 16, 10))
     );
 
     assert_eq!(
-        find_nearest_dock_target(&session, client, floating_pane_id),
+        find_nearest_dock_target(&session, client, htop_pane_id),
         None
     );
 }
@@ -2980,7 +3024,7 @@ fn a_client_zoomed_in_the_tab_docks_a_floating_pane_beside_the_zoomed_pane() {
     let tab_id = TabId::new();
     let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
-    let (mut session, floating_pane_id) = build_nearest_dock_session(
+    let (mut session, htop_pane_id) = build_nearest_dock_session(
         tab_id,
         &[left_pane_id, right_pane_id],
         build_horizontal_split(left_pane_id, right_pane_id),
@@ -2999,7 +3043,7 @@ fn a_client_zoomed_in_the_tab_docks_a_floating_pane_beside_the_zoomed_pane() {
         .expect("the client is attached");
 
     assert_eq!(
-        find_nearest_dock_target(&session, client, floating_pane_id),
+        find_nearest_dock_target(&session, client, htop_pane_id),
         Some(TiledPlacementTarget::Split {
             destination_tab_id: tab_id,
             anchor: PanePlacementAnchor::Pane(left_pane_id),
@@ -3017,7 +3061,7 @@ fn a_client_zoomed_on_a_stack_member_docks_a_floating_pane_beside_the_whole_stac
     let (open_member_pane_id, collapsed_member_pane_id, lower_pane_id, right_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
     let client_id = ClientId::new();
-    let (mut session, floating_pane_id) = build_nearest_dock_session(
+    let (mut session, htop_pane_id) = build_nearest_dock_session(
         tab_id,
         &[
             open_member_pane_id,
@@ -3056,7 +3100,7 @@ fn a_client_zoomed_on_a_stack_member_docks_a_floating_pane_beside_the_whole_stac
         .expect("the client is attached");
 
     assert_eq!(
-        find_nearest_dock_target(&session, client, floating_pane_id),
+        find_nearest_dock_target(&session, client, htop_pane_id),
         Some(TiledPlacementTarget::Split {
             destination_tab_id: tab_id,
             anchor: PanePlacementAnchor::Group(vec![open_member_pane_id, collapsed_member_pane_id]),

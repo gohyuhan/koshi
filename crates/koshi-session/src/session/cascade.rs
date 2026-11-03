@@ -10,10 +10,11 @@
 //!
 //! [`remove_pane_cascade`] is the cascade proper: drop the pane, collapse the
 //! layout, repair each affected client's focus, and — if that empties the tab —
-//! close the tab, and if that empties the session, quit. A floating pane holds
-//! no leaf: [`remove_floating_pane`] drops it from the registry, the floating
-//! set and every client's view, moves the input of each client it held, and
-//! closes nothing above it. Each function
+//! close the tab, and if that empties the session, quit. A tab's layout holds
+//! no pane of a floating pane: [`remove_floating_pane`] drops such a pane from
+//! the registry and its floating pane from the floating set and every client's
+//! view, moves the input of each client the pane held, and closes nothing
+//! above it. Each function
 //! returns the events describing what it did, for the caller to emit; none
 //! touches the terminal or spawns a process.
 
@@ -410,30 +411,33 @@ fn resolve_terminal_too_small_cause(
     TerminalTooSmallCause::Terminal
 }
 
-/// Remove the floating pane `pane_id`: drop its registry record, its member
-/// entry in the floating set, and every attached client's view of it
-/// ([`Session::remove_floating_member`]). No layout changes and no tab closes.
-/// A client whose floating focus was on `pane_id` focuses the newest floating
-/// pane it still shows, else its input returns to the pane it focused in its
-/// active tab.
+/// Remove `pane_id`, the pane of a floating pane: drop its registry record,
+/// the floating pane that holds it from the floating set, and every attached
+/// client's view of that floating pane ([`Session::remove_floating_pane`]). No
+/// layout changes and no tab closes. A client whose floating focus was on that
+/// floating pane focuses the newest floating pane it still shows, else its
+/// input returns to the pane it focused in its active tab.
 ///
 /// Returns [`Event::PaneClosing`] then [`Event::PaneRemoved`] with
 /// `tab_id: None`, then, in client id order, one [`Event::PaneFocused`] with
 /// `previous_pane_id: Some(pane_id)` for each client whose input `pane_id`
 /// took and that has a pane to take its input now
-/// ([`build_pane_focused_event`]). A `pane_id` that is not a floating member
+/// ([`build_pane_focused_event`]). A `pane_id` that no floating pane holds
 /// changes nothing and returns no events.
 #[must_use]
 pub fn remove_floating_pane(session: &mut Session, pane_id: PaneId) -> Vec<Event> {
+    let Some((_, floating_pane)) = session.floating_set.find_floating_pane_by_pane_id(pane_id)
+    else {
+        return Vec::new();
+    };
+    let floating_pane_id = floating_pane.get_floating_pane_id();
     let focusing_client_ids: Vec<ClientId> = session
         .clients
         .list_attached_clients()
-        .filter(|client| client.get_focused_floating_pane_id() == Some(pane_id))
+        .filter(|client| client.get_active_focused_pane_id() == Some(pane_id))
         .map(Client::get_client_id)
         .collect();
-    if session.remove_floating_member(pane_id).is_none() {
-        return Vec::new();
-    }
+    let _ = session.remove_floating_pane(floating_pane_id);
     session.panes.remove_pane_record(pane_id);
     let mut emitted_events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),

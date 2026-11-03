@@ -13,14 +13,14 @@
 //! [`ResumeHeader::resume_format`] numbers its shape: [`RESUME_FORMAT`] is what
 //! this build writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and
 //! [`read_resume_body`] refuses anything outside that range. This build writes
-//! format 5 and converts formats 1 through 4 through adjacent migration steps
+//! format 6 and converts formats 1 through 5 through adjacent migration steps
 //! before it restores the body.
 //!
 //! Each pane's screen is one [`CarriedPaneState`]. An unreadable pane state is
 //! left out while other panes keep their screens and the session keeps its layout.
 //!
 //! Example: a server holding two panes writes
-//! `{"header":{"resume_format":5,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":5000,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
+//! `{"header":{"resume_format":6,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":5000,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
 //! The next image reads the header, checks that descriptor 9 is still the master of `/dev/ttys009`,
 //! takes it and process 5000 back as that pane, then reads the body and puts the pane's screen
 //! back under it.
@@ -427,7 +427,7 @@ pub fn read_resume_header(
 /// appears twice or cannot be read is logged and left out. Other panes keep
 /// their screens and the session keeps its layout.
 ///
-/// Example: a format 5 body carries panes `A` and `B`, where `B`'s screen
+/// Example: a format 6 body carries panes `A` and `B`, where `B`'s screen
 /// holds a Kitty placement no upload holds. The returned body carries `A`
 /// alone, and a warning names `B`.
 ///

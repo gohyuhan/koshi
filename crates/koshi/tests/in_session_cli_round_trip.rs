@@ -421,8 +421,8 @@ fn close_pane_from_outside_koshi_closes_the_floating_pane_it_names() {
     let client = attach_test_client(&session);
     let root_pane_id = session.list_pane_ids()[0];
     let tab_id = get_only_tab_id(&session);
-    let floating_pane_id = build_floating_pane(&session, &client, root_pane_id);
-    let floating_pane_text = floating_pane_id.to_string();
+    let htop_pane_id = build_floating_pane(&session, &client, root_pane_id);
+    let floating_pane_text = htop_pane_id.to_string();
     assert_eq!(
         session
             .fetch_session_overview()
@@ -430,7 +430,7 @@ fn close_pane_from_outside_koshi_closes_the_floating_pane_it_names() {
             .iter()
             .map(|pane| (pane.pane_id, pane.tab_id))
             .collect::<Vec<_>>(),
-        vec![(root_pane_id, Some(tab_id)), (floating_pane_id, None)]
+        vec![(root_pane_id, Some(tab_id)), (htop_pane_id, None)]
     );
 
     let (command_result, exit_code) = run_external_cli_invocation(
@@ -442,23 +442,23 @@ fn close_pane_from_outside_koshi_closes_the_floating_pane_it_names() {
         list_emitted_events(&command_result),
         [
             Event::PaneClosing(PaneClosing {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 tab_id: None,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id: client.client_id,
                 tab_id: Some(tab_id),
                 pane_id: root_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
     assert_eq!(exit_code, CliExitCode::Success);
     assert_eq!(
-        wait_for_pane_kill_policies(&session, floating_pane_id),
+        wait_for_pane_kill_policies(&session, htop_pane_id),
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
@@ -953,7 +953,7 @@ fn dump_layout_over_the_socket_lists_a_floating_pane_and_where_the_client_draws_
     let session = RunningSession::start_session();
     let client = attach_test_client(&session);
     let root_pane_id = session.list_pane_ids()[0];
-    let floating_pane_id = build_floating_pane(&session, &client, root_pane_id);
+    let htop_pane_id = build_floating_pane(&session, &client, root_pane_id);
 
     let session_layout = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
@@ -968,7 +968,7 @@ fn dump_layout_over_the_socket_lists_a_floating_pane_and_where_the_client_draws_
     assert_eq!(
         session_layout.floating_panes,
         vec![FloatingPaneLayout {
-            pane_id: floating_pane_id,
+            pane_ids: vec![htop_pane_id],
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
             solved_size: Size {
                 column_count: 48,
@@ -988,9 +988,9 @@ fn dump_layout_over_the_socket_lists_a_floating_pane_and_where_the_client_draws_
     let expected_output = format!(
         "session {session_id} quiet-lake\n  tab {tab_id} {tab_name} index 0\n    tree\n      \
          pane {root_pane_id}\n    client {client_id} tiled viewport 80x22\n      pane \
-         {root_pane_id} rect 0,0 80x22\n  floating panes\n    pane {floating_pane_id} asks \
+         {root_pane_id} rect 0,0 80x22\n  floating panes\n    pane {htop_pane_id} asks \
          60%x60% size 48x13\n      client {client_id} rect 16,4 48x13 layer 0 position \
-         default\n  clients\n    {client_id} tab {tab_id} focus {floating_pane_id}\n",
+         default\n  clients\n    {client_id} tab {tab_id} focus {htop_pane_id}\n",
         session_id = session.session_id,
         tab_id = tab_layout.tab_id,
         tab_name = tab_layout.tab_name,

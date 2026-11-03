@@ -3621,21 +3621,24 @@ fn an_empty_answer_changes_nothing() {
 
 #[test]
 fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
-    let back_floating_pane_id = PaneId::new();
-    let front_floating_pane_id = PaneId::new();
+    let back_floating_slot_pane_id = PaneId::new();
+    let front_floating_slot_pane_id = PaneId::new();
     let mut mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(PaneId::new())]);
-    for (floating_pane_id, column) in [(back_floating_pane_id, 0), (front_floating_pane_id, 40)] {
+    for (floating_slot_pane_id, column) in [
+        (back_floating_slot_pane_id, 0),
+        (front_floating_slot_pane_id, 40),
+    ] {
         mouse_frame
             .session_snapshot
             .floating_panes
             .push(FloatingPane::Shown {
-                pane_id: floating_pane_id,
+                pane_id: floating_slot_pane_id,
             });
         mouse_frame
             .session_snapshot
             .floating_pane_slots
             .push(FloatingPaneSlot {
-                pane_id: floating_pane_id,
+                pane_id: floating_slot_pane_id,
                 outer_rect: Rect::from_origin_and_size(
                     Point { column, row: 2 },
                     Size {
@@ -3647,13 +3650,13 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
             });
         mouse_frame
             .mouse_panes
-            .push(build_plain_mouse_pane(floating_pane_id));
+            .push(build_plain_mouse_pane(floating_slot_pane_id));
     }
-    mouse_frame.client_snapshot.focused_pane_id = Some(front_floating_pane_id);
+    mouse_frame.client_snapshot.focused_pane_id = Some(front_floating_slot_pane_id);
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     client.pane_move_mode = Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-        selected_pane_id: front_floating_pane_id,
+        selected_pane_id: front_floating_slot_pane_id,
         draft_top_left_cell: None,
         pending_move_command_id: None,
     }));
@@ -3711,7 +3714,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Command(Box::new(
                 Command::FocusPane(FocusPaneArgs {
-                    focus_target: FocusTarget::Pane(back_floating_pane_id),
+                    focus_target: FocusTarget::Pane(back_floating_slot_pane_id),
                     client_id: Some(client_id),
                 })
             ))]),
@@ -3729,7 +3732,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
     assert_eq!(
         tab_command_envelope.command,
         Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Pane(front_floating_pane_id),
+            focus_target: FocusTarget::Pane(front_floating_slot_pane_id),
             client_id: Some(client_id),
         })
     );
@@ -3740,7 +3743,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
     assert_eq!(
         client.pane_move_mode,
         Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-            selected_pane_id: front_floating_pane_id,
+            selected_pane_id: front_floating_slot_pane_id,
             draft_top_left_cell: None,
             pending_move_command_id: None,
         }))
@@ -9937,7 +9940,7 @@ fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
 
 #[test]
 fn the_minimize_all_binding_sends_the_session_toggle_and_keeps_the_tray_open() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true, false]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true, false]);
     let mut client = build_client_with_open_tray(&mouse_frame);
     let open_floating_pane_tray = client.floating_pane_tray;
     let (request_sender, request_receiver) = mpsc::channel();
@@ -9967,7 +9970,7 @@ fn the_minimize_all_binding_sends_the_session_toggle_and_keeps_the_tray_open() {
 
 #[test]
 fn two_presses_on_the_painted_tray_button_in_one_read_open_the_tray_and_close_it() {
-    let (mut mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[false]);
+    let (mut mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[false]);
     mouse_frame.client_snapshot.is_mouse_selection_enabled = true;
     // The painted tabline ends in ` SELECT ` and shows the tray button at
     // (69, 0) to (71, 0). The open tray's tabline ends in ` TRAY · SELECT `
@@ -12048,11 +12051,11 @@ fn select_floating_placement_source(
 ) -> (TabId, PaneId, Arc<PlacementPreview>) {
     let (active_tab_id, initial_tab_snapshot, _) =
         paint_initial_swapped_pane_frame(client, screen, started_at);
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let target_pane_id = initial_tab_snapshot.pane_slots[0].pane_id;
     let tab_size = initial_tab_snapshot.tab_size;
     let placement_preview = Arc::new(PlacementPreview::Available(Box::new(PlacementSnapshot {
-        source_pane_id: floating_pane_id,
+        source_pane_id: floating_slot_pane_id,
         source: PlacementSource::Floating,
         destination_tab_id: active_tab_id,
         destination_tab_snapshot: Some(build_frame_placement_tab_snapshot(initial_tab_snapshot)),
@@ -12065,7 +12068,7 @@ fn select_floating_placement_source(
     })));
     client.placement_state.placement_preview = Some(Arc::clone(&placement_preview));
     client.placement_state.placement_mode = Some(PlacementMode {
-        source_pane_id: floating_pane_id,
+        source_pane_id: floating_slot_pane_id,
         source_tab_id: None,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
@@ -12133,7 +12136,7 @@ fn a_floating_source_target_with_no_room_paints_the_tab_as_it_is_and_names_the_r
     let started_at = Instant::now();
     let (active_tab_id, target_pane_id, placement_preview) =
         select_floating_placement_source(&mut client, &mut screen, started_at);
-    let floating_pane_id = client
+    let floating_slot_pane_id = client
         .get_placement_source_pane_id()
         .expect("the floating pane is the source");
     screen
@@ -12171,7 +12174,7 @@ fn a_floating_source_target_with_no_room_paints_the_tab_as_it_is_and_names_the_r
         displayed_tab_snapshot: get_displayed_tab_snapshot(&refused_placement_preview).clone(),
     };
     let expected_placement_presentation = PanePlacementPresentation {
-        source_pane_id: floating_pane_id,
+        source_pane_id: floating_slot_pane_id,
         target_pane_ids: vec![target_pane_id],
         source_message: PanePlacementMessage {
             full_text: "Moving pane cannot go there".to_string(),
@@ -12835,13 +12838,13 @@ fn a_termination_signal_ends_the_attachment_and_is_recorded_unless_this_process_
 #[test]
 fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() {
     let tiled_pane_id = PaneId::new();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let mut mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(tiled_pane_id)]);
     mouse_frame
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: Rect::from_origin_and_size(
                 Point { column: 10, row: 4 },
                 Size {
@@ -12853,7 +12856,7 @@ fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() 
         });
     mouse_frame
         .mouse_panes
-        .push(build_plain_mouse_pane(floating_pane_id));
+        .push(build_plain_mouse_pane(floating_slot_pane_id));
     let mut client = build_test_client();
     let current_time = Instant::now();
     // The grab handle sits on screen row 6, columns 12 and 13.
@@ -12880,7 +12883,7 @@ fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() 
         panic!("expected one floating pane move, got {release_actions:?}");
     };
     let moved_draft = Some(FloatingPaneMoveDraft {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
         top_left_cell: Point { column: 15, row: 5 },
     });
     let mut screen = build_failing_screen();
@@ -14671,18 +14674,20 @@ fn a_restart_hold_counts_each_key_of_a_read() {
 }
 
 /// Two frames of an `80x24` session whose one floating pane
-/// `floating_pane_id` is titled `htop`, over one tab with no pane. In the
+/// `floating_slot_pane_id` is titled `htop`, over one tab with no pane. In the
 /// first, the client shows the pane at `(16, 4)` `48x13` with its content and
 /// one image. In the second, the client minimized it.
-fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, RenderSnapshot) {
+fn build_minimized_pane_snapshots(
+    floating_slot_pane_id: PaneId,
+) -> (RenderSnapshot, RenderSnapshot) {
     let mut minimized_frame = build_test_painted_frame();
     minimized_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Minimized {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
         pane_title: Some(String::from("htop")),
     }];
     let mut shown_frame = minimized_frame.clone();
     let floating_pane_slot = FloatingPaneSlot {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
         outer_rect: Rect::from_origin_and_size(
             Point { column: 16, row: 4 },
             Size {
@@ -14693,12 +14698,12 @@ fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, 
         is_pinned: false,
     };
     shown_frame.session_snapshot.floating_pane_slots = vec![FrameFloatingPaneSlot {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
         outer_rect: floating_pane_slot.outer_rect,
         is_pinned: false,
     }];
     shown_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
     }];
     let mut shown_snapshot = build_render_snapshot(&build_received_painted_frame(shown_frame));
     shown_snapshot.pane_snapshots.push(PaneSnapshot {
@@ -14706,7 +14711,7 @@ fn build_minimized_pane_snapshots(floating_pane_id: PaneId) -> (RenderSnapshot, 
         image_placement_snapshots: build_native_image_snapshot().pane_snapshots[0]
             .image_placement_snapshots
             .clone(),
-        ..PaneSnapshot::from_empty_pane(floating_pane_id)
+        ..PaneSnapshot::from_empty_pane(floating_slot_pane_id)
     });
     let minimized_snapshot = build_render_snapshot(&build_received_painted_frame(minimized_frame));
     (shown_snapshot, minimized_snapshot)
@@ -14751,8 +14756,9 @@ fn build_unpinned_floating_pane_slot(
 fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let floating_pane_id = PaneId::new();
-    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
     let started_at = Instant::now();
     commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
 
@@ -14762,7 +14768,7 @@ fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             16,
             4,
             48,
@@ -14786,7 +14792,7 @@ fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
     assert_eq!(
         displayed_snapshot.session_snapshot.floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             16,
             4,
             48,
@@ -14795,10 +14801,10 @@ fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
         "the painted frame draws the sliding pane on top"
     );
     assert_eq!(
-        displayed_snapshot.find_pane_snapshot(floating_pane_id),
+        displayed_snapshot.find_pane_snapshot(floating_slot_pane_id),
         Some(&PaneSnapshot {
             pane_title: Some(String::from("htop")),
-            ..PaneSnapshot::from_empty_pane(floating_pane_id)
+            ..PaneSnapshot::from_empty_pane(floating_slot_pane_id)
         }),
         "the slide draws the pane's last content without its image"
     );
@@ -14820,7 +14826,7 @@ fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             65,
             1,
             7,
@@ -14847,8 +14853,9 @@ fn a_minimized_pane_slides_into_the_cell_under_the_closed_trays_button() {
 fn a_minimized_pane_slides_into_its_tile_while_the_tray_is_open() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let floating_pane_id = PaneId::new();
-    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
     let started_at = Instant::now();
     let shown_mouse_frame =
         commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
@@ -14871,7 +14878,7 @@ fn a_minimized_pane_slides_into_its_tile_while_the_tray_is_open() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             8,
             3,
             15,
@@ -14884,8 +14891,9 @@ fn a_minimized_pane_slides_into_its_tile_while_the_tray_is_open() {
 fn a_restored_pane_slides_out_of_the_cell_under_the_closed_trays_button() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let floating_pane_id = PaneId::new();
-    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
     let started_at = Instant::now();
     commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
 
@@ -14893,7 +14901,7 @@ fn a_restored_pane_slides_out_of_the_cell_under_the_closed_trays_button() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             72,
             0,
             1,
@@ -14911,7 +14919,7 @@ fn a_restored_pane_slides_out_of_the_cell_under_the_closed_trays_button() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             23,
             4,
             42,
@@ -14924,8 +14932,9 @@ fn a_restored_pane_slides_out_of_the_cell_under_the_closed_trays_button() {
 fn a_restore_during_a_minimize_slides_back_from_where_the_minimize_reached() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let floating_pane_id = PaneId::new();
-    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
     let started_at = Instant::now();
     commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
     commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
@@ -14937,7 +14946,7 @@ fn a_restore_during_a_minimize_slides_back_from_where_the_minimize_reached() {
     assert_eq!(
         screen.shown_animated_floating_pane_slots,
         vec![build_unpinned_floating_pane_slot(
-            floating_pane_id,
+            floating_slot_pane_id,
             65,
             1,
             7,
@@ -14951,8 +14960,9 @@ fn reduced_motion_minimizes_and_restores_a_pane_in_one_frame() {
     let mut client = build_test_client();
     client.client_config.should_reduce_motion = true;
     let mut screen = build_test_screen();
-    let floating_pane_id = PaneId::new();
-    let (shown_snapshot, minimized_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
     let started_at = Instant::now();
     commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
 
@@ -14974,8 +14984,9 @@ fn reduced_motion_minimizes_and_restores_a_pane_in_one_frame() {
 fn a_closed_floating_pane_starts_no_slide() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let floating_pane_id = PaneId::new();
-    let (shown_snapshot, mut closed_snapshot) = build_minimized_pane_snapshots(floating_pane_id);
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, mut closed_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
     closed_snapshot.session_snapshot.floating_panes.clear();
     let started_at = Instant::now();
     commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
@@ -15271,7 +15282,7 @@ fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
 
 #[test]
 fn the_notification_center_binding_opens_the_center_and_sends_no_request() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15316,7 +15327,7 @@ fn list_sent_commands(request_receiver: &mpsc::Receiver<IpcRequest>) -> Vec<Comm
 
 #[test]
 fn a_command_binding_fired_in_the_center_closes_it_and_sends_its_command() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15353,7 +15364,7 @@ fn a_command_binding_fired_in_the_center_closes_it_and_sends_its_command() {
 
 #[test]
 fn a_lock_binding_that_keeps_the_mode_closes_the_center() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15388,7 +15399,7 @@ fn a_lock_binding_that_keeps_the_mode_closes_the_center() {
 
 #[test]
 fn a_continuous_command_fired_in_the_center_drops_the_prefix_it_rearmed() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let ctrl_y_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('y'));
     let h_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('h'));
@@ -15489,7 +15500,7 @@ fn press_once(
 #[test]
 fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_and_keeps_the_tray()
 {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_with_open_tray(&mouse_frame);
     let open_floating_pane_tray = client.floating_pane_tray;
     client.post_core_notification(
@@ -15530,7 +15541,7 @@ fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_a
 #[test]
 fn a_press_on_the_notification_button_while_the_tray_is_open_closes_the_tray_and_opens_the_center()
 {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_with_open_tray(&mouse_frame);
     client.post_core_notification(
         NotificationSeverity::Info,
@@ -15564,7 +15575,7 @@ fn a_press_on_the_notification_button_while_the_tray_is_open_closes_the_tray_and
 
 #[test]
 fn a_press_on_the_notification_button_while_the_center_is_open_closes_it_and_sends_nothing() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     client.client_config.should_reduce_motion = true;
     client.post_core_notification(
@@ -15600,7 +15611,7 @@ fn a_press_on_the_notification_button_while_the_center_is_open_closes_it_and_sen
 
 #[test]
 fn a_press_on_the_tray_button_while_the_center_is_open_closes_the_center_and_opens_the_tray() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     client.client_config.should_reduce_motion = true;
     client.open_notification_center(Some(&mouse_frame));
@@ -15890,7 +15901,7 @@ fn the_toast_clock_stops_while_no_frame_shows() {
 
 #[test]
 fn a_requested_notification_center_toggle_opens_the_center_and_answers_ok() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15914,7 +15925,7 @@ fn a_requested_notification_center_toggle_opens_the_center_and_answers_ok() {
 
 #[test]
 fn a_requested_action_that_builds_a_session_command_is_refused_and_sends_nothing() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15940,7 +15951,7 @@ fn a_requested_action_that_builds_a_session_command_is_refused_and_sends_nothing
 
 #[test]
 fn a_requested_action_this_viewer_does_not_know_is_target_not_found() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, _request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15960,7 +15971,7 @@ fn a_requested_action_this_viewer_does_not_know_is_target_not_found() {
 
 #[test]
 fn a_requested_placement_action_in_normal_mode_is_refused_and_changes_nothing() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
@@ -15987,7 +15998,7 @@ fn a_requested_placement_action_in_normal_mode_is_refused_and_changes_nothing() 
 
 #[test]
 fn a_requested_close_of_a_center_that_is_closed_answers_ok_and_changes_nothing() {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut client = build_client_viewing(&mouse_frame);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);

@@ -56,7 +56,7 @@ impl Server {
     /// `is_every_pane_suppressed`. `session_snapshot.floating_pane_slots`
     /// holds the floating panes the client shows, placed for it.
     /// `session_snapshot.floating_panes` lists every floating pane of the
-    /// session, in the order the panes became floating: `Shown` while the
+    /// session, in the order they were created: `Shown` while the
     /// client shows it, and `Minimized` with its title while the client
     /// minimized it. `pane_snapshots` holds one entry per tiled slot, then one
     /// per floating pane slot, then one per pane of the client's placement
@@ -104,20 +104,22 @@ impl Server {
             floating_pane_slots: list_floating_pane_slots(session, client),
             floating_panes: session
                 .floating_set
-                .list_pane_ids()
-                .into_iter()
-                .map(|pane_id| {
-                    if client.is_floating_pane_shown(pane_id) {
-                        return FloatingPane::Shown { pane_id };
+                .list_floating_panes()
+                .iter()
+                .filter_map(|floating_pane| {
+                    let floating_pane_id = floating_pane.get_floating_pane_id();
+                    let pane_id = client.find_floating_pane_input_pane_id(floating_pane_id)?;
+                    if client.is_floating_pane_shown(floating_pane_id) {
+                        return Some(FloatingPane::Shown { pane_id });
                     }
-                    FloatingPane::Minimized {
+                    Some(FloatingPane::Minimized {
                         pane_id,
                         pane_title: self.terminal_engine_by_pane_id.get(&pane_id).and_then(
                             |terminal_engine| {
                                 resolve_pane_title(terminal_engine.get_terminal_state())
                             },
                         ),
-                    }
+                    })
                 })
                 .collect(),
         };
@@ -256,7 +258,9 @@ impl Server {
 
 /// The floating panes `client` shows, back to front
 /// ([`Client::list_shown_floating_pane_ids`]), each placed for it. A slot's
-/// outer rect is the rectangle the session places the pane in for the client
+/// pane is the first pane of the client's focus history inside the floating
+/// pane ([`Client::find_floating_pane_input_pane_id`]). A slot's outer rect is
+/// the rectangle the session places the floating pane in for the client
 /// ([`Session::find_client_floating_pane_rect`]). Empty when the client has no
 /// floating viewport ([`Client::get_floating_viewport`]).
 ///
@@ -266,9 +270,10 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
     client
         .list_shown_floating_pane_ids()
         .iter()
-        .filter_map(|&pane_id| {
-            let floating_pane_view = client.get_floating_pane_view(pane_id)?;
-            let outer_rect = session.find_client_floating_pane_rect(client, pane_id)?;
+        .filter_map(|&floating_pane_id| {
+            let floating_pane_view = client.get_floating_pane_view(floating_pane_id)?;
+            let pane_id = client.find_floating_pane_input_pane_id(floating_pane_id)?;
+            let outer_rect = session.find_client_floating_pane_rect(client, floating_pane_id)?;
             Some(FloatingPaneSlot {
                 pane_id,
                 outer_rect,

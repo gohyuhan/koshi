@@ -26,7 +26,9 @@ use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 /// One id per kind. An event naming two ids of one kind records the one it
 /// changed to: [`Event::PaneFocused`] records the pane focused and not its
 /// previous pane, and [`Event::TabFocused`] records the tab focused and not its
-/// previous tab.
+/// previous tab. An event naming every pane of a floating pane records the
+/// first in layout order: [`Event::FloatingPanePinChanged`] with `pane_ids`
+/// `[vim, htop]` records `vim`.
 ///
 /// Decoding ignores a field this build does not know, so a record from a newer
 /// koshi still reads. An absent id field reads as `None`; an absent
@@ -163,17 +165,17 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
         },
         Event::FloatingPaneMoved(floating_pane_moved) => RecentEvent {
             client_id: Some(floating_pane_moved.client_id),
-            pane_id: Some(floating_pane_moved.pane_id),
+            pane_id: floating_pane_moved.pane_ids.first().copied(),
             ..recent_event_without_entity_ids
         },
-        Event::PanePinChanged(pane_pin_changed) => RecentEvent {
-            client_id: Some(pane_pin_changed.client_id),
-            pane_id: Some(pane_pin_changed.pane_id),
+        Event::FloatingPanePinChanged(floating_pane_pin_changed) => RecentEvent {
+            client_id: Some(floating_pane_pin_changed.client_id),
+            pane_id: floating_pane_pin_changed.pane_ids.first().copied(),
             ..recent_event_without_entity_ids
         },
-        Event::PaneMinimizedChanged(pane_minimized_changed) => RecentEvent {
-            client_id: Some(pane_minimized_changed.client_id),
-            pane_id: Some(pane_minimized_changed.pane_id),
+        Event::FloatingPaneMinimizedChanged(floating_pane_minimized_changed) => RecentEvent {
+            client_id: Some(floating_pane_minimized_changed.client_id),
+            pane_id: floating_pane_minimized_changed.pane_ids.first().copied(),
             ..recent_event_without_entity_ids
         },
         Event::Quit(_) | Event::Restarting => recent_event_without_entity_ids,

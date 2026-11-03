@@ -792,7 +792,8 @@ pub fn build_tab_rows(session_overviews: &[SessionOverview]) -> Vec<TabRow> {
 
 /// The `list-panes` answer: every pane of every listed session, in the
 /// overview's own order — tab-bar order, then layout order within a tab, then
-/// the floating panes in the order the panes became floating.
+/// the floating panes in the order they were created, and each one's panes in
+/// layout order.
 ///
 /// A tiled pane whose tab is not in the overview's tab list is left out. A
 /// floating pane's row carries no tab.

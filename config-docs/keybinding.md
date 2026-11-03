@@ -392,7 +392,7 @@ The tabline shows the tray button `⧉` left of the mode tag, also while the
 session holds no floating pane. `<leader>p w`
 (`core:toggle-floating-pane-tray`) or a click on the button opens the tray under
 the button. The tray lists every floating pane of the session as a tile, in the
-order the panes became floating, then the `+ new` tile:
+order the floating panes were created, then the `+ new` tile:
 
 - A tile shows its number, `1` to `12`, on its top border, and the pane's
   title under it. A tile is 10 cells wide. A title of 8 cells or more shows
@@ -428,8 +428,8 @@ gains a tile for it.
   `core:new-pane-floating` does.
 - `a` (`core:toggle-minimize-all-floating-panes`) minimizes every floating
   pane this client shows. When this client shows none, it shows every one, in
-  the order the panes became floating, and focuses the last one. A click on
-  `minimize all` or `restore all` does the same.
+  the order the floating panes were created, and focuses the last one. A
+  click on `minimize all` or `restore all` does the same.
 - A click on a tile does what Enter does on that tile.
 - Escape (`core:close-floating-pane-tray`), `<leader>p w`, a click on the
   button and a click on the close button `✕` close the tray.
@@ -575,8 +575,8 @@ No default key runs these actions. Bind them in `normal` or `locked`:
 - `core:minimize-pane` minimizes the focused floating pane for this client.
 - `core:minimize-all-floating-panes` minimizes every floating pane this client
   shows. `core:restore-all-floating-panes` shows each floating pane this
-  client minimized, in the order the panes became floating, and focuses the
-  last one it shows.
+  client minimized, in the order the floating panes were created, and
+  focuses the last one it shows.
 
 `core:toggle-minimize-all-floating-panes` has a default key only in the tray,
 `a`. Bound in `normal` or `locked`, it runs with the tray closed: it minimizes
@@ -594,7 +594,7 @@ nothing when pressed.
 
 `<leader>p <Tab>` (`core:focus-next-floating-pane`) and `<leader>p <S-Tab>`
 (`core:focus-previous-floating-pane`) step through every floating pane of the
-session, in the order the panes became floating, and wrap at the ends:
+session, in the order the floating panes were created, and wrap at the ends:
 
 - Each step shows the pane it lands on above this client's other floating
   panes and gives it this client's input. A minimized pane is shown again.
@@ -604,9 +604,9 @@ session, in the order the panes became floating, and wrap at the ends:
 - Both actions repeat (see [Repeating keys](#repeating-keys)). The prefix
   stays open, so each further `<Tab>` or `<S-Tab>` takes one more step.
 
-Example: `htop` and then `logs` became floating, this client minimized both,
-and its input is on the tiled pane `A`. `<C-p> <Tab>` shows and focuses
-`htop`. `<Tab>` again shows `logs` on top, and `htop` stays shown.
+Example: the floating panes `htop` and then `logs` were created, this client
+minimized both, and its input is on the tiled pane `A`. `<C-p> <Tab>` shows
+and focuses `htop`. `<Tab>` again shows `logs` on top, and `htop` stays shown.
 
 With no floating pane in the session, both are refused with `the session holds
 no floating pane`. A client that cannot draw floating panes refuses both with
@@ -645,8 +645,8 @@ pane.
 - Arrow keys move the selected pane one cell. The pane stops at the edge of
   the pane area. Only this client draws the moved pane until you confirm.
 - Tab and Shift+Tab select the next or previous floating pane in the order
-  the panes became floating, and focus it. With floating panes `a`, `b` and
-  `c` that became floating in that order and `c` selected, Shift+Tab selects
+  the floating panes were created, and focus it. With floating panes `a`, `b`
+  and `c` created in that order and `c` selected, Shift+Tab selects
   `b`, then `a`, then `c`. A move you did not confirm is discarded.
 - A left-button press on a floating pane's content or grab handle selects
   that pane and focuses it. A drag moves it, and the release sends the move.

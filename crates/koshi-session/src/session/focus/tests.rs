@@ -14,12 +14,13 @@ use super::*;
 use std::time::SystemTime;
 
 use koshi_core::geometry::{FloatingPanePosition, Size, SplitDirection};
-use koshi_core::ids::{SessionId, TabId};
+use koshi_core::ids::{FloatingPaneId, SessionId, TabId};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::client::ClientOrigin;
-use crate::session::state::tests::{build_empty_session, build_tab};
+use crate::session::state::tests::{build_default_floating_pane, build_empty_session, build_tab};
+use crate::session::state::FloatingSet;
 
 /// A registry holding exactly `pane_records`.
 fn build_registry_with(pane_records: Vec<PaneRecord>) -> PaneRegistry {
@@ -354,10 +355,26 @@ fn ineligible_spatial_and_absorbed_candidates_fall_through_to_layout_order() {
     );
 }
 
+/// The floating set holding one floating pane per pane of `pane_ids`, each
+/// holding that pane alone ([`build_default_floating_pane`]), in that order,
+/// and the floating pane ids in the same order.
+fn build_floating_set_of<const PANE_COUNT: usize>(
+    pane_ids: [PaneId; PANE_COUNT],
+) -> (FloatingSet, [FloatingPaneId; PANE_COUNT]) {
+    let mut floating_set = FloatingSet::default();
+    let floating_pane_ids = pane_ids.map(|pane_id| {
+        floating_set
+            .add_floating_pane(build_default_floating_pane(pane_id))
+            .expect("the floating set has room")
+            .get_floating_pane_id()
+    });
+    (floating_set, floating_pane_ids)
+}
+
 /// A client viewing `active_tab_id` on an `80x24` viewport, focusing nothing,
-/// with a minimized view at the default placement of each of
-/// `floating_pane_ids`.
-fn build_client_on(active_tab_id: TabId, floating_pane_ids: &[PaneId]) -> Client {
+/// with a minimized view at the default placement of each floating pane of
+/// `floating_set`.
+fn build_client_on(active_tab_id: TabId, floating_set: &FloatingSet) -> Client {
     let mut client = Client::from_attachment(
         ClientId::new(),
         SessionId::new(),
@@ -372,8 +389,8 @@ fn build_client_on(active_tab_id: TabId, floating_pane_ids: &[PaneId]) -> Client
         "C-test-client".to_string(),
         0,
     );
-    for &floating_pane_id in floating_pane_ids {
-        client.add_floating_pane_view(floating_pane_id, FloatingPanePosition::Default);
+    for floating_pane in floating_set.list_floating_panes() {
+        client.add_floating_pane_view(floating_pane, FloatingPanePosition::Default);
     }
     client
 }
@@ -382,10 +399,11 @@ fn build_client_on(active_tab_id: TabId, floating_pane_ids: &[PaneId]) -> Client
 fn a_move_into_a_floating_pane_reports_no_tab_and_the_pane_it_left() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id, &[htop_pane_id]);
+    let (floating_set, [htop_floating_pane_id]) = build_floating_set_of([htop_pane_id]);
+    let mut client = build_client_on(tab_id, &floating_set);
     client.update_focused_pane(tab_id, vim_pane_id);
     let previous_focused_pane_id = client.get_active_focused_pane_id();
-    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
 
     assert_eq!(
         build_pane_focused_event(&client, previous_focused_pane_id),
@@ -402,11 +420,12 @@ fn a_move_into_a_floating_pane_reports_no_tab_and_the_pane_it_left() {
 fn a_move_out_of_the_floating_panes_reports_the_active_tab_and_its_focused_pane() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id, &[htop_pane_id]);
+    let (floating_set, [htop_floating_pane_id]) = build_floating_set_of([htop_pane_id]);
+    let mut client = build_client_on(tab_id, &floating_set);
     client.update_focused_pane(tab_id, vim_pane_id);
-    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
     let previous_focused_pane_id = client.get_active_focused_pane_id();
-    assert!(client.minimize_floating_pane(htop_pane_id));
+    assert!(client.minimize_floating_pane(htop_floating_pane_id));
 
     assert_eq!(
         build_pane_focused_event(&client, previous_focused_pane_id),
@@ -423,11 +442,13 @@ fn a_move_out_of_the_floating_panes_reports_the_active_tab_and_its_focused_pane(
 fn a_move_between_floating_panes_reports_no_tab_and_the_floating_pane_it_left() {
     let tab_id = TabId::new();
     let (vim_pane_id, htop_pane_id, btop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id, &[htop_pane_id, btop_pane_id]);
+    let (floating_set, [htop_floating_pane_id, btop_floating_pane_id]) =
+        build_floating_set_of([htop_pane_id, btop_pane_id]);
+    let mut client = build_client_on(tab_id, &floating_set);
     client.update_focused_pane(tab_id, vim_pane_id);
-    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
     let previous_focused_pane_id = client.get_active_focused_pane_id();
-    assert!(client.focus_floating_pane(btop_pane_id));
+    assert!(client.focus_floating_pane(btop_floating_pane_id));
 
     assert_eq!(
         build_pane_focused_event(&client, previous_focused_pane_id),
@@ -443,13 +464,14 @@ fn a_move_between_floating_panes_reports_no_tab_and_the_floating_pane_it_left() 
 #[test]
 fn an_unchanged_input_and_no_pane_to_type_into_report_nothing() {
     let tab_id = TabId::new();
-    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id, &[htop_pane_id]);
+    let vim_pane_id = PaneId::new();
+    let (floating_set, [htop_floating_pane_id]) = build_floating_set_of([PaneId::new()]);
+    let mut client = build_client_on(tab_id, &floating_set);
 
     assert_eq!(build_pane_focused_event(&client, None), None);
-    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
     let previous_focused_pane_id = client.get_active_focused_pane_id();
-    assert!(client.minimize_floating_pane(htop_pane_id));
+    assert!(client.minimize_floating_pane(htop_floating_pane_id));
     assert_eq!(
         build_pane_focused_event(&client, previous_focused_pane_id),
         None
@@ -464,23 +486,25 @@ fn a_tiled_focus_in_the_active_tab_reports_each_minimized_floating_pane_then_the
     let tab_id = TabId::new();
     let (vim_pane_id, shell_pane_id, htop_pane_id, logs_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
-    let mut client = build_client_on(tab_id, &[htop_pane_id, logs_pane_id]);
+    let (floating_set, [htop_floating_pane_id, logs_floating_pane_id]) =
+        build_floating_set_of([htop_pane_id, logs_pane_id]);
+    let mut client = build_client_on(tab_id, &floating_set);
     client.update_focused_pane(tab_id, vim_pane_id);
-    assert!(client.focus_floating_pane(htop_pane_id));
-    assert!(client.focus_floating_pane(logs_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    assert!(client.focus_floating_pane(logs_floating_pane_id));
     let client_id = client.get_client_id();
 
     assert_eq!(
-        apply_tiled_pane_focus(&mut client, tab_id, shell_pane_id),
+        apply_tiled_pane_focus(&mut client, &floating_set, tab_id, shell_pane_id),
         vec![
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: htop_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_minimized: true,
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: logs_pane_id,
+                pane_ids: vec![logs_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
@@ -492,18 +516,22 @@ fn a_tiled_focus_in_the_active_tab_reports_each_minimized_floating_pane_then_the
         ]
     );
     assert_eq!(client.get_active_focused_pane_id(), Some(shell_pane_id));
-    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        Vec::<FloatingPaneId>::new()
+    );
 }
 
 #[test]
 fn a_tiled_focus_on_the_pane_already_focused_reports_nothing() {
     let tab_id = TabId::new();
     let vim_pane_id = PaneId::new();
-    let mut client = build_client_on(tab_id, &[]);
+    let floating_set = FloatingSet::default();
+    let mut client = build_client_on(tab_id, &floating_set);
     client.update_focused_pane(tab_id, vim_pane_id);
 
     assert_eq!(
-        apply_tiled_pane_focus(&mut client, tab_id, vim_pane_id),
+        apply_tiled_pane_focus(&mut client, &floating_set, tab_id, vim_pane_id),
         Vec::new()
     );
 }
@@ -512,13 +540,14 @@ fn a_tiled_focus_on_the_pane_already_focused_reports_nothing() {
 fn a_tiled_focus_in_another_tab_reports_that_tab_and_minimizes_nothing() {
     let (active_tab_id, other_tab_id) = (TabId::new(), TabId::new());
     let (old_pane_id, new_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut client = build_client_on(active_tab_id, &[htop_pane_id]);
+    let (floating_set, [htop_floating_pane_id]) = build_floating_set_of([htop_pane_id]);
+    let mut client = build_client_on(active_tab_id, &floating_set);
     client.update_focused_pane(other_tab_id, old_pane_id);
-    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
     let client_id = client.get_client_id();
 
     assert_eq!(
-        apply_tiled_pane_focus(&mut client, other_tab_id, new_pane_id),
+        apply_tiled_pane_focus(&mut client, &floating_set, other_tab_id, new_pane_id),
         vec![Event::PaneFocused(PaneFocused {
             client_id,
             tab_id: Some(other_tab_id),
@@ -530,35 +559,46 @@ fn a_tiled_focus_in_another_tab_reports_that_tab_and_minimizes_nothing() {
 }
 
 #[test]
-fn minimized_changed_events_name_each_pane_in_order_with_the_given_flag() {
+fn minimized_changed_events_name_every_pane_of_each_floating_pane_in_order_with_the_given_flag() {
     let client_id = ClientId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let (floating_set, [first_floating_pane_id, second_floating_pane_id]) =
+        build_floating_set_of([first_pane_id, second_pane_id]);
 
     assert_eq!(
-        build_pane_minimized_changed_events(client_id, &[second_pane_id, first_pane_id], false)
-            .collect::<Vec<Event>>(),
+        build_floating_pane_minimized_changed_events(
+            client_id,
+            &floating_set,
+            &[
+                second_floating_pane_id,
+                FloatingPaneId::new(),
+                first_floating_pane_id
+            ],
+            false
+        )
+        .collect::<Vec<Event>>(),
         vec![
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: second_pane_id,
+                pane_ids: vec![second_pane_id],
                 is_minimized: false,
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: first_pane_id,
+                pane_ids: vec![first_pane_id],
                 is_minimized: false,
             }),
         ]
     );
     assert_eq!(
-        build_pane_minimized_changed_events(client_id, &[], true).count(),
+        build_floating_pane_minimized_changed_events(client_id, &floating_set, &[], true).count(),
         0
     );
 }
 
 /// A session holding one tab `vim | shell` and one attached client viewing
-/// it that shows and focuses the floating pane `htop` and focuses `vim` in
-/// the tab. Returns the session, the tab id, the client id and
+/// it that shows and focuses the floating pane holding `htop` and focuses
+/// `vim` in the tab. Returns the session, the tab id, the client id and
 /// `[vim, shell, htop]`.
 fn build_session_with_floating_focus() -> (Session, TabId, ClientId, [PaneId; 3]) {
     let (vim_pane_id, shell_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
@@ -577,9 +617,11 @@ fn build_session_with_floating_focus() -> (Session, TabId, ClientId, [PaneId; 3]
     let tab_id = tab.get_tab_id();
     let mut session = build_empty_session();
     session.tabs.insert(tab_id, tab);
-    let mut client = build_client_on(tab_id, &[htop_pane_id]);
+    let (floating_set, [htop_floating_pane_id]) = build_floating_set_of([htop_pane_id]);
+    let mut client = build_client_on(tab_id, &floating_set);
+    session.floating_set = floating_set;
     client.update_focused_pane(tab_id, vim_pane_id);
-    assert!(client.focus_floating_pane(htop_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
     let client_id = client.get_client_id();
     session.attach_client(client);
     (

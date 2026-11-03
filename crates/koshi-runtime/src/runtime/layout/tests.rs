@@ -12,11 +12,10 @@ use koshi_core::geometry::{
     FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea, Point, Rect, Size,
     DEFAULT_FLOATING_PANE_SIZE,
 };
-use koshi_core::ids::{ClientId, PaneId, SessionId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, SessionId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{Client, ClientOrigin};
 use koshi_session::session::state::Session;
@@ -24,8 +23,12 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::runtime::event::RuntimeEvent;
 
+use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
+
 use super::*;
-use crate::runtime::command::tests::{attach_client_record, build_horizontal_split, build_tab};
+use crate::runtime::command::tests::{
+    attach_client_record, build_horizontal_split, build_tab, put_pane_beside_in_floating_pane,
+};
 use crate::runtime::discovery::tests::build_empty_session;
 use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
@@ -1076,14 +1079,24 @@ fn build_starving_client_id() -> ClientId {
     ClientId::from_uuid(build_test_uuid_with_suffix(13))
 }
 
-/// The floating pane that asks for `60%` by `60%`.
-fn build_percent_floating_pane_id() -> PaneId {
+/// The pane of the floating pane that asks for `60%` by `60%`.
+fn build_percent_pane_id() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(21))
 }
 
-/// The floating pane that asks for `20` by `6` cells.
-fn build_cells_floating_pane_id() -> PaneId {
+/// The pane of the floating pane that asks for `20` by `6` cells.
+fn build_cells_pane_id() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(22))
+}
+
+/// The id of the floating pane of `session` that holds `pane_id`.
+fn get_floating_pane_id_holding(session: &Session, pane_id: PaneId) -> FloatingPaneId {
+    session
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .expect("the pane is floating")
+        .1
+        .get_floating_pane_id()
 }
 
 /// A floating pane size of `column_count` by `row_count` cells.
@@ -1126,9 +1139,9 @@ fn build_floating_pane_session() -> (Session, TabId) {
             None,
         );
     }
-    for (floating_pane_id, desired_size, solved_size) in [
+    for (pane_id, desired_size, solved_size) in [
         (
-            build_percent_floating_pane_id(),
+            build_percent_pane_id(),
             DEFAULT_FLOATING_PANE_SIZE,
             Size {
                 column_count: 48,
@@ -1136,7 +1149,7 @@ fn build_floating_pane_session() -> (Session, TabId) {
             },
         ),
         (
-            build_cells_floating_pane_id(),
+            build_cells_pane_id(),
             build_cells_floating_pane_size(20, 6),
             Size {
                 column_count: 20,
@@ -1144,40 +1157,35 @@ fn build_floating_pane_session() -> (Session, TabId) {
             },
         ),
     ] {
-        session
-            .panes
-            .register_pane_record(PaneRecord::from_terminal_pane(floating_pane_id))
-            .expect("a fresh pane id");
-        session
-            .add_floating_member(
-                FloatingMember {
-                    pane_id: floating_pane_id,
-                    desired_size,
-                    solved_size,
-                },
-                &[],
-            )
-            .expect("the set has room");
+        commit_new_floating_pane(
+            &mut session,
+            pane_id,
+            desired_size,
+            solved_size,
+            None,
+            NewPaneSpec::default(),
+        )
+        .expect("the set has room");
     }
+    let percent_floating_pane_id = get_floating_pane_id_holding(&session, build_percent_pane_id());
+    let cells_floating_pane_id = get_floating_pane_id_holding(&session, build_cells_pane_id());
 
     let drawing_client = session
         .clients
         .get_client_mut_by_id(build_drawing_client_id())
         .expect("the drawing client is attached");
-    assert!(drawing_client.focus_floating_pane(build_percent_floating_pane_id()));
-    assert!(drawing_client.focus_floating_pane(build_cells_floating_pane_id()));
-    drawing_client.pin_floating_pane(build_cells_floating_pane_id(), Point { column: 70, row: 2 });
+    assert!(drawing_client.focus_floating_pane(percent_floating_pane_id));
+    assert!(drawing_client.focus_floating_pane(cells_floating_pane_id));
+    drawing_client.pin_floating_pane(cells_floating_pane_id, Point { column: 70, row: 2 });
 
     let minimizing_client = session
         .clients
         .get_client_mut_by_id(build_minimizing_client_id())
         .expect("the minimizing client is attached");
-    assert!(minimizing_client.focus_floating_pane(build_percent_floating_pane_id()));
-    assert!(minimizing_client.set_floating_pane_position(
-        build_percent_floating_pane_id(),
-        Point { column: 2, row: 1 }
-    ));
-    assert!(minimizing_client.minimize_floating_pane(build_percent_floating_pane_id()));
+    assert!(minimizing_client.focus_floating_pane(percent_floating_pane_id));
+    assert!(minimizing_client
+        .set_floating_pane_position(percent_floating_pane_id, Point { column: 2, row: 1 }));
+    assert!(minimizing_client.minimize_floating_pane(percent_floating_pane_id));
 
     (session, tab_id)
 }
@@ -1189,7 +1197,7 @@ fn build_floating_pane_session() -> (Session, TabId) {
 fn build_expected_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
     vec![
         FloatingPaneLayout {
-            pane_id: build_percent_floating_pane_id(),
+            pane_ids: vec![build_percent_pane_id()],
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
             solved_size: Size {
                 column_count: 48,
@@ -1217,7 +1225,7 @@ fn build_expected_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
             ],
         },
         FloatingPaneLayout {
-            pane_id: build_cells_floating_pane_id(),
+            pane_ids: vec![build_cells_pane_id()],
             desired_size: build_cells_floating_pane_size(20, 6),
             solved_size: Size {
                 column_count: 20,
@@ -1313,30 +1321,24 @@ fn narrowing_to_one_tab_or_to_a_missing_tab_still_lists_every_floating_pane() {
 }
 
 #[test]
-fn a_floating_pane_with_no_attached_client_lists_no_client_view() {
+fn a_floating_pane_of_two_panes_lists_its_panes_in_layout_order() {
     let session_id = SessionId::new();
     let tab_id = TabId::new();
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, tab_id, "editor", 0, PaneId::new());
-    session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            build_percent_floating_pane_id(),
-        ))
-        .expect("a fresh pane id");
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: build_percent_floating_pane_id(),
-                desired_size: DEFAULT_FLOATING_PANE_SIZE,
-                solved_size: Size {
-                    column_count: 48,
-                    row_count: 13,
-                },
-            },
-            &[],
-        )
-        .expect("the set has room");
+    commit_new_floating_pane(
+        &mut session,
+        build_cells_pane_id(),
+        build_cells_floating_pane_size(20, 6),
+        Size {
+            column_count: 20,
+            row_count: 6,
+        },
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the set has room");
+    put_pane_beside_in_floating_pane(&mut session, build_cells_pane_id(), build_percent_pane_id());
     let server = build_test_runtime_with_session(session);
 
     let session_layout = server
@@ -1346,7 +1348,45 @@ fn a_floating_pane_with_no_attached_client_lists_no_client_view() {
     assert_eq!(
         session_layout.floating_panes,
         vec![FloatingPaneLayout {
-            pane_id: build_percent_floating_pane_id(),
+            pane_ids: vec![build_cells_pane_id(), build_percent_pane_id()],
+            desired_size: build_cells_floating_pane_size(20, 6),
+            solved_size: Size {
+                column_count: 20,
+                row_count: 6,
+            },
+            client_views: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn a_floating_pane_with_no_attached_client_lists_no_client_view() {
+    let session_id = SessionId::new();
+    let tab_id = TabId::new();
+    let mut session = build_empty_session(session_id);
+    add_session_tab(&mut session, tab_id, "editor", 0, PaneId::new());
+    commit_new_floating_pane(
+        &mut session,
+        build_percent_pane_id(),
+        DEFAULT_FLOATING_PANE_SIZE,
+        Size {
+            column_count: 48,
+            row_count: 13,
+        },
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the set has room");
+    let server = build_test_runtime_with_session(session);
+
+    let session_layout = server
+        .build_session_layout(None)
+        .expect("one session is running");
+
+    assert_eq!(
+        session_layout.floating_panes,
+        vec![FloatingPaneLayout {
+            pane_ids: vec![build_percent_pane_id()],
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
             solved_size: Size {
                 column_count: 48,

@@ -1,5 +1,7 @@
 //! Tests for building the discovery overview from live session state.
 
+use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
+
 use super::*;
 use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
@@ -480,31 +482,30 @@ fn a_layout_leaf_the_registry_does_not_hold_gets_no_row_but_is_still_counted() {
 }
 
 #[test]
-fn floating_panes_follow_the_tiled_panes_in_the_order_they_became_floating_with_no_tab() {
+fn floating_panes_follow_the_tiled_panes_in_the_order_they_were_created_with_no_tab() {
     let session_id = SessionId::new();
     let mut session = build_empty_session(session_id);
     let tab_id = TabId::from_uuid(build_test_uuid_with_suffix(1));
     let tiled_pane_id = register_session_tab_with_pane(&mut session, tab_id, "only", 0);
-    let first_floating_pane_id = PaneId::from_uuid(build_test_uuid_with_suffix(9));
-    let second_floating_pane_id = PaneId::from_uuid(build_test_uuid_with_suffix(3));
-    for floating_pane_id in [first_floating_pane_id, second_floating_pane_id] {
+    let first_pane_id = PaneId::from_uuid(build_test_uuid_with_suffix(9));
+    let second_pane_id = PaneId::from_uuid(build_test_uuid_with_suffix(3));
+    for pane_id in [first_pane_id, second_pane_id] {
         session
             .panes
-            .register_pane_record(PaneRecord::from_terminal_pane(floating_pane_id))
+            .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
             .expect("a fresh pane id");
-        session
-            .add_floating_member(
-                koshi_session::session::state::FloatingMember {
-                    pane_id: floating_pane_id,
-                    desired_size: koshi_core::geometry::DEFAULT_FLOATING_PANE_SIZE,
-                    solved_size: Size {
-                        column_count: 40,
-                        row_count: 10,
-                    },
-                },
-                &[],
-            )
-            .expect("the set has room");
+        commit_new_floating_pane(
+            &mut session,
+            pane_id,
+            koshi_core::geometry::DEFAULT_FLOATING_PANE_SIZE,
+            Size {
+                column_count: 40,
+                row_count: 10,
+            },
+            None,
+            NewPaneSpec::default(),
+        )
+        .expect("the set has room");
     }
     let mut server = build_test_runtime();
     server.session_by_id.insert(session_id, session);
@@ -520,8 +521,8 @@ fn floating_panes_follow_the_tiled_panes_in_the_order_they_became_floating_with_
         pane_rows,
         vec![
             (tiled_pane_id, Some(tab_id)),
-            (first_floating_pane_id, None),
-            (second_floating_pane_id, None),
+            (first_pane_id, None),
+            (second_pane_id, None),
         ]
     );
     assert_eq!(overview.session.pane_count, 3);

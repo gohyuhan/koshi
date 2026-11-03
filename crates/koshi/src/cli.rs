@@ -28,8 +28,9 @@ use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
     LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
     NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs,
-    ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs, SetPanePinnedArgs,
-    SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
+    ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs,
+    SetFloatingPanePinnedArgs, SwitchSessionArgs, TabTarget, TiledPlacementTarget,
+    ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, Point,
@@ -823,15 +824,15 @@ pub enum CliCommand {
         )]
         pane_id: Option<PaneId>,
         /// Show and focus the floating pane after the focused one, in the order
-        /// the panes became floating, wrapping past the last to the first.
+        /// the floating panes were created, wrapping past the last to the first.
         #[arg(
             long = "next-floating",
             conflicts_with = "should_focus_previous_floating_pane"
         )]
         should_focus_next_floating_pane: bool,
         /// Show and focus the floating pane before the focused one, in the
-        /// order the panes became floating, wrapping past the first to the
-        /// last.
+        /// order the floating panes were created, wrapping past the first to
+        /// the last.
         #[arg(long = "previous-floating")]
         should_focus_previous_floating_pane: bool,
         /// Client whose focus moves; defaults to the issuing client.
@@ -1637,7 +1638,7 @@ impl CliCommand {
                 client_id: _,
             } => (
                 "pin-pane",
-                Command::SetPanePinned(SetPanePinnedArgs {
+                Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                     pane_id: pane_id.or(resolved_targets.pane_id),
                     is_pinned: true,
                 }),
@@ -1647,7 +1648,7 @@ impl CliCommand {
                 client_id: _,
             } => (
                 "unpin-pane",
-                Command::SetPanePinned(SetPanePinnedArgs {
+                Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                     pane_id: pane_id.or(resolved_targets.pane_id),
                     is_pinned: false,
                 }),
@@ -2185,7 +2186,7 @@ fn build_tiled_placement_target(
 /// `restore-pane` (`false`). With `should_apply_to_all_floating_panes`:
 /// `minimize-all-floating-panes` or `restore-all-floating-panes` with
 /// [`Command::SetAllFloatingPanesMinimized`]. Else `minimize-pane` or
-/// `restore-pane` with [`Command::SetPaneMinimized`] for `pane_id`.
+/// `restore-pane` with [`Command::SetFloatingPaneMinimized`] for `pane_id`.
 fn build_floating_pane_minimize_action(
     pane_id: Option<PaneId>,
     should_apply_to_all_floating_panes: bool,
@@ -2211,7 +2212,7 @@ fn build_floating_pane_minimize_action(
     };
     (
         action_name,
-        Command::SetPaneMinimized(SetPaneMinimizedArgs {
+        Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
             pane_id,
             is_minimized,
         }),
@@ -2305,10 +2306,10 @@ pub fn build_actions_run_request(
         | Command::PlacePane(_)
         | Command::ScrollPane(_)
         | Command::MoveFloatingPane(_)
-        | Command::SetPanePinned(_)
-        | Command::TogglePanePinned(_)
-        | Command::SetPaneMinimized(_)
-        | Command::TogglePaneMinimized(_)
+        | Command::SetFloatingPanePinned(_)
+        | Command::ToggleFloatingPanePinned(_)
+        | Command::SetFloatingPaneMinimized(_)
+        | Command::ToggleFloatingPaneMinimized(_)
         | Command::SetAllFloatingPanesMinimized(_)
         | Command::ToggleAllFloatingPanesMinimized
         | Command::KillSession

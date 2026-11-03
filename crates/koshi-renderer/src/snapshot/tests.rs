@@ -982,7 +982,7 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
             }
         };
     let tiled_pane_id = source_tab_snapshot.pane_slots[0].pane_id;
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
 
     let same_tab_placement_snapshot = build_placement_snapshot(
         tiled_pane_id,
@@ -999,7 +999,7 @@ fn a_placement_snapshot_shows_the_source_tab_only_when_it_is_the_destination() {
         )),
     );
     let floating_placement_snapshot = build_placement_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         PlacementSource::Floating,
         destination_tab_id,
         Some(build_placement_tab_snapshot(

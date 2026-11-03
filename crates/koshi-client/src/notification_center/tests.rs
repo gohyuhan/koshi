@@ -901,7 +901,7 @@ fn opening_the_center_is_refused_while_another_local_mode_is_on() {
 #[test]
 fn the_center_actions_do_nothing_while_the_tray_is_open_and_the_tray_actions_while_the_center_is_open(
 ) {
-    let (mouse_frame, _floating_pane_ids) = build_tray_mouse_frame(&[true]);
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
     let mut tray_client = build_client_viewing(&mouse_frame);
     post_own_entries(&mut tray_client, 1);
     tray_client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));

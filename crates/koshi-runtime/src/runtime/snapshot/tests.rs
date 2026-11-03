@@ -13,16 +13,18 @@ use koshi_core::command::GridPosition;
 use koshi_core::geometry::{
     PaneArea, Point, Rect, Size, SplitDirection, DEFAULT_FLOATING_PANE_SIZE,
 };
-use koshi_core::ids::{CommandId, SessionId, TabId};
+use koshi_core::ids::{CommandId, FloatingPaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
-use koshi_session::session::state::FloatingMember;
+use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
 
-use crate::runtime::command::tests::{attach_client_record, build_tab};
+use crate::runtime::command::tests::{
+    attach_client_record, build_tab, put_pane_beside_in_floating_pane,
+};
 use koshi_terminal::engine::TerminalEngine;
 use koshi_terminal::grid::row_snapshot::RowSnapshot;
 use koshi_terminal::state::CursorShape;
@@ -1584,24 +1586,25 @@ fn format_display_path_is_bounded_and_filtered() {
     assert_eq!(format_display_path(&hostile_path), "/tmp/abc");
 }
 
-/// Register `floating_pane_id` in `session` as its newest floating member,
-/// holding `solved_size`, with a minimized view of it for every attached
-/// client.
-fn add_floating_member(session: &mut Session, floating_pane_id: PaneId, solved_size: Size) {
+/// Add `pane_id` to `session` alone as its newest floating pane, asking for
+/// the default size and holding `solved_size`, with a minimized view of it for
+/// every attached client. Returns the floating pane's id.
+fn add_floating_pane(session: &mut Session, pane_id: PaneId, solved_size: Size) -> FloatingPaneId {
+    commit_new_floating_pane(
+        session,
+        pane_id,
+        DEFAULT_FLOATING_PANE_SIZE,
+        solved_size,
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the set has room");
     session
-        .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(floating_pane_id))
-        .expect("unique pane id");
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: DEFAULT_FLOATING_PANE_SIZE,
-                solved_size,
-            },
-            &[],
-        )
-        .expect("the set has room");
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .expect("the pane is floating")
+        .1
+        .get_floating_pane_id()
 }
 
 /// The attached client `client_id` of `session`, for in-place edits.
@@ -1632,12 +1635,13 @@ fn list_floating_slot_pane_ids(render_snapshot: &RenderSnapshot) -> Vec<PaneId> 
 }
 
 /// A session whose one client has a `120x40` viewport and reports a `120x38`
-/// pane area, holding one floating member of `solved_size`. Returns the
-/// session, its id, the tab id, the tiled pane id, the client id and the
-/// floating pane id.
-fn build_session_with_floating_member(
+/// pane area, holding one floating pane of `solved_size` that holds `pane_id`
+/// alone. Returns the session, its id, the tab id, the tiled pane id, the
+/// client id and the floating pane id.
+fn build_session_with_floating_pane(
+    pane_id: PaneId,
     solved_size: Size,
-) -> (Session, SessionId, TabId, PaneId, ClientId, PaneId) {
+) -> (Session, SessionId, TabId, PaneId, ClientId, FloatingPaneId) {
     let (mut session, session_id, tab_id, tiled_pane_id, client_id) =
         build_session_with_client_reporting(
             Size {
@@ -1649,8 +1653,7 @@ fn build_session_with_floating_member(
                 row_count: 38,
             })),
         );
-    let floating_pane_id = PaneId::new();
-    add_floating_member(&mut session, floating_pane_id, solved_size);
+    let floating_pane_id = add_floating_pane(&mut session, pane_id, solved_size);
     (
         session,
         session_id,
@@ -1664,12 +1667,18 @@ fn build_session_with_floating_member(
 #[test]
 fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 72,
-            row_count: 22,
-        });
-    assert!(get_attached_client_mut(&mut session, client_id).focus_floating_pane(floating_pane_id));
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
+    assert!(
+        get_attached_client_mut(&mut session, client_id).focus_floating_pane(htop_floating_pane_id)
+    );
     server.session_by_id.insert(session_id, session);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
@@ -1677,7 +1686,7 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_pane_slots,
         [FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             outer_rect: Rect::from_origin_and_size(
                 Point { column: 24, row: 8 },
                 Size {
@@ -1690,7 +1699,7 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     );
     assert_eq!(
         render_snapshot.client_snapshot.focused_pane_id,
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(
         render_snapshot.client_snapshot.active_tab_focused_pane_id,
@@ -1699,28 +1708,97 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Shown {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
         }]
     );
     assert_eq!(
         list_snapshot_pane_ids(&render_snapshot),
-        [tiled_pane_id, floating_pane_id]
+        [tiled_pane_id, htop_pane_id]
     );
 }
 
 #[test]
-fn floating_panes_list_every_floating_pane_in_the_order_it_became_floating() {
+fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_its_slot() {
+    let mut server = build_test_runtime();
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
+    let logs_pane_id = PaneId::new();
+    put_pane_beside_in_floating_pane(&mut session, htop_pane_id, logs_pane_id);
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    client.update_floating_pane_focused_pane(htop_floating_pane_id, logs_pane_id);
+    server.session_by_id.insert(session_id, session);
+
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_pane_slots,
+        [FloatingPaneSlot {
+            pane_id: logs_pane_id,
+            outer_rect: Rect::from_origin_and_size(
+                Point { column: 24, row: 8 },
+                Size {
+                    column_count: 72,
+                    row_count: 22,
+                },
+            ),
+            is_pinned: false,
+        }]
+    );
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Shown {
+            pane_id: logs_pane_id,
+        }]
+    );
+    assert_eq!(
+        render_snapshot.client_snapshot.focused_pane_id,
+        Some(logs_pane_id)
+    );
+    assert_eq!(
+        list_snapshot_pane_ids(&render_snapshot),
+        [tiled_pane_id, logs_pane_id]
+    );
+
+    assert!(server
+        .get_client_mut(client_id)
+        .expect("client")
+        .minimize_floating_pane(htop_floating_pane_id));
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(render_snapshot.session_snapshot.floating_pane_slots, []);
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Minimized {
+            pane_id: logs_pane_id,
+            pane_title: None,
+        }]
+    );
+    assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
+}
+
+#[test]
+fn floating_panes_list_every_floating_pane_in_the_order_it_was_created() {
     let mut server = build_test_runtime();
     let floating_pane_size = Size {
         column_count: 20,
         row_count: 8,
     };
+    let first_pane_id = PaneId::new();
     let (mut session, session_id, _tab_id, tiled_pane_id, client_id, first_floating_pane_id) =
-        build_session_with_floating_member(floating_pane_size);
-    let second_floating_pane_id = PaneId::new();
-    add_floating_member(&mut session, second_floating_pane_id, floating_pane_size);
-    let third_floating_pane_id = PaneId::new();
-    add_floating_member(&mut session, third_floating_pane_id, floating_pane_size);
+        build_session_with_floating_pane(first_pane_id, floating_pane_size);
+    let second_pane_id = PaneId::new();
+    let second_floating_pane_id =
+        add_floating_pane(&mut session, second_pane_id, floating_pane_size);
+    let third_pane_id = PaneId::new();
+    let third_floating_pane_id = add_floating_pane(&mut session, third_pane_id, floating_pane_size);
     let client = get_attached_client_mut(&mut session, client_id);
     assert!(client.focus_floating_pane(third_floating_pane_id));
     assert!(client.focus_floating_pane(second_floating_pane_id));
@@ -1734,20 +1812,20 @@ fn floating_panes_list_every_floating_pane_in_the_order_it_became_floating() {
         render_snapshot.session_snapshot.floating_panes,
         [
             FloatingPane::Shown {
-                pane_id: first_floating_pane_id,
+                pane_id: first_pane_id,
             },
             FloatingPane::Minimized {
-                pane_id: second_floating_pane_id,
+                pane_id: second_pane_id,
                 pane_title: None,
             },
             FloatingPane::Shown {
-                pane_id: third_floating_pane_id,
+                pane_id: third_pane_id,
             },
         ]
     );
     assert_eq!(
         render_snapshot.client_snapshot.focused_pane_id,
-        Some(first_floating_pane_id)
+        Some(first_pane_id)
     );
     assert_eq!(
         render_snapshot.client_snapshot.active_tab_focused_pane_id,
@@ -1758,14 +1836,18 @@ fn floating_panes_list_every_floating_pane_in_the_order_it_became_floating() {
 #[test]
 fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 72,
-            row_count: 22,
-        });
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
     let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(floating_pane_id));
-    assert!(client.minimize_floating_pane(floating_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    assert!(client.minimize_floating_pane(htop_floating_pane_id));
     server.session_by_id.insert(session_id, session);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
@@ -1774,7 +1856,7 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             pane_title: None,
         }]
     );
@@ -1784,14 +1866,18 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
 #[test]
 fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 72,
-            row_count: 22,
-        });
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
     let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(floating_pane_id));
-    assert!(client.minimize_floating_pane(floating_pane_id));
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    assert!(client.minimize_floating_pane(htop_floating_pane_id));
     server.session_by_id.insert(session_id, session);
     let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 70,
@@ -1800,7 +1886,7 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
     let _ = terminal_engine.process_pty_output(b"\x1b]2;htop\x07\x1b[?1049h");
     server
         .terminal_engine_by_pane_id
-        .insert(floating_pane_id, terminal_engine);
+        .insert(htop_pane_id, terminal_engine);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
 
@@ -1808,7 +1894,7 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             pane_title: Some("htop".to_string()),
         }]
     );
@@ -1817,11 +1903,15 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
 #[test]
 fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
     let mut server = build_test_runtime();
-    let (session, session_id, _tab_id, tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 72,
-            row_count: 22,
-        });
+    let htop_pane_id = PaneId::new();
+    let (session, session_id, _tab_id, tiled_pane_id, client_id, _htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
     server.session_by_id.insert(session_id, session);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
@@ -1831,7 +1921,7 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             pane_title: None,
         }]
     );
@@ -1840,12 +1930,18 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
 #[test]
 fn a_client_resized_to_a_pane_area_narrower_than_five_columns_gets_no_floating_slot() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 20,
-            row_count: 6,
-        });
-    assert!(get_attached_client_mut(&mut session, client_id).focus_floating_pane(floating_pane_id));
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 20,
+                row_count: 6,
+            },
+        );
+    assert!(
+        get_attached_client_mut(&mut session, client_id).focus_floating_pane(htop_floating_pane_id)
+    );
     server.session_by_id.insert(session_id, session);
 
     let _ = server.handle_client_resize(
@@ -1877,15 +1973,19 @@ fn a_client_resized_to_a_pane_area_narrower_than_five_columns_gets_no_floating_s
 #[test]
 fn floating_slots_follow_the_shown_order_and_a_refocus_moves_a_pane_to_the_top() {
     let mut server = build_test_runtime();
+    let first_pane_id = PaneId::new();
     let (mut session, session_id, _tab_id, tiled_pane_id, client_id, first_floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 20,
-            row_count: 6,
-        });
-    let second_floating_pane_id = PaneId::new();
-    add_floating_member(
+        build_session_with_floating_pane(
+            first_pane_id,
+            Size {
+                column_count: 20,
+                row_count: 6,
+            },
+        );
+    let second_pane_id = PaneId::new();
+    let second_floating_pane_id = add_floating_pane(
         &mut session,
-        second_floating_pane_id,
+        second_pane_id,
         Size {
             column_count: 20,
             row_count: 6,
@@ -1899,15 +1999,11 @@ fn floating_slots_follow_the_shown_order_and_a_refocus_moves_a_pane_to_the_top()
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
         list_floating_slot_pane_ids(&render_snapshot),
-        [first_floating_pane_id, second_floating_pane_id]
+        [first_pane_id, second_pane_id]
     );
     assert_eq!(
         list_snapshot_pane_ids(&render_snapshot),
-        [
-            tiled_pane_id,
-            first_floating_pane_id,
-            second_floating_pane_id
-        ]
+        [tiled_pane_id, first_pane_id, second_pane_id]
     );
 
     assert!(!server
@@ -1917,15 +2013,11 @@ fn floating_slots_follow_the_shown_order_and_a_refocus_moves_a_pane_to_the_top()
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
         list_floating_slot_pane_ids(&render_snapshot),
-        [second_floating_pane_id, first_floating_pane_id]
+        [second_pane_id, first_pane_id]
     );
     assert_eq!(
         list_snapshot_pane_ids(&render_snapshot),
-        [
-            tiled_pane_id,
-            second_floating_pane_id,
-            first_floating_pane_id
-        ]
+        [tiled_pane_id, second_pane_id, first_pane_id]
     );
 }
 
@@ -1943,11 +2035,10 @@ fn a_second_floating_pane_at_the_default_position_cascades_one_step() {
                 row_count: 22,
             })),
         );
-    let floating_pane_ids = [PaneId::new(), PaneId::new()];
-    for floating_pane_id in floating_pane_ids {
-        add_floating_member(
+    for pane_id in [PaneId::new(), PaneId::new()] {
+        let floating_pane_id = add_floating_pane(
             &mut session,
-            floating_pane_id,
+            pane_id,
             Size {
                 column_count: 48,
                 row_count: 13,
@@ -1991,14 +2082,18 @@ fn a_second_floating_pane_at_the_default_position_cascades_one_step() {
 #[test]
 fn a_pinned_floating_pane_is_marked_pinned_at_its_pinned_cell() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 20,
-            row_count: 6,
-        });
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 20,
+                row_count: 6,
+            },
+        );
     let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(floating_pane_id));
-    client.pin_floating_pane(floating_pane_id, Point { column: 10, row: 3 });
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    client.pin_floating_pane(htop_floating_pane_id, Point { column: 10, row: 3 });
     server.session_by_id.insert(session_id, session);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
@@ -2006,7 +2101,7 @@ fn a_pinned_floating_pane_is_marked_pinned_at_its_pinned_cell() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_pane_slots,
         [FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             outer_rect: Rect::from_origin_and_size(
                 Point { column: 10, row: 3 },
                 Size {
@@ -2022,11 +2117,15 @@ fn a_pinned_floating_pane_is_marked_pinned_at_its_pinned_cell() {
 #[test]
 fn two_clients_place_one_floating_pane_at_the_same_size_and_their_own_cells() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, tab_id, tiled_pane_id, moving_client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 48,
-            row_count: 13,
-        });
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, tab_id, tiled_pane_id, moving_client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 48,
+                row_count: 13,
+            },
+        );
     let default_position_client_id = ClientId::new();
     let mut default_position_client = Client::from_attachment(
         default_position_client_id,
@@ -2049,13 +2148,12 @@ fn two_clients_place_one_floating_pane_at_the_same_size_and_their_own_cells() {
     attach_client_record(&mut session, default_position_client);
     assert!(
         get_attached_client_mut(&mut session, default_position_client_id)
-            .focus_floating_pane(floating_pane_id)
+            .focus_floating_pane(htop_floating_pane_id)
     );
     let moving_client = get_attached_client_mut(&mut session, moving_client_id);
-    assert!(moving_client.focus_floating_pane(floating_pane_id));
-    assert!(
-        moving_client.set_floating_pane_position(floating_pane_id, Point { column: 60, row: 2 })
-    );
+    assert!(moving_client.focus_floating_pane(htop_floating_pane_id));
+    assert!(moving_client
+        .set_floating_pane_position(htop_floating_pane_id, Point { column: 60, row: 2 }));
     server.session_by_id.insert(session_id, session);
 
     let moving_client_snapshot = server.build_snapshot(moving_client_id).expect("snapshot");
@@ -2083,14 +2181,18 @@ fn two_clients_place_one_floating_pane_at_the_same_size_and_their_own_cells() {
 #[test]
 fn a_floating_pane_carries_its_content_at_the_clients_scroll_offset() {
     let mut server = build_test_runtime();
-    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, floating_pane_id) =
-        build_session_with_floating_member(Size {
-            column_count: 72,
-            row_count: 22,
-        });
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, _tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
     let client = get_attached_client_mut(&mut session, client_id);
-    assert!(client.focus_floating_pane(floating_pane_id));
-    client.set_scroll_offset(floating_pane_id, 7);
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    client.set_scroll_offset(htop_pane_id, 7);
     server.session_by_id.insert(session_id, session);
     let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 70,
@@ -2103,12 +2205,12 @@ fn a_floating_pane_carries_its_content_at_the_clients_scroll_offset() {
     let _ = terminal_engine.process_pty_output(&terminal_input_bytes);
     server
         .terminal_engine_by_pane_id
-        .insert(floating_pane_id, terminal_engine);
+        .insert(htop_pane_id, terminal_engine);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
 
     let floating_pane_snapshot = &render_snapshot.pane_snapshots[1];
-    assert_eq!(floating_pane_snapshot.pane_id, floating_pane_id);
+    assert_eq!(floating_pane_snapshot.pane_id, htop_pane_id);
     assert_eq!(
         floating_pane_snapshot
             .terminal_grid_view

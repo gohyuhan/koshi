@@ -501,7 +501,7 @@ client --format json` writes `pane_area` as `null` for no report,
 `null`.
 
 `koshi list-panes` lists the tiled panes of each session in tab order, then
-its floating panes in the order they became floating. A floating pane prints
+its floating panes in the order they were created. A floating pane prints
 `float` in the `tab` column and `-` in the `tab_name` column, and `--format
 json` writes `"tab_id": null` and `"tab_name": null` for it. `koshi inspect
 pane` prints `float` as the `tab` of a floating pane. A `--pane` flag finds a
@@ -833,10 +833,10 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both show `htop` floati
 `client-3c4d…` alone.
 
 `koshi focus-pane --next-floating` shows and focuses the floating pane after
-the focused one, in the order the panes became floating, and wraps past the
-last to the first. `--previous-floating` goes the other way. With no floating
-pane in the session, both are refused with `the session holds no floating
-pane`.
+the focused one, in the order the floating panes were created, and wraps
+past the last to the first. `--previous-floating` goes the other way. With no
+floating pane in the session, both are refused with `the session holds no
+floating pane`.
 
 ## Tabs
 
@@ -1773,15 +1773,16 @@ bottom hint row. Two clients on one tab, one 80x24 and one 120x40, both print
 a pane fullscreen give that tab two sets of rectangles. A tab no client is
 viewing prints its tree and no rectangles.
 
-`dump-layout` prints the floating panes after the tabs, in the order the panes
-became floating. Each pane line names the size the pane asks for and the size
-it holds. Under it, one line per attached client says what that client draws:
+`dump-layout` prints the floating panes after the tabs, in the order the
+floating panes were created. Each floating pane line names its panes in layout
+order, the size the floating pane asks for and the size it holds. Under it, one
+line per attached client says what that client draws:
 
-- `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the pane there.
-  Layer `0` draws first, and a higher layer draws over a lower one.
-- `minimized`: the client holds the pane minimized. A client whose pane area
-  is smaller than `5x6`, or that has no room to draw a pane, holds every
-  floating pane minimized.
+- `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the floating pane
+  there. Layer `0` draws first, and a higher layer draws over a lower one.
+- `minimized`: the client holds the floating pane minimized. A client whose
+  pane area is smaller than `5x6`, or that has no room to draw a pane, holds
+  every floating pane minimized.
 
 Each client line ends with the position that client stored: `default`,
 `moved <x>,<y>`, or `pinned <x>,<y>`. A session with no floating pane prints
@@ -1804,10 +1805,11 @@ weights do not number one per child says so: `horizontal split, 3 weights for
 has `"node": "pane"` or `"node": "split"`, and a split has `split_direction`
 (`horizontal`, `vertical` or `stacked`) and `weights`, one sizing per child in
 the words above. Each client solve has `layout_mode`
-(`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each client view of a
-floating pane has `position` (`default`, or `moved` or `pinned` with
-`stored_cell`) and `visibility` (`drawn` with `top_left_cell` and
-`layer_index`, or `minimized`). `desired_size` writes each axis as `--cols`
+(`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each floating pane has
+`pane_ids`, its panes in layout order. Each client view of a floating pane has
+`position` (`default`, or `moved` or `pinned` with `stored_cell`) and
+`visibility` (`drawn` with `top_left_cell` and `layer_index`, or
+`minimized`). `desired_size` writes each axis as `--cols`
 and `--rows` take it: `"60%"` or `"80"`.
 
 A session that started before you installed this Koshi cannot report its

@@ -86,7 +86,8 @@ impl Server {
 /// One [`PaneDiscovery`] row per pane that a tab's layout or the floating set
 /// holds and the session registry knows: the tabs' panes in the tab-bar order
 /// of the tabs holding them and layout order within each tab, then the
-/// floating panes in the order the panes became floating, with `tab_id: None`.
+/// floating panes in the order they were created and each one's panes in
+/// layout order, with `tab_id: None`.
 /// A pane the registry does not hold gets no row.
 fn list_pane_discoveries(
     session: &Session,
@@ -104,11 +105,11 @@ fn list_pane_discoveries(
             ));
         }
     }
-    for floating_member in session.floating_set.list_members() {
+    for pane_id in session.floating_set.list_pane_ids() {
         pane_discoveries.extend(build_pane_discovery(
             session,
             None,
-            floating_member.pane_id,
+            pane_id,
             terminal_engine_by_pane_id,
         ));
     }

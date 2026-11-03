@@ -11,9 +11,9 @@ use super::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use koshi_core::event::{PaneFocused, PaneMinimizedChanged};
+use koshi_core::event::{FloatingPaneMinimizedChanged, PaneFocused};
 use koshi_core::geometry::{Size, SplitDirection};
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{FloatingPaneId, SessionId};
 use koshi_layout::tree::SplitNode;
 use koshi_pane::pane::state::PaneRecord;
 
@@ -21,7 +21,7 @@ use crate::client::ClientOrigin;
 use crate::error::SessionConsistencyError;
 use crate::session::lifecycle::SessionLifecycle;
 use crate::session::state::tests::{
-    build_default_floating_member, build_empty_session, build_tab, TEST_TAB_SIZE,
+    build_default_floating_pane, build_empty_session, build_tab, TEST_TAB_SIZE,
 };
 
 const TEST_VIEWPORT_SIZE: Size = Size {
@@ -2102,29 +2102,29 @@ fn a_new_tab_after_a_close_takes_the_freed_index_densely() {
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
-/// Register `pane_id` and add it to `session`'s floating set, asking for the
-/// default size, solved to `48x13`.
-fn add_floating_pane(session: &mut Session, pane_id: PaneId) {
+/// Register `pane_id` and add a floating pane holding it alone to
+/// `session`'s floating set, asking for the default size, solved to `48x13`.
+fn add_floating_pane_holding(session: &mut Session, pane_id: PaneId) {
     let _ = session
         .panes
         .register_pane_record(PaneRecord::from_terminal_pane(pane_id));
     session
         .floating_set
-        .add_member(build_default_floating_member(pane_id))
+        .add_floating_pane(build_default_floating_pane(pane_id))
         .expect("the floating set has room");
 }
 
 #[test]
-fn closing_the_last_tab_removes_floating_panes_in_the_order_they_became_floating_then_quits() {
+fn closing_the_last_tab_removes_floating_panes_in_the_order_they_were_created_then_quits() {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
-    let (first_floating_pane_id, second_floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (htop_pane_id, logs_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, tiled_pane_id, 0)],
         vec![tiled_pane_id],
     );
-    add_floating_pane(&mut session, first_floating_pane_id);
-    add_floating_pane(&mut session, second_floating_pane_id);
+    add_floating_pane_holding(&mut session, htop_pane_id);
+    add_floating_pane_holding(&mut session, logs_pane_id);
 
     let emitted_events = close_tab(&mut session, tab_id);
 
@@ -2140,17 +2140,17 @@ fn closing_the_last_tab_removes_floating_panes_in_the_order_they_became_floating
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::PaneClosing(PaneClosing {
-                pane_id: first_floating_pane_id,
+                pane_id: htop_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: first_floating_pane_id,
+                pane_id: htop_pane_id,
                 tab_id: None,
             }),
             Event::PaneClosing(PaneClosing {
-                pane_id: second_floating_pane_id,
+                pane_id: logs_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: second_floating_pane_id,
+                pane_id: logs_pane_id,
                 tab_id: None,
             }),
             Event::Quit(QuitCause::LastTabClosed {
@@ -2159,7 +2159,7 @@ fn closing_the_last_tab_removes_floating_panes_in_the_order_they_became_floating
             }),
         ]
     );
-    assert_eq!(session.floating_set.list_members(), []);
+    assert_eq!(session.floating_set.list_floating_panes(), []);
     assert_eq!(session.panes.count_pane_records(), 0);
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Stopping);
 }
@@ -2167,8 +2167,8 @@ fn closing_the_last_tab_removes_floating_panes_in_the_order_they_became_floating
 #[test]
 fn closing_a_tab_that_is_not_the_last_keeps_every_floating_pane() {
     let (mut session, [first_tab_id, ..]) = build_three_tab_session();
-    let floating_pane_id = PaneId::new();
-    add_floating_pane(&mut session, floating_pane_id);
+    let htop_pane_id = PaneId::new();
+    add_floating_pane_holding(&mut session, htop_pane_id);
     let closed_pane_id = get_only_pane_id(&session, first_tab_id);
 
     let emitted_events = close_tab(&mut session, first_tab_id);
@@ -2188,24 +2188,29 @@ fn closing_a_tab_that_is_not_the_last_keeps_every_floating_pane() {
             }),
         ]
     );
-    assert_eq!(session.floating_set.list_pane_ids(), vec![floating_pane_id]);
+    assert_eq!(session.floating_set.list_pane_ids(), vec![htop_pane_id]);
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(floating_pane_id)
+            .get_pane_record_by_id(htop_pane_id)
             .map(PaneRecord::get_pane_id),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
 }
 
-/// Focus `pane_ids`, in order, as floating panes of `client_id` in `session`.
+/// Focus the floating pane holding each of `pane_ids`, in order, for
+/// `client_id` in `session`.
 fn focus_floating_panes(session: &mut Session, client_id: ClientId, pane_ids: &[PaneId]) {
     let client = session
         .clients
         .get_client_mut_by_id(client_id)
         .expect("the client is attached");
     for &pane_id in pane_ids {
-        assert!(client.focus_floating_pane(pane_id));
+        let (_, floating_pane) = session
+            .floating_set
+            .find_floating_pane_by_pane_id(pane_id)
+            .expect("a floating pane holds the pane");
+        assert!(client.focus_floating_pane(floating_pane.get_floating_pane_id()));
     }
 }
 
@@ -2217,10 +2222,10 @@ fn commit_new_tab_takes_over_the_input_from_a_focused_floating_pane() {
         vec![build_single_pane_tab(existing_tab_id, existing_pane_id, 0)],
         vec![existing_pane_id],
     );
-    let floating_pane_id = PaneId::new();
-    add_floating_pane(&mut session, floating_pane_id);
+    let htop_pane_id = PaneId::new();
+    add_floating_pane_holding(&mut session, htop_pane_id);
     let client_id = attach_client_on(&mut session, existing_tab_id);
-    focus_floating_panes(&mut session, client_id, &[floating_pane_id]);
+    focus_floating_panes(&mut session, client_id, &[htop_pane_id]);
     let (new_tab_id, new_pane_id) = (TabId::new(), PaneId::new());
 
     let (_, emitted_events) = commit_new_tab(
@@ -2246,32 +2251,35 @@ fn commit_new_tab_takes_over_the_input_from_a_focused_floating_pane() {
                 tab_id: new_tab_id,
                 previous_tab_id: existing_tab_id,
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(new_tab_id),
                 pane_id: new_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
     let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(client.get_focused_floating_pane_id(), None);
-    assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        &[] as &[FloatingPaneId]
+    );
     assert_eq!(client.get_active_focused_pane_id(), Some(new_pane_id));
 }
 
 #[test]
 fn a_tab_switch_keeps_the_input_on_a_focused_floating_pane() {
     let (mut session, [first_tab_id, second_tab_id, _]) = build_three_tab_session();
-    let floating_pane_id = PaneId::new();
-    add_floating_pane(&mut session, floating_pane_id);
+    let htop_pane_id = PaneId::new();
+    add_floating_pane_holding(&mut session, htop_pane_id);
     let client_id = attach_client_on(&mut session, first_tab_id);
-    focus_floating_panes(&mut session, client_id, &[floating_pane_id]);
+    focus_floating_panes(&mut session, client_id, &[htop_pane_id]);
     let second_tab_pane_id = get_only_pane_id(&session, second_tab_id);
 
     let emitted_events = focus_tab(&mut session, client_id, TabTarget::Id(second_tab_id));
@@ -2294,26 +2302,22 @@ fn a_tab_switch_keeps_the_input_on_a_focused_floating_pane() {
     );
     let client = session.clients.get_client_by_id(client_id).unwrap();
     assert_eq!(client.get_active_tab_id(), second_tab_id);
-    assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
+    assert_eq!(client.get_active_focused_pane_id(), Some(htop_pane_id));
 }
 
 #[test]
 fn closing_the_last_tab_moves_a_floating_focus_through_the_floats_it_removes() {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
-    let (first_floating_pane_id, second_floating_pane_id) = (PaneId::new(), PaneId::new());
+    let (htop_pane_id, logs_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, tiled_pane_id, 0)],
         vec![tiled_pane_id],
     );
-    add_floating_pane(&mut session, first_floating_pane_id);
-    add_floating_pane(&mut session, second_floating_pane_id);
+    add_floating_pane_holding(&mut session, htop_pane_id);
+    add_floating_pane_holding(&mut session, logs_pane_id);
     let client_id = attach_client_on(&mut session, tab_id);
-    focus_floating_panes(
-        &mut session,
-        client_id,
-        &[second_floating_pane_id, first_floating_pane_id],
-    );
+    focus_floating_panes(&mut session, client_id, &[logs_pane_id, htop_pane_id]);
 
     let emitted_events = close_tab(&mut session, tab_id);
 
@@ -2329,23 +2333,23 @@ fn closing_the_last_tab_moves_a_floating_focus_through_the_floats_it_removes() {
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::PaneClosing(PaneClosing {
-                pane_id: first_floating_pane_id,
+                pane_id: htop_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: first_floating_pane_id,
+                pane_id: htop_pane_id,
                 tab_id: None,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: None,
-                pane_id: second_floating_pane_id,
-                previous_pane_id: Some(first_floating_pane_id),
+                pane_id: logs_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
             Event::PaneClosing(PaneClosing {
-                pane_id: second_floating_pane_id,
+                pane_id: logs_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: second_floating_pane_id,
+                pane_id: logs_pane_id,
                 tab_id: None,
             }),
             Event::Quit(QuitCause::LastTabClosed {
