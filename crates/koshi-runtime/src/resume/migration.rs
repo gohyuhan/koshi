@@ -10,9 +10,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use serde_json::{Map, Number, Value};
 
+use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSeverity};
-use koshi_session::session::state::Session;
+use koshi_session::session::state::{compute_floating_layout_size, Session};
 use koshi_storage::error::StorageError;
 use koshi_terminal::engine::{GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport};
 use koshi_terminal::state::ResumeFormat4TerminalState;
@@ -282,6 +283,16 @@ fn get_required_json_field<'a>(
         .ok_or_else(|| build_invalid_resume_error(format!("{json_path}.{field_name} is missing")))
 }
 
+fn remove_required_json_field(
+    json_fields: &mut Map<String, Value>,
+    field_name: &str,
+    json_path: &str,
+) -> Result<Value, StorageError> {
+    json_fields
+        .remove(field_name)
+        .ok_or_else(|| build_invalid_resume_error(format!("{json_path}.{field_name} is missing")))
+}
+
 fn rename_json_field(
     json_fields: &mut Map<String, Value>,
     previous_field_name: &str,
@@ -351,8 +362,8 @@ const FORMAT_ONE_TO_THREE_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFie
     ],
 };
 
-/// The field names of a body saved at format 4.
-const FORMAT_FOUR_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames {
+/// The field names of a body saved at format 4 or later.
+const FORMAT_FOUR_AND_LATER_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames {
     sessions_field_name: "session_by_id",
     pane_states_field_name: "carried_pane_state_by_pane_id",
     carried_quit_field_name: "carried_quit",
@@ -364,12 +375,21 @@ const FORMAT_FOUR_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames 
 /// [`ResumeFormat4CarriedPaneState`] with no JSON step.
 const OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS: u32 = 4;
 
+/// The oldest format whose saved pane states have the [`CarriedPaneState`]
+/// shape. A pane state saved at this format decodes as a
+/// [`CarriedPaneState`].
+const OLDEST_FORMAT_WITH_CURRENT_PANE_STATE: u32 = 5;
+
+/// The oldest format whose body carries client records, the saved-view store
+/// and the child processes left running.
+const OLDEST_FORMAT_WITH_CARRIED_CLIENTS: u32 = 5;
+
 /// The top-level field names of a body saved at `resume_format`.
 fn get_resume_body_field_names(resume_format: u32) -> &'static ResumeBodyFieldNames {
     if resume_format <= 3 {
         return &FORMAT_ONE_TO_THREE_BODY_FIELD_NAMES;
     }
-    &FORMAT_FOUR_BODY_FIELD_NAMES
+    &FORMAT_FOUR_AND_LATER_BODY_FIELD_NAMES
 }
 
 pub(super) fn migrate_resume_body(
@@ -478,14 +498,70 @@ pub(super) fn migrate_resume_body(
             ),
         }
     }
-    // A body read from formats 1 through 4 comes back with no client in any
-    // session, an empty saved-view store and no child left running.
+    let (saved_view_store, left_running_child_process_ids) =
+        if source_resume_format >= OLDEST_FORMAT_WITH_CARRIED_CLIENTS {
+            let raw_saved_view_store = root_fields
+                .get("saved_view_store")
+                .ok_or_else(|| build_invalid_resume_error("body.saved_view_store is missing"))?;
+            let raw_left_running_child_process_ids = root_fields
+                .get("left_running_child_process_ids")
+                .ok_or_else(|| {
+                    build_invalid_resume_error("body.left_running_child_process_ids is missing")
+                })?;
+            let left_running_child_process_ids =
+                serde_json::from_str::<Vec<u32>>(raw_left_running_child_process_ids.get())
+                    .map_err(|parse_error| {
+                        build_invalid_resume_error(format!(
+                            "body.left_running_child_process_ids is unreadable: {parse_error}"
+                        ))
+                    })?;
+            (
+                migrate_previous_saved_view_store(source_resume_format, raw_saved_view_store)?,
+                left_running_child_process_ids,
+            )
+        } else {
+            (SavedViewStore::default(), Vec::new())
+        };
     Ok(ResumeBody {
         session_by_id,
         carried_pane_state_by_pane_id,
         carried_quit,
-        saved_view_store: SavedViewStore::default(),
-        left_running_child_process_ids: Vec::new(),
+        saved_view_store,
+        left_running_child_process_ids,
+    })
+}
+
+/// Run every resume step from `source_resume_format` on the saved-view store
+/// `raw_saved_view_store` and decode it as a [`SavedViewStore`].
+///
+/// # Errors
+/// Returns an invalid-resume error when the store JSON cannot be read, a step
+/// cannot convert it, or the result does not decode.
+fn migrate_previous_saved_view_store(
+    source_resume_format: u32,
+    raw_saved_view_store: &RawValue,
+) -> Result<SavedViewStore, StorageError> {
+    let saved_view_store_json =
+        serde_json::from_str::<Value>(raw_saved_view_store.get()).map_err(|parse_error| {
+            build_invalid_resume_error(format!(
+                "body.saved_view_store is unreadable: {parse_error}"
+            ))
+        })?;
+    let mut single_store_body = serde_json::json!({
+        "session_by_id": {},
+        "carried_pane_state_by_pane_id": {},
+        "saved_view_store": saved_view_store_json,
+    });
+    apply_resume_migrations(source_resume_format, &mut single_store_body)?;
+    let migrated_saved_view_store = remove_required_json_field(
+        get_json_object(&mut single_store_body, "body")?,
+        "saved_view_store",
+        "body",
+    )?;
+    serde_json::from_value(migrated_saved_view_store).map_err(|parse_error| {
+        build_invalid_resume_error(format!(
+            "migrated body.saved_view_store is unreadable: {parse_error}"
+        ))
     })
 }
 
@@ -493,8 +569,9 @@ pub(super) fn migrate_resume_body(
 /// `raw_session`, stored under `session_key`, and hand back the migrated
 /// session as JSON bytes in the current [`Session`] shape.
 ///
-/// Replaces the session's `clients` with `{"client_by_id":{}}` before the
-/// first step: the migrated session holds no client.
+/// A session saved at format 4 or older has its `clients` replaced with
+/// `{"client_by_id":{}}` before the first step: the migrated session holds no
+/// client. A session saved at format 5 keeps its client records.
 ///
 /// # Errors
 /// Returns an invalid-resume error when the session JSON cannot be read, is
@@ -510,17 +587,19 @@ fn migrate_previous_session_json(
             build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
         })?;
     let body_field_names = get_resume_body_field_names(source_resume_format);
-    get_json_object(
+    let session_fields = get_json_object(
         &mut session_json,
         &format!(
             "body.{}.{session_key}",
             body_field_names.sessions_field_name
         ),
-    )?
-    .insert(
-        "clients".to_string(),
-        serde_json::json!({"client_by_id": {}}),
-    );
+    )?;
+    if source_resume_format < OLDEST_FORMAT_WITH_CARRIED_CLIENTS {
+        session_fields.insert(
+            "clients".to_string(),
+            serde_json::json!({"client_by_id": {}}),
+        );
+    }
     let mut single_session_by_id = Map::new();
     single_session_by_id.insert(session_key.to_string(), session_json);
     let mut body_fields = Map::new();
@@ -556,7 +635,9 @@ fn migrate_previous_session_json(
 
 /// Read the saved pane state `raw_pane_state`, stored under `pane_key` in a
 /// body saved at `source_resume_format`, as a [`CarriedPaneState`]. A pane
-/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS`] decodes as a
+/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_PANE_STATE`] or later decodes
+/// as a [`CarriedPaneState`]. A pane state saved at
+/// [`OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS`] decodes as a
 /// [`ResumeFormat4CarriedPaneState`]. An older one first passes through every
 /// step together with its entries in `ancillary_pane_fields`, then decodes the
 /// same way. Decoding encodes every grid row and history line, one at a time,
@@ -571,6 +652,13 @@ fn migrate_previous_pane_state(
     raw_pane_state: &RawValue,
     ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
 ) -> Result<CarriedPaneState, StorageError> {
+    if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+        return serde_json::from_str::<CarriedPaneState>(raw_pane_state.get()).map_err(
+            |parse_error| {
+                build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
+            },
+        );
+    }
     if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS {
         return serde_json::from_str::<ResumeFormat4CarriedPaneState>(raw_pane_state.get())
             .map(ResumeFormat4CarriedPaneState::into_carried_pane_state)
@@ -700,8 +788,10 @@ fn write_migrated_json(
 /// replaces. Step 2 adds the format-3 fields. Step 3 converts format 3 to
 /// format 4. Step 4 adds the format-5 floating fields, each session's
 /// notification queue and each tab's `solved_tab_size`, and removes each pane
-/// record's `lifecycle` and `close_policy`. A body saved at format 3 also gets
-/// the step-2 fields before step 3. Steps 2 and 4 add only the fields that are
+/// record's `lifecycle` and `close_policy`. Step 5 converts each session's
+/// floating members, tabs and client views, and each saved view, to format 6
+/// ([`migrate_resume_five_to_six`]). A body saved at format 3 also gets the
+/// step-2 fields before step 3. Steps 2 and 4 add only the fields that are
 /// missing.
 ///
 /// # Errors
@@ -721,6 +811,7 @@ fn apply_resume_migrations(
                 migrate_resume_three_to_four(resume_body)?;
             }
             4 => migrate_resume_four_to_five(resume_body)?,
+            5 => migrate_resume_five_to_six(resume_body)?,
             _ => {
                 return Err(build_invalid_resume_error(format!(
                     "no resume migration from format {migration_format}"
@@ -1195,6 +1286,152 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
         }
         Ok(())
     })
+}
+
+/// Convert every session of `resume_body` and its saved-view store, when it
+/// has one, from format 5 to format 6:
+///
+/// 1. Each floating member `{pane_id, desired_size, solved_size}` becomes a
+///    floating pane `{floating_pane_id, layout_area, desired_size,
+///    solved_size}`. Its id holds the UUID of its pane, and its tree is that
+///    one pane, solved over [`compute_floating_layout_size`] of
+///    `solved_size`: member `pane-<u>` at `40x12` → floating pane id `<u>`,
+///    tree `Pane(pane-<u>)` over `40x11`.
+/// 2. Each tab's `layout` and `solved_tab_size` move into
+///    `layout_area: {layout, solved_size}`.
+/// 3. Each client record and each saved view renames
+///    `floating_pane_view_by_pane_id` to
+///    `floating_pane_view_by_floating_pane_id`. The view of pane `<u>` gains
+///    `focus_history: [<u>]` and `zoomed_pane_id: null`.
+///    `shown_floating_pane_ids` and `focused_floating_pane_id` keep their
+///    values.
+///
+/// # Errors
+/// Returns an invalid-resume error when a session, a floating member, a tab,
+/// a client record or a saved view is not an object, or misses a field that
+/// format 5 writes.
+fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageError> {
+    let body_fields = get_json_object(resume_body, "body")?;
+    let sessions = get_required_json_field(body_fields, "session_by_id", "body")?;
+    migrate_json_object_members(sessions, "body.session_by_id", |session, session_path| {
+        let session_fields = get_json_object(session, session_path)?;
+        let floating_set = get_required_json_field(session_fields, "floating_set", session_path)?;
+        migrate_floating_set_five_to_six(floating_set, &format!("{session_path}.floating_set"))?;
+        let tabs = get_required_json_field(session_fields, "tabs", session_path)?;
+        migrate_json_object_members(tabs, &format!("{session_path}.tabs"), |tab, tab_path| {
+            let tab_fields = get_json_object(tab, tab_path)?;
+            let layout = remove_required_json_field(tab_fields, "layout", tab_path)?;
+            let solved_tab_size =
+                remove_required_json_field(tab_fields, "solved_tab_size", tab_path)?;
+            tab_fields.insert(
+                "layout_area".to_string(),
+                serde_json::json!({"layout": layout, "solved_size": solved_tab_size}),
+            );
+            Ok(())
+        })?;
+        let clients_path = format!("{session_path}.clients");
+        let clients = get_required_json_field(session_fields, "clients", session_path)?;
+        let client_by_id = get_required_json_field(
+            get_json_object(clients, &clients_path)?,
+            "client_by_id",
+            &clients_path,
+        )?;
+        migrate_json_object_members(
+            client_by_id,
+            &format!("{clients_path}.client_by_id"),
+            migrate_floating_pane_views_five_to_six,
+        )
+    })?;
+    let Some(saved_view_store) = body_fields.get_mut("saved_view_store") else {
+        return Ok(());
+    };
+    let saved_view_records = get_required_json_field(
+        get_json_object(saved_view_store, "body.saved_view_store")?,
+        "saved_view_records",
+        "body.saved_view_store",
+    )?;
+    migrate_json_array_elements(
+        saved_view_records,
+        "body.saved_view_store.saved_view_records",
+        |saved_view_record, record_path| {
+            let saved_view = get_required_json_field(
+                get_json_object(saved_view_record, record_path)?,
+                "saved_view",
+                record_path,
+            )?;
+            migrate_floating_pane_views_five_to_six(
+                saved_view,
+                &format!("{record_path}.saved_view"),
+            )
+        },
+    )
+}
+
+/// Replace the format-5 `members` of `floating_set` with the format-6
+/// `floating_panes`, as step 1 of [`migrate_resume_five_to_six`] states.
+fn migrate_floating_set_five_to_six(
+    floating_set: &mut Value,
+    json_path: &str,
+) -> Result<(), StorageError> {
+    let floating_set_fields = get_json_object(floating_set, json_path)?;
+    let members_path = format!("{json_path}.members");
+    let Value::Array(floating_members) =
+        remove_required_json_field(floating_set_fields, "members", json_path)?
+    else {
+        return Err(build_invalid_resume_error(format!(
+            "{members_path} must be an array"
+        )));
+    };
+    let mut floating_panes = Vec::with_capacity(floating_members.len());
+    for (member_index, mut floating_member) in floating_members.into_iter().enumerate() {
+        let member_path = format!("{members_path}[{member_index}]");
+        let member_fields = get_json_object(&mut floating_member, &member_path)?;
+        let pane_id = remove_required_json_field(member_fields, "pane_id", &member_path)?;
+        let desired_size = remove_required_json_field(member_fields, "desired_size", &member_path)?;
+        let solved_size_json =
+            remove_required_json_field(member_fields, "solved_size", &member_path)?;
+        let solved_size = Size::deserialize(&solved_size_json).map_err(|decode_error| {
+            build_invalid_resume_error(format!("{member_path}.solved_size: {decode_error}"))
+        })?;
+        floating_panes.push(serde_json::json!({
+            "floating_pane_id": pane_id,
+            "layout_area": {
+                "layout": {"Pane": pane_id},
+                "solved_size": compute_floating_layout_size(solved_size),
+            },
+            "desired_size": desired_size,
+            "solved_size": solved_size_json,
+        }));
+    }
+    floating_set_fields.insert("floating_panes".to_string(), Value::Array(floating_panes));
+    Ok(())
+}
+
+/// Convert the floating pane views of the client record or saved view
+/// `view_owner`, as step 3 of [`migrate_resume_five_to_six`] states.
+fn migrate_floating_pane_views_five_to_six(
+    view_owner: &mut Value,
+    json_path: &str,
+) -> Result<(), StorageError> {
+    let view_owner_fields = get_json_object(view_owner, json_path)?;
+    let views_path = format!("{json_path}.floating_pane_view_by_pane_id");
+    let mut floating_pane_view_by_pane_id = remove_required_json_field(
+        view_owner_fields,
+        "floating_pane_view_by_pane_id",
+        json_path,
+    )?;
+    for (pane_key, floating_pane_view) in
+        get_json_object(&mut floating_pane_view_by_pane_id, &views_path)?
+    {
+        let view_fields = get_json_object(floating_pane_view, &format!("{views_path}.{pane_key}"))?;
+        view_fields.insert("focus_history".to_string(), serde_json::json!([pane_key]));
+        view_fields.insert("zoomed_pane_id".to_string(), Value::Null);
+    }
+    view_owner_fields.insert(
+        "floating_pane_view_by_floating_pane_id".to_string(),
+        floating_pane_view_by_pane_id,
+    );
+    Ok(())
 }
 
 fn migrate_size(size: &mut Value) -> Result<(), StorageError> {

@@ -281,7 +281,7 @@ pub(crate) enum PlacementInputAction {
     /// binding: the `MoveFloatingPane` that floating pane move mode recorded
     /// as sent, the `FocusPane` that focuses the floating pane that floating
     /// pane move mode selected, or the command of the floating pane tray's
-    /// selected tile: a `TogglePaneMinimized`, or the `NewPane` of the
+    /// selected tile: a `ToggleFloatingPaneMinimized`, or the `NewPane` of the
     /// `+ new` tile.
     SubmitCommand {
         /// The id the command carries.

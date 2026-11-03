@@ -109,8 +109,8 @@ struct SessionLayoutReport {
     session_name: String,
     /// The tabs described, in tab-bar order.
     tabs: Vec<TabLayoutReport>,
-    /// Every floating pane of the session, in the order the panes became
-    /// floating.
+    /// Every floating pane of the session, in the order the floating panes
+    /// were created.
     floating_panes: Vec<FloatingPaneReport>,
     /// Every attached client, and what it has focused.
     clients: Vec<ClientFocusReport>,
@@ -221,15 +221,15 @@ struct StackHeaderReport {
     member_count: usize,
 }
 
-/// One floating pane: the size it asks for, the size it holds, and what each
-/// attached client draws for it.
+/// One floating pane: its panes, the size it asks for, the size it holds, and
+/// what each attached client draws for it.
 #[derive(Serialize)]
 struct FloatingPaneReport {
-    /// The pane id.
-    pane_id: String,
-    /// The size the pane asks for, per axis.
+    /// The id of every pane of the floating pane, in layout order.
+    pane_ids: Vec<String>,
+    /// The size the floating pane asks for, per axis.
     desired_size: FloatingPaneSizeReport,
-    /// The pane's outer size in cells, its chrome included.
+    /// The floating pane's outer size in cells, its chrome included.
     solved_size: Size,
     /// One view per attached client, in client id order.
     client_views: Vec<FloatingPaneClientViewReport>,
@@ -425,7 +425,11 @@ fn build_solved_tab_report(solved_tab: &SolvedTab) -> SolvedTabReport {
 /// One [`FloatingPaneLayout`] as both formats print it.
 fn build_floating_pane_report(floating_pane_layout: &FloatingPaneLayout) -> FloatingPaneReport {
     FloatingPaneReport {
-        pane_id: floating_pane_layout.pane_id.to_string(),
+        pane_ids: floating_pane_layout
+            .pane_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         desired_size: FloatingPaneSizeReport {
             width: format_floating_pane_dimension_cell(floating_pane_layout.desired_size.width),
             height: format_floating_pane_dimension_cell(floating_pane_layout.desired_size.height),
@@ -512,17 +516,24 @@ fn render_solved_tab(rendered_output: &mut String, solved_tab_report: &SolvedTab
     }
 }
 
-/// Append one floating pane: the pane line with the size it asks for and the
-/// size it holds, then one line per client view with what the client draws
-/// and the position it stored.
+/// Append one floating pane: the line with its panes in layout order, the size
+/// it asks for and the size it holds, then one line per client view with what
+/// the client draws and the position it stored. One pane prints as
+/// `pane pane-…6 asks 60%x60% size 48x13`, and two panes as
+/// `panes pane-…6, pane-…7 asks 60%x60% size 48x13`.
 ///
-/// A view the client draws prints the pane's rectangle and its layer:
+/// A view the client draws prints the floating pane's rectangle and its layer:
 /// `client client-… rect 16,4 48x13 layer 0 position default`. A minimized view
 /// prints `minimized`: `client client-… minimized position pinned 20,5`.
 fn render_floating_pane(rendered_output: &mut String, floating_pane_report: &FloatingPaneReport) {
+    let pane_noun = if floating_pane_report.pane_ids.len() == 1 {
+        "pane"
+    } else {
+        "panes"
+    };
     rendered_output.push_str(&format!(
-        "    pane {} asks {}x{} size {}\n",
-        floating_pane_report.pane_id,
+        "    {pane_noun} {} asks {}x{} size {}\n",
+        floating_pane_report.pane_ids.join(", "),
         floating_pane_report.desired_size.width,
         floating_pane_report.desired_size.height,
         format_size_cell(floating_pane_report.solved_size)

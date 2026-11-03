@@ -264,10 +264,13 @@ impl Server {
     /// applied: with none of a tab's saved panes applied, that tab keeps the
     /// focus the attach gave it and stays tiled. A scroll
     /// entry naming a pane the session does not hold is dropped, and that
-    /// pane sits at the live bottom. A floating view entry naming a pane that
-    /// is not a floating pane of the session is dropped, and the newest
-    /// floating pane still shown takes the floating focus. A floating pane the
-    /// saved view holds no entry for is minimized at the default placement. A
+    /// pane sits at the live bottom. A floating view entry naming a floating
+    /// pane the session does not hold is dropped, and the newest floating pane
+    /// still shown takes the floating focus. A floating pane the saved view
+    /// holds no entry for is minimized at the default placement. Inside each
+    /// floating pane, a saved focus history pane or zoom that its tree does not
+    /// hold is dropped, and a history left empty holds the floating pane's
+    /// first pane in layout order. A
     /// scroll offset past the lines its pane still retains is cut down to that
     /// count — an offset of 500 onto a pane retaining 120 lines restores 120,
     /// and onto a pane whose scrollback was erased restores 0, the live
@@ -296,7 +299,7 @@ impl Server {
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return emitted_events;
         };
-        let floating_pane_ids = session.floating_set.list_pane_ids();
+        let floating_set = &session.floating_set;
         let tab_by_id = &session.tabs;
         let pane_registry = &session.panes;
         let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
@@ -335,9 +338,9 @@ impl Server {
             }
         }
         client.replace_floating_view(
-            &saved_view.floating_pane_view_by_pane_id,
+            &saved_view.floating_pane_view_by_floating_pane_id,
             &saved_view.shown_floating_pane_ids,
-            &floating_pane_ids,
+            floating_set,
         );
         let pane_focused_event = build_pane_focused_event(client, previous_focused_pane_id);
         emitted_events.extend(pane_focused_event);
@@ -984,14 +987,18 @@ impl Server {
         let FloatingPaneViewTarget {
             session_id,
             client_id,
-            pane_id,
+            floating_pane_id,
+            ..
         } = self.resolve_move_floating_pane_target(command_args, command_source, acting_session)?;
         let session = self
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let pane_ids =
+            Self::require_floating_pane_by_id(session, floating_pane_id)?.list_pane_ids();
         let client = Self::require_client(session, client_id)?;
-        let is_position_changed = Self::require_floating_pane_view(client, pane_id)?.position
+        let is_position_changed = Self::require_floating_pane_view(client, floating_pane_id)?
+            .position
             != FloatingPanePosition::Moved(command_args.top_left_cell);
         let client = Self::require_client_mut(session, client_id)?;
         if *command_source == CommandSource::from_mouse(client_id)
@@ -1002,25 +1009,26 @@ impl Server {
         if !is_position_changed {
             return Ok(self.commit_events(command_id, Vec::new()));
         }
-        let _ = client.set_floating_pane_position(pane_id, command_args.top_left_cell);
+        let _ = client.set_floating_pane_position(floating_pane_id, command_args.top_left_cell);
         Ok(self.commit_events(
             command_id,
             vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id,
-                pane_id,
+                pane_ids,
                 top_left_cell: command_args.top_left_cell,
             })],
         ))
     }
 
-    /// Handle [`Command::SetPanePinned`] and [`Command::TogglePanePinned`]:
-    /// pin or unpin the floating pane `pane_id` in the acting client's view,
-    /// as `pin_change` asks ([`Self::resolve_pane_pin_target`]).
+    /// Handle [`Command::SetFloatingPanePinned`] and [`Command::ToggleFloatingPanePinned`]:
+    /// pin or unpin the floating pane that holds `pane_id` in the acting
+    /// client's view, as `pin_change` asks ([`Self::resolve_pane_pin_target`]).
     ///
-    /// A pin stores `Pinned` at the cell where the client draws the pane, or
-    /// would draw it, and an unpin stores `Moved` at the pinned cell. Either
-    /// change emits one [`Event::PanePinChanged`]. A view that already has the
-    /// asked state changes nothing and emits nothing. Every other client's
+    /// A pin stores `Pinned` at the cell where the client draws the floating
+    /// pane, or would draw it, and an unpin stores `Moved` at the pinned cell.
+    /// Either change emits one [`Event::FloatingPanePinChanged`] that names
+    /// every pane of the floating pane. A view that already has the asked
+    /// state changes nothing and emits nothing. Every other client's
     /// view stays as it is.
     pub(super) fn handle_pane_pin_change(
         &mut self,
@@ -1034,7 +1042,8 @@ impl Server {
             FloatingPaneViewTarget {
                 session_id,
                 client_id,
-                pane_id,
+                floating_pane_id,
+                ..
             },
             pane_pin_change,
         )) = self.resolve_pane_pin_target(pane_id, pin_change, command_source, acting_session)?
@@ -1045,38 +1054,41 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let pane_ids =
+            Self::require_floating_pane_by_id(session, floating_pane_id)?.list_pane_ids();
         let client = Self::require_client_mut(session, client_id)?;
         let is_pinned = match pane_pin_change {
             PanePinChange::Pin(top_left_cell) => {
-                client.pin_floating_pane(pane_id, top_left_cell);
+                client.pin_floating_pane(floating_pane_id, top_left_cell);
                 true
             }
             PanePinChange::Unpin => {
-                client.unpin_floating_pane(pane_id);
+                client.unpin_floating_pane(floating_pane_id);
                 false
             }
         };
         Ok(self.commit_events(
             command_id,
-            vec![Event::PanePinChanged(PanePinChanged {
+            vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id,
-                pane_id,
+                pane_ids,
                 is_pinned,
             })],
         ))
     }
 
-    /// Handle [`Command::SetPaneMinimized`] and
-    /// [`Command::TogglePaneMinimized`]: minimize or restore the floating pane
-    /// `pane_id` in the acting client's view, as `minimize_change` asks
-    /// ([`Self::resolve_pane_minimize_target`]).
+    /// Handle [`Command::SetFloatingPaneMinimized`] and
+    /// [`Command::ToggleFloatingPaneMinimized`]: minimize or restore the floating
+    /// pane that holds `pane_id` in the acting client's view, as
+    /// `minimize_change` asks ([`Self::resolve_pane_minimize_target`]).
     ///
-    /// A minimize stops the client drawing the pane
+    /// A minimize stops the client drawing the floating pane
     /// ([`Client::minimize_floating_pane`]); a focus on it moves to the newest
     /// floating pane the client still shows, else to its active tab's focused
-    /// pane. A restore shows the pane above the client's other floating panes
-    /// and focuses it ([`Client::focus_floating_pane`]). Either change emits
-    /// one [`Event::PaneMinimizedChanged`], then one [`Event::PaneFocused`] when
+    /// pane. A restore shows the floating pane above the client's other
+    /// floating panes and focuses it ([`Client::focus_floating_pane`]). Either
+    /// change emits one [`Event::FloatingPaneMinimizedChanged`] that names
+    /// every pane of the floating pane, then one [`Event::PaneFocused`] when
     /// the client's input moved to a pane. A view that already has the asked
     /// state changes nothing and emits nothing. Every other client's view
     /// stays as it is.
@@ -1092,7 +1104,8 @@ impl Server {
             FloatingPaneViewTarget {
                 session_id,
                 client_id,
-                pane_id,
+                floating_pane_id,
+                ..
             },
             is_minimized,
         )) = self.resolve_pane_minimize_target(
@@ -1108,15 +1121,20 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let mut emitted_events: Vec<Event> = build_floating_pane_minimized_changed_events(
+            client_id,
+            &session.floating_set,
+            &[floating_pane_id],
+            is_minimized,
+        )
+        .collect();
         let client = Self::require_client_mut(session, client_id)?;
         let previous_focused_pane_id = client.get_active_focused_pane_id();
         if is_minimized {
-            let _ = client.minimize_floating_pane(pane_id);
+            let _ = client.minimize_floating_pane(floating_pane_id);
         } else {
-            let _ = client.focus_floating_pane(pane_id);
+            let _ = client.focus_floating_pane(floating_pane_id);
         }
-        let mut emitted_events: Vec<Event> =
-            build_pane_minimized_changed_events(client_id, &[pane_id], is_minimized).collect();
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
         Ok(self.commit_events(command_id, emitted_events))
     }
@@ -1124,7 +1142,8 @@ impl Server {
     /// Handle [`Command::SetAllFloatingPanesMinimized`] and
     /// [`Command::ToggleAllFloatingPanesMinimized`]: minimize every floating
     /// pane the acting client shows, oldest shown first, or restore every
-    /// floating pane it minimized, in the order the panes became floating.
+    /// floating pane it minimized, in the order the floating panes were
+    /// created.
     /// `minimize_change` asks for the minimize with `Set(true)`, the restore
     /// with `Set(false)`, and with `Toggle` the restore while the client shows
     /// no floating pane, else the minimize.
@@ -1134,21 +1153,22 @@ impl Server {
     /// attached, else, for a CLI source, the session's sole attached client
     /// ([`Self::resolve_view_client`]). After a minimize, the client's input
     /// returns to its active tab's focused pane
-    /// ([`Client::minimize_shown_floating_panes`]). After a restore, each pane
-    /// is shown and focused in turn ([`Client::focus_floating_pane`]), so the
-    /// last pane restored is drawn on top and focused: floats `a`, `b`, `c`
-    /// that became floating in that order, with `a` and `c` minimized and `b`
-    /// shown, restore `a`, then `c`, giving `[b, a, c]` with `c` focused.
+    /// ([`Client::minimize_shown_floating_panes`]). After a restore, each
+    /// floating pane is shown and focused in turn
+    /// ([`Client::focus_floating_pane`]), so the last floating pane restored
+    /// is drawn on top and focused: floats `a`, `b`, `c` created in that
+    /// order, with `a` and `c` minimized and `b` shown, restore `a`, then `c`,
+    /// giving `[b, a, c]` with `c` focused.
     ///
     /// A restore by a client that cannot draw floating panes
     /// ([`Session::can_client_draw_floating_panes`]) is
     /// [`RejectReason::InvalidState`] `no floating pane can be drawn on this
     /// client`, changing nothing.
     ///
-    /// A change emits one [`Event::PaneMinimizedChanged`] per changed pane, in
-    /// that order,
-    /// then one [`Event::PaneFocused`] when the client's input moved to a
-    /// pane. With no pane to change, nothing changes and nothing is emitted.
+    /// A change emits one [`Event::FloatingPaneMinimizedChanged`] per changed
+    /// floating pane, in that order, then one [`Event::PaneFocused`] when the
+    /// client's input moved to a pane. With no floating pane to change,
+    /// nothing changes and nothing is emitted.
     /// Every other client's view stays as it is.
     pub(super) fn handle_all_floating_panes_minimize_change(
         &mut self,
@@ -1170,18 +1190,18 @@ impl Server {
         let client = Self::require_client(session, client_id)?;
         let is_minimized =
             minimize_change.is_flag_on_after(client.list_shown_floating_pane_ids().is_empty());
-        let changing_pane_ids: Vec<PaneId> = if is_minimized {
+        let changing_floating_pane_ids: Vec<FloatingPaneId> = if is_minimized {
             client.list_shown_floating_pane_ids().to_vec()
         } else {
             session
                 .floating_set
-                .list_members()
+                .list_floating_panes()
                 .iter()
-                .map(|floating_member| floating_member.pane_id)
-                .filter(|&pane_id| !client.is_floating_pane_shown(pane_id))
+                .map(FloatingPane::get_floating_pane_id)
+                .filter(|&floating_pane_id| !client.is_floating_pane_shown(floating_pane_id))
                 .collect()
         };
-        if changing_pane_ids.is_empty() {
+        if changing_floating_pane_ids.is_empty() {
             return Ok(self.commit_events(command_id, Vec::new()));
         }
         if !is_minimized {
@@ -1191,18 +1211,22 @@ impl Server {
                 "no floating pane can be drawn on this client",
             )?;
         }
+        let mut emitted_events: Vec<Event> = build_floating_pane_minimized_changed_events(
+            client_id,
+            &session.floating_set,
+            &changing_floating_pane_ids,
+            is_minimized,
+        )
+        .collect();
         let client = Self::require_client_mut(session, client_id)?;
         let previous_focused_pane_id = client.get_active_focused_pane_id();
         if is_minimized {
             let _ = client.minimize_shown_floating_panes();
         } else {
-            for &pane_id in &changing_pane_ids {
-                let _ = client.focus_floating_pane(pane_id);
+            for &floating_pane_id in &changing_floating_pane_ids {
+                let _ = client.focus_floating_pane(floating_pane_id);
             }
         }
-        let mut emitted_events: Vec<Event> =
-            build_pane_minimized_changed_events(client_id, &changing_pane_ids, is_minimized)
-                .collect();
         emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
         Ok(self.commit_events(command_id, emitted_events))
     }

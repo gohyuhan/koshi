@@ -243,9 +243,9 @@ fn tab_rows_span_every_session_in_bar_order() {
 #[test]
 fn a_floating_pane_row_follows_the_tiled_rows_and_carries_no_tab() {
     let mut session_overview = build_session_overview("amber-fox", &[("editor", 1)]);
-    let floating_pane_id = PaneId::new();
+    let htop_pane_id = PaneId::new();
     session_overview.panes.push(PaneDiscovery {
-        pane_id: floating_pane_id,
+        pane_id: htop_pane_id,
         tab_id: None,
         session_id: session_overview.session.session_id,
         pane_title: Some("htop".to_string()),
@@ -263,7 +263,7 @@ fn a_floating_pane_row_follows_the_tiled_rows_and_carries_no_tab() {
         session_name: "amber-fox".to_string(),
     };
     let floating_pane_row = PaneRow {
-        pane_id: floating_pane_id,
+        pane_id: htop_pane_id,
         pane_name: Some("htop".to_string()),
         tab_id: None,
         tab_name: None,

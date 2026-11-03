@@ -34,8 +34,8 @@ pub struct SessionLayout {
     /// The tabs described, in tab-bar order. Holds every tab, or the one tab
     /// the request named.
     pub tabs: Vec<TabLayout>,
-    /// Every floating pane of the session, in the order the panes became
-    /// floating, also when the request named one tab.
+    /// Every floating pane of the session, in the order the floating panes
+    /// were created, also when the request named one tab.
     pub floating_panes: Vec<FloatingPaneLayout>,
     /// Every attached client, and what it has focused.
     pub clients: Vec<ClientFocus>,
@@ -93,20 +93,20 @@ pub struct SolvedPane {
     pub outer_rect: Rect,
 }
 
-/// One floating pane: the size it asks for, the size it holds, and what each
-/// attached client draws for it.
+/// One floating pane: its panes, the size it asks for, the size it holds, and
+/// what each attached client draws for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingPaneLayout {
-    /// The floating pane.
-    pub pane_id: PaneId,
-    /// The size the pane asks for, per axis: a number of cells, or a percent
-    /// of the smallest floating viewport of the attached clients. `60%` by
-    /// `60%` for a pane that `koshi new-pane --floating` opened with no `--cols`
-    /// and no `--rows`.
+    /// Every pane of the floating pane, in layout order.
+    pub pane_ids: Vec<PaneId>,
+    /// The size the floating pane asks for, per axis: a number of cells, or a
+    /// percent of the smallest floating viewport of the attached clients.
+    /// `60%` by `60%` for a floating pane that `koshi new-pane --floating`
+    /// opened with no `--cols` and no `--rows`.
     pub desired_size: FloatingPaneSize,
-    /// The pane's outer size in cells, its chrome included: the size every
-    /// client draws it at. `60%` by `60%` with an `80x22` smallest floating
-    /// viewport → `48x13`.
+    /// The floating pane's outer size in cells, its chrome included: the size
+    /// every client draws it at. `60%` by `60%` with an `80x22` smallest
+    /// floating viewport → `48x13`.
     pub solved_size: Size,
     /// One view per attached client, in client id order.
     pub client_views: Vec<FloatingPaneClientView>,
@@ -156,9 +156,9 @@ pub struct ClientFocus {
     pub client_id: ClientId,
     /// The tab the client is viewing.
     pub active_tab_id: TabId,
-    /// The pane that takes the client's input: its focused floating pane,
-    /// else its focused pane in the tab it is viewing. Absent until the client
-    /// focuses one.
+    /// The pane that takes the client's input: its focused pane inside its
+    /// focused floating pane, else its focused pane in the tab it is viewing.
+    /// Absent until the client focuses one.
     pub focused_pane_id: Option<PaneId>,
 }
 

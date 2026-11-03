@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use crate::event::tests::list_event_cases;
 use crate::event::{
-    ConfigReloaded, FloatingPaneMoved, PaneCommandFinished, PaneCreated, PaneFocused,
-    PaneMinimizedChanged, PanePinChanged, QuitCause, TabFocused,
+    ConfigReloaded, FloatingPaneMinimizedChanged, FloatingPaneMoved, FloatingPanePinChanged,
+    PaneCommandFinished, PaneCreated, PaneFocused, QuitCause, TabFocused,
 };
 use crate::geometry::Point;
 
@@ -132,7 +132,7 @@ fn a_pane_created_records_its_pane_and_tab_and_nothing_else() {
 }
 
 #[test]
-fn floating_pane_view_events_record_their_client_and_pane_and_nothing_else() {
+fn floating_pane_view_events_record_their_client_and_first_pane_and_nothing_else() {
     let client_id = ClientId::new();
     let pane_id = PaneId::new();
     let build_floating_view_record = |event_name: &'static str| RecentEvent {
@@ -149,7 +149,7 @@ fn floating_pane_view_events_record_their_client_and_pane_and_nothing_else() {
         record_event(
             &Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id,
-                pane_id,
+                pane_ids: vec![pane_id, PaneId::new()],
                 top_left_cell: Point { column: 70, row: 2 },
             }),
             build_occurred_at(),
@@ -158,25 +158,25 @@ fn floating_pane_view_events_record_their_client_and_pane_and_nothing_else() {
     );
     assert_eq!(
         record_event(
-            &Event::PanePinChanged(PanePinChanged {
+            &Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id,
-                pane_id,
+                pane_ids: vec![pane_id, PaneId::new()],
                 is_pinned: true,
             }),
             build_occurred_at(),
         ),
-        build_floating_view_record("PanePinChanged")
+        build_floating_view_record("FloatingPanePinChanged")
     );
     assert_eq!(
         record_event(
-            &Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            &Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id,
+                pane_ids: vec![pane_id, PaneId::new()],
                 is_minimized: true,
             }),
             build_occurred_at(),
         ),
-        build_floating_view_record("PaneMinimizedChanged")
+        build_floating_view_record("FloatingPaneMinimizedChanged")
     );
 }
 

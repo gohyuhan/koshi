@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::hash_connection_token;
 use koshi_session::client::{Client, FloatingPaneView};
@@ -55,12 +55,13 @@ pub struct SavedView {
     /// value the lines scrolled up from the live bottom. A pane with no entry
     /// sat at the live bottom.
     pub scroll_offset_by_pane_id: HashMap<PaneId, usize>,
-    /// The client's view of each floating pane of its session, keyed by pane
-    /// id: where it drew the pane, and whether it minimized the pane.
-    pub floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView>,
+    /// The client's view of each floating pane of its session, keyed by
+    /// floating pane id: where it drew the floating pane, whether it minimized
+    /// it, the panes it focused inside it, and the pane it zoomed there.
+    pub floating_pane_view_by_floating_pane_id: HashMap<FloatingPaneId, FloatingPaneView>,
     /// The floating panes the client showed, oldest first. The last one held
     /// the client's input.
-    pub shown_floating_pane_ids: Vec<PaneId>,
+    pub shown_floating_pane_ids: Vec<FloatingPaneId>,
 }
 
 /// One filed view: the sha256 of the token that takes it back, when it stops
@@ -131,7 +132,7 @@ impl SavedViewStore {
                 focus_history_by_tab_id: client.list_focus_histories().clone(),
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
-                floating_pane_view_by_pane_id: client.list_floating_pane_views().clone(),
+                floating_pane_view_by_floating_pane_id: client.list_floating_pane_views().clone(),
                 shown_floating_pane_ids: client.list_shown_floating_pane_ids().to_vec(),
             },
         });

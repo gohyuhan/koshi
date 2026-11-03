@@ -394,8 +394,8 @@ impl EventBus {
             | Event::PaneCommandFinished(_)
             | Event::SelectionChanged(_)
             | Event::FloatingPaneMoved(_)
-            | Event::PanePinChanged(_)
-            | Event::PaneMinimizedChanged(_) => return Vec::new(),
+            | Event::FloatingPanePinChanged(_)
+            | Event::FloatingPaneMinimizedChanged(_) => return Vec::new(),
         };
         // The stream's last frame, delivered whatever state the subscriber is
         // in: the client reading it leaves this socket. The notice carries it

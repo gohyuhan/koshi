@@ -2498,7 +2498,7 @@ fn pin_and_unpin_pane_set_the_pin_of_the_named_or_focused_floating_pane() {
         build_cli_action(&pin_arguments),
         (
             build_core_action_reference("pin-pane"),
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: Some(pane_id),
                 is_pinned: true,
             }),
@@ -2512,7 +2512,7 @@ fn pin_and_unpin_pane_set_the_pin_of_the_named_or_focused_floating_pane() {
         build_cli_action(&["koshi", "unpin-pane"]),
         (
             build_core_action_reference("unpin-pane"),
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: None,
                 is_pinned: false,
             }),
@@ -2530,7 +2530,7 @@ fn minimize_and_restore_pane_act_on_one_pane_or_with_all_on_every_pane() {
         build_cli_action(&["koshi", "minimize-pane", "--pane", &pane_flag]),
         (
             build_core_action_reference("minimize-pane"),
-            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                 pane_id: Some(pane_id),
                 is_minimized: true,
             }),
@@ -2540,7 +2540,7 @@ fn minimize_and_restore_pane_act_on_one_pane_or_with_all_on_every_pane() {
         build_cli_action(&["koshi", "restore-pane"]),
         (
             build_core_action_reference("restore-pane"),
-            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                 pane_id: None,
                 is_minimized: false,
             }),
@@ -4229,21 +4229,21 @@ fn a_pane_verb_given_no_pane_flag_acts_on_the_resolved_default_pane() {
         ),
         (
             vec!["koshi", "pin-pane"],
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: Some(default_pane_id),
                 is_pinned: true,
             }),
         ),
         (
             vec!["koshi", "unpin-pane", "--pane", &pane_flag],
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: Some(flag_pane_id),
                 is_pinned: false,
             }),
         ),
         (
             vec!["koshi", "minimize-pane"],
-            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                 pane_id: Some(default_pane_id),
                 is_minimized: true,
             }),

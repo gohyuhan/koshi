@@ -445,13 +445,13 @@ fn build_placed_preview_refuses_a_source_tab_too_small_for_what_stays() {
 
 #[test]
 fn build_placed_preview_puts_a_floating_pane_under_the_whole_tab() {
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let destination_tree = build_side_by_side_tree(&[first_pane_id, second_pane_id]);
     let placement_snapshot = build_test_placement_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         PlacementSource::Floating,
         destination_tab_id,
         Some(build_test_tab_snapshot(
@@ -475,14 +475,14 @@ fn build_placed_preview_puts_a_floating_pane_under_the_whole_tab() {
             destination_tab_id,
             LayoutNode::Split(SplitNode::with_equal_weights(
                 SplitDirection::Vertical,
-                vec![destination_tree, LayoutNode::Pane(floating_pane_id)],
+                vec![destination_tree, LayoutNode::Pane(floating_slot_pane_id)],
             )),
-            vec![floating_pane_id],
+            vec![floating_slot_pane_id],
             TEST_TAB_SIZE,
             build_unsuppressed_solve(vec![
                 (first_pane_id, build_cell_rect(0, 0, 24, 4)),
                 (second_pane_id, build_cell_rect(24, 0, 24, 4)),
-                (floating_pane_id, build_cell_rect(0, 4, 48, 4)),
+                (floating_slot_pane_id, build_cell_rect(0, 4, 48, 4)),
             ]),
         ))
     );
@@ -567,10 +567,10 @@ fn build_placed_preview_refuses_each_placement_the_session_refuses() {
 
 #[test]
 fn build_placed_preview_refuses_a_floating_pane_with_no_destination_tab() {
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let placement_snapshot = build_test_placement_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         PlacementSource::Floating,
         destination_tab_id,
         None,
@@ -732,7 +732,7 @@ fn list_drawable_pane_ids_by_building_every_placement(
 
 #[test]
 fn list_drawable_pane_ids_lists_a_floating_pane_after_panes_that_all_show() {
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let tiled_pane_ids = [
         PaneId::new(),
         PaneId::new(),
@@ -742,7 +742,7 @@ fn list_drawable_pane_ids_lists_a_floating_pane_after_panes_that_all_show() {
     ];
     let destination_tab_id = TabId::new();
     let placement_snapshot = build_test_placement_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         PlacementSource::Floating,
         destination_tab_id,
         Some(build_test_tab_snapshot(
@@ -754,7 +754,7 @@ fn list_drawable_pane_ids_lists_a_floating_pane_after_panes_that_all_show() {
         LARGE_TEST_TAB_SIZE,
     );
     let mut expected_drawable_pane_ids = tiled_pane_ids.to_vec();
-    expected_drawable_pane_ids.push(floating_pane_id);
+    expected_drawable_pane_ids.push(floating_slot_pane_id);
 
     assert_eq!(
         placement_snapshot.list_drawable_pane_ids(),
@@ -768,12 +768,12 @@ fn list_drawable_pane_ids_lists_a_floating_pane_after_panes_that_all_show() {
 
 #[test]
 fn list_drawable_pane_ids_leaves_out_a_floating_pane_no_placement_fits() {
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let mut placement_snapshot = build_test_placement_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         PlacementSource::Floating,
         destination_tab_id,
         Some(build_test_tab_snapshot(
@@ -805,7 +805,7 @@ fn list_drawable_pane_ids_lists_what_building_every_placement_lists() {
         [PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new()];
     let [subtree_first_pane_id, subtree_second_pane_id] = [PaneId::new(), PaneId::new()];
     let [inner_shown_pane_id, inner_collapsed_pane_id] = [PaneId::new(), PaneId::new()];
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let plain_pane_beside_stack_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
@@ -857,7 +857,7 @@ fn list_drawable_pane_ids_lists_what_building_every_placement_lists() {
         )
     });
     let floating_placement_snapshot = build_test_placement_snapshot(
-        floating_pane_id,
+        floating_slot_pane_id,
         PlacementSource::Floating,
         destination_tab_id,
         Some(build_test_tab_snapshot(
@@ -884,7 +884,7 @@ fn list_drawable_pane_ids_lists_what_building_every_placement_lists() {
     for (placement_snapshot, expected_drawable_pane_ids) in [
         (
             &floating_placement_snapshot,
-            vec![tiled_pane_id, shown_stack_pane_id, floating_pane_id],
+            vec![tiled_pane_id, shown_stack_pane_id, floating_slot_pane_id],
         ),
         // A swap of `X` with the moved pane opens `H[moved, U]`.
         (

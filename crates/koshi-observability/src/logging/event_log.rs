@@ -30,6 +30,7 @@
 //!   shell inside a pane is doing.
 
 use koshi_core::event::{Event, QuitCause};
+use koshi_core::ids::PaneId;
 
 /// Write one log line for `runtime_event`, at the level its outcome deserves, or write
 /// nothing when the event is one of the high-frequency kinds the [logging
@@ -156,24 +157,24 @@ pub fn log_event(runtime_event: &Event) {
         Event::FloatingPaneMoved(event_payload) => {
             tracing::info!(
                 client_id = %event_payload.client_id,
-                pane_id = %event_payload.pane_id,
+                pane_ids = %format_pane_ids(&event_payload.pane_ids),
                 column = event_payload.top_left_cell.column,
                 row = event_payload.top_left_cell.row,
                 "floating pane moved"
             );
         }
-        Event::PanePinChanged(event_payload) => {
+        Event::FloatingPanePinChanged(event_payload) => {
             tracing::info!(
                 client_id = %event_payload.client_id,
-                pane_id = %event_payload.pane_id,
+                pane_ids = %format_pane_ids(&event_payload.pane_ids),
                 is_pinned = event_payload.is_pinned,
                 "floating pane pin changed"
             );
         }
-        Event::PaneMinimizedChanged(event_payload) => {
+        Event::FloatingPaneMinimizedChanged(event_payload) => {
             tracing::info!(
                 client_id = %event_payload.client_id,
-                pane_id = %event_payload.pane_id,
+                pane_ids = %format_pane_ids(&event_payload.pane_ids),
                 is_minimized = event_payload.is_minimized,
                 "floating pane minimize changed"
             );
@@ -237,6 +238,16 @@ pub fn log_event(runtime_event: &Event) {
         | Event::PaneCommandFinished(_)
         | Event::SelectionChanged(_) => {}
     }
+}
+
+/// `pane_ids` as one log field value: each pane id's prefixed form, joined
+/// with `,`. `[vim, htop]` → `pane-<vim uuid>,pane-<htop uuid>`.
+fn format_pane_ids(pane_ids: &[PaneId]) -> String {
+    pane_ids
+        .iter()
+        .map(PaneId::to_string)
+        .collect::<Vec<String>>()
+        .join(",")
 }
 
 #[cfg(test)]

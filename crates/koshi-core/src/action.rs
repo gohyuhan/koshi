@@ -311,11 +311,11 @@ pub enum ClientActionKind {
     /// Move the selected floating pane's draft one cell in `direction` during
     /// floating pane move mode.
     MoveFloatingPane(Direction),
-    /// Select the next floating pane, in the order the panes became floating,
-    /// during floating pane move mode.
+    /// Select the next floating pane, in the order the floating panes were
+    /// created, during floating pane move mode.
     SelectNextFloatingPane,
-    /// Select the previous floating pane, in the order the panes became
-    /// floating, during floating pane move mode.
+    /// Select the previous floating pane, in the order the floating panes were
+    /// created, during floating pane move mode.
     SelectPreviousFloatingPane,
     /// Send the selected floating pane's draft as a floating pane move.
     ConfirmFloatingPaneMove,
@@ -468,8 +468,8 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`; `undock-pane`
 /// builds `PlacePane` with a floating target; `toggle-pane-floating` builds
 /// `TogglePaneFloating`; `pin-pane`/`unpin-pane` both
-/// build `SetPanePinned`; `toggle-pane-pinned` builds `TogglePanePinned`;
-/// `minimize-pane` builds `SetPaneMinimized`; `minimize-all-floating-panes` and
+/// build `SetFloatingPanePinned`; `toggle-pane-pinned` builds `ToggleFloatingPanePinned`;
+/// `minimize-pane` builds `SetFloatingPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
 /// `toggle-minimize-all-floating-panes` builds
 /// `ToggleAllFloatingPanesMinimized`.
@@ -803,7 +803,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "select-next-floating-pane",
             "Select Next Floating Pane",
-            "Select and focus the next floating pane, in the order the panes became floating, in floating pane move mode",
+            "Select and focus the next floating pane, in the order the floating panes were created, in floating pane move mode",
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectNextFloatingPane),
@@ -811,7 +811,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "select-previous-floating-pane",
             "Select Previous Floating Pane",
-            "Select and focus the previous floating pane, in the order the panes became floating, in floating pane move mode",
+            "Select and focus the previous floating pane, in the order the floating panes were created, in floating pane move mode",
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPreviousFloatingPane),
@@ -990,7 +990,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Pin the focused floating pane at its top-left cell on the issuing client's screen",
             Client,
             vec![Pane, ClientTarget],
-            CoreCommand(CommandKind::SetPanePinned),
+            CoreCommand(CommandKind::SetFloatingPanePinned),
         ),
         build_core_action_seed(
             "unpin-pane",
@@ -998,7 +998,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Unpin the focused floating pane on the issuing client's screen",
             Client,
             vec![Pane, ClientTarget],
-            CoreCommand(CommandKind::SetPanePinned),
+            CoreCommand(CommandKind::SetFloatingPanePinned),
         ),
         build_core_action_seed(
             "toggle-pane-pinned",
@@ -1006,7 +1006,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Pin the focused floating pane at its top-left cell on the issuing client's screen, or unpin it when it is pinned there",
             Client,
             vec![Pane, ClientTarget],
-            CoreCommand(CommandKind::TogglePanePinned),
+            CoreCommand(CommandKind::ToggleFloatingPanePinned),
         ),
         build_core_action_seed(
             "minimize-pane",
@@ -1014,7 +1014,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Minimize the focused floating pane on the issuing client's screen",
             Client,
             vec![Pane, ClientTarget],
-            CoreCommand(CommandKind::SetPaneMinimized),
+            CoreCommand(CommandKind::SetFloatingPaneMinimized),
         ),
         build_core_action_seed(
             "restore-pane",
@@ -1022,7 +1022,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             "Restore a minimized floating pane on one client's screen and focus it",
             Client,
             vec![Pane, ClientTarget],
-            CoreCommand(CommandKind::SetPaneMinimized),
+            CoreCommand(CommandKind::SetFloatingPaneMinimized),
         ),
         build_core_action_seed(
             "minimize-all-floating-panes",
@@ -1091,7 +1091,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "focus-next-floating-pane",
             "Focus Next Floating Pane",
-            "Show and focus the floating pane after the focused one, in the order the panes became floating",
+            "Show and focus the floating pane after the focused one, in the order the floating panes were created",
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
@@ -1099,7 +1099,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "focus-previous-floating-pane",
             "Focus Previous Floating Pane",
-            "Show and focus the floating pane before the focused one, in the order the panes became floating",
+            "Show and focus the floating pane before the focused one, in the order the floating panes were created",
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),

@@ -23,6 +23,11 @@ pub const FLOATING_CHROME_SIZE: Size = Size {
     row_count: 4,
 };
 
+/// The rows the titlebar strip of a floating pane takes above its layout tree:
+/// `1`. A floating pane's tree is solved over its outer size less these rows,
+/// so a `40x12` floating pane solves its tree over `40x11`.
+pub const FLOATING_TITLEBAR_STRIP_ROW_COUNT: u16 = 1;
+
 /// The timeout of every `Graceful` close that koshi requests: the time a child
 /// gets to exit on its own before the close escalates to a forced kill.
 pub const GRACEFUL_TIMEOUT_DURATION: Duration = Duration::from_secs(3);

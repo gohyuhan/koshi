@@ -365,7 +365,7 @@ struct SessionOverviewReport {
     /// The session's tabs, in tab-bar order.
     tabs: Vec<TabReport>,
     /// Every pane of the session: the panes of its tabs in tab-bar order, then
-    /// its floating panes in the order they became floating.
+    /// its floating panes in the order they were created.
     panes: Vec<PaneReport>,
     /// The clients attached to the session.
     clients: Vec<ClientReport>,

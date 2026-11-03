@@ -957,8 +957,8 @@ pub struct SessionSnapshot {
     /// floating viewport: it reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a pane area
     /// narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FloatingPaneSlot>,
-    /// Every floating pane of the session, in the order the panes became
-    /// floating, shown or minimized for the viewing client. With floats `a`,
+    /// Every floating pane of the session, in the order they were created,
+    /// shown or minimized for the viewing client. With floats `a`,
     /// `b` and `c` made in that order and `b` minimized, it holds `Shown` `a`,
     /// `Minimized` `b` with `b`'s title, and `Shown` `c`.
     pub floating_panes: Vec<FloatingPane>,

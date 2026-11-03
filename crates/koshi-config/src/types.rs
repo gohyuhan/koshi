@@ -592,7 +592,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             build_bound_action("toggle-pane-floating"),
         ),
         // Tab and Shift+Tab under the pane prefix show and focus the next or
-        // previous floating pane, in the order the panes became floating.
+        // previous floating pane, in the order the floating panes were created.
         // These fire continuous actions: the prefix stays armed.
         (
             parse_default_key_sequence("<leader>p <Tab>"),

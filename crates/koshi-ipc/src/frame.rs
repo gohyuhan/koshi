@@ -91,8 +91,8 @@ pub struct FrameSession {
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
     /// pane area narrower than 5 columns or shorter than 6 rows.
     pub floating_pane_slots: Vec<FrameFloatingPaneSlot>,
-    /// Every floating pane of the session, in the order the panes became
-    /// floating, shown or minimized for the viewing client.
+    /// Every floating pane of the session, in the order they were created,
+    /// shown or minimized for the viewing client.
     pub floating_panes: Vec<FrameFloatingPane>,
 }
 

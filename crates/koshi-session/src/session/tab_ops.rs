@@ -65,7 +65,7 @@ pub enum TabTarget {
 /// Returns the focused client's *previous* tab when one was switched, and the
 /// events to emit: [`Event::TabCreated`], [`Event::PaneCreated`], then — only
 /// when `focus_client_id` applies — [`Event::TabFocused`], one
-/// [`Event::PaneMinimizedChanged`] per floating pane minimized,
+/// [`Event::FloatingPaneMinimizedChanged`] per floating pane minimized,
 /// [`Event::PaneFocused`], and the events of the solves, in that order. The
 /// `PaneFocused` names as `previous_pane_id` the floating pane that held the
 /// client's input, if any.
@@ -117,7 +117,12 @@ pub fn commit_new_tab(
                 tab_id: new_tab_id,
                 previous_tab_id,
             }));
-            emitted_events.extend(apply_tiled_pane_focus(client, new_tab_id, new_pane_id));
+            emitted_events.extend(apply_tiled_pane_focus(
+                client,
+                &session.floating_set,
+                new_tab_id,
+                new_pane_id,
+            ));
         }
     }
     if let Some(previous_tab_id) = previous_active_tab_id {
@@ -436,8 +441,8 @@ pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usiz
 /// a client holding no pane focus there, [`Event::PaneFocused`] on that tab's
 /// landing pane — solves that tab again at its tab size
 /// ([`Session::update_tab_solve`]), and renumbers the survivors densely. When
-/// no tabs remain, it removes every floating pane, in the order the panes
-/// became floating ([`remove_floating_pane`]: [`Event::PaneClosing`] and
+/// no tabs remain, it removes every floating pane, in the order they were
+/// created ([`remove_floating_pane`]: [`Event::PaneClosing`] and
 /// [`Event::PaneRemoved`] with `tab_id: None` for each), then emits
 /// [`Event::Quit`] with [`QuitCause::LastTabClosed`] naming `tab_id` and
 /// `pane_exit`. `pane_exit` is the child exit that emptied the tab, and
@@ -488,9 +493,9 @@ pub(crate) fn close_and_refocus_tab(
     reindex_tabs_by_display_index(session);
 
     if session.tabs.is_empty() {
-        let floating_pane_ids: Vec<PaneId> = session.floating_set.list_pane_ids();
-        for floating_pane_id in floating_pane_ids {
-            emitted_events.extend(remove_floating_pane(session, floating_pane_id));
+        let floating_set_pane_ids: Vec<PaneId> = session.floating_set.list_pane_ids();
+        for pane_id in floating_set_pane_ids {
+            emitted_events.extend(remove_floating_pane(session, pane_id));
         }
         // An already `Stopping` or `Stopped` session keeps the state it has;
         // `Quit` is emitted either way.

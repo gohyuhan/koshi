@@ -1622,17 +1622,17 @@ fn push_floating_pane_slot(
 #[test]
 fn a_cell_goes_to_the_topmost_floating_pane_drawn_over_it() {
     let tiled_pane_id = PaneId::new();
-    let lower_floating_pane_id = PaneId::new();
-    let upper_floating_pane_id = PaneId::new();
+    let lower_floating_slot_pane_id = PaneId::new();
+    let upper_floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_floating_frame(tiled_pane_id, FULL_PANE_AREA_TAB_SIZE);
     push_floating_pane_slot(
         &mut render_snapshot,
-        lower_floating_pane_id,
+        lower_floating_slot_pane_id,
         build_cell_rect(10, 5, 40, 15),
     );
     push_floating_pane_slot(
         &mut render_snapshot,
-        upper_floating_pane_id,
+        upper_floating_slot_pane_id,
         build_cell_rect(30, 10, 40, 15),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
@@ -1646,14 +1646,14 @@ fn a_cell_goes_to_the_topmost_floating_pane_drawn_over_it() {
     assert_eq!(
         resolve_screen_hit_region(35, 16),
         HitRegion::PaneContent {
-            pane_id: upper_floating_pane_id
+            pane_id: upper_floating_slot_pane_id
         }
     );
     // Pane-area (15, 15) lies in the lower float and the tiled pane.
     assert_eq!(
         resolve_screen_hit_region(15, 16),
         HitRegion::PaneContent {
-            pane_id: lower_floating_pane_id
+            pane_id: lower_floating_slot_pane_id
         }
     );
     // Pane-area (100, 30) lies in the tiled pane only.
@@ -1667,7 +1667,7 @@ fn a_cell_goes_to_the_topmost_floating_pane_drawn_over_it() {
     assert_eq!(
         resolve_screen_hit_region(30, 16),
         HitRegion::PaneBorder {
-            pane_id: upper_floating_pane_id,
+            pane_id: upper_floating_slot_pane_id,
             side: Direction::Left,
             corner_horizontal_side: None,
         }
@@ -1679,7 +1679,7 @@ fn a_cell_goes_to_the_topmost_floating_pane_drawn_over_it() {
 #[test]
 fn a_floating_pane_in_the_letterbox_margin_is_hit() {
     let tiled_pane_id = PaneId::new();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     // A 60x20 tab centered in the 120x38 pane area spans screen columns 30–89.
     let mut render_snapshot = build_floating_frame(
         tiled_pane_id,
@@ -1698,7 +1698,7 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
 
     push_floating_pane_slot(
         &mut render_snapshot,
-        floating_pane_id,
+        floating_slot_pane_id,
         build_cell_rect(0, 0, 20, 8),
     );
 
@@ -1708,7 +1708,7 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
             build_screen_point(5, 6)
         ),
         HitRegion::PaneContent {
-            pane_id: floating_pane_id
+            pane_id: floating_slot_pane_id
         }
     );
     assert_eq!(
@@ -1717,7 +1717,7 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
             build_screen_point(5, 1)
         ),
         HitRegion::PaneBorder {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             side: Direction::Up,
             corner_horizontal_side: None,
         }
@@ -1729,11 +1729,11 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
 #[test]
 fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
     let tiled_pane_id = PaneId::new();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_floating_frame(tiled_pane_id, FULL_PANE_AREA_TAB_SIZE);
     push_floating_pane_slot(
         &mut render_snapshot,
-        floating_pane_id,
+        floating_slot_pane_id,
         build_cell_rect(10, 5, 40, 15),
     );
     let placement_viewer_chrome = ViewerChrome {
@@ -1753,7 +1753,7 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
     assert_eq!(
         find_pane_content_rect(
             build_core_mouse_frame(&render_snapshot, placement_viewer_chrome).build_frame_layout(),
-            floating_pane_id
+            floating_slot_pane_id
         ),
         None
     );
@@ -1772,7 +1772,7 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
     assert_eq!(
         find_pane_content_rect(
             build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
-            floating_pane_id
+            floating_slot_pane_id
         ),
         None
     );
@@ -1782,11 +1782,11 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
 /// them; its other cells and the separator row are titlebar.
 #[test]
 fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_floating_frame(PaneId::new(), FULL_PANE_AREA_TAB_SIZE);
     push_floating_pane_slot(
         &mut render_snapshot,
-        floating_pane_id,
+        floating_slot_pane_id,
         build_cell_rect(0, 0, 48, 12),
     );
     // Each pane-area cell is one screen row lower.
@@ -1796,7 +1796,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
             build_screen_point(pane_area_column, pane_area_row + 1),
         )
     };
-    let pane_id = floating_pane_id;
+    let pane_id = floating_slot_pane_id;
 
     for (pane_area_column, pane_area_row, expected_hit_region) in [
         (2, 1, HitRegion::PlacementHandle { pane_id }),
@@ -1890,7 +1890,7 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
 /// letterbox offset.
 #[test]
 fn a_floating_panes_content_rect_takes_no_letterbox_offset() {
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_floating_frame(
         PaneId::new(),
         Size {
@@ -1900,21 +1900,21 @@ fn a_floating_panes_content_rect_takes_no_letterbox_offset() {
     );
     push_floating_pane_slot(
         &mut render_snapshot,
-        floating_pane_id,
+        floating_slot_pane_id,
         build_cell_rect(24, 8, 72, 22),
     );
 
     assert_eq!(
         find_pane_content_rect(
             build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
-            floating_pane_id
+            floating_slot_pane_id
         ),
         Some(build_cell_rect(25, 12, 70, 18))
     );
     assert_eq!(
         compute_clamped_pane_cell(
             build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
-            floating_pane_id,
+            floating_slot_pane_id,
             build_screen_point(30, 14)
         ),
         Some(Point { column: 5, row: 2 })
@@ -1926,16 +1926,16 @@ fn a_floating_panes_content_rect_takes_no_letterbox_offset() {
 #[test]
 fn a_move_draft_moves_the_floating_pane_it_names() {
     let tiled_pane_id = PaneId::new();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_floating_frame(tiled_pane_id, FULL_PANE_AREA_TAB_SIZE);
     push_floating_pane_slot(
         &mut render_snapshot,
-        floating_pane_id,
+        floating_slot_pane_id,
         build_cell_rect(10, 5, 40, 15),
     );
     let draft_viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             top_left_cell: Point {
                 column: 60,
                 row: 20,
@@ -1959,13 +1959,13 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
             build_screen_point(65, 31)
         ),
         HitRegion::PaneContent {
-            pane_id: floating_pane_id
+            pane_id: floating_slot_pane_id
         }
     );
     assert_eq!(
         find_pane_content_rect(
             build_core_mouse_frame(&render_snapshot, draft_viewer_chrome).build_frame_layout(),
-            floating_pane_id
+            floating_slot_pane_id
         ),
         Some(build_cell_rect(61, 24, 38, 11))
     );

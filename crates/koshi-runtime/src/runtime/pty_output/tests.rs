@@ -20,7 +20,7 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::state::{FloatingMember, Session};
+use koshi_session::session::state::Session;
 
 use crate::runtime::command::tests::{attach_client_record, build_tab};
 use koshi_terminal::engine::TerminalEngine;
@@ -32,6 +32,8 @@ use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::render_schedule::tests::{
     mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
 };
+
+use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
 
 use super::*;
 
@@ -179,9 +181,9 @@ fn build_measured_client(
 fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_size() {
     let (mut runtime, fake_pty_backend) = build_test_server();
     let tiled_pane_id = insert_test_terminal_engine(&mut runtime);
-    let floating_pane_id = insert_test_terminal_engine(&mut runtime);
+    let htop_pane_id = insert_test_terminal_engine(&mut runtime);
     let stray_pane_id = insert_test_terminal_engine(&mut runtime);
-    for pane_id in [tiled_pane_id, floating_pane_id, stray_pane_id] {
+    for pane_id in [tiled_pane_id, htop_pane_id, stray_pane_id] {
         spawn_test_pane(&fake_pty_backend, pane_id);
     }
     let (db_tab_id, web_tab_id) = (TabId::new(), TabId::new());
@@ -200,22 +202,21 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
         build_tab(web_tab_id, "web", 1, LayoutNode::Pane(tiled_pane_id)),
     );
     let forty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(40).expect("40 is nonzero"));
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: FloatingPaneSize {
-                    width: forty_cells,
-                    height: forty_cells,
-                },
-                solved_size: Size {
-                    column_count: 40,
-                    row_count: 40,
-                },
-            },
-            &[],
-        )
-        .expect("the floating set is empty");
+    commit_new_floating_pane(
+        &mut session,
+        htop_pane_id,
+        FloatingPaneSize {
+            width: forty_cells,
+            height: forty_cells,
+        },
+        Size {
+            column_count: 40,
+            row_count: 40,
+        },
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the floating set is empty");
     // alice attaches first and views `db` with 10x20 px cells; bob views
     // `web` with 8x16 px cells.
     let alice_client = build_measured_client(
@@ -237,7 +238,7 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
     runtime.session_by_id.insert(session.session_id, session);
 
     // XTWINOPS 16: report the cell size in pixels.
-    for pane_id in [tiled_pane_id, floating_pane_id, stray_pane_id] {
+    for pane_id in [tiled_pane_id, htop_pane_id, stray_pane_id] {
         runtime.handle_pty_output(pane_id, b"\x1b[16t");
     }
 
@@ -249,7 +250,7 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
     );
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(floating_pane_id)
+            .list_pane_write_bytes(htop_pane_id)
             .unwrap(),
         vec![b"\x1b[6;20;10t".to_vec()]
     );
@@ -313,7 +314,7 @@ fn an_escape_sequence_split_across_two_chunks_decodes_once() {
 /// The pane ids and client ids of [`build_floating_pane_viewers_server`].
 struct FloatingPaneViewers {
     db_pane_id: PaneId,
-    floating_pane_id: PaneId,
+    htop_pane_id: PaneId,
     db_client_id: ClientId,
     web_client_id: ClientId,
 }
@@ -335,7 +336,7 @@ fn build_floating_pane_viewers_server(
     let (db_tab_id, web_tab_id) = (TabId::new(), TabId::new());
     let db_pane_id = insert_test_terminal_engine(&mut runtime);
     let web_pane_id = insert_test_terminal_engine(&mut runtime);
-    let floating_pane_id = insert_test_terminal_engine(&mut runtime);
+    let htop_pane_id = insert_test_terminal_engine(&mut runtime);
     let mut session = Session::from_identity_and_client_registry(
         SessionId::new(),
         "s".to_owned(),
@@ -363,28 +364,31 @@ fn build_floating_pane_viewers_server(
     attach_client_record(&mut session, db_client);
     attach_client_record(&mut session, web_client);
     let twenty_cells = FloatingPaneDimension::Cells(NonZeroU16::new(20).expect("20 is nonzero"));
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: FloatingPaneSize {
-                    width: twenty_cells,
-                    height: twenty_cells,
-                },
-                solved_size: Size {
-                    column_count: 20,
-                    row_count: 20,
-                },
-            },
-            &[],
-        )
-        .expect("the floating set is empty");
+    commit_new_floating_pane(
+        &mut session,
+        htop_pane_id,
+        FloatingPaneSize {
+            width: twenty_cells,
+            height: twenty_cells,
+        },
+        Size {
+            column_count: 20,
+            row_count: 20,
+        },
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the floating set is empty");
+    let (_, floating_pane) = session
+        .floating_set
+        .find_floating_pane_by_pane_id(htop_pane_id)
+        .expect("the pane is floating");
     // web shows the floating pane; db holds it minimized.
     assert!(session
         .clients
         .get_client_mut_by_id(web_client_id)
         .expect("web is attached")
-        .focus_floating_pane(floating_pane_id));
+        .focus_floating_pane(floating_pane.get_floating_pane_id()));
     runtime.session_by_id.insert(session.session_id, session);
     let db_deliveries = runtime.subscribe(db_client_id, 60);
     let web_deliveries = runtime.subscribe(web_client_id, 60);
@@ -393,7 +397,7 @@ fn build_floating_pane_viewers_server(
         runtime,
         FloatingPaneViewers {
             db_pane_id,
-            floating_pane_id,
+            htop_pane_id,
             db_client_id,
             web_client_id,
         },
@@ -408,7 +412,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
         build_floating_pane_viewers_server(first_frame_time);
     let FloatingPaneViewers {
         db_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         db_client_id,
         web_client_id,
     } = floating_pane_viewers;
@@ -425,7 +429,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
 
     let second_frame_time = first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
     runtime.push_frames(second_frame_time);
-    runtime.handle_pty_output(floating_pane_id, b"hi");
+    runtime.handle_pty_output(htop_pane_id, b"hi");
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, second_frame_time),
         None
@@ -454,7 +458,7 @@ fn a_change_of_a_floating_panes_title_marks_the_view_of_the_client_that_minimize
         build_floating_pane_viewers_server(first_frame_time);
     let FloatingPaneViewers {
         db_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         db_client_id,
         web_client_id,
     } = floating_pane_viewers;
@@ -489,19 +493,19 @@ fn a_change_of_a_floating_panes_title_marks_the_view_of_the_client_that_minimize
     // minimized the floating pane, changes. The floating pane starts on the
     // primary screen with no title and no working directory.
     let output_steps: [(PaneId, &[u8], bool); 10] = [
-        (floating_pane_id, b"\x1b]2;make\x07", true),
-        (floating_pane_id, b"\x1b]2;make\x07", false),
+        (htop_pane_id, b"\x1b]2;make\x07", true),
+        (htop_pane_id, b"\x1b]2;make\x07", false),
         (
-            floating_pane_id,
+            htop_pane_id,
             b"\x1b]7;file://host/home/user/project\x07",
             true,
         ),
-        (floating_pane_id, b"\x1b]2;vim\x07", false),
-        (floating_pane_id, b"hi", false),
-        (floating_pane_id, b"\x1b[?1049h", true),
-        (floating_pane_id, b"\x1b]2;htop\x07", true),
-        (floating_pane_id, b"\x1b]7;file://host/tmp\x07", false),
-        (floating_pane_id, b"\x1b[?1049l", true),
+        (htop_pane_id, b"\x1b]2;vim\x07", false),
+        (htop_pane_id, b"hi", false),
+        (htop_pane_id, b"\x1b[?1049h", true),
+        (htop_pane_id, b"\x1b]2;htop\x07", true),
+        (htop_pane_id, b"\x1b]7;file://host/tmp\x07", false),
+        (htop_pane_id, b"\x1b[?1049l", true),
         (db_pane_id, b"\x1b]7;file://host/home/user\x07", true),
     ];
     let mut step_time = first_frame_time;
@@ -517,7 +521,7 @@ fn a_change_of_a_floating_panes_title_marks_the_view_of_the_client_that_minimize
         );
         assert_eq!(
             mark_changed_views_then_compute_frame_wait(&mut runtime, web_client_id, step_time),
-            (pane_id == floating_pane_id).then_some(Duration::ZERO),
+            (pane_id == htop_pane_id).then_some(Duration::ZERO),
             "{output_bytes:?}"
         );
         assert_eq!(

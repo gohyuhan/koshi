@@ -2717,9 +2717,9 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
     );
 }
 
-/// The floating pane of the layout fixtures below that asks for `60%` by
-/// `60%`.
-fn build_test_percent_floating_pane_id() -> PaneId {
+/// The pane of the floating pane of the layout fixtures below that asks for
+/// `60%` by `60%`.
+fn build_test_percent_pane_id() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(6))
 }
 
@@ -2728,23 +2728,30 @@ fn build_test_second_layout_client_id() -> ClientId {
     ClientId::from_uuid(build_test_uuid_with_suffix(7))
 }
 
-/// The floating pane of the layout fixtures below that asks for `30` columns
-/// by `50%`.
-fn build_test_cells_floating_pane_id() -> PaneId {
+/// The first pane of the floating pane of the layout fixtures below that asks
+/// for `30` columns by `50%`.
+fn build_test_cells_first_pane_id() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(8))
 }
 
+/// The second pane of the floating pane of the layout fixtures below that asks
+/// for `30` columns by `50%`.
+fn build_test_cells_second_pane_id() -> PaneId {
+    PaneId::from_uuid(build_test_uuid_with_suffix(10))
+}
+
 /// Two floating panes whose views carry every visibility and every position:
-/// the `60%` pane drawn at the back by the fixture client at the default
-/// placement and minimized by the second client, which pinned it; the
-/// `30`-column pane drawn on top by the fixture client, moved, and minimized
-/// by the second client at the default placement.
+/// the `60%` floating pane, holding one pane, drawn at the back by the fixture
+/// client at the default placement and minimized by the second client, which
+/// pinned it; the `30`-column floating pane, holding two panes, drawn on top by
+/// the fixture client, moved, and minimized by the second client at the
+/// default placement.
 fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
     let sixty_percent =
         FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("1 to 100"));
     vec![
         FloatingPaneLayout {
-            pane_id: build_test_percent_floating_pane_id(),
+            pane_ids: vec![build_test_percent_pane_id()],
             desired_size: FloatingPaneSize {
                 width: sixty_percent,
                 height: sixty_percent,
@@ -2770,7 +2777,10 @@ fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
             ],
         },
         FloatingPaneLayout {
-            pane_id: build_test_cells_floating_pane_id(),
+            pane_ids: vec![
+                build_test_cells_first_pane_id(),
+                build_test_cells_second_pane_id(),
+            ],
             desired_size: FloatingPaneSize {
                 width: FloatingPaneDimension::Cells(
                     std::num::NonZeroU16::new(30).expect("not zero"),
@@ -2804,14 +2814,14 @@ fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
 
 /// One session with one tab no client views, the floating panes of
 /// [`build_test_floating_pane_layouts`], and the fixture client focused on
-/// the `30`-column floating pane.
+/// the first pane of the `30`-column floating pane.
 fn build_test_floating_session_layout() -> SessionLayout {
     SessionLayout {
         floating_panes: build_test_floating_pane_layouts(),
         ..build_test_session_layout(
             LayoutNode::Pane(build_test_first_pane_id()),
             Vec::new(),
-            Some(build_test_cells_floating_pane_id()),
+            Some(build_test_cells_first_pane_id()),
         )
     }
 }
@@ -2828,7 +2838,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
     pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
       client client-00000000-0000-0000-0000-000000000003 rect 16,4 48x13 layer 0 position default
       client client-00000000-0000-0000-0000-000000000007 minimized position pinned 20,5
-    pane pane-00000000-0000-0000-0000-000000000008 asks 30x50% size 30x11
+    panes pane-00000000-0000-0000-0000-000000000008, pane-00000000-0000-0000-0000-000000000010 asks 30x50% size 30x11
       client client-00000000-0000-0000-0000-000000000003 rect 2,1 30x11 layer 1 position moved 2,1
       client client-00000000-0000-0000-0000-000000000007 minimized position default
   clients
@@ -2892,7 +2902,7 @@ fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
             }],
             "floating_panes": [
                 {
-                    "pane_id": "pane-00000000-0000-0000-0000-000000000006",
+                    "pane_ids": ["pane-00000000-0000-0000-0000-000000000006"],
                     "desired_size": { "width": "60%", "height": "60%" },
                     "solved_size": { "column_count": 48, "row_count": 13 },
                     "client_views": [
@@ -2912,7 +2922,10 @@ fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
                     ]
                 },
                 {
-                    "pane_id": "pane-00000000-0000-0000-0000-000000000008",
+                    "pane_ids": [
+                        "pane-00000000-0000-0000-0000-000000000008",
+                        "pane-00000000-0000-0000-0000-000000000010"
+                    ],
                     "desired_size": { "width": "30", "height": "50%" },
                     "solved_size": { "column_count": 30, "row_count": 11 },
                     "client_views": [

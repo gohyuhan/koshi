@@ -54,8 +54,8 @@ use koshi_config::types::WheelScroll;
 use koshi_core::command::{
     ClearSelectionArgs, ClosePaneArgs, Command, CopyArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
     GridPosition, MoveFloatingPaneArgs, PanePlacementAnchor, Selection, SelectionKind,
-    SetPaneMinimizedArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget, TogglePanePinnedArgs,
-    VisualCommand,
+    SetFloatingPaneMinimizedArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget,
+    ToggleFloatingPanePinnedArgs, VisualCommand,
 };
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
@@ -1377,19 +1377,19 @@ impl Client {
                 vec![build_focus_pane_action(self.client_id, pane_id)]
             }
             HitRegion::PanePinToggle { pane_id } => {
-                vec![MouseAction::Command(Box::new(Command::TogglePanePinned(
-                    TogglePanePinnedArgs {
+                vec![MouseAction::Command(Box::new(
+                    Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs {
                         pane_id: Some(pane_id),
-                    },
-                )))]
+                    }),
+                ))]
             }
             HitRegion::PaneMinimizeButton { pane_id } => {
-                vec![MouseAction::Command(Box::new(Command::SetPaneMinimized(
-                    SetPaneMinimizedArgs {
+                vec![MouseAction::Command(Box::new(
+                    Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                         pane_id: Some(pane_id),
                         is_minimized: true,
-                    },
-                )))]
+                    }),
+                ))]
             }
             HitRegion::PaneCloseButton { pane_id } => {
                 vec![MouseAction::Command(Box::new(Command::ClosePane(

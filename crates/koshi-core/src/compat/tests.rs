@@ -1,6 +1,7 @@
 //! Tests for the versioned-surface table: that every surface in it follows the
-//! rule, that the check catches each way of breaking it, and that the table
-//! holds exactly the surfaces and numbers it pins.
+//! rule, that the check catches each way of breaking it, that the table holds
+//! exactly the surfaces and numbers it pins, and, on a stable release tag, that
+//! every surface records this release as released.
 
 use super::*;
 
@@ -12,6 +13,29 @@ fn every_surface_follows_the_version_rule() {
         .collect();
 
     assert_eq!(version_problems, Vec::<String>::new());
+}
+
+/// Every surface's `released_version` is `Some` of its `maximum_version`. Each
+/// failing row is `(surface_name, maximum_version, released_version)`. The
+/// test fails from the first breaking change of a release cycle until the
+/// release commit sets the numbers. `release.yml` runs it with `--ignored` on
+/// each `vX.Y.Z` tag.
+#[test]
+#[ignore = "runs on stable release tags only"]
+fn every_surface_records_this_release_as_released() {
+    let unrecorded_surfaces: Vec<(&str, u32, Option<u32>)> = SURFACES
+        .iter()
+        .filter(|surface| surface.released_version != Some(surface.maximum_version))
+        .map(|surface| {
+            (
+                surface.surface_name,
+                surface.maximum_version,
+                surface.released_version,
+            )
+        })
+        .collect();
+
+    assert_eq!(unrecorded_surfaces, Vec::<(&str, u32, Option<u32>)>::new());
 }
 
 #[test]
@@ -139,7 +163,7 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 
 /// Each row is `(surface_name, minimum_version, maximum_version,
 /// released_version)`. `released_version` is the `max` the surface reads in
-/// the `v0.5.0` tag, which is the last release; `None` marks a surface that tag
+/// the `v0.6.0` tag, which is the last release; `None` marks a surface that tag
 /// does not carry.
 #[test]
 fn the_table_pins_every_surface_by_name_and_numbers() {
@@ -158,15 +182,15 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
     assert_eq!(
         surface_versions,
         [
-            ("session protocol", 5, 5, Some(4)),
+            ("session protocol", 6, 6, Some(5)),
             ("control plane", 3, 3, Some(3)),
-            ("supervisor link", 2, 3, Some(2)),
+            ("supervisor link", 2, 3, Some(3)),
             ("token store format", 1, 2, Some(2)),
             ("remote protocol", 2, 2, Some(2)),
             ("saved server file format", 1, 2, Some(2)),
             ("remote certificate file format", 1, 2, Some(2)),
             ("remote access record format", 1, 2, Some(2)),
-            ("resume file format", 1, 5, Some(4)),
+            ("resume file format", 1, 6, Some(5)),
             ("config schema", 1, 2, Some(2)),
             ("endpoint file format", 1, 2, Some(2)),
             ("program file format", 1, 1, Some(1)),

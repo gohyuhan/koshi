@@ -3117,7 +3117,7 @@ fn get_frame_floating_pane_move_command_id(
 fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_frame() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 10, row: 4 },
@@ -3131,7 +3131,7 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         },
     );
     let move_args = MoveFloatingPaneArgs {
-        pane_id: floating_pane_id,
+        pane_id: htop_pane_id,
         top_left_cell: Point { column: 2, row: 3 },
     };
     let command_id = CommandId::new();
@@ -3158,7 +3158,7 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         Some(command_id)
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         moved_outer_rect
     );
 
@@ -3178,7 +3178,7 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         Some(repeated_command_id)
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         moved_outer_rect
     );
 
@@ -3189,12 +3189,12 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         key_binding_command_id,
         CommandSource::from_key_binding(client_id),
         Command::MoveFloatingPane(MoveFloatingPaneArgs {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             top_left_cell: Point { column: 4, row: 5 },
         }),
     ));
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id).origin,
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id).origin,
         Point { column: 4, row: 5 }
     );
     assert_eq!(
@@ -3208,12 +3208,12 @@ fn a_floating_pane_move_from_the_clients_own_connection_is_named_in_its_next_fra
         CommandId::new(),
         CommandSource::from_external_cli(None, Some(client_id)),
         Command::MoveFloatingPane(MoveFloatingPaneArgs {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             top_left_cell: Point { column: 6, row: 7 },
         }),
     ));
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id).origin,
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id).origin,
         Point { column: 6, row: 7 }
     );
     assert_eq!(
@@ -3227,7 +3227,7 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
     // A pinned pane refuses a move.
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 10, row: 4 },
@@ -3241,7 +3241,7 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
         vec![WireMouseAction::MoveFloatingPane {
             command_id,
             command_args: MoveFloatingPaneArgs {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 top_left_cell: Point { column: 2, row: 3 },
             },
         }],
@@ -3263,7 +3263,7 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
                 command_id,
                 fired_action: None,
                 reject_reason: RejectReason::InvalidState,
-                help: Some(format!("{floating_pane_id} is pinned; unpin it to move it")),
+                help: Some(format!("{htop_pane_id} is pinned; unpin it to move it")),
             },
             Delivery::MouseAnswer {
                 request_id: 6,
@@ -3272,7 +3272,7 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
         ]
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id).origin,
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id).origin,
         Point { column: 10, row: 4 }
     );
     assert_eq!(
@@ -3285,7 +3285,7 @@ fn a_refused_floating_pane_move_is_rejected_ahead_of_an_empty_answer() {
 fn a_refused_command_a_mouse_round_carries_is_rejected_to_that_client_ahead_of_the_answer() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 10, row: 4 },
@@ -3297,7 +3297,7 @@ fn a_refused_command_a_mouse_round_carries_is_rejected_to_that_client_ahead_of_t
         8,
         vec![WireMouseAction::Command(Box::new(
             Command::MoveFloatingPane(MoveFloatingPaneArgs {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 top_left_cell: Point { column: 2, row: 3 },
             }),
         ))],
@@ -3325,7 +3325,7 @@ fn a_refused_command_a_mouse_round_carries_is_rejected_to_that_client_ahead_of_t
     assert_eq!(*reject_reason, RejectReason::InvalidState);
     assert_eq!(
         *help,
-        Some(format!("{floating_pane_id} is pinned; unpin it to move it"))
+        Some(format!("{htop_pane_id} is pinned; unpin it to move it"))
     );
     assert_eq!(
         *mouse_answer,
@@ -3383,7 +3383,7 @@ fn a_floating_pane_right_border_drag_answers_the_cells_it_grew() {
         build_server_with_mouse_event_queue();
     // Drawn at column 30 of the 80-column pane area: 10 columns of room on
     // the right.
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 30, row: 4 },
@@ -3394,7 +3394,7 @@ fn a_floating_pane_right_border_drag_answers_the_cells_it_grew() {
         client_id,
         7,
         vec![WireMouseAction::Resize {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             border_side: Direction::Right,
             resize_step: 1,
             requested_cell_count: 15,
@@ -3406,7 +3406,7 @@ fn a_floating_pane_right_border_drag_answers_the_cells_it_grew() {
         vec![(
             7,
             vec![MouseAnswer::Resized {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 border_side: Direction::Right,
                 resize_step: 1,
                 applied_cell_count: 10,
@@ -3414,7 +3414,7 @@ fn a_floating_pane_right_border_drag_answers_the_cells_it_grew() {
         )]
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         Rect::from_origin_and_size(
             Point { column: 30, row: 4 },
             Size {
@@ -3437,7 +3437,7 @@ fn each_floating_pane_border_drag_answers_the_cells_it_shrank() {
     for (border_side, top_left_cell, column_count, row_count) in shrunk_outer_rect_by_border_side {
         let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
             build_server_with_mouse_event_queue();
-        let floating_pane_id = create_forty_by_twelve_floating_pane(
+        let htop_pane_id = create_forty_by_twelve_floating_pane(
             &mut server,
             client_id,
             Point { column: 30, row: 4 },
@@ -3448,7 +3448,7 @@ fn each_floating_pane_border_drag_answers_the_cells_it_shrank() {
             client_id,
             7,
             vec![WireMouseAction::Resize {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 border_side,
                 resize_step: -1,
                 requested_cell_count: 2,
@@ -3460,7 +3460,7 @@ fn each_floating_pane_border_drag_answers_the_cells_it_shrank() {
             vec![(
                 7,
                 vec![MouseAnswer::Resized {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     border_side,
                     resize_step: -1,
                     applied_cell_count: 2,
@@ -3469,7 +3469,7 @@ fn each_floating_pane_border_drag_answers_the_cells_it_shrank() {
             "{border_side:?}"
         );
         assert_eq!(
-            get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+            get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
             Rect::from_origin_and_size(
                 top_left_cell,
                 Size {
@@ -3486,7 +3486,7 @@ fn each_floating_pane_border_drag_answers_the_cells_it_shrank() {
 fn a_floating_pane_border_drag_from_a_client_too_short_to_draw_it_answers_no_cells() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 30, row: 4 },
@@ -3518,7 +3518,7 @@ fn a_floating_pane_border_drag_from_a_client_too_short_to_draw_it_answers_no_cel
         client_id,
         7,
         vec![WireMouseAction::Resize {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             border_side: Direction::Right,
             resize_step: 1,
             requested_cell_count: 3,
@@ -3530,7 +3530,7 @@ fn a_floating_pane_border_drag_from_a_client_too_short_to_draw_it_answers_no_cel
         vec![(
             7,
             vec![MouseAnswer::Resized {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 border_side: Direction::Right,
                 resize_step: 1,
                 applied_cell_count: 0,
@@ -3543,7 +3543,7 @@ fn a_floating_pane_border_drag_from_a_client_too_short_to_draw_it_answers_no_cel
 fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its_border_stays() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 20, row: 5 },
@@ -3562,7 +3562,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its
         None,
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         Rect::from_origin_and_size(
             Point { column: 10, row: 5 },
             Size {
@@ -3576,7 +3576,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its
         client_id,
         7,
         vec![WireMouseAction::Resize {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             border_side: Direction::Right,
             resize_step: -1,
             requested_cell_count: 3,
@@ -3588,7 +3588,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its
         vec![(
             7,
             vec![MouseAnswer::Resized {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 border_side: Direction::Right,
                 resize_step: -1,
                 applied_cell_count: 3,
@@ -3596,7 +3596,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its
         )]
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         Rect::from_origin_and_size(
             Point { column: 13, row: 5 },
             Size {
@@ -3610,7 +3610,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_answers_the_cells_it_shrank_though_its
 #[test]
 fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_border_is_dragged() {
     let (mut server, _fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 20, row: 5 },
@@ -3641,7 +3641,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_borde
                     row: border_row,
                 },
             ) == HitRegion::PaneBorder {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 side: Direction::Right,
                 corner_horizontal_side: None,
             }
@@ -3666,7 +3666,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_borde
         build_left_drag_input(border_column - 3, border_row),
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         shrunk_outer_rect
     );
 
@@ -3678,7 +3678,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_borde
     );
 
     assert_eq!(
-        get_floating_pane_outer_rect(&server, client_id, floating_pane_id),
+        get_floating_pane_outer_rect(&server, client_id, htop_pane_id),
         shrunk_outer_rect
     );
 }
@@ -3687,7 +3687,7 @@ fn a_pinned_floating_pane_drawn_pulled_in_shrinks_only_as_far_as_its_right_borde
 fn a_floating_pane_border_drag_from_a_too_short_client_answers_the_cells_a_taller_client_allows() {
     let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         client_id,
         Point { column: 30, row: 4 },
@@ -3723,7 +3723,7 @@ fn a_floating_pane_border_drag_from_a_too_short_client_answers_the_cells_a_talle
         client_id,
         7,
         vec![WireMouseAction::Resize {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             border_side: Direction::Right,
             resize_step: 1,
             requested_cell_count: 3,
@@ -3735,21 +3735,21 @@ fn a_floating_pane_border_drag_from_a_too_short_client_answers_the_cells_a_talle
         vec![(
             7,
             vec![MouseAnswer::Resized {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 border_side: Direction::Right,
                 resize_step: 1,
                 applied_cell_count: 3,
             }]
         )]
     );
-    let (_, floating_member) = server
+    let (_, floating_pane) = server
         .get_session_for_client(client_id)
         .expect("session")
         .floating_set
-        .find_member(floating_pane_id)
-        .expect("floating member");
+        .find_floating_pane_by_pane_id(htop_pane_id)
+        .expect("the pane is floating");
     assert_eq!(
-        floating_member.solved_size,
+        floating_pane.get_solved_size(),
         Size {
             column_count: 43,
             row_count: 12,
@@ -3760,7 +3760,7 @@ fn a_floating_pane_border_drag_from_a_too_short_client_answers_the_cells_a_talle
 #[test]
 fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
     let (mut server, _fake_pty_backend, alice_client_id) = build_runtime_with_fake_pty_backend();
-    let floating_pane_id = create_forty_by_twelve_floating_pane(
+    let htop_pane_id = create_forty_by_twelve_floating_pane(
         &mut server,
         alice_client_id,
         Point { column: 10, row: 4 },
@@ -3792,7 +3792,7 @@ fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
         compute_separated_event_time(),
     );
     assert_eq!(
-        get_floating_pane_outer_rect(&server, alice_client_id, floating_pane_id).origin,
+        get_floating_pane_outer_rect(&server, alice_client_id, htop_pane_id).origin,
         Point { column: 10, row: 4 },
         "the drag reaches no session"
     );
@@ -3809,7 +3809,7 @@ fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
     );
 
     assert_eq!(
-        get_floating_pane_outer_rect(&server, alice_client_id, floating_pane_id).origin,
+        get_floating_pane_outer_rect(&server, alice_client_id, htop_pane_id).origin,
         Point { column: 15, row: 5 }
     );
     assert_eq!(

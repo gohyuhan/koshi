@@ -292,25 +292,25 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         ("toggle-pane-floating", Command::TogglePaneFloating),
         (
             "pin-pane",
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: None,
                 is_pinned: true,
             }),
         ),
         (
             "unpin-pane",
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: None,
                 is_pinned: false,
             }),
         ),
         (
             "toggle-pane-pinned",
-            Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
+            Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs { pane_id: None }),
         ),
         (
             "minimize-pane",
-            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                 pane_id: None,
                 is_minimized: true,
             }),
@@ -482,15 +482,15 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::TogglePaneFloating => Some(CommandKind::TogglePaneFloating),
         Command::ScrollPane(_) => Some(CommandKind::ScrollPane),
         Command::MoveFloatingPane(_) => Some(CommandKind::MoveFloatingPane),
-        Command::SetPanePinned(_) => Some(CommandKind::SetPanePinned),
-        Command::TogglePanePinned(_) => Some(CommandKind::TogglePanePinned),
-        Command::SetPaneMinimized(_) => Some(CommandKind::SetPaneMinimized),
+        Command::SetFloatingPanePinned(_) => Some(CommandKind::SetFloatingPanePinned),
+        Command::ToggleFloatingPanePinned(_) => Some(CommandKind::ToggleFloatingPanePinned),
+        Command::SetFloatingPaneMinimized(_) => Some(CommandKind::SetFloatingPaneMinimized),
         Command::SetAllFloatingPanesMinimized(_) => Some(CommandKind::SetAllFloatingPanesMinimized),
         Command::ToggleAllFloatingPanesMinimized => {
             Some(CommandKind::ToggleAllFloatingPanesMinimized)
         }
         Command::Quit(_) => Some(CommandKind::Quit),
-        Command::TogglePaneMinimized(_)
+        Command::ToggleFloatingPaneMinimized(_)
         | Command::KillSession
         | Command::Visual(_)
         | Command::Detach(_)

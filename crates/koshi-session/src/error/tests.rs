@@ -10,7 +10,8 @@
 //! literal.
 
 use super::*;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId};
 
 use crate::session::lifecycle::{SessionLifecycle, SessionLifecycleEvent};
 
@@ -327,89 +328,185 @@ fn floating_set_error_display_names_the_repeated_pane_and_the_limit() {
 #[test]
 fn too_many_floating_panes_display_names_the_count_and_the_limit() {
     assert_eq!(
-        SessionConsistencyError::TooManyFloatingPanes { member_count: 13 }.to_string(),
-        "floating panes list 13 panes, more than 12"
+        SessionConsistencyError::TooManyFloatingPanes {
+            floating_pane_count: 13
+        }
+        .to_string(),
+        "the session holds 13 floating panes, more than 12"
     );
 }
 
 #[test]
-fn floating_member_errors_display_the_pane() {
+fn floating_pane_errors_display_the_floating_pane_and_the_pane() {
+    let floating_pane_id = FloatingPaneId::new();
+    let other_floating_pane_id = FloatingPaneId::new();
     let pane_id = PaneId::new();
     let (first_tab_id, second_tab_id) = (TabId::new(), TabId::new());
+    let (solved_layout_size, floating_layout_size) = (
+        Size {
+            column_count: 40,
+            row_count: 10,
+        },
+        Size {
+            column_count: 40,
+            row_count: 9,
+        },
+    );
 
-    assert_eq!(
-        SessionConsistencyError::FloatingPaneNotInRegistry { pane_id }.to_string(),
-        format!("floating pane {pane_id:?} has no registry record")
-    );
-    assert_eq!(
-        SessionConsistencyError::DuplicateFloatingPane { pane_id }.to_string(),
-        format!("floating panes list pane {pane_id:?} more than once")
-    );
-    assert_eq!(
-        SessionConsistencyError::FloatingPaneInLayout {
-            pane_id,
-            tab_ids: vec![first_tab_id, second_tab_id],
-        }
-        .to_string(),
-        format!(
-            "floating pane {pane_id:?} is also a layout leaf in tabs [{first_tab_id:?}, {second_tab_id:?}]"
-        )
-    );
+    for (consistency_error, expected_display) in [
+        (
+            SessionConsistencyError::EmptyFloatingPane { floating_pane_id },
+            format!("floating pane {floating_pane_id:?} holds no pane"),
+        ),
+        (
+            SessionConsistencyError::DuplicateFloatingPaneId { floating_pane_id },
+            format!("more than one floating pane carries the id {floating_pane_id:?}"),
+        ),
+        (
+            SessionConsistencyError::FloatingPaneSolveSizeStale {
+                floating_pane_id,
+                solved_layout_size,
+                floating_layout_size,
+            },
+            format!(
+                "floating pane {floating_pane_id:?} is solved at {solved_layout_size:?}, and its tree size is {floating_layout_size:?}"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingPaneSolveStale { floating_pane_id },
+            format!(
+                "floating pane {floating_pane_id:?} stores a solve that its tree does not give"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingPaneNotInRegistry { pane_id },
+            format!("floating pane holds pane {pane_id:?} with no registry record"),
+        ),
+        (
+            SessionConsistencyError::PaneInMultipleFloatingPanes {
+                pane_id,
+                floating_pane_ids: vec![floating_pane_id, other_floating_pane_id],
+            },
+            format!(
+                "pane {pane_id:?} is a leaf of floating panes [{floating_pane_id:?}, {other_floating_pane_id:?}]"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingPaneInLayout {
+                pane_id,
+                tab_ids: vec![first_tab_id, second_tab_id],
+            },
+            format!(
+                "floating pane holds pane {pane_id:?}, which is also a layout leaf in tabs [{first_tab_id:?}, {second_tab_id:?}]"
+            ),
+        ),
+    ] {
+        assert_eq!(consistency_error.to_string(), expected_display);
+    }
 }
 
 #[test]
-fn client_floating_view_errors_display_the_client_and_the_pane() {
+fn client_floating_view_errors_display_the_client_and_the_floating_pane() {
     let client_id = ClientId::new();
+    let floating_pane_id = FloatingPaneId::new();
     let pane_id = PaneId::new();
 
-    assert_eq!(
-        SessionConsistencyError::FloatingViewTargetMissing {
-            client_id,
-            pane_id,
-        }
-        .to_string(),
-        format!("client {client_id:?} stores a floating view of pane {pane_id:?}, which is not floating")
-    );
-    assert_eq!(
-        SessionConsistencyError::FloatingViewMissing { client_id, pane_id }.to_string(),
-        format!("client {client_id:?} holds no floating view of floating pane {pane_id:?}")
-    );
-    assert_eq!(
-        SessionConsistencyError::ShownFloatingPaneMissing { client_id, pane_id }.to_string(),
-        format!("client {client_id:?} shows pane {pane_id:?} as floating, and it is not floating")
-    );
-    assert_eq!(
-        SessionConsistencyError::DuplicateShownFloatingPane { client_id, pane_id }.to_string(),
-        format!("client {client_id:?} shows floating pane {pane_id:?} more than once")
-    );
-    assert_eq!(
-        SessionConsistencyError::FloatingPaneShownStateMismatch {
-            client_id,
-            pane_id,
-            is_minimized: true,
-        }
-        .to_string(),
-        format!(
-            "client {client_id:?} view of floating pane {pane_id:?} says is_minimized true, which its shown floating panes contradict"
-        )
-    );
-    assert_eq!(
-        SessionConsistencyError::FloatingFocusNotNewestShown {
-            client_id,
-            focused_pane_id: None,
-            newest_shown_pane_id: Some(pane_id),
-        }
-        .to_string(),
-        format!(
-            "client {client_id:?} focuses floating pane None, and the newest floating pane it shows is Some({pane_id:?})"
-        )
-    );
-    assert_eq!(
-        SessionConsistencyError::UndrawableFloatingPaneShown { client_id, pane_id }.to_string(),
-        format!(
-            "client {client_id:?} cannot draw floating panes and shows floating pane {pane_id:?}"
-        )
-    );
+    for (consistency_error, expected_display) in [
+        (
+            SessionConsistencyError::FloatingViewTargetMissing {
+                client_id,
+                floating_pane_id,
+            },
+            format!(
+                "client {client_id:?} stores a view of floating pane {floating_pane_id:?}, which the session does not hold"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingViewMissing {
+                client_id,
+                floating_pane_id,
+            },
+            format!("client {client_id:?} holds no view of floating pane {floating_pane_id:?}"),
+        ),
+        (
+            SessionConsistencyError::FloatingFocusHistoryEmpty {
+                client_id,
+                floating_pane_id,
+            },
+            format!(
+                "client {client_id:?} view of floating pane {floating_pane_id:?} focuses no pane"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingFocusTargetMissing {
+                client_id,
+                floating_pane_id,
+                pane_id,
+            },
+            format!(
+                "client {client_id:?} remembers pane {pane_id:?} in floating pane {floating_pane_id:?}, whose tree does not hold it"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingZoomTargetMissing {
+                client_id,
+                floating_pane_id,
+                pane_id,
+            },
+            format!(
+                "client {client_id:?} is zoomed on pane {pane_id:?} in floating pane {floating_pane_id:?}, whose tree does not hold it"
+            ),
+        ),
+        (
+            SessionConsistencyError::ShownFloatingPaneMissing {
+                client_id,
+                floating_pane_id,
+            },
+            format!(
+                "client {client_id:?} shows floating pane {floating_pane_id:?}, which the session does not hold"
+            ),
+        ),
+        (
+            SessionConsistencyError::DuplicateShownFloatingPane {
+                client_id,
+                floating_pane_id,
+            },
+            format!(
+                "client {client_id:?} shows floating pane {floating_pane_id:?} more than once"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingPaneShownStateMismatch {
+                client_id,
+                floating_pane_id,
+                is_minimized: true,
+            },
+            format!(
+                "client {client_id:?} view of floating pane {floating_pane_id:?} says is_minimized true, which its shown floating panes contradict"
+            ),
+        ),
+        (
+            SessionConsistencyError::FloatingFocusNotNewestShown {
+                client_id,
+                focused_floating_pane_id: None,
+                newest_shown_floating_pane_id: Some(floating_pane_id),
+            },
+            format!(
+                "client {client_id:?} focuses floating pane None, and the newest floating pane it shows is Some({floating_pane_id:?})"
+            ),
+        ),
+        (
+            SessionConsistencyError::UndrawableFloatingPaneShown {
+                client_id,
+                floating_pane_id,
+            },
+            format!(
+                "client {client_id:?} cannot draw floating panes and shows floating pane {floating_pane_id:?}"
+            ),
+        ),
+    ] {
+        assert_eq!(consistency_error.to_string(), expected_display);
+    }
 }
 
 #[test]

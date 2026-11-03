@@ -1280,7 +1280,7 @@ fn build_whole_source_rect(pixel_width: u32, pixel_height: u32) -> ImageSourceRe
 #[test]
 fn a_floating_panes_image_paint_targets_its_content_cells_from_the_pane_area_origin() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
-    let floating_pane_id = push_floating_pane(
+    let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(8, 0, 20, 7),
         vec![build_image_placement(1, 8, 4, (1, 2), 4, 2)],
@@ -1309,7 +1309,7 @@ fn a_floating_panes_image_paint_targets_its_content_cells_from_the_pane_area_ori
     assert_eq!(
         list_paint_targets(&image_paints),
         [(
-            floating_pane_id,
+            floating_slot_pane_id,
             RatatuiRect::new(11, 5, 4, 2),
             build_whole_source_rect(8, 4)
         )]
@@ -1356,7 +1356,7 @@ fn a_later_floating_pane_hides_an_earlier_ones_image_and_an_earlier_one_hides_no
         build_cell_rect(0, 0, 20, 8),
         vec![build_image_placement(1, 8, 4, (0, 0), 4, 2)],
     );
-    let upper_floating_pane_id = push_floating_pane(
+    let upper_floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(3, 2, 20, 6),
         vec![build_image_placement(1, 8, 2, (0, 0), 4, 1)],
@@ -1375,7 +1375,7 @@ fn a_later_floating_pane_hides_an_earlier_ones_image_and_an_earlier_one_hides_no
     assert_eq!(
         list_paint_targets(&image_paints),
         [(
-            upper_floating_pane_id,
+            upper_floating_slot_pane_id,
             RatatuiRect::new(4, 5, 4, 1),
             build_whole_source_rect(8, 2)
         )]
@@ -1425,7 +1425,7 @@ fn while_pane_placement_shows_no_floating_image_is_painted_and_no_tiled_image_is
 #[test]
 fn a_floating_panes_image_is_cut_where_its_content_passes_the_pane_area() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
-    let floating_pane_id = push_floating_pane(
+    let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(30, 2, 20, 6),
         vec![build_image_placement(1, 24, 4, (0, 0), 12, 2)],
@@ -1445,7 +1445,7 @@ fn a_floating_panes_image_is_cut_where_its_content_passes_the_pane_area() {
     assert_eq!(
         list_paint_targets(&image_paints),
         [(
-            floating_pane_id,
+            floating_slot_pane_id,
             RatatuiRect::new(31, 6, 9, 1),
             build_whole_source_rect(18, 2)
         )]
@@ -1455,12 +1455,12 @@ fn a_floating_panes_image_is_cut_where_its_content_passes_the_pane_area() {
 #[test]
 fn the_image_cell_snapshot_writes_no_floating_pane_cell_past_the_pane_area() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
-    let floating_pane_id = push_floating_pane(
+    let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(4, 2, 6, 6),
         Vec::new(),
     );
-    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
+    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
     update_pane_grid(floating_pane_snapshot, |floating_grid| {
         *floating_grid
             .get_cell_mut(0, 0)
@@ -1496,12 +1496,12 @@ fn the_image_cell_snapshot_writes_no_floating_pane_cell_past_the_pane_area() {
 #[test]
 fn a_snapshot_of_part_of_the_viewport_places_each_floating_pane_as_the_whole_viewport_does() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
-    let floating_pane_id = push_floating_pane(
+    let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(4, 2, 6, 6),
         Vec::new(),
     );
-    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
+    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
     update_pane_grid(floating_pane_snapshot, |floating_grid| {
         *floating_grid
             .get_cell_mut(0, 0)
@@ -1558,12 +1558,12 @@ fn the_image_cell_snapshot_writes_each_floating_pane_over_the_tiled_cells() {
             }
         }
     });
-    let floating_pane_id = push_floating_pane(
+    let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
         build_cell_rect(4, 0, 6, 5),
         Vec::new(),
     );
-    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id);
+    let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
     update_pane_grid(floating_pane_snapshot, |floating_grid| {
         *floating_grid
             .get_cell_mut(0, 0)

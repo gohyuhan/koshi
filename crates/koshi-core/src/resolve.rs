@@ -33,8 +33,8 @@ use crate::action::{ActionHandlerReference, ActionReference, ClientActionKind};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget, PlacePaneArgs, QuitArgs,
-    ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetPaneMinimizedArgs,
-    SetPanePinnedArgs, TabTarget, ToggleLockModeArgs, TogglePanePinnedArgs,
+    ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs,
+    SetFloatingPanePinnedArgs, TabTarget, ToggleFloatingPanePinnedArgs, ToggleLockModeArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -191,16 +191,18 @@ fn resolve_core_action(
             },
         }),
         "toggle-pane-floating" => Command::TogglePaneFloating,
-        "pin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
+        "pin-pane" => Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
             pane_id: None,
             is_pinned: true,
         }),
-        "unpin-pane" => Command::SetPanePinned(SetPanePinnedArgs {
+        "unpin-pane" => Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
             pane_id: None,
             is_pinned: false,
         }),
-        "toggle-pane-pinned" => Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
-        "minimize-pane" => Command::SetPaneMinimized(SetPaneMinimizedArgs {
+        "toggle-pane-pinned" => {
+            Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs { pane_id: None })
+        }
+        "minimize-pane" => Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
             pane_id: None,
             is_minimized: true,
         }),

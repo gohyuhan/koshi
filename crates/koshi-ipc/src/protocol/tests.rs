@@ -555,13 +555,13 @@ fn get_variant_tag(encoded_json: &serde_json::Value) -> String {
 }
 
 #[test]
-fn the_protocol_version_this_build_speaks_is_five() {
-    assert_eq!(PROTOCOL_VERSION, 5);
+fn the_protocol_version_this_build_speaks_is_six() {
+    assert_eq!(PROTOCOL_VERSION, 6);
 }
 
 #[test]
-fn the_lowest_protocol_version_this_build_speaks_is_five() {
-    assert_eq!(MIN_PROTOCOL_VERSION, 5);
+fn the_lowest_protocol_version_this_build_speaks_is_six() {
+    assert_eq!(MIN_PROTOCOL_VERSION, 6);
 }
 
 #[test]

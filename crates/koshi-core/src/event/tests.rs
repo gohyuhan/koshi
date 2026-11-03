@@ -186,51 +186,54 @@ fn selection_events_with_and_without_a_selection_round_trip_through_json() {
 }
 
 #[test]
-fn floating_pane_view_events_encode_the_client_the_pane_and_the_new_state() {
+fn floating_pane_view_events_encode_the_client_every_pane_and_the_new_state() {
     let client_id = ClientId::new();
     let pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
 
     assert_eq!(
         serde_json::to_value(Event::FloatingPaneMoved(FloatingPaneMoved {
             client_id,
-            pane_id,
+            pane_ids: vec![pane_id, second_pane_id],
             top_left_cell: Point { column: 70, row: 2 },
         }))
         .expect("serialize floating pane moved"),
         serde_json::json!({
             "FloatingPaneMoved": {
                 "client_id": client_id,
-                "pane_id": pane_id,
+                "pane_ids": [pane_id, second_pane_id],
                 "top_left_cell": { "column": 70, "row": 2 },
             }
         })
     );
     assert_eq!(
-        serde_json::to_value(Event::PanePinChanged(PanePinChanged {
+        serde_json::to_value(Event::FloatingPanePinChanged(FloatingPanePinChanged {
             client_id,
-            pane_id,
+            pane_ids: vec![pane_id, second_pane_id],
             is_pinned: false,
         }))
-        .expect("serialize pane pin changed"),
+        .expect("serialize floating pane pin changed"),
         serde_json::json!({
-            "PanePinChanged": {
+            "FloatingPanePinChanged": {
                 "client_id": client_id,
-                "pane_id": pane_id,
+                "pane_ids": [pane_id, second_pane_id],
                 "is_pinned": false,
             }
         })
     );
     assert_eq!(
-        serde_json::to_value(Event::PaneMinimizedChanged(PaneMinimizedChanged {
-            client_id,
-            pane_id,
-            is_minimized: true,
-        }))
-        .expect("serialize pane minimized changed"),
+        serde_json::to_value(Event::FloatingPaneMinimizedChanged(
+            FloatingPaneMinimizedChanged {
+                client_id,
+                pane_ids: vec![pane_id, second_pane_id],
+                is_minimized: true,
+            }
+        ))
+        .expect("serialize floating pane minimized changed"),
         serde_json::json!({
-            "PaneMinimizedChanged": {
+            "FloatingPaneMinimizedChanged": {
                 "client_id": client_id,
-                "pane_id": pane_id,
+                "pane_ids": [pane_id, second_pane_id],
                 "is_minimized": true,
             }
         })
@@ -493,26 +496,26 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 24] {
         (
             Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: ClientId::new(),
-                pane_id: PaneId::new(),
+                pane_ids: vec![PaneId::new()],
                 top_left_cell: Point { column: 4, row: 2 },
             }),
             "FloatingPaneMoved",
         ),
         (
-            Event::PanePinChanged(PanePinChanged {
+            Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: ClientId::new(),
-                pane_id: PaneId::new(),
+                pane_ids: vec![PaneId::new()],
                 is_pinned: true,
             }),
-            "PanePinChanged",
+            "FloatingPanePinChanged",
         ),
         (
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id: ClientId::new(),
-                pane_id: PaneId::new(),
+                pane_ids: vec![PaneId::new()],
                 is_minimized: false,
             }),
-            "PaneMinimizedChanged",
+            "FloatingPaneMinimizedChanged",
         ),
         (Event::Quit(QuitCause::Requested), "Quit"),
         (Event::Restarting, "Restarting"),

@@ -24,15 +24,15 @@ use koshi_core::command::{
     GridPosition, LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
     NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ResizePaneArgs,
     ScrollPaneArgs, Selection, SelectionKind, SetAllFloatingPanesMinimizedArgs,
-    SetPaneMinimizedArgs, SetPanePinnedArgs, TabTarget, TiledPlacementTarget,
-    TogglePaneMinimizedArgs, TogglePanePinnedArgs, VisualCommand, WriteToPaneArgs,
+    SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs, TabTarget, TiledPlacementTarget,
+    ToggleFloatingPaneMinimizedArgs, ToggleFloatingPanePinnedArgs, VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::{GRACEFUL_TIMEOUT_DURATION, MAX_FLOATING_PANES_PER_SESSION};
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, PixelCellSize, Size,
     SplitDirection,
 };
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_core::process::{ExitStatus, PtySize, ShellKind, SpawnSpec};
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
@@ -45,8 +45,8 @@ use koshi_pty::error::PtyError;
 use koshi_session::client::{
     compute_default_pane_area_size, Client, ClientRegistry, FloatingPaneView,
 };
-use koshi_session::session::pane_ops::NewPaneSpec;
-use koshi_session::session::state::{FloatingMember, Session, SessionViewChanges, Tab};
+use koshi_session::session::pane_ops::{self, NewPaneSpec};
+use koshi_session::session::state::{FloatingPane, Session, SessionViewChanges, Tab};
 use koshi_session::session::tab_ops;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -60,8 +60,8 @@ use koshi_renderer::snapshot::{Delivery, PlacementSnapshot};
 
 use super::*;
 use koshi_core::event::{
-    PaneClosing, PaneCreated, PaneFocused, PaneMinimizedChanged, PaneRemoved, QuitCause, TabClosed,
-    TabFocused, TerminalTooSmallCause, TerminalTooSmallEntered,
+    FloatingPaneMinimizedChanged, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, QuitCause,
+    TabClosed, TabFocused, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_test_support::fixtures::{build_new_pane_args, build_spawn_spec};
 
@@ -511,8 +511,9 @@ const COMMAND_VARIANT_COUNT: usize = 30;
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
 /// id no runtime holds, `MoveFloatingPane` names the same pane id on every runtime, one
-/// no runtime holds, and `SetPanePinned`, `TogglePanePinned`, `SetPaneMinimized` and
-/// `TogglePaneMinimized` name no pane, so each resolves the same way on every runtime.
+/// no runtime holds, and `SetFloatingPanePinned`, `ToggleFloatingPanePinned`,
+/// `SetFloatingPaneMinimized` and `ToggleFloatingPaneMinimized` name no pane, so each
+/// resolves the same way on every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),
@@ -579,16 +580,16 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
             pane_id: PaneId::from_uuid(uuid::uuid!("019bb2ba-0007-7000-8000-000000000001")),
             top_left_cell: Point { column: 4, row: 2 },
         }),
-        Command::SetPanePinned(SetPanePinnedArgs {
+        Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
             pane_id: None,
             is_pinned: true,
         }),
-        Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
-        Command::SetPaneMinimized(SetPaneMinimizedArgs {
+        Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs { pane_id: None }),
+        Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
             pane_id: None,
             is_minimized: true,
         }),
-        Command::TogglePaneMinimized(TogglePaneMinimizedArgs { pane_id: None }),
+        Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs { pane_id: None }),
         Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
             is_minimized: true,
         }),
@@ -628,10 +629,10 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::TogglePaneFloating => "TogglePaneFloating",
         Command::ScrollPane(_) => "ScrollPane",
         Command::MoveFloatingPane(_) => "MoveFloatingPane",
-        Command::SetPanePinned(_) => "SetPanePinned",
-        Command::TogglePanePinned(_) => "TogglePanePinned",
-        Command::SetPaneMinimized(_) => "SetPaneMinimized",
-        Command::TogglePaneMinimized(_) => "TogglePaneMinimized",
+        Command::SetFloatingPanePinned(_) => "SetFloatingPanePinned",
+        Command::ToggleFloatingPanePinned(_) => "ToggleFloatingPanePinned",
+        Command::SetFloatingPaneMinimized(_) => "SetFloatingPaneMinimized",
+        Command::ToggleFloatingPaneMinimized(_) => "ToggleFloatingPaneMinimized",
         Command::SetAllFloatingPanesMinimized(_) => "SetAllFloatingPanesMinimized",
         Command::ToggleAllFloatingPanesMinimized => "ToggleAllFloatingPanesMinimized",
         Command::Quit(_) => "Quit",
@@ -9008,7 +9009,7 @@ fn move_pane_from_a_tiled_shell_leaves_the_input_on_the_focused_floating_pane() 
         .get_client_by_id(client_id)
         .expect("client")
         .get_active_tab_id();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(client_id),
         build_floating_new_pane_args(None, None, false),
@@ -9031,7 +9032,7 @@ fn move_pane_from_a_tiled_shell_leaves_the_input_on_the_focused_floating_pane() 
         vec![split_pane_id, root_pane_id]
     );
     let client = session.clients.get_client_by_id(client_id).expect("client");
-    assert_eq!(client.get_active_focused_pane_id(), Some(floating_pane_id));
+    assert_eq!(client.get_active_focused_pane_id(), Some(htop_pane_id));
     assert_eq!(client.get_focused_pane_id(tab_id), Some(split_pane_id));
 }
 
@@ -15285,22 +15286,19 @@ fn a_floating_pane_whose_child_is_killed_posts_one_error() {
         SystemTime::UNIX_EPOCH,
     )
     .expect("the session starts");
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(client_id),
         build_floating_new_pane_args(None, None, false),
     );
 
-    runtime.handle_child_exit(floating_pane_id, ExitStatus::Signaled(9));
+    runtime.handle_child_exit(htop_pane_id, ExitStatus::Signaled(9));
 
     assert_eq!(
         list_session_notifications(&runtime, session_id),
         vec![(
             NotificationSeverity::Error,
-            format!(
-                "{} killed by signal 9",
-                floating_pane_id.format_short_label()
-            )
+            format!("{} killed by signal 9", htop_pane_id.format_short_label())
         )]
     );
 }
@@ -15541,7 +15539,8 @@ struct FloatingPaneFixture {
     alice_client_id: ClientId,
     tab_id: TabId,
     tiled_pane_id: PaneId,
-    floating_pane_id: PaneId,
+    /// The pane of the floating pane, alone in it.
+    htop_pane_id: PaneId,
 }
 
 /// A floating pane size of 60% of the floating viewport on both axes.
@@ -15570,33 +15569,31 @@ fn build_floating_pane_fixture() -> FloatingPaneFixture {
         column_count: 120,
         row_count: 42,
     });
-    let floating_pane_id = PaneId::new();
+    let htop_pane_id = PaneId::new();
     let session = runtime
         .session_by_id
         .get_mut(&session_id)
         .expect("the seeded session");
-    register_pane_record(session, floating_pane_id);
-    session
-        .add_floating_member(
-            FloatingMember {
-                pane_id: floating_pane_id,
-                desired_size: build_sixty_percent_floating_pane_size(),
-                solved_size: Size {
-                    column_count: 72,
-                    row_count: 24,
-                },
-            },
-            &[],
-        )
-        .expect("the floating set is empty");
+    pane_ops::commit_new_floating_pane(
+        session,
+        htop_pane_id,
+        build_sixty_percent_floating_pane_size(),
+        Size {
+            column_count: 72,
+            row_count: 24,
+        },
+        None,
+        NewPaneSpec::default(),
+    )
+    .expect("the floating set is empty");
     let floating_pty_size = PtySize {
         column_count: 70,
         row_count: 20,
     };
     fake_pty_backend
-        .spawn_pane(floating_pane_id, build_spawn_spec(), floating_pty_size)
+        .spawn_pane(htop_pane_id, build_spawn_spec(), floating_pty_size)
         .expect("spawn the floating pane");
-    runtime.park_pane_pty(floating_pane_id, floating_pty_size);
+    runtime.park_pane_pty(htop_pane_id, floating_pty_size);
     FloatingPaneFixture {
         runtime,
         fake_pty_backend,
@@ -15604,7 +15601,7 @@ fn build_floating_pane_fixture() -> FloatingPaneFixture {
         alice_client_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
     }
 }
 
@@ -15626,7 +15623,7 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
         session_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     assert_eq!(
@@ -15663,11 +15660,11 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
                 previous_pane_id: None,
             }),
             build_pty_resized(tiled_pane_id, 78, 20),
-            build_pty_resized(floating_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 9),
         ]
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 48,
             row_count: 13,
@@ -15680,11 +15677,11 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
         detach_events,
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(floating_pane_id, 70, 20),
+            build_pty_resized(htop_pane_id, 70, 20),
         ]
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 72,
             row_count: 24,
@@ -15699,7 +15696,7 @@ fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
         session_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     let bob_client_id = ClientId::new();
@@ -15725,11 +15722,11 @@ fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
         emitted_events,
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(floating_pane_id, 70, 20),
+            build_pty_resized(htop_pane_id, 70, 20),
         ]
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 72,
             row_count: 24,
@@ -15765,7 +15762,7 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         session_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10.
@@ -15802,12 +15799,9 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         None,
     );
 
+    assert_eq!(shrink_events, vec![build_pty_resized(htop_pane_id, 16, 14)]);
     assert_eq!(
-        shrink_events,
-        vec![build_pty_resized(floating_pane_id, 16, 14)]
-    );
-    assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 18,
             row_count: 18,
@@ -15815,7 +15809,7 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
     );
     assert_eq!(
         fake_pty_backend
-            .list_pane_sizes(floating_pane_id)
+            .list_pane_sizes(htop_pane_id)
             .expect("the floating pane spawned")
             .last(),
         Some(&PtySize {
@@ -15849,22 +15843,19 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         regrow_events,
         vec![
             build_pty_resized(tiled_pane_id, 98, 28),
-            build_pty_resized(floating_pane_id, 58, 14),
+            build_pty_resized(htop_pane_id, 58, 14),
         ]
     );
-    let floating_member = runtime.session_by_id[&session_id]
-        .floating_set
-        .list_members()[0];
     assert_eq!(
-        floating_member.solved_size,
-        Size {
-            column_count: 60,
-            row_count: 18,
-        }
-    );
-    assert_eq!(
-        floating_member.desired_size,
-        build_sixty_percent_floating_pane_size()
+        list_floating_pane_shapes(&runtime.session_by_id[&session_id]),
+        [(
+            vec![htop_pane_id],
+            build_sixty_percent_floating_pane_size(),
+            Size {
+                column_count: 60,
+                row_count: 18,
+            },
+        )]
     );
 }
 
@@ -15875,7 +15866,7 @@ fn a_starving_client_beside_a_roomy_one_leaves_every_floating_pane_as_it_is() {
         session_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     let bob_client_id = ClientId::new();
@@ -15904,7 +15895,7 @@ fn a_starving_client_beside_a_roomy_one_leaves_every_floating_pane_as_it_is() {
         })]
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 72,
             row_count: 24,
@@ -15919,7 +15910,7 @@ fn every_client_starving_freezes_every_floating_pane_until_one_reports_room() {
         session_id,
         alice_client_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     let alice_viewport_size = Size {
@@ -15936,7 +15927,7 @@ fn every_client_starving_freezes_every_floating_pane_until_one_reports_room() {
 
     assert_eq!(starving_events, Vec::new());
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 72,
             row_count: 24,
@@ -15957,7 +15948,7 @@ fn every_client_starving_freezes_every_floating_pane_until_one_reports_room() {
         roomy_events,
         vec![
             build_pty_resized(tiled_pane_id, 78, 20),
-            build_pty_resized(floating_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 9),
         ]
     );
 }
@@ -15970,7 +15961,7 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
         alice_client_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
 
@@ -15978,7 +15969,7 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
 
     assert_eq!(detach_events, Vec::new());
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 72,
             row_count: 24,
@@ -16010,7 +16001,7 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
                 previous_pane_id: None,
             }),
             build_pty_resized(tiled_pane_id, 78, 20),
-            build_pty_resized(floating_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 9),
         ]
     );
 }
@@ -16020,7 +16011,7 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
     let FloatingPaneFixture {
         mut runtime,
         session_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     let (other_tab_id, other_pane_id) = (TabId::new(), PaneId::new());
@@ -16057,7 +16048,7 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
                 pane_id: other_pane_id,
                 previous_pane_id: None,
             }),
-            build_pty_resized(floating_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 9),
         ]
     );
 }
@@ -16068,11 +16059,11 @@ fn a_floating_pane_takes_the_cell_size_of_the_earliest_attached_client_on_any_ta
         mut runtime,
         session_id,
         alice_client_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     let read_floating_cell_size = |runtime: &Server| {
-        runtime.list_terminal_engines()[&floating_pane_id]
+        runtime.list_terminal_engines()[&htop_pane_id]
             .get_terminal_state()
             .get_cell_size()
     };
@@ -16119,7 +16110,7 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         session_id,
         tab_id,
         tiled_pane_id,
-        floating_pane_id,
+        htop_pane_id,
         ..
     } = build_floating_pane_fixture();
     let bob_client_id = ClientId::new();
@@ -16161,7 +16152,7 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         move_events,
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(floating_pane_id, 70, 20),
+            build_pty_resized(htop_pane_id, 70, 20),
             Event::PaneFocused(PaneFocused {
                 client_id: bob_client_id,
                 tab_id: Some(other_tab_id),
@@ -21444,18 +21435,16 @@ fn attach_bob(
     bob_client_id
 }
 
-/// A floating pane view at the default placement that the client shows.
-const SHOWN_DEFAULT_FLOATING_PANE_VIEW: FloatingPaneView = FloatingPaneView {
-    position: FloatingPanePosition::Default,
-    is_minimized: false,
-};
-
-/// A floating pane view at the default placement that the client holds
-/// minimized.
-const MINIMIZED_DEFAULT_FLOATING_PANE_VIEW: FloatingPaneView = FloatingPaneView {
-    position: FloatingPanePosition::Default,
-    is_minimized: true,
-};
+/// The view at the default placement, minimized when `is_minimized`, whose
+/// focus history is `[input_pane_id]` and whose zoom is `None`.
+fn build_default_floating_pane_view(is_minimized: bool, input_pane_id: PaneId) -> FloatingPaneView {
+    FloatingPaneView {
+        position: FloatingPanePosition::Default,
+        is_minimized,
+        focus_history: vec![input_pane_id],
+        zoomed_pane_id: None,
+    }
+}
 
 /// The attached client `client_id` of `session_id`.
 fn get_attached_client(runtime: &Server, session_id: SessionId, client_id: ClientId) -> &Client {
@@ -21465,14 +21454,55 @@ fn get_attached_client(runtime: &Server, session_id: SessionId, client_id: Clien
         .expect("the client is attached")
 }
 
-/// The member of `session_id`'s floating set that holds `pane_id`.
-fn get_floating_member(runtime: &Server, session_id: SessionId, pane_id: PaneId) -> FloatingMember {
-    *runtime.session_by_id[&session_id]
+/// Each floating pane of `session` as its panes in layout order, its desired
+/// size and its solved size, in the order the floating panes were added.
+fn list_floating_pane_shapes(session: &Session) -> Vec<(Vec<PaneId>, FloatingPaneSize, Size)> {
+    session
         .floating_set
-        .list_members()
+        .list_floating_panes()
         .iter()
-        .find(|floating_member| floating_member.pane_id == pane_id)
-        .expect("the pane floats")
+        .map(|floating_pane| {
+            (
+                floating_pane.list_pane_ids(),
+                floating_pane.get_desired_size(),
+                floating_pane.get_solved_size(),
+            )
+        })
+        .collect()
+}
+
+/// The floating pane of `session_id`'s floating set that holds `pane_id`.
+fn get_floating_pane_holding(
+    runtime: &Server,
+    session_id: SessionId,
+    pane_id: PaneId,
+) -> &FloatingPane {
+    runtime.session_by_id[&session_id]
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .expect("the pane is floating")
+        .1
+}
+
+/// The id of the floating pane that holds each pane of `pane_ids`, in order.
+fn list_floating_pane_ids_holding(runtime: &Server, pane_ids: &[PaneId]) -> Vec<FloatingPaneId> {
+    pane_ids
+        .iter()
+        .map(|&pane_id| get_floating_pane_id_holding(runtime, pane_id))
+        .collect()
+}
+
+/// The id of the floating pane that holds `pane_id`, in the session of
+/// `pane_id`.
+pub(crate) fn get_floating_pane_id_holding(runtime: &Server, pane_id: PaneId) -> FloatingPaneId {
+    runtime
+        .get_session_for_pane(pane_id)
+        .expect("the pane's session")
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .expect("the pane is floating")
+        .1
+        .get_floating_pane_id()
 }
 
 #[test]
@@ -21494,44 +21524,44 @@ fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() 
 
     let command_result = runtime.dispatch(command_envelope);
 
-    let floating_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
+    let htop_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
                 Event::PaneCreated(PaneCreated {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     tab_id: None,
                 }),
                 Event::PaneFocused(PaneFocused {
                     client_id: alice_client_id,
                     tab_id: None,
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     previous_pane_id: Some(tiled_pane_id),
                 }),
-                build_pty_resized(floating_pane_id, 46, 9),
+                build_pty_resized(htop_pane_id, 46, 9),
             ],
         }
     );
     let session = &runtime.session_by_id[&session_id];
     assert_eq!(
-        session.floating_set.list_members(),
-        [FloatingMember {
-            pane_id: floating_pane_id,
-            desired_size: DEFAULT_FLOATING_PANE_SIZE,
-            solved_size: Size {
+        list_floating_pane_shapes(session),
+        [(
+            vec![htop_pane_id],
+            DEFAULT_FLOATING_PANE_SIZE,
+            Size {
                 column_count: 48,
                 row_count: 13,
-            },
-        }]
+            }
+        )]
     );
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(floating_pane_id)
+            .get_pane_record_by_id(htop_pane_id)
             .map(PaneRecord::get_pane_id),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
@@ -21540,19 +21570,19 @@ fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() 
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        [floating_pane_id]
+        list_floating_pane_ids_holding(&runtime, &[htop_pane_id])
     );
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(floating_pane_id)
+        Some(get_floating_pane_id_holding(&runtime, htop_pane_id))
     );
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW)
+        alice_client.get_floating_pane_view(get_floating_pane_id_holding(&runtime, htop_pane_id)),
+        Some(&build_default_floating_pane_view(false, htop_pane_id))
     );
     assert_eq!(
         alice_client.get_focused_pane_id(tab_id),
@@ -21560,7 +21590,7 @@ fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() 
     );
     assert_eq!(
         fake_pty_backend
-            .list_pane_sizes(floating_pane_id)
+            .list_pane_sizes(htop_pane_id)
             .expect("the floating pane spawned"),
         vec![PtySize {
             column_count: 46,
@@ -21568,13 +21598,13 @@ fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() 
         }]
     );
     assert_eq!(
-        runtime.pty_size_by_pane_id[&floating_pane_id],
+        runtime.pty_size_by_pane_id[&htop_pane_id],
         PtySize {
             column_count: 46,
             row_count: 9,
         }
     );
-    assert!(runtime.live_pane_ids.contains(&floating_pane_id));
+    assert!(runtime.live_pane_ids.contains(&htop_pane_id));
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
         SessionViewChanges {
@@ -21605,24 +21635,28 @@ fn a_floating_new_pane_at_a_cell_stores_that_cell_for_the_issuer_alone() {
     );
     let _ = take_session_view_changes(&mut runtime, session_id);
 
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, Some(Point { column: 5, row: 2 }), false),
     );
 
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 5, row: 2 }),
             is_minimized: false,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         })
     );
     let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
     assert_eq!(
-        bob_client.get_floating_pane_view(floating_pane_id),
-        Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW)
+        bob_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&build_default_floating_pane_view(true, htop_pane_id))
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -21664,16 +21698,28 @@ fn a_pinned_floating_new_pane_without_a_cell_pins_where_the_issuer_draws_it() {
 
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        [first_pane_id, second_pane_id, third_pane_id]
-            .map(|pane_id| alice_client.get_floating_pane_view(pane_id)),
+        [first_pane_id, second_pane_id, third_pane_id].map(|pane_id| alice_client
+            .get_floating_pane_view(get_floating_pane_id_holding(&runtime, pane_id))
+            .cloned()),
         [
-            FloatingPanePosition::Pinned(Point { column: 16, row: 4 }),
-            FloatingPanePosition::Pinned(Point { column: 18, row: 5 }),
-            FloatingPanePosition::Pinned(Point { column: 5, row: 2 }),
+            (
+                FloatingPanePosition::Pinned(Point { column: 16, row: 4 }),
+                first_pane_id
+            ),
+            (
+                FloatingPanePosition::Pinned(Point { column: 18, row: 5 }),
+                second_pane_id
+            ),
+            (
+                FloatingPanePosition::Pinned(Point { column: 5, row: 2 }),
+                third_pane_id
+            ),
         ]
-        .map(|position| Some(FloatingPaneView {
+        .map(|(position, pane_id)| Some(FloatingPaneView {
             position,
             is_minimized: false,
+            focus_history: vec![pane_id],
+            zoomed_pane_id: None,
         }))
     );
 }
@@ -21694,9 +21740,9 @@ fn a_thirteenth_floating_pane_is_refused_and_spawns_nothing() {
             build_floating_new_pane_args(None, None, false),
         );
     }
-    let floating_members = runtime.session_by_id[&session_id]
+    let floating_panes = runtime.session_by_id[&session_id]
         .floating_set
-        .list_members()
+        .list_floating_panes()
         .to_vec();
     let spawned_pane_ids = fake_pty_backend.list_spawned_pane_ids();
     let _ = take_session_view_changes(&mut runtime, session_id);
@@ -21715,7 +21761,7 @@ fn a_thirteenth_floating_pane_is_refused_and_spawns_nothing() {
         }
     );
     let session = &runtime.session_by_id[&session_id];
-    assert_eq!(session.floating_set.list_members(), floating_members);
+    assert_eq!(session.floating_set.list_floating_panes(), floating_panes);
     assert_eq!(session.panes.count_pane_records(), 13);
     assert_eq!(fake_pty_backend.list_spawned_pane_ids(), spawned_pane_ids);
     assert_eq!(
@@ -21757,12 +21803,12 @@ fn a_floating_new_pane_whose_child_cannot_launch_commits_nothing() {
         }
     );
     let session = &runtime.session_by_id[&session_id];
-    assert_eq!(session.floating_set.list_members(), []);
+    assert_eq!(session.floating_set.list_floating_panes(), []);
     assert_eq!(session.panes.count_pane_records(), 1);
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         serde_json::to_value(alice_client).expect("the client encodes")
-            ["floating_pane_view_by_pane_id"],
+            ["floating_pane_view_by_floating_pane_id"],
         serde_json::json!({})
     );
     assert_eq!(runtime.live_pane_ids, HashSet::from([tiled_pane_id]));
@@ -21819,22 +21865,22 @@ fn a_floating_new_pane_with_no_client_attached_takes_the_floating_minimum_and_ca
     let command_id = command_envelope.command_id;
     let command_result = runtime.dispatch(command_envelope);
 
-    let floating_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
+    let htop_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
                 Event::PaneCreated(PaneCreated {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     tab_id: None,
                 }),
-                build_pty_resized(floating_pane_id, 2, 1),
+                build_pty_resized(htop_pane_id, 2, 1),
             ],
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 4,
             row_count: 5,
@@ -21876,7 +21922,7 @@ fn a_floating_new_pane_from_an_external_cli_with_two_clients_and_none_named_is_a
     assert_eq!(
         runtime.session_by_id[&session_id]
             .floating_set
-            .list_members(),
+            .list_floating_panes(),
         []
     );
 }
@@ -21889,7 +21935,7 @@ fn writing_to_a_floating_pane_delivers_the_bytes_to_its_child() {
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -21897,7 +21943,7 @@ fn writing_to_a_floating_pane_delivers_the_bytes_to_its_child() {
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         Command::WriteToPane(WriteToPaneArgs {
-            pane_id: Some(floating_pane_id),
+            pane_id: Some(htop_pane_id),
             pane_input_bytes: b"ls\r".to_vec(),
         }),
     );
@@ -21912,7 +21958,7 @@ fn writing_to_a_floating_pane_delivers_the_bytes_to_its_child() {
     );
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(floating_pane_id)
+            .list_pane_write_bytes(htop_pane_id)
             .expect("the floating pane's child was spawned"),
         vec![b"ls\r".to_vec()]
     );
@@ -21937,21 +21983,22 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
             row_count: 24,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, Some(Point { column: 5, row: 2 }), false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let bob_client = runtime
         .get_client_mut(bob_client_id)
         .expect("bob is attached");
-    assert!(bob_client.focus_floating_pane(floating_pane_id));
-    assert!(bob_client.minimize_floating_pane(floating_pane_id));
+    assert!(bob_client.focus_floating_pane(htop_floating_pane_id));
+    assert!(bob_client.minimize_floating_pane(htop_floating_pane_id));
     let _ = take_session_view_changes(&mut runtime, session_id);
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         Command::ClosePane(ClosePaneArgs {
-            pane_id: Some(floating_pane_id),
+            pane_id: Some(htop_pane_id),
             should_force_close: false,
             should_kill_process_tree: false,
         }),
@@ -21966,35 +22013,35 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
             command_id,
             emitted_events: vec![
                 Event::PaneClosing(PaneClosing {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                 }),
                 Event::PaneRemoved(PaneRemoved {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     tab_id: None,
                 }),
                 Event::PaneFocused(PaneFocused {
                     client_id: alice_client_id,
                     tab_id: Some(tab_id),
                     pane_id: tiled_pane_id,
-                    previous_pane_id: Some(floating_pane_id),
+                    previous_pane_id: Some(htop_pane_id),
                 }),
             ],
         }
     );
     let session = &runtime.session_by_id[&session_id];
-    assert_eq!(session.floating_set.list_members(), []);
-    assert!(session
-        .panes
-        .get_pane_record_by_id(floating_pane_id)
-        .is_none());
+    assert_eq!(session.floating_set.list_floating_panes(), []);
+    assert!(session.panes.get_pane_record_by_id(htop_pane_id).is_none());
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Pane(tiled_pane_id)
     );
     for client_id in [alice_client_id, bob_client_id] {
         let client = get_attached_client(&runtime, session_id, client_id);
-        assert_eq!(client.get_floating_pane_view(floating_pane_id), None);
-        assert_eq!(client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
+        assert_eq!(client.get_floating_pane_view(htop_floating_pane_id), None);
+        assert_eq!(
+            client.list_shown_floating_pane_ids(),
+            &[] as &[FloatingPaneId]
+        );
         assert_eq!(client.get_active_focused_pane_id(), Some(tiled_pane_id));
     }
     assert_eq!(
@@ -22007,9 +22054,9 @@ fn closing_a_floating_pane_removes_it_from_every_client_and_kills_its_child() {
         "alice showed the closed pane; bob held it minimized"
     );
     assert_eq!(runtime.live_pane_ids, HashSet::from([tiled_pane_id]));
-    assert!(!runtime.pty_size_by_pane_id.contains_key(&floating_pane_id));
+    assert!(!runtime.pty_size_by_pane_id.contains_key(&htop_pane_id));
     assert_eq!(
-        wait_for_pane_kill_policies(&fake_pty_backend, floating_pane_id),
+        wait_for_pane_kill_policies(&fake_pty_backend, htop_pane_id),
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
@@ -22035,14 +22082,14 @@ fn new_pane_external_named_client_splits_the_pane_that_takes_its_keys() {
             row_count: 24,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, bob_client_id).get_active_focused_pane_id(),
@@ -22065,7 +22112,7 @@ fn new_pane_external_named_client_splits_the_pane_that_takes_its_keys() {
             command_id: alice_command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!(
-                "{floating_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
+                "{htop_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
             )),
         }
     );
@@ -22079,7 +22126,7 @@ fn new_pane_external_named_client_splits_the_pane_that_takes_its_keys() {
             ..build_new_pane_args()
         }),
     ));
-    let new_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id, floating_pane_id]);
+    let new_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id, htop_pane_id]);
     assert_eq!(
         runtime.session_by_id[&session_id].tabs[&tab_id].get_layout_tree(),
         &split_leaf(
@@ -22096,7 +22143,7 @@ fn new_pane_external_named_client_splits_the_pane_that_takes_its_keys() {
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
 }
 
@@ -22110,21 +22157,21 @@ fn a_split_or_a_stack_from_a_floating_pane_is_refused() {
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
     let expected_help = format!(
-        "{floating_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
+        "{htop_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
     );
     let in_session_source =
-        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id);
+        build_in_session_source(session_id, Some(alice_client_id), htop_pane_id);
     let refused_requests = [
         (
             CommandSource::from_key_binding(alice_client_id),
             NewPanePlacement::Split {
-                source_pane_id: Some(floating_pane_id),
+                source_pane_id: Some(htop_pane_id),
                 tab_id: None,
                 direction: Direction::Right,
             },
@@ -22132,7 +22179,7 @@ fn a_split_or_a_stack_from_a_floating_pane_is_refused() {
         (
             CommandSource::from_key_binding(alice_client_id),
             NewPanePlacement::Stacked {
-                source_pane_id: Some(floating_pane_id),
+                source_pane_id: Some(htop_pane_id),
                 tab_id: None,
             },
         ),
@@ -22182,7 +22229,7 @@ fn moving_or_swapping_a_floating_pane_is_refused() {
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -22190,30 +22237,28 @@ fn moving_or_swapping_a_floating_pane_is_refused() {
     let refused_commands = [
         (
             Command::MovePane(MovePaneArgs {
-                pane_id: Some(floating_pane_id),
+                pane_id: Some(htop_pane_id),
                 direction: Direction::Right,
             }),
-            format!(
-                "{floating_pane_id} is floating and has no tiled position; use move-pane --x --y"
-            ),
+            format!("{htop_pane_id} is floating and has no tiled position; use move-pane --x --y"),
         ),
         (
             Command::PlacePane(PlacePaneArgs {
-                source_pane_id: Some(floating_pane_id),
+                source_pane_id: Some(htop_pane_id),
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
                     target_pane_id: tiled_pane_id,
                 }),
             }),
-            format!("{floating_pane_id} is floating; a swap exchanges tiled slots"),
+            format!("{htop_pane_id} is floating; a swap exchanges tiled slots"),
         ),
         (
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: Some(tiled_pane_id),
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
-                    target_pane_id: floating_pane_id,
+                    target_pane_id: htop_pane_id,
                 }),
             }),
-            format!("{floating_pane_id} is floating; a swap exchanges tiled slots"),
+            format!("{htop_pane_id} is floating; a swap exchanges tiled slots"),
         ),
     ];
 
@@ -22235,7 +22280,7 @@ fn moving_or_swapping_a_floating_pane_is_refused() {
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Pane(tiled_pane_id)
     );
-    assert_eq!(session.floating_set.list_pane_ids(), vec![floating_pane_id]);
+    assert_eq!(session.floating_set.list_pane_ids(), vec![htop_pane_id]);
 }
 
 #[test]
@@ -22247,21 +22292,21 @@ fn a_tab_command_or_a_zoom_from_a_floating_panes_shell_is_refused() {
         tab_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
     let in_session_source =
-        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id);
+        build_in_session_source(session_id, Some(alice_client_id), htop_pane_id);
     let refused_commands = [
         (
             Command::CloseTab(CloseTabArgs::default()),
-            format!("{floating_pane_id} is floating and belongs to no tab"),
+            format!("{htop_pane_id} is floating and belongs to no tab"),
         ),
         (
             Command::TogglePaneFullscreen,
-            format!("{floating_pane_id} is floating; fullscreen fills a tab"),
+            format!("{htop_pane_id} is floating; fullscreen fills a tab"),
         ),
     ];
 
@@ -22295,11 +22340,12 @@ fn scrolling_a_floating_pane_needs_it_shown_on_the_client() {
         ..
     } = build_floating_command_fixture();
     // The new pane takes alice's input, so alice shows it.
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let bob_client_id = attach_bob(
         &mut runtime,
         session_id,
@@ -22313,7 +22359,7 @@ fn scrolling_a_floating_pane_needs_it_shown_on_the_client() {
         let command_envelope = build_command_envelope(
             CommandSource::from_key_binding(client_id),
             Command::ScrollPane(ScrollPaneArgs {
-                pane_id: Some(floating_pane_id),
+                pane_id: Some(htop_pane_id),
                 scroll_line_count: 3,
             }),
         );
@@ -22337,21 +22383,21 @@ fn scrolling_a_floating_pane_needs_it_shown_on_the_client() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some(format!("{floating_pane_id} is minimized; restore it first")),
+            help: Some(format!("{htop_pane_id} is minimized; restore it first")),
         }
     );
 
     let alice_client = runtime
         .get_client_mut(alice_client_id)
         .expect("alice is attached");
-    assert!(alice_client.minimize_floating_pane(floating_pane_id));
+    assert!(alice_client.minimize_floating_pane(htop_floating_pane_id));
     let (command_id, command_result) = dispatch_scroll(&mut runtime, alice_client_id);
     assert_eq!(
         command_result,
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some(format!("{floating_pane_id} is minimized; restore it first")),
+            help: Some(format!("{htop_pane_id} is minimized; restore it first")),
         }
     );
 }
@@ -22448,17 +22494,18 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
                 row_count: 42,
             },
         );
-        let floating_pane_id = create_floating_pane(
+        let htop_pane_id = create_floating_pane(
             &mut runtime,
             CommandSource::from_key_binding(alice_client_id),
             build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
         );
+        let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
         let _ = take_session_view_changes(&mut runtime, session_id);
 
         let (command_id, command_result) = dispatch_resize_pane(
             &mut runtime,
             CommandSource::from_key_binding(alice_client_id),
-            floating_pane_id,
+            htop_pane_id,
             direction,
             resize_amount_cells,
         );
@@ -22468,27 +22515,31 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
             CommandResult::Ok {
                 command_id,
                 emitted_events: vec![Event::PtyResized(PtyResized {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     pty_size: expected_pty_size,
                 })],
             },
             "{direction:?} {resize_amount_cells}"
         );
-        let floating_member = get_floating_member(&runtime, session_id, floating_pane_id);
-        assert_eq!(floating_member.desired_size, expected_desired_size);
+        assert_eq!(
+            get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
+            expected_desired_size
+        );
         let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
         assert_eq!(
-            alice_client.get_floating_pane_view(floating_pane_id),
-            Some(FloatingPaneView {
+            alice_client.get_floating_pane_view(htop_floating_pane_id),
+            Some(&FloatingPaneView {
                 position: FloatingPanePosition::Moved(expected_top_left_cell),
                 is_minimized: false,
+                focus_history: vec![htop_pane_id],
+                zoomed_pane_id: None,
             }),
             "{direction:?} {resize_amount_cells}"
         );
         let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
         assert_eq!(
-            bob_client.get_floating_pane_view(floating_pane_id),
-            Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW)
+            bob_client.get_floating_pane_view(htop_floating_pane_id),
+            Some(&build_default_floating_pane_view(true, htop_pane_id))
         );
         assert_eq!(
             take_session_view_changes(&mut runtime, session_id),
@@ -22510,7 +22561,7 @@ fn a_floating_resize_of_zero_cells_is_refused_and_changes_nothing() {
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
@@ -22520,7 +22571,7 @@ fn a_floating_resize_of_zero_cells_is_refused_and_changes_nothing() {
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         0,
     );
@@ -22534,7 +22585,7 @@ fn a_floating_resize_of_zero_cells_is_refused_and_changes_nothing() {
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
         build_cells_floating_pane_size(40, 12)
     );
     assert_eq!(
@@ -22551,7 +22602,7 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -22560,12 +22611,13 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
             true,
         ),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
 
     for direction in [Direction::Left, Direction::Up] {
         let (command_id, command_result) = dispatch_resize_pane(
             &mut runtime,
             CommandSource::from_key_binding(alice_client_id),
-            floating_pane_id,
+            htop_pane_id,
             direction,
             3,
         );
@@ -22575,13 +22627,13 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
                 command_id,
                 reason: RejectReason::InvalidState,
                 help: Some(format!(
-                    "{floating_pane_id} is pinned; unpin it to move its left or top edge"
+                    "{htop_pane_id} is pinned; unpin it to move its left or top edge"
                 )),
             }
         );
     }
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
         build_cells_floating_pane_size(40, 12)
     );
     let _ = take_session_view_changes(&mut runtime, session_id);
@@ -22589,7 +22641,7 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         3,
     );
@@ -22598,15 +22650,17 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 41, 8)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 41, 8)],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
             is_minimized: false,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         })
     );
     assert_eq!(
@@ -22627,7 +22681,7 @@ fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinn
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -22636,12 +22690,13 @@ fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinn
             true,
         ),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
 
     // Column 20 of an 80-column pane area leaves room for 60 columns.
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         30,
     );
@@ -22649,18 +22704,18 @@ fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinn
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 58, 8)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 58, 8)],
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
         build_cells_floating_pane_size(60, 12)
     );
 
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Down,
         1,
     );
@@ -22668,19 +22723,21 @@ fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinn
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 58, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 58, 9)],
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
         build_cells_floating_pane_size(60, 13)
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id)
-            .get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
+            .get_floating_pane_view(htop_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
             is_minimized: false,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         })
     );
 }
@@ -22693,7 +22750,7 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -22702,6 +22759,7 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
             true,
         ),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let narrow_pane_area_size = Size {
         column_count: 50,
         row_count: 22,
@@ -22718,6 +22776,8 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
     let pinned_view = FloatingPaneView {
         position: FloatingPanePosition::Pinned(Point { column: 20, row: 5 }),
         is_minimized: false,
+        focus_history: vec![htop_pane_id],
+        zoomed_pane_id: None,
     };
     let _ = take_session_view_changes(&mut runtime, session_id);
 
@@ -22725,7 +22785,7 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Down,
         1,
     );
@@ -22733,13 +22793,13 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 38, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 38, 9)],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(pinned_view)
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&pinned_view)
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -22753,7 +22813,7 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         -3,
     );
@@ -22761,13 +22821,13 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 35, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 35, 9)],
         }
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id)
-            .get_floating_pane_view(floating_pane_id),
-        Some(pinned_view)
+            .get_floating_pane_view(htop_floating_pane_id),
+        Some(&pinned_view)
     );
     assert_eq!(
         place_floating_pane(
@@ -22801,6 +22861,7 @@ fn a_floating_pane_growth_stops_at_the_pane_area_edge_on_the_moved_side() {
             false,
         ),
     );
+    let left_floating_pane_id = get_floating_pane_id_holding(&runtime, left_pane_id);
     let right_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
@@ -22827,15 +22888,17 @@ fn a_floating_pane_growth_stops_at_the_pane_area_edge_on_the_moved_side() {
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, left_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, left_pane_id).get_desired_size(),
         build_cells_floating_pane_size(42, 12)
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id)
-            .get_floating_pane_view(left_pane_id),
-        Some(FloatingPaneView {
+            .get_floating_pane_view(left_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 0, row: 5 }),
             is_minimized: false,
+            focus_history: vec![left_pane_id],
+            zoomed_pane_id: None,
         })
     );
 
@@ -22859,7 +22922,7 @@ fn a_floating_pane_growth_stops_at_the_pane_area_edge_on_the_moved_side() {
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, right_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, right_pane_id).get_desired_size(),
         build_cells_floating_pane_size(40, 12)
     );
     assert_eq!(
@@ -22891,7 +22954,7 @@ fn a_floating_pane_resize_past_the_minimum_or_the_cap_is_refused() {
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(80, 12)), None, false),
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, widest_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, widest_pane_id).get_solved_size(),
         Size {
             column_count: 72,
             row_count: 12,
@@ -22948,7 +23011,7 @@ fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
         tab_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -22970,7 +23033,7 @@ fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         1,
     );
@@ -22979,11 +23042,11 @@ fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 47, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 47, 9)],
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 49,
             row_count: 13,
@@ -23010,16 +23073,17 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
 
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_external_cli(Some(session_id), None),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         1,
     );
@@ -23055,7 +23119,7 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_external_cli(Some(session_id), Some(bob_client_id)),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Left,
         1,
     );
@@ -23063,24 +23127,26 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(floating_pane_id, 39, 8)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 39, 8)],
         }
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, bob_client_id)
-            .get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
+            .get_floating_pane_view(htop_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(Point {
                 column: 39,
                 row: 14
             }),
             is_minimized: true,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         })
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id)
-            .get_floating_pane_view(floating_pane_id),
-        Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW)
+            .get_floating_pane_view(htop_floating_pane_id),
+        Some(&build_default_floating_pane_view(false, htop_pane_id))
     );
 }
 
@@ -23099,12 +23165,14 @@ fn a_floating_pane_whose_child_exits_leaves_at_once_and_its_input_moves_to_the_o
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let staying_floating_pane_id = get_floating_pane_id_holding(&runtime, staying_pane_id);
     // The second pane takes over alice's input from the first.
     let exiting_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, Some(Point { column: 5, row: 2 }), false),
     );
+    let exiting_floating_pane_id = get_floating_pane_id_holding(&runtime, exiting_pane_id);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     let emitted_events = runtime.handle_child_exit(exiting_pane_id, ExitStatus::ExitCode(0));
@@ -23134,15 +23202,15 @@ fn a_floating_pane_whose_child_exits_leaves_at_once_and_its_input_moves_to_the_o
     );
     let session = &runtime.session_by_id[&session_id];
     assert_eq!(
-        session.floating_set.list_members(),
-        [FloatingMember {
-            pane_id: staying_pane_id,
-            desired_size: DEFAULT_FLOATING_PANE_SIZE,
-            solved_size: Size {
+        list_floating_pane_shapes(session),
+        [(
+            vec![staying_pane_id],
+            DEFAULT_FLOATING_PANE_SIZE,
+            Size {
                 column_count: 48,
                 row_count: 13,
-            },
-        }]
+            }
+        )]
     );
     assert!(session
         .panes
@@ -23156,14 +23224,17 @@ fn a_floating_pane_whose_child_exits_leaves_at_once_and_its_input_moves_to_the_o
         Some(staying_pane_id)
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
-    assert_eq!(alice_client.get_floating_pane_view(exiting_pane_id), None);
+    assert_eq!(
+        alice_client.get_floating_pane_view(exiting_floating_pane_id),
+        None
+    );
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        [staying_pane_id]
+        [staying_floating_pane_id]
     );
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(staying_pane_id)
+        Some(staying_floating_pane_id)
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -23257,7 +23328,7 @@ fn closing_the_last_tab_ends_every_floating_pane_before_the_quit() {
         }
     );
     let session = &runtime.session_by_id[&session_id];
-    assert_eq!(session.floating_set.list_members(), []);
+    assert_eq!(session.floating_set.list_floating_panes(), []);
     assert_eq!(session.panes.count_pane_records(), 0);
     assert!(!runtime.has_active_panes());
     for pane_id in [tiled_pane_id, first_pane_id, second_pane_id] {
@@ -23278,7 +23349,7 @@ fn closing_the_last_tiled_pane_ends_every_floating_pane_with_a_graceful_close() 
         tab_id,
         tiled_pane_id,
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -23307,10 +23378,10 @@ fn closing_the_last_tiled_pane_ends_every_floating_pane_with_a_graceful_close() 
                 }),
                 Event::TabClosed(TabClosed { tab_id }),
                 Event::PaneClosing(PaneClosing {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                 }),
                 Event::PaneRemoved(PaneRemoved {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     tab_id: None,
                 }),
                 Event::Quit(QuitCause::LastTabClosed {
@@ -23323,7 +23394,7 @@ fn closing_the_last_tiled_pane_ends_every_floating_pane_with_a_graceful_close() 
     assert_eq!(
         runtime.session_by_id[&session_id]
             .floating_set
-            .list_members(),
+            .list_floating_panes(),
         []
     );
     assert!(!runtime.has_active_panes());
@@ -23332,7 +23403,7 @@ fn closing_the_last_tiled_pane_ends_every_floating_pane_with_a_graceful_close() 
         vec![KillPolicy::Force]
     );
     assert_eq!(
-        wait_for_pane_kill_policies(&fake_pty_backend, floating_pane_id),
+        wait_for_pane_kill_policies(&fake_pty_backend, htop_pane_id),
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
@@ -23381,7 +23452,7 @@ fn a_pinned_floating_new_pane_the_issuer_does_not_draw_is_refused_and_spawns_not
     assert_eq!(
         runtime.session_by_id[&session_id]
             .floating_set
-            .list_members(),
+            .list_floating_panes(),
         []
     );
     assert_eq!(fake_pty_backend.list_spawned_pane_ids(), spawned_pane_ids);
@@ -23395,7 +23466,7 @@ fn a_floating_pane_resize_with_no_reported_pane_area_is_refused() {
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
@@ -23413,7 +23484,7 @@ fn a_floating_pane_resize_with_no_reported_pane_area_is_refused() {
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         1,
     );
@@ -23429,7 +23500,7 @@ fn a_floating_pane_resize_with_no_reported_pane_area_is_refused() {
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
         build_cells_floating_pane_size(40, 12)
     );
 }
@@ -23452,11 +23523,12 @@ fn a_floating_pane_resize_for_a_client_with_no_pane_area_changes_no_view() {
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     runtime
         .get_client_mut(bob_client_id)
         .expect("bob is attached")
@@ -23466,7 +23538,7 @@ fn a_floating_pane_resize_for_a_client_with_no_pane_area_changes_no_view() {
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_external_cli(Some(session_id), Some(bob_client_id)),
-        floating_pane_id,
+        htop_pane_id,
         Direction::Right,
         3,
     );
@@ -23476,7 +23548,7 @@ fn a_floating_pane_resize_for_a_client_with_no_pane_area_changes_no_view() {
         CommandResult::Ok {
             command_id,
             emitted_events: vec![Event::PtyResized(PtyResized {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 pty_size: PtySize {
                     column_count: 41,
                     row_count: 8,
@@ -23485,17 +23557,23 @@ fn a_floating_pane_resize_for_a_client_with_no_pane_area_changes_no_view() {
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).desired_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_desired_size(),
         build_cells_floating_pane_size(43, 12)
     );
     for (client_id, floating_pane_view) in [
-        (alice_client_id, SHOWN_DEFAULT_FLOATING_PANE_VIEW),
-        (bob_client_id, MINIMIZED_DEFAULT_FLOATING_PANE_VIEW),
+        (
+            alice_client_id,
+            build_default_floating_pane_view(false, htop_pane_id),
+        ),
+        (
+            bob_client_id,
+            build_default_floating_pane_view(true, htop_pane_id),
+        ),
     ] {
         let attached_client = get_attached_client(&runtime, session_id, client_id);
         assert_eq!(
-            attached_client.get_floating_pane_view(floating_pane_id),
-            Some(floating_pane_view)
+            attached_client.get_floating_pane_view(htop_floating_pane_id),
+            Some(&floating_pane_view)
         );
     }
     assert_eq!(
@@ -23518,7 +23596,7 @@ fn a_last_tiled_pane_whose_child_exits_ends_every_floating_pane_with_a_graceful_
         tab_id,
         tiled_pane_id,
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -23544,10 +23622,10 @@ fn a_last_tiled_pane_whose_child_exits_ends_every_floating_pane_with_a_graceful_
             }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::PaneClosing(PaneClosing {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 tab_id: None,
             }),
             Event::Quit(QuitCause::LastTabClosed {
@@ -23559,12 +23637,12 @@ fn a_last_tiled_pane_whose_child_exits_ends_every_floating_pane_with_a_graceful_
     assert_eq!(
         runtime.session_by_id[&session_id]
             .floating_set
-            .list_members(),
+            .list_floating_panes(),
         []
     );
     assert!(!runtime.has_active_panes());
     assert_eq!(
-        wait_for_pane_kill_policies(&fake_pty_backend, floating_pane_id),
+        wait_for_pane_kill_policies(&fake_pty_backend, htop_pane_id),
         vec![KillPolicy::Graceful {
             timeout_duration: GRACEFUL_TIMEOUT_DURATION,
         }]
@@ -23584,35 +23662,35 @@ fn a_floating_new_pane_opens_in_the_directory_of_the_pane_it_was_asked_from() {
     fake_pty_backend.set_live_working_directory(tiled_pane_id, "/home/user/project");
 
     // A key binding opens it where alice's focused pane is.
-    let first_floating_pane_id = create_floating_pane(
+    let first_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    fake_pty_backend.set_live_working_directory(first_floating_pane_id, "/home/user/logs");
+    fake_pty_backend.set_live_working_directory(first_pane_id, "/home/user/logs");
     // The shell of a floating pane opens it where that shell is.
-    let second_floating_pane_id = create_floating_pane(
+    let second_pane_id = create_floating_pane(
         &mut runtime,
-        build_in_session_source(session_id, Some(alice_client_id), first_floating_pane_id),
+        build_in_session_source(session_id, Some(alice_client_id), first_pane_id),
         build_floating_new_pane_args(None, None, false),
     );
-    fake_pty_backend.set_live_working_directory(second_floating_pane_id, "/home/user/notes");
+    fake_pty_backend.set_live_working_directory(second_pane_id, "/home/user/notes");
     // The second floating pane took alice's input, so a key binding opens the
     // third where the second one's shell is.
-    let third_floating_pane_id = create_floating_pane(
+    let third_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
 
-    for (floating_pane_id, expected_working_directory) in [
-        (first_floating_pane_id, "/home/user/project"),
-        (second_floating_pane_id, "/home/user/logs"),
-        (third_floating_pane_id, "/home/user/notes"),
+    for (pane_id, expected_working_directory) in [
+        (first_pane_id, "/home/user/project"),
+        (second_pane_id, "/home/user/logs"),
+        (third_pane_id, "/home/user/notes"),
     ] {
         assert_eq!(
             fake_pty_backend
-                .get_spawn_spec(floating_pane_id)
+                .get_spawn_spec(pane_id)
                 .expect("the floating pane's child was spawned")
                 .working_directory,
             Some(PathBuf::from(expected_working_directory))
@@ -23643,7 +23721,7 @@ fn dispatch_move_floating_pane(
 
 /// Dispatch a pin (`is_pinned: true`) or an unpin of `pane_id` from
 /// `command_source`, and return the command id with the result.
-fn dispatch_set_pane_pinned(
+fn dispatch_set_floating_pane_pinned(
     runtime: &mut Server,
     command_source: CommandSource,
     pane_id: Option<PaneId>,
@@ -23651,14 +23729,14 @@ fn dispatch_set_pane_pinned(
 ) -> (CommandId, CommandResult) {
     let command_envelope = build_command_envelope(
         command_source,
-        Command::SetPanePinned(SetPanePinnedArgs { pane_id, is_pinned }),
+        Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs { pane_id, is_pinned }),
     );
     let command_id = command_envelope.command_id;
     (command_id, runtime.dispatch(command_envelope))
 }
 
 /// The view the client `client_id` of `session_id` holds of the floating pane
-/// `pane_id`. Panics when the client holds no view of it.
+/// that holds `pane_id`. Panics when the client holds no view of it.
 fn get_client_floating_pane_view(
     runtime: &Server,
     session_id: SessionId,
@@ -23666,8 +23744,9 @@ fn get_client_floating_pane_view(
     pane_id: PaneId,
 ) -> FloatingPaneView {
     get_attached_client(runtime, session_id, client_id)
-        .get_floating_pane_view(pane_id)
+        .get_floating_pane_view(get_floating_pane_id_holding(runtime, pane_id))
         .expect("the client holds a view of the floating pane")
+        .clone()
 }
 
 /// The whole record of the client `client_id` of `session_id`, floating views
@@ -23710,19 +23789,20 @@ fn moving_a_floating_pane_stores_the_cell_in_the_acting_clients_view_only() {
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let floating_member_before = get_floating_member(&runtime, session_id, floating_pane_id);
+    let floating_pane_before =
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).clone();
     let _ = take_session_view_changes(&mut runtime, session_id);
     let bob_record_before = serialize_client_record(&runtime, session_id, bob_client_id);
 
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 4, row: 2 },
     );
 
@@ -23732,21 +23812,23 @@ fn moving_a_floating_pane_stores_the_cell_in_the_acting_clients_view_only() {
             command_id,
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 top_left_cell: Point { column: 4, row: 2 },
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id),
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id),
         FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 4, row: 2 }),
             is_minimized: false,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         }
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id),
-        floating_member_before
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id),
+        &floating_pane_before
     );
     assert_eq!(
         serialize_client_record(&runtime, session_id, bob_client_id),
@@ -23769,7 +23851,7 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -23782,7 +23864,7 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         far_cell,
     );
 
@@ -23792,7 +23874,7 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
             command_id,
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 top_left_cell: far_cell,
             })],
         }
@@ -23802,12 +23884,11 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
         row_count: 13,
     };
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         outer_size
     );
     let alice_position =
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position;
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position;
     assert_eq!(alice_position, FloatingPanePosition::Moved(far_cell));
     // alice's 80x22 pane area draws the 48x13 pane at its bottom-right corner.
     assert_eq!(
@@ -23828,7 +23909,7 @@ fn a_cell_past_the_pane_area_is_stored_as_given_and_a_repeated_move_changes_noth
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         far_cell,
     );
 
@@ -23860,24 +23941,24 @@ fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_m
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
@@ -23887,7 +23968,7 @@ fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_m
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 4, row: 2 },
     );
 
@@ -23896,7 +23977,7 @@ fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_m
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::InvalidState,
-            help: Some(format!("{floating_pane_id} is pinned; unpin it to move it")),
+            help: Some(format!("{htop_pane_id} is pinned; unpin it to move it")),
         }
     );
     assert_eq!(serialize_session_records(&runtime), session_records_before);
@@ -23904,7 +23985,7 @@ fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_m
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(bob_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 3, row: 1 },
     );
 
@@ -23914,19 +23995,17 @@ fn a_pane_one_client_pinned_refuses_that_clients_move_and_another_client_still_m
             command_id,
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: bob_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 top_left_cell: Point { column: 3, row: 1 },
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, bob_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, bob_client_id, htop_pane_id).position,
         FloatingPanePosition::Moved(Point { column: 3, row: 1 })
     );
 }
@@ -23959,7 +24038,7 @@ fn moving_or_pinning_a_tiled_pane_is_refused_naming_what_only_a_floating_pane_do
     );
 
     for is_pinned in [true, false] {
-        let (command_id, command_result) = dispatch_set_pane_pinned(
+        let (command_id, command_result) = dispatch_set_floating_pane_pinned(
             &mut runtime,
             CommandSource::from_key_binding(alice_client_id),
             Some(tiled_pane_id),
@@ -23994,7 +24073,7 @@ fn pinning_stores_the_cell_the_client_draws_and_unpinning_keeps_that_cell() {
         build_floating_new_pane_args(None, None, false),
     );
     // The second 48x13 pane is one cascade step from the centered (16, 4).
-    let second_floating_pane_id = create_floating_pane(
+    let second_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -24011,10 +24090,10 @@ fn pinning_stores_the_cell_the_client_draws_and_unpinning_keeps_that_cell() {
             FloatingPanePosition::Moved(Point { column: 18, row: 5 }),
         ),
     ] {
-        let (command_id, command_result) = dispatch_set_pane_pinned(
+        let (command_id, command_result) = dispatch_set_floating_pane_pinned(
             &mut runtime,
             CommandSource::from_key_binding(alice_client_id),
-            Some(second_floating_pane_id),
+            Some(second_pane_id),
             is_pinned,
         );
 
@@ -24022,23 +24101,20 @@ fn pinning_stores_the_cell_the_client_draws_and_unpinning_keeps_that_cell() {
             command_result,
             CommandResult::Ok {
                 command_id,
-                emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                     client_id: alice_client_id,
-                    pane_id: second_floating_pane_id,
+                    pane_ids: vec![second_pane_id],
                     is_pinned,
                 })],
             }
         );
         assert_eq!(
-            get_client_floating_pane_view(
-                &runtime,
-                session_id,
-                alice_client_id,
-                second_floating_pane_id
-            ),
+            get_client_floating_pane_view(&runtime, session_id, alice_client_id, second_pane_id),
             FloatingPaneView {
                 position: expected_position,
                 is_minimized: false,
+                focus_history: vec![second_pane_id],
+                zoomed_pane_id: None,
             }
         );
         assert_eq!(
@@ -24060,7 +24136,7 @@ fn pinning_a_pane_whose_stored_cell_lies_past_the_edge_pins_the_cell_it_is_drawn
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -24070,15 +24146,14 @@ fn pinning_a_pane_whose_stored_cell_lies_past_the_edge_pins_the_cell_it_is_drawn
         ),
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Moved(Point { column: 70, row: 2 })
     );
 
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
 
@@ -24086,17 +24161,16 @@ fn pinning_a_pane_whose_stored_cell_lies_past_the_edge_pins_the_cell_it_is_drawn
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
     );
     // A 20-column pane on alice's 80-column pane area starts at column 60 at most.
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Pinned(Point { column: 60, row: 2 })
     );
 }
@@ -24108,17 +24182,17 @@ fn a_pin_of_a_pinned_pane_and_an_unpin_of_an_unpinned_pane_change_nothing() {
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
 
     let session_records_before = serialize_session_records(&runtime);
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         false,
     );
     assert_eq!(
@@ -24130,21 +24204,21 @@ fn a_pin_of_a_pinned_pane_and_an_unpin_of_an_unpinned_pane_change_nothing() {
     );
     assert_eq!(serialize_session_records(&runtime), session_records_before);
 
-    let (_, command_result) = dispatch_set_pane_pinned(
+    let (_, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
         get_command_outcome(&command_result),
-        Ok(vec!["PanePinChanged"])
+        Ok(vec!["FloatingPanePinChanged"])
     );
     let session_records_before = serialize_session_records(&runtime);
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
@@ -24166,7 +24240,7 @@ fn a_client_below_the_floating_minimum_cannot_pin_and_does_not_stop_another_clie
         tab_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -24184,7 +24258,7 @@ fn a_client_below_the_floating_minimum_cannot_pin_and_does_not_stop_another_clie
         },
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 48,
             row_count: 13,
@@ -24192,10 +24266,10 @@ fn a_client_below_the_floating_minimum_cannot_pin_and_does_not_stop_another_clie
     );
     let session_records_before = serialize_session_records(&runtime);
 
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(bob_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
@@ -24204,33 +24278,32 @@ fn a_client_below_the_floating_minimum_cannot_pin_and_does_not_stop_another_clie
             command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!(
-                "{floating_pane_id} is not drawn on the client's screen, so it has no position \
+                "{htop_pane_id} is not drawn on the client's screen, so it has no position \
                  to pin"
             )),
         }
     );
     assert_eq!(serialize_session_records(&runtime), session_records_before);
 
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
     );
 }
@@ -24253,7 +24326,7 @@ fn a_pin_for_a_client_that_reports_no_pane_area_is_refused() {
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
@@ -24269,7 +24342,7 @@ fn a_pin_for_a_client_that_reports_no_pane_area_is_refused() {
     );
     // bob's pane area still sizes the pane.
     assert_eq!(
-        get_floating_member(&runtime, session_id, floating_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 40,
             row_count: 12,
@@ -24277,10 +24350,10 @@ fn a_pin_for_a_client_that_reports_no_pane_area_is_refused() {
     );
     let session_records_before = serialize_session_records(&runtime);
 
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
 
@@ -24290,7 +24363,7 @@ fn a_pin_for_a_client_that_reports_no_pane_area_is_refused() {
             command_id,
             reason: RejectReason::InvalidState,
             help: Some(format!(
-                "{floating_pane_id} is not drawn on the client's screen, so it has no position \
+                "{htop_pane_id} is not drawn on the client's screen, so it has no position \
                  to pin"
             )),
         }
@@ -24306,48 +24379,51 @@ fn a_minimized_pane_pins_and_moves_and_stays_minimized() {
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     assert!(runtime
         .get_client_mut(alice_client_id)
         .expect("alice is attached")
-        .minimize_floating_pane(floating_pane_id));
+        .minimize_floating_pane(htop_floating_pane_id));
 
-    let (_, command_result) = dispatch_set_pane_pinned(
+    let (_, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
         get_command_outcome(&command_result),
-        Ok(vec!["PanePinChanged"])
+        Ok(vec!["FloatingPanePinChanged"])
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id),
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id),
         FloatingPaneView {
             position: FloatingPanePosition::Pinned(Point { column: 16, row: 4 }),
             is_minimized: true,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         }
     );
 
-    let (_, command_result) = dispatch_set_pane_pinned(
+    let (_, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         false,
     );
     assert_eq!(
         get_command_outcome(&command_result),
-        Ok(vec!["PanePinChanged"])
+        Ok(vec!["FloatingPanePinChanged"])
     );
     let (_, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 1, row: 1 },
     );
     assert_eq!(
@@ -24355,10 +24431,12 @@ fn a_minimized_pane_pins_and_moves_and_stays_minimized() {
         Ok(vec!["FloatingPaneMoved"])
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id),
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id),
         FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 1, row: 1 }),
             is_minimized: true,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         }
     );
 }
@@ -24372,11 +24450,12 @@ fn a_pin_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     // The focused tiled pane takes over alice's input from the new floating
     // pane, which is minimized.
     let focus_command_result = runtime.dispatch(build_command_envelope(
@@ -24388,11 +24467,11 @@ fn a_pin_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
     ));
     assert_eq!(
         get_command_outcome(&focus_command_result),
-        Ok(vec!["PaneMinimizedChanged", "PaneFocused"])
+        Ok(vec!["FloatingPaneMinimizedChanged", "PaneFocused"])
     );
     let session_records_before = serialize_session_records(&runtime);
 
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         None,
@@ -24411,8 +24490,8 @@ fn a_pin_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
     assert!(runtime
         .get_client_mut(alice_client_id)
         .expect("alice is attached")
-        .focus_floating_pane(floating_pane_id));
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+        .focus_floating_pane(htop_floating_pane_id));
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         None,
@@ -24422,16 +24501,15 @@ fn a_pin_naming_no_pane_takes_the_acting_clients_focused_floating_pane() {
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
     );
 }
@@ -24445,18 +24523,18 @@ fn an_in_session_move_and_pin_act_on_the_pane_they_were_issued_from() {
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
     let floating_shell_source =
-        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id);
+        build_in_session_source(session_id, Some(alice_client_id), htop_pane_id);
 
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         floating_shell_source.clone(),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 5, row: 3 },
     );
     assert_eq!(
@@ -24465,32 +24543,31 @@ fn an_in_session_move_and_pin_act_on_the_pane_they_were_issued_from() {
             command_id,
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 top_left_cell: Point { column: 5, row: 3 },
             })],
         }
     );
     let (command_id, command_result) =
-        dispatch_set_pane_pinned(&mut runtime, floating_shell_source, None, true);
+        dispatch_set_floating_pane_pinned(&mut runtime, floating_shell_source, None, true);
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Pinned(Point { column: 5, row: 3 })
     );
 
     let session_records_before = serialize_session_records(&runtime);
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         build_in_session_source(session_id, Some(alice_client_id), tiled_pane_id),
         None,
@@ -24527,15 +24604,16 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     assert!(runtime
         .get_client_mut(bob_client_id)
         .expect("bob is attached")
-        .focus_floating_pane(floating_pane_id));
+        .focus_floating_pane(htop_floating_pane_id));
     let alice_record_before = serialize_client_record(&runtime, session_id, alice_client_id);
     let bob_source = CommandSource::from_external_cli(Some(session_id), Some(bob_client_id));
 
@@ -24550,7 +24628,7 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
             }),
         ),
         (
-            Some(floating_pane_id),
+            Some(htop_pane_id),
             false,
             FloatingPanePosition::Moved(Point {
                 column: 36,
@@ -24559,20 +24637,20 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
         ),
     ] {
         let (command_id, command_result) =
-            dispatch_set_pane_pinned(&mut runtime, bob_source.clone(), pane_id, is_pinned);
+            dispatch_set_floating_pane_pinned(&mut runtime, bob_source.clone(), pane_id, is_pinned);
         assert_eq!(
             command_result,
             CommandResult::Ok {
                 command_id,
-                emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                     client_id: bob_client_id,
-                    pane_id: floating_pane_id,
+                    pane_ids: vec![htop_pane_id],
                     is_pinned,
                 })],
             }
         );
         assert_eq!(
-            get_client_floating_pane_view(&runtime, session_id, bob_client_id, floating_pane_id)
+            get_client_floating_pane_view(&runtime, session_id, bob_client_id, htop_pane_id)
                 .position,
             expected_position
         );
@@ -24580,7 +24658,7 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         bob_source,
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 4, row: 2 },
     );
     assert_eq!(
@@ -24589,7 +24667,7 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
             command_id,
             emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
                 client_id: bob_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 top_left_cell: Point { column: 4, row: 2 },
             })],
         }
@@ -24605,7 +24683,7 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_external_cli(Some(session_id), Some(stranger_client_id)),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 4, row: 2 },
     );
     assert_eq!(
@@ -24618,10 +24696,10 @@ fn an_external_move_and_pin_change_only_the_named_clients_view() {
             )),
         }
     );
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_external_cli(Some(session_id), None),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         true,
     );
     assert_eq!(
@@ -24665,7 +24743,7 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
         .map(PaneRecord::get_pane_id)
         .next()
         .expect("the other session's pane");
-    let other_floating_pane_id = create_floating_pane(
+    let other_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(carol_client_id),
         build_floating_new_pane_args(Some(build_cells_floating_pane_size(40, 12)), None, false),
@@ -24680,23 +24758,23 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
     let (command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        other_floating_pane_id,
+        other_pane_id,
         Point { column: 4, row: 2 },
     );
     assert_eq!(command_result, build_not_attached_rejection(command_id));
 
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_mouse(alice_client_id),
-        Some(other_floating_pane_id),
+        Some(other_pane_id),
         true,
     );
     assert_eq!(command_result, build_not_attached_rejection(command_id));
 
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(other_floating_pane_id),
+        Some(other_pane_id),
         true,
     );
     assert_eq!(command_result, build_not_attached_rejection(command_id));
@@ -24704,7 +24782,7 @@ fn a_key_or_mouse_of_a_client_in_another_session_changes_nothing_there() {
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        other_floating_pane_id,
+        other_pane_id,
         Direction::Right,
         1,
     );
@@ -24739,7 +24817,7 @@ fn a_floating_view_command_that_changes_nothing_emits_no_event_and_records_only_
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -24747,7 +24825,7 @@ fn a_floating_view_command_that_changes_nothing_emits_no_event_and_records_only_
     let (_, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 4, row: 2 },
     );
     assert_eq!(
@@ -24762,7 +24840,7 @@ fn a_floating_view_command_that_changes_nothing_emits_no_event_and_records_only_
     let (unchanged_move_command_id, command_result) = dispatch_move_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        floating_pane_id,
+        htop_pane_id,
         Point { column: 4, row: 2 },
     );
     assert_eq!(
@@ -24772,10 +24850,10 @@ fn a_floating_view_command_that_changes_nothing_emits_no_event_and_records_only_
             emitted_events: Vec::new(),
         }
     );
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         false,
     );
     assert_eq!(
@@ -24786,15 +24864,15 @@ fn a_floating_view_command_that_changes_nothing_emits_no_event_and_records_only_
         }
     );
     for command in [
-        Command::SetPaneMinimized(SetPaneMinimizedArgs {
-            pane_id: Some(floating_pane_id),
+        Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
+            pane_id: Some(htop_pane_id),
             is_minimized: false,
         }),
         Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
             is_minimized: false,
         }),
         Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Pane(floating_pane_id),
+            focus_target: FocusTarget::Pane(htop_pane_id),
             client_id: None,
         }),
     ] {
@@ -24829,7 +24907,7 @@ fn a_floating_view_command_that_changes_nothing_emits_no_event_and_records_only_
 
 /// Dispatch a minimize (`is_minimized: true`) or a restore of `pane_id` from
 /// `command_source`, and return the command id with the result.
-fn dispatch_set_pane_minimized(
+fn dispatch_set_floating_pane_minimized(
     runtime: &mut Server,
     command_source: CommandSource,
     pane_id: Option<PaneId>,
@@ -24837,7 +24915,7 @@ fn dispatch_set_pane_minimized(
 ) -> (CommandId, CommandResult) {
     let command_envelope = build_command_envelope(
         command_source,
-        Command::SetPaneMinimized(SetPaneMinimizedArgs {
+        Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
             pane_id,
             is_minimized,
         }),
@@ -24879,11 +24957,16 @@ fn dispatch_focus_pane(
     (command_id, runtime.dispatch(command_envelope))
 }
 
-/// `PaneMinimizedChanged` for `client_id`'s view of `pane_id`.
-fn build_pane_minimized_changed(client_id: ClientId, pane_id: PaneId, is_minimized: bool) -> Event {
-    Event::PaneMinimizedChanged(PaneMinimizedChanged {
+/// `FloatingPaneMinimizedChanged` for `client_id`'s view of the floating pane
+/// that holds `pane_id` alone.
+fn build_floating_pane_minimized_changed(
+    client_id: ClientId,
+    pane_id: PaneId,
+    is_minimized: bool,
+) -> Event {
+    Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
         client_id,
-        pane_id,
+        pane_ids: vec![pane_id],
         is_minimized,
     })
 }
@@ -24923,11 +25006,12 @@ fn an_external_minimize_of_every_floating_pane_changes_the_named_clients_view_on
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let bob_source = CommandSource::from_external_cli(Some(session_id), Some(bob_client_id));
     let (_, restore_result) =
         dispatch_set_all_floating_panes_minimized(&mut runtime, bob_source.clone(), false);
@@ -24936,7 +25020,7 @@ fn an_external_minimize_of_every_floating_pane_changes_the_named_clients_view_on
     };
     assert_eq!(
         get_attached_client(&runtime, session_id, bob_client_id).list_shown_floating_pane_ids(),
-        &[floating_pane_id]
+        [htop_floating_pane_id]
     );
 
     let (command_id, command_result) =
@@ -24947,27 +25031,30 @@ fn an_external_minimize_of_every_floating_pane_changes_the_named_clients_view_on
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(bob_client_id, floating_pane_id, true),
+                build_floating_pane_minimized_changed(bob_client_id, htop_pane_id, true),
                 build_pane_focused(
                     bob_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
     );
     let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
-    assert_eq!(bob_client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
+    assert_eq!(
+        bob_client.list_shown_floating_pane_ids(),
+        &[] as &[FloatingPaneId]
+    );
     assert_eq!(bob_client.get_active_focused_pane_id(), Some(tiled_pane_id));
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        &[floating_pane_id]
+        [htop_floating_pane_id]
     );
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
 }
 
@@ -24981,15 +25068,16 @@ fn minimizing_the_focused_floating_pane_returns_the_input_to_the_tab_and_a_resto
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     // A minimize naming no pane takes the focused floating pane.
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         None,
@@ -25001,27 +25089,29 @@ fn minimizing_the_focused_floating_pane_returns_the_input_to_the_tab_and_a_resto
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, htop_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Default,
             is_minimized: true,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         })
     );
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
     assert_eq!(alice_client.get_focused_floating_pane_id(), None);
     assert_eq!(
@@ -25038,7 +25128,7 @@ fn minimizing_the_focused_floating_pane_returns_the_input_to_the_tab_and_a_resto
 
     // With no floating pane focused, a restore names its pane.
     let session_records_before = serialize_session_records(&runtime);
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         None,
@@ -25058,10 +25148,10 @@ fn minimizing_the_focused_floating_pane_returns_the_input_to_the_tab_and_a_resto
         SessionViewChanges::default()
     );
 
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         false,
     );
 
@@ -25070,19 +25160,19 @@ fn minimizing_the_focused_floating_pane_returns_the_input_to_the_tab_and_a_resto
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, floating_pane_id, false),
-                build_pane_focused(alice_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+                build_floating_pane_minimized_changed(alice_client_id, htop_pane_id, false),
+                build_pane_focused(alice_client_id, None, htop_pane_id, Some(tiled_pane_id)),
             ],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW)
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&build_default_floating_pane_view(false, htop_pane_id))
     );
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_floating_pane_id)
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -25113,7 +25203,7 @@ fn a_minimize_of_a_pane_the_client_does_not_show_or_a_restore_of_a_shown_pane_ch
         },
     );
     // The new pane takes alice's input; bob never focused it.
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -25121,10 +25211,10 @@ fn a_minimize_of_a_pane_the_client_does_not_show_or_a_restore_of_a_shown_pane_ch
     let session_records_before = serialize_session_records(&runtime);
 
     for (client_id, is_minimized) in [(alice_client_id, false), (bob_client_id, true)] {
-        let (command_id, command_result) = dispatch_set_pane_minimized(
+        let (command_id, command_result) = dispatch_set_floating_pane_minimized(
             &mut runtime,
             CommandSource::from_key_binding(client_id),
-            Some(floating_pane_id),
+            Some(htop_pane_id),
             is_minimized,
         );
         assert_eq!(
@@ -25135,7 +25225,7 @@ fn a_minimize_of_a_pane_the_client_does_not_show_or_a_restore_of_a_shown_pane_ch
             }
         );
     }
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         Some(tiled_pane_id),
@@ -25177,13 +25267,14 @@ fn two_minimize_toggles_sent_before_a_frame_minimize_the_pane_then_restore_it() 
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let toggle_command = Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-        pane_id: Some(floating_pane_id),
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    let toggle_command = Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs {
+        pane_id: Some(htop_pane_id),
     });
 
     // Both toggles run with no frame between them, as two quick clicks on one
@@ -25198,12 +25289,12 @@ fn two_minimize_toggles_sent_before_a_frame_minimize_the_pane_then_restore_it() 
         CommandResult::Ok {
             command_id: first_command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, htop_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
@@ -25213,19 +25304,19 @@ fn two_minimize_toggles_sent_before_a_frame_minimize_the_pane_then_restore_it() 
         CommandResult::Ok {
             command_id: second_command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, floating_pane_id, false),
-                build_pane_focused(alice_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+                build_floating_pane_minimized_changed(alice_client_id, htop_pane_id, false),
+                build_pane_focused(alice_client_id, None, htop_pane_id, Some(tiled_pane_id)),
             ],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(floating_pane_id),
-        Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW)
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        Some(&build_default_floating_pane_view(false, htop_pane_id))
     );
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_floating_pane_id)
     );
 }
 
@@ -25239,7 +25330,7 @@ fn a_minimize_toggle_naming_no_pane_takes_the_focused_floating_pane_and_refuses_
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -25248,19 +25339,19 @@ fn a_minimize_toggle_naming_no_pane_takes_the_focused_floating_pane_and_refuses_
     let (command_id, command_result) = dispatch_key_binding_command(
         &mut runtime,
         alice_client_id,
-        Command::TogglePaneMinimized(TogglePaneMinimizedArgs { pane_id: None }),
+        Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs { pane_id: None }),
     );
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, htop_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
@@ -25270,7 +25361,7 @@ fn a_minimize_toggle_naming_no_pane_takes_the_focused_floating_pane_and_refuses_
     let (command_id, command_result) = dispatch_key_binding_command(
         &mut runtime,
         alice_client_id,
-        Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
+        Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs {
             pane_id: Some(tiled_pane_id),
         }),
     );
@@ -25287,7 +25378,7 @@ fn a_minimize_toggle_naming_no_pane_takes_the_focused_floating_pane_and_refuses_
     assert_eq!(serialize_session_records(&runtime), session_records_before);
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
 }
 
@@ -25301,25 +25392,25 @@ fn a_minimize_all_toggle_minimizes_while_one_pane_shows_and_restores_while_none_
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let first_floating_pane_id = create_floating_pane(
+    let first_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let second_floating_pane_id = create_floating_pane(
+    let second_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let (_, minimize_result) = dispatch_set_pane_minimized(
+    let (_, minimize_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
-        Some(first_floating_pane_id),
+        Some(first_pane_id),
         true,
     );
     assert_eq!(
         get_command_outcome(&minimize_result),
-        Ok(vec!["PaneMinimizedChanged"])
+        Ok(vec!["FloatingPaneMinimizedChanged"])
     );
 
     // alice shows the second pane only: the toggle minimizes it.
@@ -25328,8 +25419,8 @@ fn a_minimize_all_toggle_minimizes_while_one_pane_shows_and_restores_while_none_
         alice_client_id,
         Command::ToggleAllFloatingPanesMinimized,
     );
-    // alice shows no pane: the toggle restores both, in the order they became
-    // floating, and the second takes the input.
+    // alice shows no pane: the toggle restores both, in the order they were
+    // created, and the second takes the input.
     let (second_command_id, second_command_result) = dispatch_key_binding_command(
         &mut runtime,
         alice_client_id,
@@ -25341,12 +25432,12 @@ fn a_minimize_all_toggle_minimizes_while_one_pane_shows_and_restores_while_none_
         CommandResult::Ok {
             command_id: first_command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, second_floating_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, second_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(second_floating_pane_id)
+                    Some(second_pane_id)
                 ),
             ],
         }
@@ -25356,20 +25447,15 @@ fn a_minimize_all_toggle_minimizes_while_one_pane_shows_and_restores_while_none_
         CommandResult::Ok {
             command_id: second_command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_floating_pane_id, false),
-                build_pane_minimized_changed(alice_client_id, second_floating_pane_id, false),
-                build_pane_focused(
-                    alice_client_id,
-                    None,
-                    second_floating_pane_id,
-                    Some(tiled_pane_id)
-                ),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, second_pane_id, false),
+                build_pane_focused(alice_client_id, None, second_pane_id, Some(tiled_pane_id)),
             ],
         }
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).list_shown_floating_pane_ids(),
-        &[first_floating_pane_id, second_floating_pane_id]
+        list_floating_pane_ids_holding(&runtime, &[first_pane_id, second_pane_id])
     );
 }
 
@@ -25406,13 +25492,13 @@ fn two_pin_toggles_sent_before_a_frame_pin_the_pane_then_unpin_it_at_its_pinned_
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let toggle_command = Command::TogglePanePinned(TogglePanePinnedArgs {
-        pane_id: Some(floating_pane_id),
+    let toggle_command = Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs {
+        pane_id: Some(htop_pane_id),
     });
 
     let (first_command_id, first_command_result) =
@@ -25421,16 +25507,15 @@ fn two_pin_toggles_sent_before_a_frame_pin_the_pane_then_unpin_it_at_its_pinned_
         first_command_result,
         CommandResult::Ok {
             command_id: first_command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Pinned(Point { column: 16, row: 4 })
     );
 
@@ -25440,16 +25525,15 @@ fn two_pin_toggles_sent_before_a_frame_pin_the_pane_then_unpin_it_at_its_pinned_
         second_command_result,
         CommandResult::Ok {
             command_id: second_command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: false,
             })],
         }
     );
     assert_eq!(
-        get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
-            .position,
+        get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id).position,
         FloatingPanePosition::Moved(Point { column: 16, row: 4 })
     );
 }
@@ -25463,12 +25547,14 @@ fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() 
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let toggle_command = Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None });
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    let toggle_command =
+        Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs { pane_id: None });
     // The focused tiled pane takes over alice's input from the new floating
     // pane, which is minimized.
     let focus_command_result = runtime.dispatch(build_command_envelope(
@@ -25480,7 +25566,7 @@ fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() 
     ));
     assert_eq!(
         get_command_outcome(&focus_command_result),
-        Ok(vec!["PaneMinimizedChanged", "PaneFocused"])
+        Ok(vec!["FloatingPaneMinimizedChanged", "PaneFocused"])
     );
     let session_records_before = serialize_session_records(&runtime);
 
@@ -25499,7 +25585,7 @@ fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() 
     assert!(runtime
         .get_client_mut(alice_client_id)
         .expect("alice is attached")
-        .focus_floating_pane(floating_pane_id));
+        .focus_floating_pane(htop_floating_pane_id));
     for (is_pinned, expected_position) in [
         (
             true,
@@ -25516,15 +25602,15 @@ fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() 
             command_result,
             CommandResult::Ok {
                 command_id,
-                emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+                emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                     client_id: alice_client_id,
-                    pane_id: floating_pane_id,
+                    pane_ids: vec![htop_pane_id],
                     is_pinned,
                 })],
             }
         );
         assert_eq!(
-            get_client_floating_pane_view(&runtime, session_id, alice_client_id, floating_pane_id)
+            get_client_floating_pane_view(&runtime, session_id, alice_client_id, htop_pane_id)
                 .position,
             expected_position
         );
@@ -25532,14 +25618,14 @@ fn a_pin_toggle_naming_no_pane_takes_the_acting_clients_focused_floating_pane() 
 }
 
 #[test]
-fn toggle_pane_minimized_is_refused_from_the_command_line() {
+fn toggle_floating_pane_minimized_is_refused_from_the_command_line() {
     let FloatingCommandFixture {
         mut runtime,
         session_id,
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -25548,8 +25634,8 @@ fn toggle_pane_minimized_is_refused_from_the_command_line() {
 
     let command_result = runtime.dispatch(build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), Some(alice_client_id)),
-        Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-            pane_id: Some(floating_pane_id),
+        Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs {
+            pane_id: Some(htop_pane_id),
         }),
     ));
 
@@ -25571,7 +25657,7 @@ fn pin_and_minimize_all_toggles_from_the_command_line_act_for_the_named_client()
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -25580,16 +25666,16 @@ fn pin_and_minimize_all_toggles_from_the_command_line_act_for_the_named_client()
 
     let pin_envelope = build_command_envelope(
         command_source.clone(),
-        Command::TogglePanePinned(TogglePanePinnedArgs { pane_id: None }),
+        Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs { pane_id: None }),
     );
     let pin_command_id = pin_envelope.command_id;
     assert_eq!(
         runtime.dispatch(pin_envelope),
         CommandResult::Ok {
             command_id: pin_command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_pinned: true,
             })],
         }
@@ -25601,7 +25687,7 @@ fn pin_and_minimize_all_toggles_from_the_command_line_act_for_the_named_client()
     ));
     assert_eq!(
         get_command_outcome(&minimize_all_result),
-        Ok(vec!["PaneMinimizedChanged", "PaneFocused"])
+        Ok(vec!["FloatingPaneMinimizedChanged", "PaneFocused"])
     );
     assert_eq!(
         runtime.session_by_id[&session_id]
@@ -25609,7 +25695,7 @@ fn pin_and_minimize_all_toggles_from_the_command_line_act_for_the_named_client()
             .get_client_by_id(alice_client_id)
             .expect("alice is attached")
             .list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
 }
 
@@ -25632,18 +25718,19 @@ fn restoring_a_floating_pane_another_client_created_shows_it_and_takes_the_input
             row_count: 24,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     // bob holds alice's new pane minimized: the restore shows it.
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(bob_client_id),
-        Some(floating_pane_id),
+        Some(htop_pane_id),
         false,
     );
 
@@ -25652,19 +25739,19 @@ fn restoring_a_floating_pane_another_client_created_shows_it_and_takes_the_input
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(bob_client_id, floating_pane_id, false),
-                build_pane_focused(bob_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+                build_floating_pane_minimized_changed(bob_client_id, htop_pane_id, false),
+                build_pane_focused(bob_client_id, None, htop_pane_id, Some(tiled_pane_id)),
             ],
         }
     );
     let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
     assert_eq!(
         bob_client.list_shown_floating_pane_ids(),
-        [floating_pane_id]
+        [htop_floating_pane_id]
     );
     assert_eq!(
         bob_client.get_focused_floating_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_floating_pane_id)
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -25676,7 +25763,7 @@ fn restoring_a_floating_pane_another_client_created_shows_it_and_takes_the_input
 }
 
 #[test]
-fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_became_floating() {
+fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_were_created() {
     let FloatingCommandFixture {
         mut runtime,
         session_id,
@@ -25685,14 +25772,15 @@ fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_became_f
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_ids: [PaneId; 3] = std::array::from_fn(|_| {
+    let pane_ids: [PaneId; 3] = std::array::from_fn(|_| {
         create_floating_pane(
             &mut runtime,
             CommandSource::from_key_binding(alice_client_id),
             build_floating_new_pane_args(None, None, false),
         )
     });
-    let [first_pane_id, second_pane_id, third_pane_id] = floating_pane_ids;
+    let [first_pane_id, second_pane_id, third_pane_id] = pane_ids;
+    let floating_pane_ids = pane_ids.map(|pane_id| get_floating_pane_id_holding(&runtime, pane_id));
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     let (command_id, command_result) = dispatch_set_all_floating_panes_minimized(
@@ -25706,9 +25794,9 @@ fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_became_f
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
-                build_pane_minimized_changed(alice_client_id, second_pane_id, true),
-                build_pane_minimized_changed(alice_client_id, third_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, second_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, third_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
@@ -25721,11 +25809,13 @@ fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_became_f
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
     assert_eq!(
-        floating_pane_ids.map(|pane_id| alice_client.get_floating_pane_view(pane_id)),
-        [Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW); 3]
+        floating_pane_ids.map(|floating_pane_id| alice_client
+            .get_floating_pane_view(floating_pane_id)
+            .cloned()),
+        pane_ids.map(|pane_id| Some(build_default_floating_pane_view(true, pane_id)))
     );
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
@@ -25769,9 +25859,9 @@ fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_became_f
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_pane_id, false),
-                build_pane_minimized_changed(alice_client_id, second_pane_id, false),
-                build_pane_minimized_changed(alice_client_id, third_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, second_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, third_pane_id, false),
                 build_pane_focused(alice_client_id, None, third_pane_id, Some(tiled_pane_id)),
             ],
         }
@@ -25782,12 +25872,14 @@ fn restoring_every_minimized_floating_pane_shows_them_in_the_order_they_became_f
         floating_pane_ids
     );
     assert_eq!(
-        floating_pane_ids.map(|pane_id| alice_client.get_floating_pane_view(pane_id)),
-        [Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW); 3]
+        floating_pane_ids.map(|floating_pane_id| alice_client
+            .get_floating_pane_view(floating_pane_id)
+            .cloned()),
+        pane_ids.map(|pane_id| Some(build_default_floating_pane_view(false, pane_id)))
     );
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(third_pane_id)
+        Some(floating_pane_ids[2])
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -25821,7 +25913,7 @@ fn a_floating_pane_created_after_minimizing_every_pane_is_shown_and_focused() {
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, minimized_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, minimized_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
@@ -25838,15 +25930,20 @@ fn a_floating_pane_created_after_minimizing_every_pane_is_shown_and_focused() {
         build_floating_new_pane_args(None, None, false),
     );
 
+    let new_floating_pane_id = get_floating_pane_id_holding(&runtime, new_pane_id);
+
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(new_pane_id),
-        Some(SHOWN_DEFAULT_FLOATING_PANE_VIEW)
+        alice_client.get_floating_pane_view(new_floating_pane_id),
+        Some(&build_default_floating_pane_view(false, new_pane_id))
     );
-    assert_eq!(alice_client.list_shown_floating_pane_ids(), [new_pane_id]);
+    assert_eq!(
+        alice_client.list_shown_floating_pane_ids(),
+        [new_floating_pane_id]
+    );
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(new_pane_id)
+        Some(new_floating_pane_id)
     );
 }
 
@@ -25869,15 +25966,16 @@ fn an_external_minimize_acts_for_the_named_client_only() {
             row_count: 42,
         },
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     assert!(runtime
         .get_client_mut(bob_client_id)
         .expect("bob is attached")
-        .focus_floating_pane(floating_pane_id));
+        .focus_floating_pane(htop_floating_pane_id));
     let alice_record_before = serialize_client_record(&runtime, session_id, alice_client_id);
 
     let session_records_before = serialize_session_records(&runtime);
@@ -25904,25 +26002,25 @@ fn an_external_minimize_acts_for_the_named_client_only() {
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(bob_client_id, floating_pane_id, true),
+                build_floating_pane_minimized_changed(bob_client_id, htop_pane_id, true),
                 build_pane_focused(
                     bob_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
     );
     let (command_id, command_result) =
-        dispatch_set_pane_minimized(&mut runtime, bob_source, Some(floating_pane_id), false);
+        dispatch_set_floating_pane_minimized(&mut runtime, bob_source, Some(htop_pane_id), false);
     assert_eq!(
         command_result,
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(bob_client_id, floating_pane_id, false),
-                build_pane_focused(bob_client_id, None, floating_pane_id, Some(tiled_pane_id)),
+                build_floating_pane_minimized_changed(bob_client_id, htop_pane_id, false),
+                build_pane_focused(bob_client_id, None, htop_pane_id, Some(tiled_pane_id)),
             ],
         }
     );
@@ -25945,12 +26043,14 @@ fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_shows_a_minimiz
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let first_floating_pane_id = get_floating_pane_id_holding(&runtime, first_pane_id);
     let second_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let second_floating_pane_id = get_floating_pane_id_holding(&runtime, second_pane_id);
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         Some(first_pane_id),
@@ -25960,9 +26060,9 @@ fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_shows_a_minimiz
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: first_pane_id,
+                pane_ids: vec![first_pane_id],
                 is_pinned: true,
             })],
         }
@@ -25990,7 +26090,7 @@ fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_shows_a_minimiz
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        [second_pane_id, first_pane_id]
+        [second_floating_pane_id, first_floating_pane_id]
     );
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -26020,7 +26120,7 @@ fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_shows_a_minimiz
     );
 
     // The minimize moves alice's input back to the second pane.
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         Some(first_pane_id),
@@ -26031,7 +26131,7 @@ fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_shows_a_minimiz
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, true),
                 build_pane_focused(alice_client_id, None, second_pane_id, Some(first_pane_id)),
             ],
         }
@@ -26046,19 +26146,19 @@ fn focusing_a_floating_pane_takes_the_input_also_when_pinned_and_shows_a_minimiz
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, false),
                 build_pane_focused(alice_client_id, None, first_pane_id, Some(second_pane_id)),
             ],
         }
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).list_shown_floating_pane_ids(),
-        [second_pane_id, first_pane_id]
+        [second_floating_pane_id, first_floating_pane_id]
     );
 }
 
 #[test]
-fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floating() {
+fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_were_created() {
     let FloatingCommandFixture {
         mut runtime,
         session_id,
@@ -26077,7 +26177,7 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
     let alice_source = CommandSource::from_key_binding(alice_client_id);
     // The second pane is minimized and the first is pinned; the steps reach
     // both.
-    let (command_id, command_result) = dispatch_set_pane_minimized(
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
         &mut runtime,
         alice_source.clone(),
         Some(second_pane_id),
@@ -26087,14 +26187,14 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pane_minimized_changed(
+            emitted_events: vec![build_floating_pane_minimized_changed(
                 alice_client_id,
                 second_pane_id,
                 true
             )],
         }
     );
-    let (command_id, command_result) = dispatch_set_pane_pinned(
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
         &mut runtime,
         alice_source.clone(),
         Some(first_pane_id),
@@ -26104,9 +26204,9 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![Event::PanePinChanged(PanePinChanged {
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
                 client_id: alice_client_id,
-                pane_id: first_pane_id,
+                pane_ids: vec![first_pane_id],
                 is_pinned: true,
             })],
         }
@@ -26127,7 +26227,7 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         (
             FocusTarget::NextFloatingPane,
             vec![
-                build_pane_minimized_changed(alice_client_id, second_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, second_pane_id, false),
                 build_pane_focused(alice_client_id, None, second_pane_id, Some(first_pane_id)),
             ],
         ),
@@ -26163,7 +26263,7 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
     }
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).list_shown_floating_pane_ids(),
-        [second_pane_id, first_pane_id, third_pane_id]
+        list_floating_pane_ids_holding(&runtime, &[second_pane_id, first_pane_id, third_pane_id])
     );
 
     // A focus of the tiled pane minimizes every shown floating pane. From the
@@ -26178,9 +26278,9 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, second_pane_id, true),
-                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
-                build_pane_minimized_changed(alice_client_id, third_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, second_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, third_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
@@ -26200,7 +26300,7 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, false),
                 build_pane_focused(alice_client_id, None, first_pane_id, Some(tiled_pane_id)),
             ],
         }
@@ -26215,7 +26315,7 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, first_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, first_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
@@ -26235,10 +26335,393 @@ fn next_and_previous_floating_pane_visit_every_one_in_the_order_they_became_floa
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, third_pane_id, false),
+                build_floating_pane_minimized_changed(alice_client_id, third_pane_id, false),
                 build_pane_focused(alice_client_id, None, third_pane_id, Some(tiled_pane_id)),
             ],
         }
+    );
+}
+
+/// Put `added_pane_id` beside `pane_id` in the tree of the floating pane of
+/// `session` that holds `pane_id` alone: the tree becomes `pane_id` left of
+/// `added_pane_id`, solved again, and `added_pane_id` gets a pane record. The
+/// floating pane keeps its id and every client view of it, focus history
+/// included.
+pub(crate) fn put_pane_beside_in_floating_pane(
+    session: &mut Session,
+    pane_id: PaneId,
+    added_pane_id: PaneId,
+) {
+    register_pane_record(session, added_pane_id);
+    let mut floating_set_json =
+        serde_json::to_value(&session.floating_set).expect("the floating set encodes");
+    let floating_pane_json = floating_set_json["floating_panes"]
+        .as_array_mut()
+        .expect("a list of floating panes")
+        .iter_mut()
+        .find(|floating_pane_json| {
+            floating_pane_json["layout_area"]["layout"] == serde_json::json!({"Pane": pane_id})
+        })
+        .expect("a floating pane holds the pane alone");
+    floating_pane_json["layout_area"]["layout"] =
+        serde_json::to_value(LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![LayoutNode::Pane(pane_id), LayoutNode::Pane(added_pane_id)],
+        )))
+        .expect("the tree encodes");
+    session.floating_set =
+        serde_json::from_value(floating_set_json).expect("the floating set decodes");
+    let _ = session.update_pane_sizing(session.get_pane_sizing());
+}
+
+/// [`put_pane_beside_in_floating_pane`] in the session `session_id` of
+/// `runtime`, with a live PTY of `46x9` for `added_pane_id`.
+fn add_pane_beside_in_floating_pane(
+    runtime: &mut Server,
+    fake_pty_backend: &FakePtyBackend,
+    session_id: SessionId,
+    pane_id: PaneId,
+    added_pane_id: PaneId,
+) {
+    let added_pty_size = PtySize {
+        column_count: 46,
+        row_count: 9,
+    };
+    fake_pty_backend
+        .spawn_pane(added_pane_id, build_spawn_spec(), added_pty_size)
+        .expect("spawn the added pane");
+    runtime.park_pane_pty(added_pane_id, added_pty_size);
+    put_pane_beside_in_floating_pane(
+        runtime
+            .session_by_id
+            .get_mut(&session_id)
+            .expect("the session"),
+        pane_id,
+        added_pane_id,
+    );
+}
+
+#[test]
+fn every_floating_pane_command_naming_a_pane_acts_on_the_floating_pane_that_holds_it() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        tiled_pane_id,
+    } = build_floating_command_fixture();
+    let htop_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    let logs_pane_id = PaneId::new();
+    add_pane_beside_in_floating_pane(
+        &mut runtime,
+        &fake_pty_backend,
+        session_id,
+        htop_pane_id,
+        logs_pane_id,
+    );
+    let both_pane_ids = vec![htop_pane_id, logs_pane_id];
+    let alice_source = CommandSource::from_key_binding(alice_client_id);
+    let get_alice_view = |runtime: &Server| {
+        get_attached_client(runtime, session_id, alice_client_id)
+            .get_floating_pane_view(htop_floating_pane_id)
+            .cloned()
+            .expect("alice holds a view of the floating pane")
+    };
+
+    let (command_id, command_result) = dispatch_move_floating_pane(
+        &mut runtime,
+        alice_source.clone(),
+        logs_pane_id,
+        Point { column: 4, row: 2 },
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPaneMoved(FloatingPaneMoved {
+                client_id: alice_client_id,
+                pane_ids: both_pane_ids.clone(),
+                top_left_cell: Point { column: 4, row: 2 },
+            })],
+        }
+    );
+    assert_eq!(
+        get_alice_view(&runtime).position,
+        FloatingPanePosition::Moved(Point { column: 4, row: 2 })
+    );
+
+    let (command_id, command_result) = dispatch_set_floating_pane_pinned(
+        &mut runtime,
+        alice_source.clone(),
+        Some(logs_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
+                client_id: alice_client_id,
+                pane_ids: both_pane_ids.clone(),
+                is_pinned: true,
+            })],
+        }
+    );
+    assert_eq!(
+        get_alice_view(&runtime).position,
+        FloatingPanePosition::Pinned(Point { column: 4, row: 2 })
+    );
+
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs {
+            pane_id: Some(logs_pane_id),
+        }),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![Event::FloatingPanePinChanged(FloatingPanePinChanged {
+                client_id: alice_client_id,
+                pane_ids: both_pane_ids.clone(),
+                is_pinned: false,
+            })],
+        }
+    );
+    assert_eq!(
+        get_alice_view(&runtime).position,
+        FloatingPanePosition::Moved(Point { column: 4, row: 2 })
+    );
+
+    // Each pane's PTY is the floating pane's content size: 51x13 outer gives
+    // 49x9.
+    let (command_id, command_result) = dispatch_resize_pane(
+        &mut runtime,
+        alice_source.clone(),
+        logs_pane_id,
+        Direction::Right,
+        3,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                build_pty_resized(htop_pane_id, 49, 9),
+                build_pty_resized(logs_pane_id, 49, 9),
+            ],
+        }
+    );
+
+    let (command_id, command_result) = dispatch_set_floating_pane_minimized(
+        &mut runtime,
+        alice_source.clone(),
+        Some(logs_pane_id),
+        true,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
+                    client_id: alice_client_id,
+                    pane_ids: both_pane_ids.clone(),
+                    is_minimized: true,
+                }),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(htop_pane_id)
+                ),
+            ],
+        }
+    );
+
+    // The restore gives the input to the front of alice's focus history inside
+    // the floating pane, `htop`, not to the named `logs`.
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs {
+            pane_id: Some(logs_pane_id),
+        }),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
+                    client_id: alice_client_id,
+                    pane_ids: both_pane_ids.clone(),
+                    is_minimized: false,
+                }),
+                build_pane_focused(alice_client_id, None, htop_pane_id, Some(tiled_pane_id)),
+            ],
+        }
+    );
+
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        alice_source.clone(),
+        FocusTarget::Pane(logs_pane_id),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                alice_client_id,
+                None,
+                logs_pane_id,
+                Some(htop_pane_id)
+            )],
+        }
+    );
+    assert_eq!(
+        get_alice_view(&runtime).focus_history,
+        [logs_pane_id, htop_pane_id]
+    );
+
+    let (command_id, command_result) =
+        dispatch_set_all_floating_panes_minimized(&mut runtime, alice_source.clone(), true);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
+                    client_id: alice_client_id,
+                    pane_ids: both_pane_ids.clone(),
+                    is_minimized: true,
+                }),
+                build_pane_focused(
+                    alice_client_id,
+                    Some(tab_id),
+                    tiled_pane_id,
+                    Some(logs_pane_id)
+                ),
+            ],
+        }
+    );
+
+    let (command_id, command_result) =
+        dispatch_set_all_floating_panes_minimized(&mut runtime, alice_source, false);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
+                    client_id: alice_client_id,
+                    pane_ids: both_pane_ids,
+                    is_minimized: false,
+                }),
+                build_pane_focused(alice_client_id, None, logs_pane_id, Some(tiled_pane_id)),
+            ],
+        }
+    );
+    assert_eq!(
+        runtime.session_by_id[&session_id].validate_session_consistency(),
+        Ok(())
+    );
+}
+
+#[test]
+fn next_and_previous_floating_pane_give_the_input_to_the_front_of_the_clients_focus_history() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let htop_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let logs_pane_id = PaneId::new();
+    add_pane_beside_in_floating_pane(
+        &mut runtime,
+        &fake_pty_backend,
+        session_id,
+        htop_pane_id,
+        logs_pane_id,
+    );
+    let (_, focus_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::Pane(logs_pane_id),
+    );
+    assert_eq!(get_command_outcome(&focus_result), Ok(vec!["PaneFocused"]));
+    let vim_pane_id = create_floating_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let [htop_floating_pane_id, vim_floating_pane_id] =
+        [htop_pane_id, vim_pane_id].map(|pane_id| get_floating_pane_id_holding(&runtime, pane_id));
+
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::NextFloatingPane,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                alice_client_id,
+                None,
+                logs_pane_id,
+                Some(vim_pane_id)
+            )],
+        }
+    );
+    let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
+    assert_eq!(
+        alice_client.list_shown_floating_pane_ids(),
+        [vim_floating_pane_id, htop_floating_pane_id]
+    );
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(logs_pane_id)
+    );
+
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::PreviousFloatingPane,
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![build_pane_focused(
+                alice_client_id,
+                None,
+                vim_pane_id,
+                Some(logs_pane_id)
+            )],
+        }
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, alice_client_id)
+            .get_floating_pane_view(htop_floating_pane_id)
+            .map(|floating_pane_view| floating_pane_view.focus_history.clone()),
+        Some(vec![logs_pane_id, htop_pane_id])
     );
 }
 
@@ -26305,7 +26788,7 @@ fn a_directional_focus_from_a_floating_pane_returns_the_input_to_the_tabs_focuse
         get_attached_client(&runtime, session_id, alice_client_id).get_focused_pane_id(tab_id),
         Some(right_pane_id)
     );
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         alice_source.clone(),
         build_floating_new_pane_args(None, None, false),
@@ -26324,12 +26807,12 @@ fn a_directional_focus_from_a_floating_pane_returns_the_input_to_the_tabs_focuse
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pane_minimized_changed(alice_client_id, floating_pane_id, true),
+                build_floating_pane_minimized_changed(alice_client_id, htop_pane_id, true),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
                     right_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
@@ -26365,7 +26848,7 @@ fn a_pane_command_naming_no_pane_acts_on_the_focused_floating_pane() {
         tiled_pane_id,
     } = build_floating_command_fixture();
     let alice_source = CommandSource::from_key_binding(alice_client_id);
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         alice_source.clone(),
         build_floating_new_pane_args(None, None, false),
@@ -26380,7 +26863,7 @@ fn a_pane_command_naming_no_pane_acts_on_the_focused_floating_pane() {
     ));
     assert_eq!(get_command_outcome(&write_command_result), Ok(Vec::new()));
     assert_eq!(
-        fake_pty_backend.list_pane_write_bytes(floating_pane_id),
+        fake_pty_backend.list_pane_write_bytes(htop_pane_id),
         Ok(vec![b"ls\r".to_vec()])
     );
     assert_eq!(
@@ -26395,12 +26878,12 @@ fn a_pane_command_naming_no_pane_acts_on_the_focused_floating_pane() {
         (
             Command::NewPane(build_new_pane_args()),
             format!(
-                "{floating_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
+                "{htop_pane_id} is floating and has no split to divide; use new-pane --floating, or dock-pane first"
             ),
         ),
         (
             Command::TogglePaneFullscreen,
-            format!("{floating_pane_id} is floating; fullscreen fills a tab"),
+            format!("{htop_pane_id} is floating; fullscreen fills a tab"),
         ),
     ] {
         let command_envelope = build_command_envelope(alice_source.clone(), command);
@@ -26425,23 +26908,23 @@ fn a_pane_command_naming_no_pane_acts_on_the_focused_floating_pane() {
             command_id,
             emitted_events: vec![
                 Event::PaneClosing(PaneClosing {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                 }),
                 Event::PaneRemoved(PaneRemoved {
-                    pane_id: floating_pane_id,
+                    pane_id: htop_pane_id,
                     tab_id: None,
                 }),
                 build_pane_focused(
                     alice_client_id,
                     Some(tab_id),
                     tiled_pane_id,
-                    Some(floating_pane_id)
+                    Some(htop_pane_id)
                 ),
             ],
         }
     );
     let session = &runtime.session_by_id[&session_id];
-    assert_eq!(session.floating_set.list_members(), []);
+    assert_eq!(session.floating_set.list_floating_panes(), []);
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Pane(tiled_pane_id)
@@ -26456,7 +26939,7 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -26468,7 +26951,7 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
             .expect("alice's frame")
             .client_snapshot
             .focused_pane_id,
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     let session_overview = runtime.build_overview().expect("the session overview");
     assert_eq!(
@@ -26477,7 +26960,7 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
             .iter()
             .map(|client_discovery| client_discovery.focused_pane_id)
             .collect::<Vec<Option<PaneId>>>(),
-        vec![Some(floating_pane_id)]
+        vec![Some(htop_pane_id)]
     );
     assert_eq!(
         session_overview
@@ -26490,7 +26973,7 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
             .collect::<Vec<(PaneId, Vec<ClientId>)>>(),
         vec![
             (tiled_pane_id, Vec::new()),
-            (floating_pane_id, vec![alice_client_id])
+            (htop_pane_id, vec![alice_client_id])
         ]
     );
     assert_eq!(
@@ -26501,7 +26984,7 @@ fn every_view_of_a_client_names_the_floating_pane_that_takes_its_input() {
             .iter()
             .map(|client_focus| client_focus.focused_pane_id)
             .collect::<Vec<Option<PaneId>>>(),
-        vec![Some(floating_pane_id)]
+        vec![Some(htop_pane_id)]
     );
 }
 
@@ -26606,15 +27089,15 @@ fn undocking_a_split_pane_floats_it_with_its_pty_and_gives_the_issuer_its_input(
         &LayoutNode::Pane(tiled_pane_id)
     );
     assert_eq!(
-        session.floating_set.list_members(),
-        &[FloatingMember {
-            pane_id: undocked_pane_id,
-            desired_size: build_cells_floating_pane_size(40, 22),
-            solved_size: Size {
+        list_floating_pane_shapes(session),
+        [(
+            vec![undocked_pane_id],
+            build_cells_floating_pane_size(40, 22),
+            Size {
                 column_count: 40,
                 row_count: 19,
-            },
-        }]
+            }
+        )]
     );
     assert_eq!(
         session
@@ -26634,17 +27117,20 @@ fn undocking_a_split_pane_floats_it_with_its_pty_and_gives_the_issuer_its_input(
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(undocked_pane_id)
+        Some(get_floating_pane_id_holding(&runtime, undocked_pane_id))
     );
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        [undocked_pane_id]
+        list_floating_pane_ids_holding(&runtime, &[undocked_pane_id])
     );
     assert_eq!(
-        alice_client.get_floating_pane_view(undocked_pane_id),
-        Some(FloatingPaneView {
+        alice_client
+            .get_floating_pane_view(get_floating_pane_id_holding(&runtime, undocked_pane_id)),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 40, row: 0 }),
             is_minimized: false,
+            focus_history: vec![undocked_pane_id],
+            zoomed_pane_id: None,
         })
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
@@ -26690,32 +27176,35 @@ fn undocking_to_a_cell_stores_that_cell_for_the_issuer_alone() {
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id)
-            .get_floating_pane_view(undocked_pane_id),
-        Some(FloatingPaneView {
+            .get_floating_pane_view(get_floating_pane_id_holding(&runtime, undocked_pane_id)),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(top_left_cell),
             is_minimized: false,
+            focus_history: vec![undocked_pane_id],
+            zoomed_pane_id: None,
         })
     );
     // The pane keeps the size alice draws it at, 40x22, cut to the 72x19 cap.
     assert_eq!(
-        runtime.session_by_id[&session_id]
-            .floating_set
-            .list_members(),
-        &[FloatingMember {
-            pane_id: undocked_pane_id,
-            desired_size: build_cells_floating_pane_size(40, 22),
-            solved_size: Size {
+        list_floating_pane_shapes(&runtime.session_by_id[&session_id]),
+        [(
+            vec![undocked_pane_id],
+            build_cells_floating_pane_size(40, 22),
+            Size {
                 column_count: 40,
                 row_count: 19,
             },
-        }]
+        )]
     );
     let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
     assert_eq!(
-        bob_client.get_floating_pane_view(undocked_pane_id),
-        Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW)
+        bob_client.get_floating_pane_view(get_floating_pane_id_holding(&runtime, undocked_pane_id)),
+        Some(&build_default_floating_pane_view(true, undocked_pane_id))
     );
-    assert_eq!(bob_client.list_shown_floating_pane_ids(), &[] as &[PaneId]);
+    assert_eq!(
+        bob_client.list_shown_floating_pane_ids(),
+        &[] as &[FloatingPaneId]
+    );
     assert_eq!(bob_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         take_session_view_changes(&mut runtime, session_id),
@@ -26755,10 +27244,10 @@ fn an_undock_naming_no_pane_floats_the_issuing_pane_or_the_focused_pane() {
     )) else {
         panic!("the in-session undock applies");
     };
-    let floating_pane_ids: Vec<PaneId> = runtime.session_by_id[&session_id]
+    let floating_set_pane_ids: Vec<PaneId> = runtime.session_by_id[&session_id]
         .floating_set
         .list_pane_ids();
-    assert_eq!(floating_pane_ids, vec![tiled_pane_id]);
+    assert_eq!(floating_set_pane_ids, vec![tiled_pane_id]);
 
     // An external CLI floats the pane that takes the sole client's input:
     // `tiled_pane_id` again, which is now floating, so it is refused.
@@ -26823,7 +27312,7 @@ fn undocking_the_sole_pane_of_a_tab_closes_the_tab_and_keeps_the_pane() {
     assert_eq!(alice_client.get_active_tab_id(), tab_id);
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(undocked_pane_id)
+        Some(get_floating_pane_id_holding(&runtime, undocked_pane_id))
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -26856,7 +27345,7 @@ fn undock_refusals_name_the_reason_and_change_nothing() {
     let undocked_pane_id =
         split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
 
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
@@ -26865,11 +27354,11 @@ fn undock_refusals_name_the_reason_and_change_nothing() {
     assert_eq!(
         get_command_outcome(&runtime.dispatch(build_command_envelope(
             CommandSource::from_key_binding(alice_client_id),
-            build_undock_command(floating_pane_id, None),
+            build_undock_command(htop_pane_id, None),
         ))),
         Err((
             RejectReason::InvalidState,
-            Some(format!("{floating_pane_id} is already floating").as_str())
+            Some(format!("{htop_pane_id} is already floating").as_str())
         ))
     );
     assert_eq!(serialize_session_records(&runtime), session_records_before);
@@ -26960,8 +27449,9 @@ fn undocking_while_no_client_has_a_floating_viewport_sizes_the_pty_to_the_floati
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
-        alice_client.get_floating_pane_view(undocked_pane_id),
-        Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW)
+        alice_client
+            .get_floating_pane_view(get_floating_pane_id_holding(&runtime, undocked_pane_id)),
+        Some(&build_default_floating_pane_view(true, undocked_pane_id))
     );
     assert_eq!(alice_client.get_focused_floating_pane_id(), None);
     assert_eq!(
@@ -26975,7 +27465,7 @@ fn undocking_while_no_client_has_a_floating_viewport_sizes_the_pty_to_the_floati
         })
     );
     assert_eq!(
-        get_floating_member(&runtime, session_id, undocked_pane_id).solved_size,
+        get_floating_pane_holding(&runtime, session_id, undocked_pane_id).get_solved_size(),
         Size {
             column_count: 22,
             row_count: 10,
@@ -27030,19 +27520,20 @@ fn docking_a_floating_pane_right_of_a_tiled_pane_keeps_the_issuers_input_on_the_
         tab_id,
         tiled_pane_id,
     } = build_floating_command_fixture();
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let focus_history_before = runtime.session_by_id[&session_id].tabs[&tab_id]
         .list_focus_mru()
         .to_vec();
     let floating_pty_size_count_before = fake_pty_backend
-        .list_pane_sizes(floating_pane_id)
+        .list_pane_sizes(htop_pane_id)
         .expect("the floating pane spawned")
         .len();
     let dock_target = build_dock_beside_pane_target(tab_id, tiled_pane_id, Direction::Right);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
-        build_dock_command(floating_pane_id, dock_target.clone()),
+        build_dock_command(htop_pane_id, dock_target.clone()),
     );
     let command_id = command_envelope.command_id;
     let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(command_envelope) else {
@@ -27058,7 +27549,7 @@ fn docking_a_floating_pane_right_of_a_tiled_pane_keeps_the_issuers_input_on_the_
         vec![
             Event::PanePlacementCommitted(PanePlacementCommitted {
                 command_id,
-                source_pane_id: floating_pane_id,
+                source_pane_id: htop_pane_id,
                 source_tab_id: None,
                 destination_tab_id: Some(tab_id),
                 placement_target: PanePlacementTarget::Tiled(dock_target),
@@ -27067,8 +27558,8 @@ fn docking_a_floating_pane_right_of_a_tiled_pane_keeps_the_issuers_input_on_the_
             Event::PaneFocused(PaneFocused {
                 client_id: alice_client_id,
                 tab_id: Some(tab_id),
-                pane_id: floating_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
             Event::PtyResized(PtyResized {
                 pane_id: tiled_pane_id,
@@ -27081,13 +27572,13 @@ fn docking_a_floating_pane_right_of_a_tiled_pane_keeps_the_issuers_input_on_the_
                 ),
             }),
             Event::PtyResized(PtyResized {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 pty_size: compute_solved_pty_size(
                     &runtime,
                     session_id,
                     tab_id,
                     tab_size,
-                    floating_pane_id
+                    htop_pane_id
                 ),
             }),
         ]
@@ -27099,24 +27590,24 @@ fn docking_a_floating_pane_right_of_a_tiled_pane_keeps_the_issuers_input_on_the_
             SplitDirection::Horizontal,
             vec![
                 LayoutNode::Pane(tiled_pane_id),
-                LayoutNode::Pane(floating_pane_id)
+                LayoutNode::Pane(htop_pane_id)
             ],
         ))
     );
     assert_eq!(
-        session.floating_set.list_members(),
-        &[] as &[FloatingMember]
+        session.floating_set.list_floating_panes(),
+        &[] as &[FloatingPane]
     );
-    let mut expected_focus_history = vec![floating_pane_id];
+    let mut expected_focus_history = vec![htop_pane_id];
     expected_focus_history.extend(focus_history_before);
     assert_eq!(
         session.tabs[&tab_id].list_focus_mru(),
         expected_focus_history
     );
-    assert!(runtime.live_pane_ids.contains(&floating_pane_id));
+    assert!(runtime.live_pane_ids.contains(&htop_pane_id));
     assert_eq!(
         fake_pty_backend
-            .list_pane_sizes(floating_pane_id)
+            .list_pane_sizes(htop_pane_id)
             .expect("the docked pane stays live")
             .len(),
         floating_pty_size_count_before + 1
@@ -27125,12 +27616,15 @@ fn docking_a_floating_pane_right_of_a_tiled_pane_keeps_the_issuers_input_on_the_
     assert_eq!(alice_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
-    assert_eq!(alice_client.get_floating_pane_view(floating_pane_id), None);
+    assert_eq!(
+        alice_client.get_floating_pane_view(htop_floating_pane_id),
+        None
+    );
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -27146,6 +27640,7 @@ fn docking_a_floating_pane_minimizes_the_issuers_other_shown_floating_panes() {
         ..
     } = build_floating_command_fixture();
     let logs_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let logs_floating_pane_id = get_floating_pane_id_holding(&runtime, logs_pane_id);
     let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
 
     assert_eq!(
@@ -27159,7 +27654,7 @@ fn docking_a_floating_pane_minimizes_the_issuers_other_shown_floating_panes() {
         Ok(vec![
             "PanePlacementCommitted",
             "LayoutChanged",
-            "PaneMinimizedChanged",
+            "FloatingPaneMinimizedChanged",
             "PaneFocused",
             "PtyResized",
             "PtyResized"
@@ -27169,11 +27664,11 @@ fn docking_a_floating_pane_minimizes_the_issuers_other_shown_floating_panes() {
     assert_eq!(alice_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         alice_client.list_shown_floating_pane_ids(),
-        &[] as &[PaneId]
+        &[] as &[FloatingPaneId]
     );
     assert_eq!(
-        alice_client.get_floating_pane_view(logs_pane_id),
-        Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW)
+        alice_client.get_floating_pane_view(logs_floating_pane_id),
+        Some(&build_default_floating_pane_view(true, logs_pane_id))
     );
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
@@ -27196,7 +27691,7 @@ fn docking_a_floating_pane_onto_a_plain_pane_stacks_them_and_opens_the_docked_pa
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
 
     // The stack's active member stays the tiled pane. alice's input follows
     // the docked pane, so alice's view opens it and draws the tiled pane as a
@@ -27205,7 +27700,7 @@ fn docking_a_floating_pane_onto_a_plain_pane_stacks_them_and_opens_the_docked_pa
     let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         build_dock_command(
-            floating_pane_id,
+            htop_pane_id,
             TiledPlacementTarget::Stack {
                 target_pane_id: tiled_pane_id,
             },
@@ -27227,8 +27722,8 @@ fn docking_a_floating_pane_onto_a_plain_pane_stacks_them_and_opens_the_docked_pa
         Event::PaneFocused(PaneFocused {
             client_id: alice_client_id,
             tab_id: Some(tab_id),
-            pane_id: floating_pane_id,
-            previous_pane_id: Some(floating_pane_id),
+            pane_id: htop_pane_id,
+            previous_pane_id: Some(htop_pane_id),
         })
     );
     // alice draws the docked pane open in the `80x22` tab, below the tiled
@@ -27236,7 +27731,7 @@ fn docking_a_floating_pane_onto_a_plain_pane_stacks_them_and_opens_the_docked_pa
     assert_eq!(
         emitted_events[3],
         Event::PtyResized(PtyResized {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             pty_size: PtySize {
                 column_count: 78,
                 row_count: 19,
@@ -27247,13 +27742,13 @@ fn docking_a_floating_pane_onto_a_plain_pane_stacks_them_and_opens_the_docked_pa
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-            vec![tiled_pane_id, floating_pane_id],
+            vec![tiled_pane_id, htop_pane_id],
             0
         ))
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
@@ -27268,11 +27763,11 @@ fn docking_a_floating_pane_onto_a_stack_member_appends_it_and_keeps_the_active_m
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let first_floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let first_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     let CommandResult::Ok { .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         build_dock_command(
-            first_floating_pane_id,
+            first_pane_id,
             TiledPlacementTarget::Stack {
                 target_pane_id: tiled_pane_id,
             },
@@ -27280,14 +27775,14 @@ fn docking_a_floating_pane_onto_a_stack_member_appends_it_and_keeps_the_active_m
     )) else {
         panic!("expected the first dock to apply");
     };
-    let second_floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let second_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
 
     let CommandResult::Ok { .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         build_dock_command(
-            second_floating_pane_id,
+            second_pane_id,
             TiledPlacementTarget::Stack {
-                target_pane_id: first_floating_pane_id,
+                target_pane_id: first_pane_id,
             },
         ),
     )) else {
@@ -27298,23 +27793,18 @@ fn docking_a_floating_pane_onto_a_stack_member_appends_it_and_keeps_the_active_m
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-            vec![
-                tiled_pane_id,
-                first_floating_pane_id,
-                second_floating_pane_id
-            ],
+            vec![tiled_pane_id, first_pane_id, second_pane_id],
             0
         ))
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
-        Some(second_floating_pane_id)
+        Some(second_pane_id)
     );
-    assert!(!session.tabs[&tab_id].get_layout_tree().is_pane_collapsed(
-        second_floating_pane_id,
-        alice_client.list_focus_history(tab_id)
-    ));
+    assert!(!session.tabs[&tab_id]
+        .get_layout_tree()
+        .is_pane_collapsed(second_pane_id, alice_client.list_focus_history(tab_id)));
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
@@ -27385,9 +27875,9 @@ fn docking_a_floating_pane_into_another_tab_moves_the_issuer_there() {
                 tab_id: other_tab_id,
                 previous_tab_id: tab_id,
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id: alice_client_id,
-                pane_id: logs_pane_id,
+                pane_ids: vec![logs_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
@@ -27450,11 +27940,12 @@ fn docking_a_pane_that_another_client_types_in_moves_that_clients_input_with_it(
             row_count: 24,
         },
     );
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let CommandResult::Ok { .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(bob_client_id),
         Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Pane(floating_pane_id),
+            focus_target: FocusTarget::Pane(htop_pane_id),
             client_id: None,
         }),
     )) else {
@@ -27464,7 +27955,7 @@ fn docking_a_pane_that_another_client_types_in_moves_that_clients_input_with_it(
     let CommandResult::Ok { emitted_events, .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         build_dock_command(
-            floating_pane_id,
+            htop_pane_id,
             build_dock_beside_pane_target(tab_id, tiled_pane_id, Direction::Right),
         ),
     )) else {
@@ -27478,24 +27969,24 @@ fn docking_a_pane_that_another_client_types_in_moves_that_clients_input_with_it(
             Event::PaneFocused(PaneFocused {
                 client_id: alice_client_id,
                 tab_id: Some(tab_id),
-                pane_id: floating_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
             Event::PaneFocused(PaneFocused {
                 client_id: bob_client_id,
                 tab_id: Some(tab_id),
-                pane_id: floating_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
     let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
     assert_eq!(bob_client.get_focused_floating_pane_id(), None);
-    assert_eq!(bob_client.get_floating_pane_view(floating_pane_id), None);
     assert_eq!(
-        bob_client.get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        bob_client.get_floating_pane_view(htop_floating_pane_id),
+        None
     );
+    assert_eq!(bob_client.get_active_focused_pane_id(), Some(htop_pane_id));
     assert_eq!(
         runtime.session_by_id[&session_id].validate_session_consistency(),
         Ok(())
@@ -27530,18 +28021,19 @@ fn docking_a_floating_pane_drops_the_minimized_view_of_a_client_on_another_tab()
     let other_tab_id =
         get_attached_client(&runtime, session_id, alice_client_id).get_active_tab_id();
     let other_tab_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id]);
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     assert_eq!(
         get_attached_client(&runtime, session_id, bob_client_id)
-            .get_floating_pane_view(floating_pane_id),
-        Some(MINIMIZED_DEFAULT_FLOATING_PANE_VIEW)
+            .get_floating_pane_view(htop_floating_pane_id),
+        Some(&build_default_floating_pane_view(true, htop_pane_id))
     );
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     let CommandResult::Ok { .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         build_dock_command(
-            floating_pane_id,
+            htop_pane_id,
             build_dock_beside_pane_target(other_tab_id, other_tab_pane_id, Direction::Right),
         ),
     )) else {
@@ -27550,7 +28042,10 @@ fn docking_a_floating_pane_drops_the_minimized_view_of_a_client_on_another_tab()
 
     let bob_client = get_attached_client(&runtime, session_id, bob_client_id);
     assert_eq!(bob_client.get_active_tab_id(), tab_id);
-    assert_eq!(bob_client.get_floating_pane_view(floating_pane_id), None);
+    assert_eq!(
+        bob_client.get_floating_pane_view(htop_floating_pane_id),
+        None
+    );
     assert_eq!(
         runtime.session_by_id[&session_id].validate_session_consistency(),
         Ok(())
@@ -27585,7 +28080,7 @@ fn docking_into_the_tab_the_issuer_zooms_leaves_the_zoom() {
     )) else {
         panic!("expected alice to zoom the split pane");
     };
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).get_zoomed_pane_id(tab_id),
         Some(split_pane_id)
@@ -27594,7 +28089,7 @@ fn docking_into_the_tab_the_issuer_zooms_leaves_the_zoom() {
     let CommandResult::Ok { .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
         build_dock_command(
-            floating_pane_id,
+            htop_pane_id,
             build_dock_beside_pane_target(tab_id, tiled_pane_id, Direction::Right),
         ),
     )) else {
@@ -27605,13 +28100,13 @@ fn docking_into_the_tab_the_issuer_zooms_leaves_the_zoom() {
     assert_eq!(alice_client.get_zoomed_pane_id(tab_id), None);
     assert_eq!(
         alice_client.get_active_focused_pane_id(),
-        Some(floating_pane_id)
+        Some(htop_pane_id)
     );
     assert_eq!(
         runtime.session_by_id[&session_id].tabs[&tab_id]
             .get_layout_tree()
             .list_leaf_pane_ids(),
-        vec![tiled_pane_id, floating_pane_id, split_pane_id]
+        vec![tiled_pane_id, htop_pane_id, split_pane_id]
     );
     assert_eq!(
         runtime.session_by_id[&session_id].validate_session_consistency(),
@@ -27628,26 +28123,26 @@ fn dock_refusals_name_the_reason_and_change_nothing() {
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     let session_records_before = serialize_session_records(&runtime);
     let swap_from_floating_pane = build_dock_command(
-        floating_pane_id,
+        htop_pane_id,
         TiledPlacementTarget::Swap {
             target_pane_id: tiled_pane_id,
         },
     );
     let stack_onto_itself = build_dock_command(
-        floating_pane_id,
+        htop_pane_id,
         TiledPlacementTarget::Stack {
-            target_pane_id: floating_pane_id,
+            target_pane_id: htop_pane_id,
         },
     );
     let dock_beside_itself = build_dock_command(
-        floating_pane_id,
-        build_dock_beside_pane_target(tab_id, floating_pane_id, Direction::Right),
+        htop_pane_id,
+        build_dock_beside_pane_target(tab_id, htop_pane_id, Direction::Right),
     );
-    let swap_help = format!("{floating_pane_id} is floating; a swap exchanges tiled slots");
-    let stack_help = format!("{floating_pane_id} is floating; a stack holds tiled panes");
+    let swap_help = format!("{htop_pane_id} is floating; a swap exchanges tiled slots");
+    let stack_help = format!("{htop_pane_id} is floating; a stack holds tiled panes");
 
     for (command, expected_outcome) in [
         (
@@ -27677,7 +28172,7 @@ fn dock_refusals_name_the_reason_and_change_nothing() {
     // session's solve.
     let dock_target = build_dock_beside_pane_target(tab_id, tiled_pane_id, Direction::Right);
     let placement_snapshot =
-        build_server_placement_snapshot(&mut runtime, alice_client_id, floating_pane_id, tab_id);
+        build_server_placement_snapshot(&mut runtime, alice_client_id, htop_pane_id, tab_id);
     let mut stale_placed_tab_layout = placement_snapshot
         .build_placed_preview(&dock_target)
         .expect("the preview accepts the dock")
@@ -27687,7 +28182,7 @@ fn dock_refusals_name_the_reason_and_change_nothing() {
         get_command_outcome(&runtime.confirm_pane_placement(
             alice_client_id,
             CommandId::new(),
-            floating_pane_id,
+            htop_pane_id,
             dock_target,
             &stale_placed_tab_layout,
             None,
@@ -27715,7 +28210,7 @@ fn docking_into_a_tab_with_no_room_is_refused_with_the_tab_name() {
         column_count: 7,
         row_count: 8,
     });
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     let session_records_before = serialize_session_records(&runtime);
     let expected_help = format!(
         "tab {} has no room for another pane",
@@ -27726,7 +28221,7 @@ fn docking_into_a_tab_with_no_room_is_refused_with_the_tab_name() {
         get_command_outcome(&runtime.dispatch(build_command_envelope(
             CommandSource::from_key_binding(alice_client_id),
             build_dock_command(
-                floating_pane_id,
+                htop_pane_id,
                 build_dock_beside_pane_target(tab_id, tiled_pane_id, Direction::Right),
             ),
         ))),
@@ -27781,13 +28276,15 @@ fn toggling_a_tiled_pane_floats_it_where_the_issuer_draws_it() {
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(
         alice_client.get_focused_floating_pane_id(),
-        Some(split_pane_id)
+        Some(get_floating_pane_id_holding(&runtime, split_pane_id))
     );
     assert_eq!(
-        alice_client.get_floating_pane_view(split_pane_id),
-        Some(FloatingPaneView {
+        alice_client.get_floating_pane_view(get_floating_pane_id_holding(&runtime, split_pane_id)),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 40, row: 0 }),
             is_minimized: false,
+            focus_history: vec![split_pane_id],
+            zoomed_pane_id: None,
         })
     );
 }
@@ -27807,7 +28304,7 @@ fn toggling_a_floating_pane_docks_it_beside_the_pane_under_its_center() {
     } = build_floating_command_fixture();
     let split_pane_id =
         split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -27830,7 +28327,7 @@ fn toggling_a_floating_pane_docks_it_beside_the_pane_under_its_center() {
         emitted_events.first(),
         Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: floating_pane_id,
+            source_pane_id: htop_pane_id,
             source_tab_id: None,
             destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Tiled(build_dock_beside_pane_target(
@@ -27843,15 +28340,12 @@ fn toggling_a_floating_pane_docks_it_beside_the_pane_under_its_center() {
     let session = &runtime.session_by_id[&session_id];
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
-        vec![tiled_pane_id, split_pane_id, floating_pane_id]
+        vec![tiled_pane_id, split_pane_id, htop_pane_id]
     );
-    assert_eq!(session.floating_set.list_members(), &[]);
+    assert_eq!(session.floating_set.list_floating_panes(), &[]);
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
     assert_eq!(alice_client.get_focused_floating_pane_id(), None);
-    assert_eq!(
-        alice_client.get_focused_pane_id(tab_id),
-        Some(floating_pane_id)
-    );
+    assert_eq!(alice_client.get_focused_pane_id(tab_id), Some(htop_pane_id));
 }
 
 #[test]
@@ -27867,7 +28361,7 @@ fn toggling_a_floating_pane_for_a_client_that_draws_it_nowhere_docks_it_at_the_r
         tiled_pane_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     let bob_client_id = attach_bob(
         &mut runtime,
         session_id,
@@ -27887,7 +28381,7 @@ fn toggling_a_floating_pane_for_a_client_that_draws_it_nowhere_docks_it_at_the_r
         .update_pane_area(Some(PaneArea::Starving));
 
     let command_envelope = build_command_envelope(
-        build_in_session_source(session_id, Some(bob_client_id), floating_pane_id),
+        build_in_session_source(session_id, Some(bob_client_id), htop_pane_id),
         Command::TogglePaneFloating,
     );
     let command_id = command_envelope.command_id;
@@ -27899,7 +28393,7 @@ fn toggling_a_floating_pane_for_a_client_that_draws_it_nowhere_docks_it_at_the_r
         emitted_events.first(),
         Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: floating_pane_id,
+            source_pane_id: htop_pane_id,
             source_tab_id: None,
             destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -27913,7 +28407,7 @@ fn toggling_a_floating_pane_for_a_client_that_draws_it_nowhere_docks_it_at_the_r
         runtime.session_by_id[&session_id].tabs[&tab_id]
             .get_layout_tree()
             .list_leaf_pane_ids(),
-        vec![tiled_pane_id, floating_pane_id]
+        vec![tiled_pane_id, htop_pane_id]
     );
 }
 
@@ -27939,7 +28433,7 @@ fn toggling_a_floating_pane_over_a_zoomed_pane_docks_it_beside_the_zoomed_pane()
     )) else {
         panic!("expected alice to zoom the split pane");
     };
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -27966,7 +28460,7 @@ fn toggling_a_floating_pane_over_a_zoomed_pane_docks_it_beside_the_zoomed_pane()
         emitted_events.first(),
         Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: floating_pane_id,
+            source_pane_id: htop_pane_id,
             source_tab_id: None,
             destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Tiled(build_dock_beside_pane_target(
@@ -27980,7 +28474,7 @@ fn toggling_a_floating_pane_over_a_zoomed_pane_docks_it_beside_the_zoomed_pane()
         runtime.session_by_id[&session_id].tabs[&tab_id]
             .get_layout_tree()
             .list_leaf_pane_ids(),
-        vec![tiled_pane_id, floating_pane_id, split_pane_id]
+        vec![tiled_pane_id, htop_pane_id, split_pane_id]
     );
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id).get_zoomed_pane_id(tab_id),
@@ -28003,7 +28497,7 @@ fn toggling_a_floating_pane_the_issuer_minimized_docks_it_at_the_right_edge_of_t
     } = build_floating_command_fixture();
     let split_pane_id =
         split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(
@@ -28012,10 +28506,11 @@ fn toggling_a_floating_pane_the_issuer_minimized_docks_it_at_the_right_edge_of_t
             false,
         ),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
     let CommandResult::Ok { .. } = runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(alice_client_id),
-        Command::SetPaneMinimized(SetPaneMinimizedArgs {
-            pane_id: Some(floating_pane_id),
+        Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
+            pane_id: Some(htop_pane_id),
             is_minimized: true,
         }),
     )) else {
@@ -28023,15 +28518,17 @@ fn toggling_a_floating_pane_the_issuer_minimized_docks_it_at_the_right_edge_of_t
     };
     assert_eq!(
         get_attached_client(&runtime, session_id, alice_client_id)
-            .get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
+            .get_floating_pane_view(htop_floating_pane_id),
+        Some(&FloatingPaneView {
             position: FloatingPanePosition::Moved(Point { column: 2, row: 1 }),
             is_minimized: true,
+            focus_history: vec![htop_pane_id],
+            zoomed_pane_id: None,
         })
     );
 
     let command_envelope = build_command_envelope(
-        build_in_session_source(session_id, Some(alice_client_id), floating_pane_id),
+        build_in_session_source(session_id, Some(alice_client_id), htop_pane_id),
         Command::TogglePaneFloating,
     );
     let command_id = command_envelope.command_id;
@@ -28043,7 +28540,7 @@ fn toggling_a_floating_pane_the_issuer_minimized_docks_it_at_the_right_edge_of_t
         emitted_events.first(),
         Some(&Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: floating_pane_id,
+            source_pane_id: htop_pane_id,
             source_tab_id: None,
             destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -28057,7 +28554,7 @@ fn toggling_a_floating_pane_the_issuer_minimized_docks_it_at_the_right_edge_of_t
         runtime.session_by_id[&session_id].tabs[&tab_id]
             .get_layout_tree()
             .list_leaf_pane_ids(),
-        vec![tiled_pane_id, split_pane_id, floating_pane_id]
+        vec![tiled_pane_id, split_pane_id, htop_pane_id]
     );
 }
 
@@ -28094,7 +28591,7 @@ fn a_client_that_cannot_draw_floating_panes_is_refused_every_command_that_shows_
         tab_id,
         ..
     } = build_floating_command_fixture();
-    let floating_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     // A 4x8 viewport gives a 4x6 pane area, whose 90% cap of 3x5 holds no
     // 4x5 floating pane.
     let bob_client_id = attach_bob(
@@ -28107,27 +28604,27 @@ fn a_client_that_cannot_draw_floating_panes_is_refused_every_command_that_shows_
         },
     );
     let session_records_before = serialize_session_records(&runtime);
-    let pane_help = format!("{floating_pane_id} cannot be drawn on this client");
+    let pane_help = format!("{htop_pane_id} cannot be drawn on this client");
     let session_help = "no floating pane can be drawn on this client";
 
     for (command, expected_help) in [
         (
             Command::FocusPane(FocusPaneArgs {
-                focus_target: FocusTarget::Pane(floating_pane_id),
+                focus_target: FocusTarget::Pane(htop_pane_id),
                 client_id: None,
             }),
             pane_help.as_str(),
         ),
         (
-            Command::SetPaneMinimized(SetPaneMinimizedArgs {
-                pane_id: Some(floating_pane_id),
+            Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
+                pane_id: Some(htop_pane_id),
                 is_minimized: false,
             }),
             pane_help.as_str(),
         ),
         (
-            Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-                pane_id: Some(floating_pane_id),
+            Command::ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs {
+                pane_id: Some(htop_pane_id),
             }),
             pane_help.as_str(),
         ),

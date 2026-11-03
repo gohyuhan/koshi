@@ -173,53 +173,57 @@ fn pane_command_variants_round_trip_through_json() {
             }
         })
     );
-    let floating_pane_id = PaneId::new();
+    let htop_pane_id = PaneId::new();
     assert_json_roundtrip(&Command::MoveFloatingPane(MoveFloatingPaneArgs {
-        pane_id: floating_pane_id,
+        pane_id: htop_pane_id,
         top_left_cell: Point { column: 70, row: 2 },
     }));
     assert_eq!(
         serde_json::to_value(Command::MoveFloatingPane(MoveFloatingPaneArgs {
-            pane_id: floating_pane_id,
+            pane_id: htop_pane_id,
             top_left_cell: Point { column: 70, row: 2 },
         }))
         .expect("serialize floating move command"),
         json!({
             "MoveFloatingPane": {
-                "pane_id": floating_pane_id,
+                "pane_id": htop_pane_id,
                 "top_left_cell": { "column": 70, "row": 2 },
             }
         })
     );
-    assert_json_roundtrip(&Command::SetPanePinned(SetPanePinnedArgs {
-        pane_id: Some(floating_pane_id),
+    assert_json_roundtrip(&Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
+        pane_id: Some(htop_pane_id),
         is_pinned: false,
     }));
     assert_eq!(
-        serde_json::to_value(Command::SetPanePinned(SetPanePinnedArgs {
+        serde_json::to_value(Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
             pane_id: None,
             is_pinned: true,
         }))
         .expect("serialize pin command"),
         json!({
-            "SetPanePinned": {
+            "SetFloatingPanePinned": {
                 "pane_id": null,
                 "is_pinned": true,
             }
         })
     );
-    assert_json_roundtrip(&Command::SetPaneMinimized(SetPaneMinimizedArgs {
-        pane_id: Some(floating_pane_id),
-        is_minimized: false,
-    }));
+    assert_json_roundtrip(&Command::SetFloatingPaneMinimized(
+        SetFloatingPaneMinimizedArgs {
+            pane_id: Some(htop_pane_id),
+            is_minimized: false,
+        },
+    ));
     assert_eq!(
-        serde_json::to_value(Command::SetPaneMinimized(SetPaneMinimizedArgs {
-            pane_id: None,
-            is_minimized: true,
-        }))
+        serde_json::to_value(Command::SetFloatingPaneMinimized(
+            SetFloatingPaneMinimizedArgs {
+                pane_id: None,
+                is_minimized: true,
+            }
+        ))
         .expect("serialize minimize command"),
         json!({
-            "SetPaneMinimized": {
+            "SetFloatingPaneMinimized": {
                 "pane_id": null,
                 "is_minimized": true,
             }
@@ -241,25 +245,29 @@ fn pane_command_variants_round_trip_through_json() {
             }
         })
     );
-    assert_json_roundtrip(&Command::TogglePanePinned(TogglePanePinnedArgs {
-        pane_id: Some(floating_pane_id),
-    }));
+    assert_json_roundtrip(&Command::ToggleFloatingPanePinned(
+        ToggleFloatingPanePinnedArgs {
+            pane_id: Some(htop_pane_id),
+        },
+    ));
     assert_eq!(
-        serde_json::to_value(Command::TogglePanePinned(TogglePanePinnedArgs {
-            pane_id: None
-        }))
+        serde_json::to_value(Command::ToggleFloatingPanePinned(
+            ToggleFloatingPanePinnedArgs { pane_id: None }
+        ))
         .expect("serialize pin toggle command"),
-        json!({ "TogglePanePinned": { "pane_id": null } })
+        json!({ "ToggleFloatingPanePinned": { "pane_id": null } })
     );
-    assert_json_roundtrip(&Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-        pane_id: Some(floating_pane_id),
-    }));
+    assert_json_roundtrip(&Command::ToggleFloatingPaneMinimized(
+        ToggleFloatingPaneMinimizedArgs {
+            pane_id: Some(htop_pane_id),
+        },
+    ));
     assert_eq!(
-        serde_json::to_value(Command::TogglePaneMinimized(TogglePaneMinimizedArgs {
-            pane_id: None
-        }))
+        serde_json::to_value(Command::ToggleFloatingPaneMinimized(
+            ToggleFloatingPaneMinimizedArgs { pane_id: None }
+        ))
         .expect("serialize minimize toggle command"),
-        json!({ "TogglePaneMinimized": { "pane_id": null } })
+        json!({ "ToggleFloatingPaneMinimized": { "pane_id": null } })
     );
     assert_json_roundtrip(&Command::ToggleAllFloatingPanesMinimized);
     assert_eq!(
@@ -463,18 +471,18 @@ fn command_variant_names_are_canonical() {
             "MoveFloatingPane",
         ),
         (
-            Command::SetPanePinned(SetPanePinnedArgs {
+            Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: None,
                 is_pinned: true,
             }),
-            "SetPanePinned",
+            "SetFloatingPanePinned",
         ),
         (
-            Command::SetPaneMinimized(SetPaneMinimizedArgs {
+            Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                 pane_id: None,
                 is_minimized: true,
             }),
-            "SetPaneMinimized",
+            "SetFloatingPaneMinimized",
         ),
         (
             Command::SetAllFloatingPanesMinimized(SetAllFloatingPanesMinimizedArgs {
@@ -1238,7 +1246,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `TogglePaneFloating`, `ScrollPane`, `MoveFloatingPane`, `SetPanePinned`, `TogglePanePinned`, `SetPaneMinimized`, `TogglePaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `TogglePaneFloating`, `ScrollPane`, `MoveFloatingPane`, `SetFloatingPanePinned`, `ToggleFloatingPanePinned`, `SetFloatingPaneMinimized`, `ToggleFloatingPaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

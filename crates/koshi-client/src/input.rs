@@ -650,7 +650,9 @@ impl Client {
             return PlacementInputAction::Consumed;
         }
         let has_movable_floating_pane = mouse_frame.is_some_and(|mouse_frame| {
-            !self.list_movable_floating_pane_ids(mouse_frame).is_empty()
+            !self
+                .list_movable_floating_slot_pane_ids(mouse_frame)
+                .is_empty()
         });
         if has_movable_floating_pane {
             self.pane_move_mode = Some(PaneMoveMode::Choice);
@@ -697,7 +699,7 @@ impl Client {
             self.close_pane_move_mode();
             return PlacementInputAction::Consumed;
         };
-        let movable_pane_ids = self.list_movable_floating_pane_ids(mouse_frame);
+        let movable_pane_ids = self.list_movable_floating_slot_pane_ids(mouse_frame);
         let selected_pane_id = match mouse_frame.client_snapshot.focused_pane_id {
             Some(focused_pane_id) if movable_pane_ids.contains(&focused_pane_id) => {
                 Some(focused_pane_id)
@@ -815,8 +817,8 @@ impl Client {
 
     /// Select the floating pane `pane_index_offset` steps after the selected
     /// one, `1` for the next and `-1` for the previous, among the floating
-    /// panes that `mouse_frame` draws unpinned, in the order the panes became
-    /// floating, wrapping around at either end. The new selection drops the
+    /// panes that `mouse_frame` draws unpinned, in the order the floating panes
+    /// were created, wrapping around at either end. The new selection drops the
     /// draft and any grab-handle drag, and returns a `FocusPane` for the pane.
     ///
     /// A selected pane that is not one of those panes moves the selection to
@@ -846,7 +848,7 @@ impl Client {
             return PlacementInputAction::Consumed;
         };
         let movable_slot_pane_ids: HashSet<PaneId> = self
-            .list_movable_floating_pane_ids(mouse_frame)
+            .list_movable_floating_slot_pane_ids(mouse_frame)
             .into_iter()
             .collect();
         let movable_pane_ids: Vec<PaneId> = mouse_frame
@@ -955,7 +957,7 @@ impl Client {
 
     /// The floating panes that `mouse_frame` draws unpinned with this viewer's
     /// current chrome, back to front.
-    fn list_movable_floating_pane_ids(&self, mouse_frame: &MouseFrame) -> Vec<PaneId> {
+    fn list_movable_floating_slot_pane_ids(&self, mouse_frame: &MouseFrame) -> Vec<PaneId> {
         self.build_frame_layout_with_current_chrome(mouse_frame)
             .list_drawn_floating_pane_slots()
             .filter(|floating_pane_slot| !floating_pane_slot.is_pinned)

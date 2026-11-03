@@ -39,15 +39,15 @@ use koshi_core::{
     },
     constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
-        Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
-        PanePinChanged, PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason,
+        Event, FloatingPaneMoved, FloatingPanePinChanged, InputModeChanged, LayoutChanged,
+        MouseSelectChanged, PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason,
         SelectionChanged,
     },
     geometry::{
         Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea,
         PixelCellSize, Point, Rect, Size, DEFAULT_FLOATING_PANE_SIZE,
     },
-    ids::{ClientId, CommandId, PaneId, SessionId, TabId},
+    ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
@@ -75,8 +75,8 @@ use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
     cascade::{apply_child_exit, remove_floating_pane, remove_pane_cascade},
     focus::{
-        apply_tiled_pane_focus, build_pane_focused_event, build_pane_minimized_changed_events,
-        update_client_tab_focus,
+        apply_tiled_pane_focus, build_floating_pane_minimized_changed_events,
+        build_pane_focused_event, update_client_tab_focus,
     },
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
@@ -85,7 +85,7 @@ use koshi_session::session::{
         compute_placement_tab_sizes, find_lifted_floating_pane_rect, find_nearest_dock_target,
         PlacementCommitError,
     },
-    state::{compute_floating_pane_minimum_size, FloatingMember, Session},
+    state::{compute_floating_pane_minimum_size, FloatingPane, Session},
     tab_ops,
 };
 
@@ -286,11 +286,12 @@ struct NewFloatingPaneTarget {
 /// [`Server::resolve_floating_pane_resize`].
 struct FloatingPaneResize {
     session_id: SessionId,
-    pane_id: PaneId,
+    /// The floating pane that the resize changes.
+    floating_pane_id: FloatingPaneId,
     /// The client whose stored top-left cell the resize writes. A client that
-    /// pinned the pane keeps its pinned cell.
+    /// pinned the floating pane keeps its pinned cell.
     client_id: ClientId,
-    /// The pane's desired size after the resize.
+    /// The floating pane's desired size after the resize.
     desired_size: FloatingPaneSize,
     /// The client's top-left cell after the resize; `None` when the client
     /// reports no pane area and keeps its view.
@@ -298,14 +299,19 @@ struct FloatingPaneResize {
 }
 
 /// The resolved target of a command that changes one client's own view of a
-/// floating pane ([`Command::MoveFloatingPane`], [`Command::SetPanePinned`],
-/// [`Command::TogglePanePinned`], [`Command::SetPaneMinimized`],
-/// [`Command::TogglePaneMinimized`], and [`Command::FocusPane`] on a floating
-/// pane): the session that owns the pane, the client whose view changes, and
-/// the pane. The `Ok` half of [`Server::resolve_floating_pane_view_target`].
+/// floating pane ([`Command::MoveFloatingPane`], [`Command::SetFloatingPanePinned`],
+/// [`Command::ToggleFloatingPanePinned`], [`Command::SetFloatingPaneMinimized`],
+/// [`Command::ToggleFloatingPaneMinimized`], and [`Command::FocusPane`] on a floating
+/// pane): the session that owns the floating pane, the client whose view
+/// changes, the floating pane, and the pane the command acts through. The
+/// `Ok` half of [`Server::resolve_floating_pane_view_target`].
 struct FloatingPaneViewTarget {
     session_id: SessionId,
     client_id: ClientId,
+    /// The floating pane whose view changes.
+    floating_pane_id: FloatingPaneId,
+    /// The pane of `floating_pane_id` that the command names, else the first
+    /// pane of the client's focus history inside it.
     pane_id: PaneId,
 }
 
@@ -313,9 +319,9 @@ struct FloatingPaneViewTarget {
 /// floating panes: whether a pane is pinned, whether a pane is minimized, or
 /// whether every floating pane is minimized.
 ///
-/// [`Command::SetPanePinned`], [`Command::SetPaneMinimized`] and
+/// [`Command::SetFloatingPanePinned`], [`Command::SetFloatingPaneMinimized`] and
 /// [`Command::SetAllFloatingPanesMinimized`] ask for `Set`.
-/// [`Command::TogglePanePinned`], [`Command::TogglePaneMinimized`] and
+/// [`Command::ToggleFloatingPanePinned`], [`Command::ToggleFloatingPaneMinimized`] and
 /// [`Command::ToggleAllFloatingPanesMinimized`] ask for `Toggle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewFlagChange {
@@ -339,7 +345,7 @@ impl ViewFlagChange {
     }
 }
 
-/// The change a [`Command::SetPanePinned`] or [`Command::TogglePanePinned`]
+/// The change a [`Command::SetFloatingPanePinned`] or [`Command::ToggleFloatingPanePinned`]
 /// makes to the acting client's view of a floating pane.
 enum PanePinChange {
     /// Pin the pane at this top-left cell, counted from the client's
@@ -509,25 +515,25 @@ impl Server {
             Command::MoveFloatingPane(command_args) => {
                 self.handle_move_floating_pane(command_id, &envelope.command_source, &command_args)
             }
-            Command::SetPanePinned(command_args) => self.handle_pane_pin_change(
+            Command::SetFloatingPanePinned(command_args) => self.handle_pane_pin_change(
                 command_id,
                 &envelope.command_source,
                 command_args.pane_id,
                 ViewFlagChange::Set(command_args.is_pinned),
             ),
-            Command::TogglePanePinned(command_args) => self.handle_pane_pin_change(
+            Command::ToggleFloatingPanePinned(command_args) => self.handle_pane_pin_change(
                 command_id,
                 &envelope.command_source,
                 command_args.pane_id,
                 ViewFlagChange::Toggle,
             ),
-            Command::SetPaneMinimized(command_args) => self.handle_pane_minimize_change(
+            Command::SetFloatingPaneMinimized(command_args) => self.handle_pane_minimize_change(
                 command_id,
                 &envelope.command_source,
                 command_args.pane_id,
                 ViewFlagChange::Set(command_args.is_minimized),
             ),
-            Command::TogglePaneMinimized(command_args) => self.handle_pane_minimize_change(
+            Command::ToggleFloatingPaneMinimized(command_args) => self.handle_pane_minimize_change(
                 command_id,
                 &envelope.command_source,
                 command_args.pane_id,
@@ -1095,18 +1101,19 @@ impl Server {
 
     /// Solve every floating pane of `session_id` against the session's shared
     /// floating viewport, then resize each live PTY whose size changed,
-    /// appending one [`Event::PtyResized`] per resized pane, in the order the
-    /// panes became floating.
+    /// appending one [`Event::PtyResized`] per resized pane: the floating panes
+    /// in the order they were created, and each one's panes in layout order.
     ///
     /// First sets [`Session::get_floating_cell_size`] on each floating pane's
     /// terminal engine ([`Self::update_pane_cell_sizes`]); with no reported
     /// cell size, each engine keeps its own.
     /// With a [`Session::get_shared_floating_viewport`],
-    /// [`Session::update_floating_member_sizes`] solves each pane with the
-    /// pane minimum of [`Server::get_pane_sizing`]. With none — no client attached,
-    /// or no client with a floating viewport — every solved size stays as it
-    /// is. Then each pane's PTY takes [`compute_floating_content_size`] of
-    /// its solved outer size: `40x12` → `38x8`. A pane undocked while no client
+    /// [`Session::update_floating_pane_sizes`] solves each floating pane with
+    /// the pane minimum of [`Server::get_pane_sizing`]. With none — no client
+    /// attached, or no client with a floating viewport — every solved size
+    /// stays as it is. Then the PTY of each pane of a floating pane takes
+    /// [`compute_floating_content_size`] of the floating pane's solved outer
+    /// size: `40x12` → `38x8`. A pane undocked while no client
     /// has a floating viewport resizes from its tiled size to the floating
     /// minimum. A session this server does not hold changes nothing.
     pub(crate) fn reflow_floating_panes(
@@ -1120,24 +1127,27 @@ impl Server {
             return;
         };
         if let Some(cell_size) = session.get_floating_cell_size() {
-            let floating_pane_ids = session.floating_set.list_pane_ids();
-            self.update_pane_cell_sizes(&floating_pane_ids, cell_size);
+            let floating_set_pane_ids = session.floating_set.list_pane_ids();
+            self.update_pane_cell_sizes(&floating_set_pane_ids, cell_size);
         }
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
         };
         if let Some(shared_floating_viewport) = session.get_shared_floating_viewport() {
-            session.update_floating_member_sizes(shared_floating_viewport, pane_minimum_size);
+            session.update_floating_pane_sizes(shared_floating_viewport, pane_minimum_size);
         }
         let content_rects: Vec<(PaneId, Option<Rect>)> = session
             .floating_set
-            .list_members()
+            .list_floating_panes()
             .iter()
-            .map(|floating_member| {
+            .flat_map(|floating_pane| {
                 let content_rect = Rect::from_size_at_origin(compute_floating_content_size(
-                    floating_member.solved_size,
+                    floating_pane.get_solved_size(),
                 ));
-                (floating_member.pane_id, Some(content_rect))
+                floating_pane
+                    .list_pane_ids()
+                    .into_iter()
+                    .map(move |pane_id| (pane_id, Some(content_rect)))
             })
             .collect();
         self.reflow_changed(backend, content_rects, emitted_events);

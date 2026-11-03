@@ -4726,18 +4726,18 @@ fn build_focused_floating_pane_render_snapshot() -> (RenderSnapshot, PaneId) {
             row_count: 8,
         },
     );
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     let floating_outer_rect = build_cell_rect(9, 0, 30, 8);
     render_snapshot
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: floating_outer_rect,
             is_pinned: false,
         });
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
-    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
         &Grid::build_blank(4, 28, TermStyle::default()),
         0,
@@ -4750,8 +4750,8 @@ fn build_focused_floating_pane_render_snapshot() -> (RenderSnapshot, PaneId) {
         shape: None,
     };
     render_snapshot.pane_snapshots.push(floating_pane_snapshot);
-    render_snapshot.client_snapshot.focused_pane_id = Some(floating_pane_id);
-    (render_snapshot, floating_pane_id)
+    render_snapshot.client_snapshot.focused_pane_id = Some(floating_slot_pane_id);
+    (render_snapshot, floating_slot_pane_id)
 }
 
 /// The content snapshot of `pane_id` in `render_snapshot`, for in-place edits.
@@ -4784,7 +4784,7 @@ fn get_core_cursor_position(
 
 #[test]
 fn a_focused_floating_panes_cursor_maps_from_its_content_cell_with_no_letterbox_offset() {
-    let (render_snapshot, _floating_pane_id) = build_focused_floating_pane_render_snapshot();
+    let (render_snapshot, _floating_slot_pane_id) = build_focused_floating_pane_render_snapshot();
 
     // Content `(10, 3)` in the pane area starting at `(0, 1)` is screen
     // `(10, 4)`; row `2`, column `5` from there is `(15, 6)`.
@@ -4796,9 +4796,10 @@ fn a_focused_floating_panes_cursor_maps_from_its_content_cell_with_no_letterbox_
 
 #[test]
 fn a_focused_floating_panes_cursor_is_clamped_to_its_last_content_cell() {
-    let (mut render_snapshot, floating_pane_id) = build_focused_floating_pane_render_snapshot();
+    let (mut render_snapshot, floating_slot_pane_id) =
+        build_focused_floating_pane_render_snapshot();
     let cursor_snapshot =
-        &mut get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id).cursor_snapshot;
+        &mut get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id).cursor_snapshot;
     cursor_snapshot.row_index = 99;
     cursor_snapshot.column_index = 99;
 
@@ -4811,9 +4812,9 @@ fn a_focused_floating_panes_cursor_is_clamped_to_its_last_content_cell() {
 
 #[test]
 fn a_focused_floating_pane_scrolled_back_hiding_its_cursor_or_without_a_grid_places_no_cursor() {
-    let (mut scrolled_render_snapshot, floating_pane_id) =
+    let (mut scrolled_render_snapshot, floating_slot_pane_id) =
         build_focused_floating_pane_render_snapshot();
-    get_pane_snapshot_mut(&mut scrolled_render_snapshot, floating_pane_id)
+    get_pane_snapshot_mut(&mut scrolled_render_snapshot, floating_slot_pane_id)
         .terminal_grid_view
         .as_mut()
         .expect("grid view")
@@ -4823,9 +4824,9 @@ fn a_focused_floating_pane_scrolled_back_hiding_its_cursor_or_without_a_grid_pla
         None
     );
 
-    let (mut hidden_render_snapshot, floating_pane_id) =
+    let (mut hidden_render_snapshot, floating_slot_pane_id) =
         build_focused_floating_pane_render_snapshot();
-    get_pane_snapshot_mut(&mut hidden_render_snapshot, floating_pane_id)
+    get_pane_snapshot_mut(&mut hidden_render_snapshot, floating_slot_pane_id)
         .cursor_snapshot
         .is_visible = false;
     assert_eq!(
@@ -4833,10 +4834,10 @@ fn a_focused_floating_pane_scrolled_back_hiding_its_cursor_or_without_a_grid_pla
         None
     );
 
-    let (mut gridless_render_snapshot, floating_pane_id) =
+    let (mut gridless_render_snapshot, floating_slot_pane_id) =
         build_focused_floating_pane_render_snapshot();
-    get_pane_snapshot_mut(&mut gridless_render_snapshot, floating_pane_id).terminal_grid_view =
-        None;
+    get_pane_snapshot_mut(&mut gridless_render_snapshot, floating_slot_pane_id)
+        .terminal_grid_view = None;
     assert_eq!(
         get_core_cursor_position(&gridless_render_snapshot, ViewerChrome::default()),
         None
@@ -4845,7 +4846,7 @@ fn a_focused_floating_pane_scrolled_back_hiding_its_cursor_or_without_a_grid_pla
 
 #[test]
 fn a_focused_floating_pane_places_no_cursor_while_pane_placement_shows() {
-    let (render_snapshot, _floating_pane_id) = build_focused_floating_pane_render_snapshot();
+    let (render_snapshot, _floating_slot_pane_id) = build_focused_floating_pane_render_snapshot();
 
     assert_eq!(
         get_core_cursor_position(
@@ -4861,7 +4862,8 @@ fn a_focused_floating_pane_places_no_cursor_while_pane_placement_shows() {
 
 #[test]
 fn a_floating_pane_over_the_focused_tiled_panes_cursor_cell_hides_the_cursor() {
-    let (mut render_snapshot, _floating_pane_id) = build_focused_floating_pane_render_snapshot();
+    let (mut render_snapshot, _floating_slot_pane_id) =
+        build_focused_floating_pane_render_snapshot();
     let tiled_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -4892,7 +4894,8 @@ fn a_floating_pane_over_the_focused_tiled_panes_cursor_cell_hides_the_cursor() {
 
 #[test]
 fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell() {
-    let (mut render_snapshot, _floating_pane_id) = build_focused_floating_pane_render_snapshot();
+    let (mut render_snapshot, _floating_slot_pane_id) =
+        build_focused_floating_pane_render_snapshot();
     let covering_outer_rect = build_cell_rect(14, 4, 10, 5);
     render_snapshot
         .session_snapshot
@@ -4920,9 +4923,10 @@ fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell()
 
 #[test]
 fn a_floating_panes_cursor_cell_past_the_pane_area_places_no_cursor() {
-    let (mut render_snapshot, floating_pane_id) = build_focused_floating_pane_render_snapshot();
+    let (mut render_snapshot, floating_slot_pane_id) =
+        build_focused_floating_pane_render_snapshot();
     render_snapshot.session_snapshot.floating_pane_slots[0] = FloatingPaneSlot {
-        pane_id: floating_pane_id,
+        pane_id: floating_slot_pane_id,
         outer_rect: build_cell_rect(9, 4, 30, 8),
         is_pinned: false,
     };
@@ -4934,7 +4938,7 @@ fn a_floating_panes_cursor_cell_past_the_pane_area_places_no_cursor() {
         Some(Position::new(15, 10))
     );
 
-    get_pane_snapshot_mut(&mut render_snapshot, floating_pane_id)
+    get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id)
         .cursor_snapshot
         .row_index = 3;
     assert_eq!(
@@ -5153,7 +5157,7 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
         }];
     }
     for _ in 0..seeded_sequence.compute_next_index(3) {
-        let floating_pane_id = PaneId::new();
+        let floating_slot_pane_id = PaneId::new();
         let outer_rect = build_cell_rect(
             seeded_sequence.compute_next_index(usize::from(viewport_size.column_count)) as u16,
             seeded_sequence.compute_next_index(usize::from(pane_area_row_count)) as u16,
@@ -5166,12 +5170,12 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
             .session_snapshot
             .floating_pane_slots
             .push(FloatingPaneSlot {
-                pane_id: floating_pane_id,
+                pane_id: floating_slot_pane_id,
                 outer_rect,
                 is_pinned,
             });
         let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
-        floating_pane_snapshot.pane_id = floating_pane_id;
+        floating_pane_snapshot.pane_id = floating_slot_pane_id;
         render_snapshot.pane_snapshots.push(floating_pane_snapshot);
     }
     let content_sizes: Vec<(PaneId, Size)> = render_snapshot
@@ -5523,17 +5527,17 @@ fn a_letterboxed_pane_row_lists_the_row_its_centered_content_area_shows_it_on() 
 #[test]
 fn a_floating_pane_row_lists_the_row_its_visible_content_area_shows_it_on() {
     let (mut previous_render_snapshot, _) = build_one_grid_render_snapshot();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     previous_render_snapshot
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: build_cell_rect(2, 3, 12, 7),
             is_pinned: false,
         });
     let mut floating_pane_snapshot = previous_render_snapshot.pane_snapshots[0].clone();
-    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_id = floating_slot_pane_id;
     let mut floating_grid = Grid::build_blank(3, 10, TermStyle::default());
     floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(&floating_grid, 0));
     previous_render_snapshot
@@ -5686,12 +5690,12 @@ fn a_pane_border_draws_the_cells_a_bordered_ratatui_block_draws() {
 #[test]
 fn a_tiled_pane_printing_under_a_floating_pane_keeps_the_floating_cells_on_top() {
     let (mut previous_render_snapshot, mut tiled_grid) = build_one_grid_render_snapshot();
-    let floating_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
     previous_render_snapshot
         .session_snapshot
         .floating_pane_slots
         .push(FloatingPaneSlot {
-            pane_id: floating_pane_id,
+            pane_id: floating_slot_pane_id,
             outer_rect: build_cell_rect(4, 1, 10, 6),
             is_pinned: false,
         });
@@ -5705,7 +5709,7 @@ fn a_tiled_pane_printing_under_a_floating_pane_keeps_the_floating_cells_on_top()
         }
     }
     let mut floating_pane_snapshot = previous_render_snapshot.pane_snapshots[0].clone();
-    floating_pane_snapshot.pane_id = floating_pane_id;
+    floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(&floating_grid, 0));
     previous_render_snapshot
         .pane_snapshots

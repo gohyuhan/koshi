@@ -112,20 +112,20 @@ pub enum Command {
     MoveFloatingPane(MoveFloatingPaneArgs),
     /// Pin or unpin a floating pane in one client's view. Every other
     /// client's view of it stays as it is.
-    SetPanePinned(SetPanePinnedArgs),
+    SetFloatingPanePinned(SetFloatingPanePinnedArgs),
     /// Pin a floating pane that one client did not pin, and unpin one it
-    /// pinned, as [`Command::SetPanePinned`] does. The session reads the
+    /// pinned, as [`Command::SetFloatingPanePinned`] does. The session reads the
     /// client's view when it runs the command. The pin button of a floating
     /// pane's title bar sends it.
-    TogglePanePinned(TogglePanePinnedArgs),
+    ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs),
     /// Minimize or restore a floating pane in one client's view. Every other
     /// client's view of it stays as it is.
-    SetPaneMinimized(SetPaneMinimizedArgs),
+    SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs),
     /// Minimize a floating pane that one client shows, and restore one it
-    /// minimized, as [`Command::SetPaneMinimized`] does. The session reads the
+    /// minimized, as [`Command::SetFloatingPaneMinimized`] does. The session reads the
     /// client's view when it runs the command. A tile of the floating pane
     /// tray sends it.
-    TogglePaneMinimized(TogglePaneMinimizedArgs),
+    ToggleFloatingPaneMinimized(ToggleFloatingPaneMinimizedArgs),
     /// Minimize every floating pane one client shows, or restore every
     /// floating pane that client minimized. Every other client's view stays as
     /// it is.
@@ -196,12 +196,12 @@ pub enum CommandKind {
     ScrollPane,
     /// Names [`Command::MoveFloatingPane`].
     MoveFloatingPane,
-    /// Names [`Command::SetPanePinned`].
-    SetPanePinned,
-    /// Names [`Command::TogglePanePinned`].
-    TogglePanePinned,
-    /// Names [`Command::SetPaneMinimized`].
-    SetPaneMinimized,
+    /// Names [`Command::SetFloatingPanePinned`].
+    SetFloatingPanePinned,
+    /// Names [`Command::ToggleFloatingPanePinned`].
+    ToggleFloatingPanePinned,
+    /// Names [`Command::SetFloatingPaneMinimized`].
+    SetFloatingPaneMinimized,
     /// Names [`Command::SetAllFloatingPanesMinimized`].
     SetAllFloatingPanesMinimized,
     /// Names [`Command::ToggleAllFloatingPanesMinimized`].
@@ -340,15 +340,15 @@ pub enum FocusTarget {
     /// focused in its active tab, in every direction.
     Direction(Direction),
     /// The floating pane after the focused one among every floating pane of
-    /// the session, in the order the panes became floating, wrapping past the
-    /// last to the first.
+    /// the session, in the order they were created, wrapping past the last to
+    /// the first.
     /// With no floating pane focused, the first one. The pane it lands on is
     /// shown and focused for the client; the floating panes the client
     /// already shows stay shown.
     NextFloatingPane,
     /// The floating pane before the focused one among every floating pane of
-    /// the session, in the order the panes became floating, wrapping past the
-    /// first to the last.
+    /// the session, in the order they were created, wrapping past the first to
+    /// the last.
     /// With no floating pane focused, the last one. The pane it lands on is
     /// shown and focused for the client; the floating panes the client
     /// already shows stay shown.
@@ -561,11 +561,11 @@ pub struct MoveFloatingPaneArgs {
     pub top_left_cell: Point,
 }
 
-/// Arguments for [`Command::SetPanePinned`].
+/// Arguments for [`Command::SetFloatingPanePinned`].
 ///
 /// The acting client is chosen as for [`MoveFloatingPaneArgs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetPanePinnedArgs {
+pub struct SetFloatingPanePinnedArgs {
     /// The floating pane to pin or unpin. `None` takes the issuing pane for an
     /// in-session CLI, and the acting client's focused floating pane for every
     /// other source.
@@ -576,21 +576,21 @@ pub struct SetPanePinnedArgs {
     pub is_pinned: bool,
 }
 
-/// Arguments for [`Command::TogglePanePinned`].
+/// Arguments for [`Command::ToggleFloatingPanePinned`].
 ///
 /// The acting client is chosen as for [`MoveFloatingPaneArgs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TogglePanePinnedArgs {
+pub struct ToggleFloatingPanePinnedArgs {
     /// The floating pane to pin or unpin, chosen as for
-    /// [`SetPanePinnedArgs::pane_id`].
+    /// [`SetFloatingPanePinnedArgs::pane_id`].
     pub pane_id: Option<PaneId>,
 }
 
-/// Arguments for [`Command::SetPaneMinimized`].
+/// Arguments for [`Command::SetFloatingPaneMinimized`].
 ///
 /// The acting client is chosen as for [`MoveFloatingPaneArgs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetPaneMinimizedArgs {
+pub struct SetFloatingPaneMinimizedArgs {
     /// The floating pane to minimize or restore. `None` takes the issuing pane
     /// for an in-session CLI, and the acting client's focused floating pane for
     /// every other source.
@@ -604,13 +604,13 @@ pub struct SetPaneMinimizedArgs {
     pub is_minimized: bool,
 }
 
-/// Arguments for [`Command::TogglePaneMinimized`].
+/// Arguments for [`Command::ToggleFloatingPaneMinimized`].
 ///
 /// The acting client is chosen as for [`MoveFloatingPaneArgs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TogglePaneMinimizedArgs {
+pub struct ToggleFloatingPaneMinimizedArgs {
     /// The floating pane to minimize or restore, chosen as for
-    /// [`SetPaneMinimizedArgs::pane_id`].
+    /// [`SetFloatingPaneMinimizedArgs::pane_id`].
     pub pane_id: Option<PaneId>,
 }
 
@@ -621,8 +621,8 @@ pub struct TogglePaneMinimizedArgs {
 pub struct SetAllFloatingPanesMinimizedArgs {
     /// `true` minimizes every floating pane the acting client shows, and that
     /// client's focus moves to its active tab's focused pane. `false` restores
-    /// every floating pane the acting client minimized, in the order the panes
-    /// became floating: the last one restored is drawn on top and focused.
+    /// every floating pane the acting client minimized, in the order they were
+    /// created: the last one restored is drawn on top and focused.
     pub is_minimized: bool,
 }
 

@@ -32,11 +32,11 @@ use std::time::{Duration, Instant};
 
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::event::{
-    ConfigReloaded, Event, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
-    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused,
-    PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited, PaneRemoved,
-    PtyResized, QuitCause, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
-    TerminalTooSmallCause, TerminalTooSmallEntered,
+    ConfigReloaded, Event, FloatingPaneMinimizedChanged, FloatingPaneMoved, FloatingPanePinChanged,
+    InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing, PaneCommandFinished,
+    PaneCommandStarted, PaneCreated, PaneFocused, PanePlacementCommitted, PaneProcessExited,
+    PaneRemoved, PtyResized, QuitCause, SelectionChanged, TabClosed, TabCreated, TabFocused,
+    TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
@@ -2150,17 +2150,17 @@ fn list_events_with_no_wire_form() -> Vec<Event> {
         }),
         Event::FloatingPaneMoved(FloatingPaneMoved {
             client_id,
-            pane_id,
+            pane_ids: vec![pane_id],
             top_left_cell: Point { column: 70, row: 2 },
         }),
-        Event::PanePinChanged(PanePinChanged {
+        Event::FloatingPanePinChanged(FloatingPanePinChanged {
             client_id,
-            pane_id,
+            pane_ids: vec![pane_id],
             is_pinned: true,
         }),
-        Event::PaneMinimizedChanged(PaneMinimizedChanged {
+        Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
             client_id,
-            pane_id,
+            pane_ids: vec![pane_id],
             is_minimized: true,
         }),
     ]

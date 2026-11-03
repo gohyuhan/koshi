@@ -7,7 +7,7 @@ use koshi_core::action::{ActionReference, ClientActionKind};
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     NewPaneArgs, NewPanePlacement, NewTabArgs, QuitArgs, ResizePaneArgs, TabTarget,
-    TogglePanePinnedArgs,
+    ToggleFloatingPanePinnedArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::key::{
@@ -771,9 +771,9 @@ fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<C-p> i",
             "toggle-pane-pinned",
-            Ok(Command::TogglePanePinned(TogglePanePinnedArgs {
-                pane_id: None,
-            })),
+            Ok(Command::ToggleFloatingPanePinned(
+                ToggleFloatingPanePinnedArgs { pane_id: None },
+            )),
         ),
         build_expected_binding(
             "normal",

@@ -973,8 +973,8 @@ impl Server {
     /// Whether a frame of `client_id` can show `pane_id`: the pane is a pane
     /// of the client's placement preview
     /// ([`ClientPlacementPreview::list_preview_pane_ids`]), a leaf of the
-    /// client's active tab, or a floating pane of the client's session that
-    /// the client shows ([`Client::is_floating_pane_shown`]). `false` when the
+    /// client's active tab, or a pane of a floating pane of the client's
+    /// session that the client shows ([`Client::is_floating_pane_shown`]). `false` when the
     /// client or the pane is in no session, or they are in different sessions.
     pub(crate) fn is_pane_shown_to_client(&self, client_id: ClientId, pane_id: PaneId) -> bool {
         let is_preview_pane = self
@@ -994,8 +994,10 @@ impl Server {
         let Some(client) = session.clients.get_client_by_id(client_id) else {
             return false;
         };
-        if session.floating_set.has_pane(pane_id) {
-            return client.is_floating_pane_shown(pane_id);
+        if let Some((_, floating_pane)) =
+            session.floating_set.find_floating_pane_by_pane_id(pane_id)
+        {
+            return client.is_floating_pane_shown(floating_pane.get_floating_pane_id());
         }
         session
             .find_tab_by_pane_id(pane_id)

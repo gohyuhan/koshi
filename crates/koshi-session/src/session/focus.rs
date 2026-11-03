@@ -13,20 +13,20 @@
 //!
 //! [`build_pane_focused_event`] reports a change of the pane that takes a
 //! client's input, floating or tiled, and
-//! [`build_pane_minimized_changed_events`] a change of the floating panes one
-//! client shows. [`apply_tiled_pane_focus`] focuses a tiled pane for one
+//! [`build_floating_pane_minimized_changed_events`] a change of the floating
+//! panes one client shows. [`apply_tiled_pane_focus`] focuses a tiled pane for one
 //! client and reports both. [`update_client_tab_focus`] focuses a tiled pane
 //! in one tab for one client and leaves its input where it is.
 
 use koshi_core::{
-    event::{Event, PaneFocused, PaneMinimizedChanged},
-    ids::{ClientId, PaneId, TabId},
+    event::{Event, FloatingPaneMinimizedChanged, PaneFocused},
+    ids::{ClientId, FloatingPaneId, PaneId, TabId},
 };
 use koshi_layout::focus::FocusCandidates;
 use koshi_pane::registry::PaneRegistry;
 
 use crate::client::Client;
-use crate::session::state::Session;
+use crate::session::state::{FloatingSet, Session};
 
 /// The outcome of focus recovery: where focus should go now, or why it cannot
 /// go to a pane.
@@ -128,22 +128,29 @@ pub fn build_pane_focused_event(
 
 /// Focus `pane_id` in `tab_id` for `client` ([`Client::focus_tiled_pane`]):
 /// in `client`'s active tab, `pane_id` takes its input and every floating
-/// pane it shows is minimized.
+/// pane it shows is minimized. `floating_set` is the floating set of
+/// `client`'s session.
 ///
-/// Returns one [`Event::PaneMinimizedChanged`] with `is_minimized: true` per
-/// floating pane minimized, oldest shown first, then an
+/// Returns one [`Event::FloatingPaneMinimizedChanged`] with `is_minimized:
+/// true` per floating pane minimized, oldest shown first, then an
 /// [`Event::PaneFocused`] with `tab_id: Some(tab_id)` naming the pane that
-/// held the focus before as `previous_pane_id`. With `htop` shown and
-/// focused, focusing tiled `a` in the active tab → `PaneMinimizedChanged
-/// { pane_id: htop, is_minimized: true }`, then `PaneFocused { pane_id: a,
-/// previous_pane_id: Some(htop) }`. No `PaneFocused` when `pane_id` held the
-/// focus already.
+/// held the focus before as `previous_pane_id`. With floating pane `[htop]`
+/// shown and focused, focusing tiled `a` in the active tab →
+/// `FloatingPaneMinimizedChanged { pane_ids: [htop], is_minimized: true }`,
+/// then `PaneFocused { pane_id: a, previous_pane_id: Some(htop) }`. No
+/// `PaneFocused` when `pane_id` held the focus already.
 #[must_use]
-pub fn apply_tiled_pane_focus(client: &mut Client, tab_id: TabId, pane_id: PaneId) -> Vec<Event> {
+pub fn apply_tiled_pane_focus(
+    client: &mut Client,
+    floating_set: &FloatingSet,
+    tab_id: TabId,
+    pane_id: PaneId,
+) -> Vec<Event> {
     let client_id = client.get_client_id();
     let tiled_pane_focus_change = client.focus_tiled_pane(tab_id, pane_id);
-    let mut emitted_events: Vec<Event> = build_pane_minimized_changed_events(
+    let mut emitted_events: Vec<Event> = build_floating_pane_minimized_changed_events(
         client_id,
+        floating_set,
         &tiled_pane_focus_change.minimized_floating_pane_ids,
         true,
     )
@@ -189,20 +196,29 @@ pub fn update_client_tab_focus(
     }))
 }
 
-/// One [`Event::PaneMinimizedChanged`] per pane of `pane_ids`, in that order,
-/// each naming `client_id` and `is_minimized`.
-pub fn build_pane_minimized_changed_events(
+/// One [`Event::FloatingPaneMinimizedChanged`] per floating pane of
+/// `floating_pane_ids` that `floating_set` holds, in that order, each naming
+/// `client_id`, every pane of that floating pane in layout order, and
+/// `is_minimized`. A floating pane `floating_set` does not hold gives no
+/// event.
+pub fn build_floating_pane_minimized_changed_events<'a>(
     client_id: ClientId,
-    pane_ids: &[PaneId],
+    floating_set: &'a FloatingSet,
+    floating_pane_ids: &'a [FloatingPaneId],
     is_minimized: bool,
-) -> impl Iterator<Item = Event> + '_ {
-    pane_ids.iter().map(move |&pane_id| {
-        Event::PaneMinimizedChanged(PaneMinimizedChanged {
-            client_id,
-            pane_id,
-            is_minimized,
+) -> impl Iterator<Item = Event> + 'a {
+    floating_pane_ids
+        .iter()
+        .filter_map(move |&floating_pane_id| {
+            let (_, floating_pane) = floating_set.find_floating_pane_by_id(floating_pane_id)?;
+            Some(Event::FloatingPaneMinimizedChanged(
+                FloatingPaneMinimizedChanged {
+                    client_id,
+                    pane_ids: floating_pane.list_pane_ids(),
+                    is_minimized,
+                },
+            ))
         })
-    })
 }
 
 #[cfg(test)]

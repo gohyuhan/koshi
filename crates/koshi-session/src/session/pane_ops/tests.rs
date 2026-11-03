@@ -15,16 +15,18 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
-use koshi_core::geometry::{Direction, PaneArea, Point, Size, SplitDirection};
+use koshi_core::geometry::{
+    Direction, PaneArea, Point, Size, SplitDirection, DEFAULT_FLOATING_PANE_SIZE,
+};
 use koshi_core::process::ShellKind;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::SplitNode;
 
-use koshi_core::event::{PaneFocused, PaneMinimizedChanged};
+use koshi_core::event::{FloatingPaneMinimizedChanged, PaneFocused};
 
 use crate::client::{Client, ClientOrigin, FloatingPaneView};
-use crate::session::state::tests::{build_default_floating_member, build_empty_session, build_tab};
+use crate::session::state::tests::{build_empty_session, build_tab};
 
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -931,16 +933,80 @@ fn commit_reports_no_previous_pane_id_when_the_client_has_no_focused_pane() {
     );
 }
 
+/// The `48x13` size a floating pane that asks for the default size holds in
+/// these tests.
+const DEFAULT_FLOATING_SOLVED_SIZE: Size = Size {
+    column_count: 48,
+    row_count: 13,
+};
+
+/// Commit a new floating pane holding `new_pane_id` alone, asking for the
+/// default size and holding [`DEFAULT_FLOATING_SOLVED_SIZE`], with
+/// `acting_view` ([`commit_new_floating_pane`]).
+fn commit_default_floating_pane(
+    session: &mut Session,
+    new_pane_id: PaneId,
+    acting_view: Option<(ClientId, FloatingPanePosition)>,
+) -> Result<Vec<Event>, FloatingSetError> {
+    commit_new_floating_pane(
+        session,
+        new_pane_id,
+        DEFAULT_FLOATING_PANE_SIZE,
+        DEFAULT_FLOATING_SOLVED_SIZE,
+        acting_view,
+        NewPaneSpec::default(),
+    )
+}
+
+/// The id of the floating pane of `session` that holds `pane_id`.
+fn get_floating_pane_id_holding(session: &Session, pane_id: PaneId) -> FloatingPaneId {
+    session
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .map(|(_, floating_pane)| floating_pane.get_floating_pane_id())
+        .expect("a floating pane holds the pane")
+}
+
+/// Each floating pane of `session`, in the order the floating panes were
+/// created, as its panes, its desired size and its solved size.
+fn list_floating_pane_shapes(session: &Session) -> Vec<(Vec<PaneId>, FloatingPaneSize, Size)> {
+    session
+        .floating_set
+        .list_floating_panes()
+        .iter()
+        .map(|floating_pane| {
+            (
+                floating_pane.list_pane_ids(),
+                floating_pane.get_desired_size(),
+                floating_pane.get_solved_size(),
+            )
+        })
+        .collect()
+}
+
+/// The view at `position`, minimized when `is_minimized`, whose focus history
+/// is `[input_pane_id]` and whose zoom is `None`.
+fn build_floating_pane_view(
+    position: FloatingPanePosition,
+    is_minimized: bool,
+    input_pane_id: PaneId,
+) -> FloatingPaneView {
+    FloatingPaneView {
+        position,
+        is_minimized,
+        focus_history: vec![input_pane_id],
+        zoomed_pane_id: None,
+    }
+}
+
 #[test]
 fn commit_new_pane_takes_over_the_input_from_a_focused_floating_pane() {
     let (mut session, tab_id, source_pane_id, client_id) = build_single_pane_session();
-    let floating_member = build_default_floating_member(PaneId::new());
-    let floating_pane_id = floating_member.pane_id;
-    commit_new_floating_pane(
+    let htop_pane_id = PaneId::new();
+    commit_default_floating_pane(
         &mut session,
-        floating_member,
+        htop_pane_id,
         Some((client_id, FloatingPanePosition::Default)),
-        NewPaneSpec::default(),
     )
     .expect("the floating set has room");
     let (new_pane_id, candidate_layout_tree) =
@@ -963,16 +1029,16 @@ fn commit_new_pane_takes_over_the_input_from_a_focused_floating_pane() {
                 tab_id: Some(tab_id),
             }),
             Event::LayoutChanged(LayoutChanged { tab_id }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(tab_id),
                 pane_id: new_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
@@ -982,7 +1048,10 @@ fn commit_new_pane_takes_over_the_input_from_a_focused_floating_pane() {
         .expect("the client is attached");
     assert_eq!(client.get_focused_floating_pane_id(), None);
     assert_eq!(client.get_active_focused_pane_id(), Some(new_pane_id));
-    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        Vec::<FloatingPaneId>::new()
+    );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
@@ -999,13 +1068,11 @@ fn commit_new_pane_in_another_tab_takes_over_the_input_from_a_focused_floating_p
         .panes
         .register_pane_record(PaneRecord::from_terminal_pane(second_pane_id))
         .expect("the second pane id is new");
-    let floating_member = build_default_floating_member(PaneId::new());
-    let floating_pane_id = floating_member.pane_id;
-    commit_new_floating_pane(
+    let htop_pane_id = PaneId::new();
+    commit_default_floating_pane(
         &mut session,
-        floating_member,
+        htop_pane_id,
         Some((client_id, FloatingPanePosition::Default)),
-        NewPaneSpec::default(),
     )
     .expect("the floating set has room");
     let (new_pane_id, candidate_layout_tree) =
@@ -1036,16 +1103,16 @@ fn commit_new_pane_in_another_tab_takes_over_the_input_from_a_focused_floating_p
             Event::LayoutChanged(LayoutChanged {
                 tab_id: second_tab_id
             }),
-            Event::PaneMinimizedChanged(PaneMinimizedChanged {
+            Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
                 client_id,
-                pane_id: floating_pane_id,
+                pane_ids: vec![htop_pane_id],
                 is_minimized: true,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(second_tab_id),
                 pane_id: new_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
@@ -1061,26 +1128,32 @@ fn commit_new_pane_in_another_tab_takes_over_the_input_from_a_focused_floating_p
 #[test]
 fn commit_new_floating_pane_for_a_client_that_is_not_attached_minimizes_it_for_every_client() {
     let (mut session, _, _, client_id) = build_single_pane_session();
-    let floating_member = build_default_floating_member(PaneId::new());
+    let new_pane_id = PaneId::new();
 
-    let commit_result = commit_new_floating_pane(
+    let commit_result = commit_default_floating_pane(
         &mut session,
-        floating_member,
+        new_pane_id,
         Some((
             ClientId::new(),
             FloatingPanePosition::Pinned(Point { column: 5, row: 2 }),
         )),
-        NewPaneSpec::default(),
     );
 
     assert_eq!(
         commit_result,
         Ok(vec![Event::PaneCreated(PaneCreated {
-            pane_id: floating_member.pane_id,
+            pane_id: new_pane_id,
             tab_id: None,
         })])
     );
-    assert_eq!(session.floating_set.list_members(), [floating_member]);
+    assert_eq!(
+        list_floating_pane_shapes(&session),
+        [(
+            vec![new_pane_id],
+            DEFAULT_FLOATING_PANE_SIZE,
+            DEFAULT_FLOATING_SOLVED_SIZE
+        )]
+    );
     assert_eq!(
         session
             .clients
@@ -1088,68 +1161,73 @@ fn commit_new_floating_pane_for_a_client_that_is_not_attached_minimizes_it_for_e
             .expect("the client is attached")
             .list_floating_pane_views(),
         &std::collections::HashMap::from([(
-            floating_member.pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Default,
-                is_minimized: true,
-            }
+            get_floating_pane_id_holding(&session, new_pane_id),
+            build_floating_pane_view(FloatingPanePosition::Default, true, new_pane_id)
         )])
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
-fn commit_new_floating_pane_registers_the_member_and_focuses_it_for_the_designated_client() {
+fn commit_new_floating_pane_registers_the_pane_and_focuses_it_for_the_designated_client() {
     let (mut session, tab_id, tiled_pane_id, client_id) = build_single_pane_session();
-    let floating_member = build_default_floating_member(PaneId::new());
-    let floating_pane_id = floating_member.pane_id;
+    let new_pane_id = PaneId::new();
 
-    let commit_result = commit_new_floating_pane(
+    let commit_result = commit_default_floating_pane(
         &mut session,
-        floating_member,
+        new_pane_id,
         Some((
             client_id,
             FloatingPanePosition::Pinned(Point { column: 5, row: 2 }),
         )),
-        NewPaneSpec::default(),
     );
 
     assert_eq!(
         commit_result,
         Ok(vec![
             Event::PaneCreated(PaneCreated {
-                pane_id: floating_pane_id,
+                pane_id: new_pane_id,
                 tab_id: None,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: None,
-                pane_id: floating_pane_id,
+                pane_id: new_pane_id,
                 previous_pane_id: Some(tiled_pane_id),
             }),
         ])
     );
-    assert_eq!(session.floating_set.list_members(), [floating_member]);
     assert_eq!(
-        session.panes.get_pane_record_by_id(floating_pane_id),
-        Some(&PaneRecord::from_terminal_pane(floating_pane_id))
+        list_floating_pane_shapes(&session),
+        [(
+            vec![new_pane_id],
+            DEFAULT_FLOATING_PANE_SIZE,
+            DEFAULT_FLOATING_SOLVED_SIZE
+        )]
     );
+    assert_eq!(
+        session.panes.get_pane_record_by_id(new_pane_id),
+        Some(&PaneRecord::from_terminal_pane(new_pane_id))
+    );
+    let floating_pane_id = get_floating_pane_id_holding(&session, new_pane_id);
     let client = session
         .clients
         .get_client_by_id(client_id)
         .expect("the client is attached");
     assert_eq!(
         client.get_floating_pane_view(floating_pane_id),
-        Some(FloatingPaneView {
-            position: FloatingPanePosition::Pinned(Point { column: 5, row: 2 }),
-            is_minimized: false,
-        })
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Pinned(Point { column: 5, row: 2 }),
+            false,
+            new_pane_id
+        ))
     );
     assert_eq!(client.list_shown_floating_pane_ids(), [floating_pane_id]);
     assert_eq!(
         client.get_focused_floating_pane_id(),
         Some(floating_pane_id)
     );
+    assert_eq!(client.get_active_focused_pane_id(), Some(new_pane_id));
     assert_eq!(client.get_focused_pane_id(tab_id), Some(tiled_pane_id));
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
@@ -1161,26 +1239,25 @@ fn commit_new_floating_pane_registers_the_member_and_focuses_it_for_the_designat
 #[test]
 fn commit_new_floating_pane_at_the_default_position_shows_it_at_the_default_placement() {
     let (mut session, _, tiled_pane_id, client_id) = build_single_pane_session();
-    let floating_member = build_default_floating_member(PaneId::new());
+    let new_pane_id = PaneId::new();
 
-    let commit_result = commit_new_floating_pane(
+    let commit_result = commit_default_floating_pane(
         &mut session,
-        floating_member,
+        new_pane_id,
         Some((client_id, FloatingPanePosition::Default)),
-        NewPaneSpec::default(),
     );
 
     assert_eq!(
         commit_result,
         Ok(vec![
             Event::PaneCreated(PaneCreated {
-                pane_id: floating_member.pane_id,
+                pane_id: new_pane_id,
                 tab_id: None,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: None,
-                pane_id: floating_member.pane_id,
+                pane_id: new_pane_id,
                 previous_pane_id: Some(tiled_pane_id),
             }),
         ])
@@ -1192,11 +1269,8 @@ fn commit_new_floating_pane_at_the_default_position_shows_it_at_the_default_plac
             .expect("the client is attached")
             .list_floating_pane_views(),
         &std::collections::HashMap::from([(
-            floating_member.pane_id,
-            FloatingPaneView {
-                position: FloatingPanePosition::Default,
-                is_minimized: false,
-            }
+            get_floating_pane_id_holding(&session, new_pane_id),
+            build_floating_pane_view(FloatingPanePosition::Default, false, new_pane_id)
         )])
     );
 }
@@ -1212,34 +1286,38 @@ fn commit_new_floating_pane_for_a_client_that_cannot_draw_floating_panes_keeps_i
             column_count: 4,
             row_count: 6,
         })));
-    let floating_member = build_default_floating_member(PaneId::new());
+    let new_pane_id = PaneId::new();
 
-    let commit_result = commit_new_floating_pane(
+    let commit_result = commit_default_floating_pane(
         &mut session,
-        floating_member,
+        new_pane_id,
         Some((client_id, FloatingPanePosition::Default)),
-        NewPaneSpec::default(),
     );
 
     assert_eq!(
         commit_result,
         Ok(vec![Event::PaneCreated(PaneCreated {
-            pane_id: floating_member.pane_id,
+            pane_id: new_pane_id,
             tab_id: None,
         })])
     );
+    let floating_pane_id = get_floating_pane_id_holding(&session, new_pane_id);
     let client = session
         .clients
         .get_client_by_id(client_id)
         .expect("the client is attached");
     assert_eq!(
-        client.get_floating_pane_view(floating_member.pane_id),
-        Some(FloatingPaneView {
-            position: FloatingPanePosition::Default,
-            is_minimized: true,
-        })
+        client.get_floating_pane_view(floating_pane_id),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Default,
+            true,
+            new_pane_id
+        ))
     );
-    assert_eq!(client.list_shown_floating_pane_ids(), Vec::<PaneId>::new());
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        Vec::<FloatingPaneId>::new()
+    );
     assert_eq!(client.get_active_focused_pane_id(), Some(tiled_pane_id));
 }
 
@@ -1247,39 +1325,37 @@ fn commit_new_floating_pane_for_a_client_that_cannot_draw_floating_panes_keeps_i
 fn commit_new_floating_pane_into_a_full_floating_set_changes_nothing() {
     let (mut session, _, _, client_id) = build_single_pane_session();
     for _ in 0..MAX_FLOATING_PANES_PER_SESSION {
-        commit_new_floating_pane(
-            &mut session,
-            build_default_floating_member(PaneId::new()),
-            None,
-            NewPaneSpec::default(),
-        )
-        .expect("the floating set has room");
+        commit_default_floating_pane(&mut session, PaneId::new(), None)
+            .expect("the floating set has room");
     }
-    let floating_members = session.floating_set.list_members().to_vec();
-    let refused_member = build_default_floating_member(PaneId::new());
+    let floating_panes = session.floating_set.list_floating_panes().to_vec();
+    let refused_pane_id = PaneId::new();
 
-    let commit_result = commit_new_floating_pane(
+    let commit_result = commit_default_floating_pane(
         &mut session,
-        refused_member,
+        refused_pane_id,
         Some((
             client_id,
             FloatingPanePosition::Moved(Point { column: 5, row: 2 }),
         )),
-        NewPaneSpec::default(),
     );
 
     assert_eq!(commit_result, Err(FloatingSetError::TooManyPanes));
-    assert_eq!(session.floating_set.list_members(), floating_members);
+    assert_eq!(session.floating_set.list_floating_panes(), floating_panes);
     assert!(session
         .panes
-        .get_pane_record_by_id(refused_member.pane_id)
+        .get_pane_record_by_id(refused_pane_id)
         .is_none());
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
     assert_eq!(
-        session
-            .clients
-            .get_client_by_id(client_id)
-            .expect("the client is attached")
-            .get_floating_pane_view(refused_member.pane_id),
-        None
+        client.list_floating_pane_views().len(),
+        MAX_FLOATING_PANES_PER_SESSION
+    );
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        Vec::<FloatingPaneId>::new()
     );
 }

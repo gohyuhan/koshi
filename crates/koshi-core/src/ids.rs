@@ -8,10 +8,11 @@
 //! existing UUID (`from_uuid`), or read from typed text with
 //! [`parse_prefixed_uuid`] followed by `from_uuid`.
 //!
-//! The six id types below share the same shape: a wrapped [`Uuid`], a `new`
-//! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
-//! existing one, a `get_uuid` accessor, and a `Display` impl that prefixes the
-//! id with its entity name.
+//! The six id types below other than [`FloatingPaneId`] share the same shape: a
+//! wrapped [`Uuid`], a `new` constructor that mints a fresh id, a `from_uuid`
+//! constructor that wraps an existing one, a `get_uuid` accessor, and a
+//! `Display` impl that prefixes the id with its entity name. [`FloatingPaneId`]
+//! has `new` and `Default` only, and no text form.
 //!
 //! [`OwnedSessionId`] pairs a session id with the user id whose folder of the
 //! shared directory advertises the session, as `1001/session-<uuid>`.
@@ -173,6 +174,26 @@ impl Default for PaneId {
 impl fmt::Display for PaneId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "pane-{}", self.0)
+    }
+}
+
+/// Identifies a floating pane: the container that holds one layout tree of
+/// panes. It names the floating pane inside one session only; no CLI flag,
+/// request or event carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FloatingPaneId(Uuid);
+
+impl FloatingPaneId {
+    /// Generate a new time-ordered identifier (`UUIDv7`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for FloatingPaneId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

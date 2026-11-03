@@ -8,10 +8,10 @@ use super::*;
 
 use koshi_core::command::{PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::event::{
-    ConfigReloaded, FloatingPaneMoved, InputModeChanged, LayoutChanged, MouseSelectChanged,
-    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused,
-    PaneMinimizedChanged, PanePinChanged, PanePlacementCommitted, PaneProcessExited, PaneRemoved,
-    PtyResized, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
+    ConfigReloaded, FloatingPaneMinimizedChanged, FloatingPaneMoved, FloatingPanePinChanged,
+    InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing, PaneCommandFinished,
+    PaneCommandStarted, PaneCreated, PaneFocused, PanePlacementCommitted, PaneProcessExited,
+    PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
     TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{PaneArea, Point, Size};
@@ -186,10 +186,11 @@ fn mouse_select_change_is_info_naming_the_state_now_in_effect() {
 fn a_floating_pane_move_writes_one_info_line_with_the_client_pane_and_cell() {
     let client_id = ClientId::new();
     let pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
 
     let log_output = capture_event_logs(&[Event::FloatingPaneMoved(FloatingPaneMoved {
         client_id,
-        pane_id,
+        pane_ids: vec![pane_id, second_pane_id],
         top_left_cell: Point { column: 70, row: 2 },
     })]);
 
@@ -208,7 +209,7 @@ fn a_floating_pane_move_writes_one_info_line_with_the_client_pane_and_cell() {
         "{log_output}"
     );
     assert!(
-        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        log_output.contains(&format!(r#""pane_ids":"{pane_id},{second_pane_id}""#)),
         "{log_output}"
     );
     assert!(log_output.contains(r#""column":70,"#), "{log_output}");
@@ -219,10 +220,11 @@ fn a_floating_pane_move_writes_one_info_line_with_the_client_pane_and_cell() {
 fn a_floating_pane_pin_change_writes_one_info_line_naming_the_state_now_in_effect() {
     let client_id = ClientId::new();
     let pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
 
-    let log_output = capture_event_logs(&[Event::PanePinChanged(PanePinChanged {
+    let log_output = capture_event_logs(&[Event::FloatingPanePinChanged(FloatingPanePinChanged {
         client_id,
-        pane_id,
+        pane_ids: vec![pane_id, second_pane_id],
         is_pinned: false,
     })]);
 
@@ -241,7 +243,7 @@ fn a_floating_pane_pin_change_writes_one_info_line_naming_the_state_now_in_effec
         "{log_output}"
     );
     assert!(
-        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        log_output.contains(&format!(r#""pane_ids":"{pane_id},{second_pane_id}""#)),
         "{log_output}"
     );
     assert!(log_output.contains(r#""is_pinned":false"#), "{log_output}");
@@ -251,12 +253,15 @@ fn a_floating_pane_pin_change_writes_one_info_line_naming_the_state_now_in_effec
 fn a_floating_pane_minimize_change_writes_one_info_line_naming_the_state_now_in_effect() {
     let client_id = ClientId::new();
     let pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
 
-    let log_output = capture_event_logs(&[Event::PaneMinimizedChanged(PaneMinimizedChanged {
-        client_id,
-        pane_id,
-        is_minimized: true,
-    })]);
+    let log_output = capture_event_logs(&[Event::FloatingPaneMinimizedChanged(
+        FloatingPaneMinimizedChanged {
+            client_id,
+            pane_ids: vec![pane_id, second_pane_id],
+            is_minimized: true,
+        },
+    )]);
 
     assert_eq!(
         log_output.lines().count(),
@@ -273,7 +278,7 @@ fn a_floating_pane_minimize_change_writes_one_info_line_naming_the_state_now_in_
         "{log_output}"
     );
     assert!(
-        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        log_output.contains(&format!(r#""pane_ids":"{pane_id},{second_pane_id}""#)),
         "{log_output}"
     );
     assert!(

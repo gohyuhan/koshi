@@ -50,7 +50,7 @@ use crate::runtime::bus::tests::build_test_pane_placement_committed;
 use crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY;
 use crate::runtime::command::tests::{
     attach_client_through_server, build_floating_new_pane_args, build_tab, create_floating_pane,
-    create_session_with_attached_client, get_command_outcome,
+    create_session_with_attached_client, get_command_outcome, get_floating_pane_id_holding,
 };
 use crate::runtime::event::{AttachAccepted, SessionEnding};
 use crate::runtime::render_schedule::tests::{
@@ -154,7 +154,7 @@ fn close_undriven_panes_uses_reported_exit_status_and_unobserved_fallback() {
 #[test]
 fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
     let (mut server, client_id) = boot_server();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(client_id),
         build_floating_new_pane_args(None, None, false),
@@ -171,9 +171,9 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
     let tiled_pane_id = booted_client
         .get_focused_pane_id(tab_id)
         .expect("the booted client focuses the tab's pane");
-    server.live_pane_ids.remove(&floating_pane_id);
+    server.live_pane_ids.remove(&htop_pane_id);
 
-    let exit_events = server.close_undriven_panes([floating_pane_id], HashMap::new());
+    let exit_events = server.close_undriven_panes([htop_pane_id], HashMap::new());
 
     // The floating pane took the client's input when it opened; its removal
     // returns the input to the tiled pane.
@@ -181,54 +181,55 @@ fn close_undriven_panes_removes_a_floating_pane_whose_child_is_gone() {
         exit_events,
         vec![
             Event::PaneProcessExited(PaneProcessExited {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 exit_code: Some(-1),
                 signal: None,
             }),
             Event::PaneClosing(PaneClosing {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
             }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: floating_pane_id,
+                pane_id: htop_pane_id,
                 tab_id: None,
             }),
             Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: Some(tab_id),
                 pane_id: tiled_pane_id,
-                previous_pane_id: Some(floating_pane_id),
+                previous_pane_id: Some(htop_pane_id),
             }),
         ]
     );
-    assert!(server.get_session_for_pane(floating_pane_id).is_none());
+    assert!(server.get_session_for_pane(htop_pane_id).is_none());
     let session = server
         .list_sessions()
         .values()
         .next()
         .expect("the booted session");
-    assert_eq!(session.floating_set.list_members(), &[]);
+    assert_eq!(session.floating_set.list_floating_panes(), &[]);
 }
 
 #[test]
 fn a_floating_pane_is_shown_only_to_a_client_that_shows_it() {
     let (mut server, client_id) = boot_server();
-    let floating_pane_id = create_floating_pane(
+    let htop_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let htop_floating_pane_id = get_floating_pane_id_holding(&server, htop_pane_id);
     let later_client_id =
         attach_client_through_server(&mut server, client_id, TEST_VIEWPORT_SIZE, None);
 
-    assert!(server.is_pane_shown_to_client(client_id, floating_pane_id));
-    assert!(!server.is_pane_shown_to_client(later_client_id, floating_pane_id));
+    assert!(server.is_pane_shown_to_client(client_id, htop_pane_id));
+    assert!(!server.is_pane_shown_to_client(later_client_id, htop_pane_id));
 
     assert!(server
         .get_client_mut(client_id)
         .expect("the booted client")
-        .minimize_floating_pane(floating_pane_id));
+        .minimize_floating_pane(htop_floating_pane_id));
 
-    assert!(!server.is_pane_shown_to_client(client_id, floating_pane_id));
+    assert!(!server.is_pane_shown_to_client(client_id, htop_pane_id));
 }
 
 /// Each subscription as its subscriber and the client it views, in
@@ -1385,7 +1386,7 @@ fn build_booted_saved_view(
         focus_history_by_tab_id: HashMap::from([(booted_tab_id, vec![root_pane_id])]),
         zoomed_pane_id_by_tab_id: HashMap::new(),
         scroll_offset_by_pane_id,
-        floating_pane_view_by_pane_id: HashMap::new(),
+        floating_pane_view_by_floating_pane_id: HashMap::new(),
         shown_floating_pane_ids: Vec::new(),
     }
 }
@@ -2086,22 +2087,25 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
         CommandSource::from_key_binding(leaving_attachment.client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let pinned_floating_pane_id = get_floating_pane_id_holding(&server, pinned_pane_id);
     let minimized_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(leaving_attachment.client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let minimized_floating_pane_id = get_floating_pane_id_holding(&server, minimized_pane_id);
     let focused_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(leaving_attachment.client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let focused_floating_pane_id = get_floating_pane_id_holding(&server, focused_pane_id);
     {
         let client = server
             .get_client_mut(leaving_attachment.client_id)
             .expect("the client that is about to leave");
-        client.pin_floating_pane(pinned_pane_id, Point { column: 4, row: 2 });
-        assert!(client.minimize_floating_pane(minimized_pane_id));
+        client.pin_floating_pane(pinned_floating_pane_id, Point { column: 4, row: 2 });
+        assert!(client.minimize_floating_pane(minimized_floating_pane_id));
     }
     let detached_at = SystemTime::now();
     server.save_client_view(leaving_attachment.client_id, detached_at);
@@ -2122,33 +2126,42 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
         client.list_floating_pane_views(),
         &HashMap::from([
             (
-                pinned_pane_id,
+                pinned_floating_pane_id,
                 FloatingPaneView {
                     position: FloatingPanePosition::Pinned(Point { column: 4, row: 2 }),
                     is_minimized: false,
+                    focus_history: vec![pinned_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
             (
-                minimized_pane_id,
+                minimized_floating_pane_id,
                 FloatingPaneView {
                     position: FloatingPanePosition::Default,
                     is_minimized: true,
+                    focus_history: vec![minimized_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
             (
-                focused_pane_id,
+                focused_floating_pane_id,
                 FloatingPaneView {
                     position: FloatingPanePosition::Default,
                     is_minimized: false,
+                    focus_history: vec![focused_pane_id],
+                    zoomed_pane_id: None,
                 },
             ),
         ])
     );
     assert_eq!(
         client.list_shown_floating_pane_ids(),
-        [pinned_pane_id, focused_pane_id]
+        [pinned_floating_pane_id, focused_floating_pane_id]
     );
-    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
+    assert_eq!(
+        client.get_focused_floating_pane_id(),
+        Some(focused_floating_pane_id)
+    );
     assert_eq!(session.validate_session_consistency(), Ok(()));
     assert_eq!(
         server.find_typed_pane(returning_attachment.client_id),
@@ -2171,6 +2184,7 @@ fn a_token_drops_a_floating_pane_closed_since_the_detach_and_moves_its_input() {
         CommandSource::from_key_binding(leaving_attachment.client_id),
         build_floating_new_pane_args(None, None, false),
     );
+    let staying_floating_pane_id = get_floating_pane_id_holding(&server, staying_pane_id);
     let closing_pane_id = create_floating_pane(
         &mut server,
         CommandSource::from_key_binding(leaving_attachment.client_id),
@@ -2195,15 +2209,23 @@ fn a_token_drops_a_floating_pane_closed_since_the_detach_and_moves_its_input() {
     assert_eq!(
         client.list_floating_pane_views(),
         &HashMap::from([(
-            staying_pane_id,
+            staying_floating_pane_id,
             FloatingPaneView {
                 position: FloatingPanePosition::Default,
                 is_minimized: false,
+                focus_history: vec![staying_pane_id],
+                zoomed_pane_id: None,
             },
         )])
     );
-    assert_eq!(client.list_shown_floating_pane_ids(), [staying_pane_id]);
-    assert_eq!(client.get_focused_floating_pane_id(), Some(staying_pane_id));
+    assert_eq!(
+        client.list_shown_floating_pane_ids(),
+        [staying_floating_pane_id]
+    );
+    assert_eq!(
+        client.get_focused_floating_pane_id(),
+        Some(staying_floating_pane_id)
+    );
     assert_eq!(session.validate_session_consistency(), Ok(()));
     assert_eq!(
         server.find_typed_pane(returning_attachment.client_id),
