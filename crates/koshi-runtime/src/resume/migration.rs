@@ -1295,8 +1295,8 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 ///    floating pane `{floating_pane_id, layout_area, desired_size,
 ///    solved_size}`. Its id holds the UUID of its pane, and its tree is that
 ///    one pane, solved over [`compute_floating_layout_size`] of
-///    `solved_size`: member `pane-<u>` at `40x12` → floating pane
-///    `floating-pane-<u>`, tree `Pane(pane-<u>)` over `40x11`.
+///    `solved_size`: member `pane-<u>` at `40x12` → floating pane id `<u>`,
+///    tree `Pane(pane-<u>)` over `40x11`.
 /// 2. Each tab's `layout` and `solved_tab_size` move into
 ///    `layout_area: {layout, solved_size}`.
 /// 3. Each client record and each saved view renames

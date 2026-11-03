@@ -511,8 +511,9 @@ const COMMAND_VARIANT_COUNT: usize = 30;
 /// One command of every variant, aimed at `tab_id` and `pane_id` — the tab and pane the
 /// acting client of [`build_command_matrix_server`] views. `SwitchSession` names a session
 /// id no runtime holds, `MoveFloatingPane` names the same pane id on every runtime, one
-/// no runtime holds, and `SetFloatingPanePinned`, `ToggleFloatingPanePinned`, `SetFloatingPaneMinimized` and
-/// `ToggleFloatingPaneMinimized` name no pane, so each resolves the same way on every runtime.
+/// no runtime holds, and `SetFloatingPanePinned`, `ToggleFloatingPanePinned`,
+/// `SetFloatingPaneMinimized` and `ToggleFloatingPaneMinimized` name no pane, so each
+/// resolves the same way on every runtime.
 fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
     vec![
         Command::NewPane(build_new_pane_args()),

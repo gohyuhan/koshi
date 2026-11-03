@@ -24,6 +24,12 @@
 //!
 //! [`Surface::find_version_problem`] checks this rule, and a test runs the whole
 //! table through it.
+//!
+//! The release commit sets each `released_version` to its `maximum_version`.
+//! On a `vX.Y.Z` tag, `release.yml` runs the ignored test
+//! `every_surface_records_this_release_as_released`, which fails on a surface
+//! whose `released_version` is not its `maximum_version`. A pre-release tag,
+//! such as `v0.7.0-pr.1`, skips that test.
 
 /// One versioned surface: what two builds must agree on, and the versions this
 /// build speaks of it.
@@ -59,15 +65,15 @@ pub struct Surface {
 ///
 /// - The `SetFloatingPanePinned`, `ToggleFloatingPanePinned`,
 ///   `SetFloatingPaneMinimized` and `ToggleFloatingPaneMinimized` commands
-///   carry the fields that 5's `SetFloatingPanePinned`, `ToggleFloatingPanePinned`,
-///   `SetFloatingPaneMinimized` and `ToggleFloatingPaneMinimized` carried. Each acts on the
+///   carry the fields that 5's `SetPanePinned`, `TogglePanePinned`,
+///   `SetPaneMinimized` and `TogglePaneMinimized` carried. Each acts on the
 ///   floating pane that holds the pane it names. 6 has none of the four names
 ///   of 5.
 /// - The `FloatingPaneMoved`, `FloatingPanePinChanged` and
 ///   `FloatingPaneMinimizedChanged` events in a command result carry
 ///   `pane_ids`: every pane of the floating pane, in layout order. 5 carried
-///   one `pane_id`, and named the last two `FloatingPanePinChanged` and
-///   `FloatingPaneMinimizedChanged`.
+///   one `pane_id`, and named the last two `PanePinChanged` and
+///   `PaneMinimizedChanged`.
 /// - A floating pane of a `Layout` answer carries `pane_ids`: every pane of the
 ///   floating pane, in layout order. 5 carried one `pane_id`.
 ///

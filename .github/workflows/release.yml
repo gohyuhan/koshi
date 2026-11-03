@@ -35,6 +35,18 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --all-features --locked
 
+      # On a vX.Y.Z tag, each surface in crates/koshi-core/src/compat.rs
+      # records this release as its released version. A pre-release tag skips
+      # the step. The step passes only on the line "test result: ok. 1 passed",
+      # so a failed test and a test name that matches nothing both fail it.
+      - name: Released surface versions
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          cargo test -p koshi-core --lib --locked -- --ignored --exact \
+            compat::tests::every_surface_records_this_release_as_released 2>&1 \
+            | tee released-surface-versions.log
+          grep -q "test result: ok. 1 passed" released-surface-versions.log
+
   dep-guard:
     name: dependency guard
     runs-on: ubuntu-latest

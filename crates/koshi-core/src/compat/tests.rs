@@ -1,6 +1,7 @@
 //! Tests for the versioned-surface table: that every surface in it follows the
-//! rule, that the check catches each way of breaking it, and that the table
-//! holds exactly the surfaces and numbers it pins.
+//! rule, that the check catches each way of breaking it, that the table holds
+//! exactly the surfaces and numbers it pins, and, on a stable release tag, that
+//! every surface records this release as released.
 
 use super::*;
 
@@ -12,6 +13,29 @@ fn every_surface_follows_the_version_rule() {
         .collect();
 
     assert_eq!(version_problems, Vec::<String>::new());
+}
+
+/// Every surface's `released_version` is `Some` of its `maximum_version`. Each
+/// failing row is `(surface_name, maximum_version, released_version)`. The
+/// test fails from the first breaking change of a release cycle until the
+/// release commit sets the numbers. `release.yml` runs it with `--ignored` on
+/// each `vX.Y.Z` tag.
+#[test]
+#[ignore = "runs on stable release tags only"]
+fn every_surface_records_this_release_as_released() {
+    let unrecorded_surfaces: Vec<(&str, u32, Option<u32>)> = SURFACES
+        .iter()
+        .filter(|surface| surface.released_version != Some(surface.maximum_version))
+        .map(|surface| {
+            (
+                surface.surface_name,
+                surface.maximum_version,
+                surface.released_version,
+            )
+        })
+        .collect();
+
+    assert_eq!(unrecorded_surfaces, Vec::<(&str, u32, Option<u32>)>::new());
 }
 
 #[test]

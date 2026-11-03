@@ -41,10 +41,6 @@ fn id_display_includes_each_type_prefix() {
         "pane-00000000-0000-0000-0000-000000000000"
     );
     assert_eq!(
-        FloatingPaneId::from_uuid(uuid).to_string(),
-        "floating-pane-00000000-0000-0000-0000-000000000000"
-    );
-    assert_eq!(
         CommandId::from_uuid(uuid).to_string(),
         "command-00000000-0000-0000-0000-000000000000"
     );
@@ -102,13 +98,12 @@ fn generated_pane_ids_are_unique() {
 #[test]
 fn get_uuid_returns_the_wrapped_value_for_every_id_type() {
     // Each type wraps the same nil UUID and hands it back unchanged, proving
-    // the per-type `get_uuid` accessor on all seven.
+    // the per-type `get_uuid` accessor on all six that have one.
     let uuid = Uuid::nil();
     assert_eq!(SessionId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(ClientId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(TabId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(PaneId::from_uuid(uuid).get_uuid(), &uuid);
-    assert_eq!(FloatingPaneId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(CommandId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(SubscriberId::from_uuid(uuid).get_uuid(), &uuid);
 }
@@ -127,7 +122,7 @@ fn default_mints_a_fresh_non_nil_id_for_every_id_type() {
     assert_ne!(PaneId::default(), PaneId::default());
     assert_ne!(PaneId::default().get_uuid(), &nil_uuid);
     assert_ne!(FloatingPaneId::default(), FloatingPaneId::default());
-    assert_ne!(FloatingPaneId::default().get_uuid(), &nil_uuid);
+    assert_ne!(FloatingPaneId::default(), FloatingPaneId(nil_uuid));
     assert_ne!(CommandId::default(), CommandId::default());
     assert_ne!(CommandId::default().get_uuid(), &nil_uuid);
     assert_ne!(SubscriberId::default(), SubscriberId::default());

@@ -8,10 +8,11 @@
 //! existing UUID (`from_uuid`), or read from typed text with
 //! [`parse_prefixed_uuid`] followed by `from_uuid`.
 //!
-//! The seven id types below share the same shape: a wrapped [`Uuid`], a `new`
-//! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
-//! existing one, a `get_uuid` accessor, and a `Display` impl that prefixes the
-//! id with its entity name.
+//! The six id types below other than [`FloatingPaneId`] share the same shape: a
+//! wrapped [`Uuid`], a `new` constructor that mints a fresh id, a `from_uuid`
+//! constructor that wraps an existing one, a `get_uuid` accessor, and a
+//! `Display` impl that prefixes the id with its entity name. [`FloatingPaneId`]
+//! has `new` and `Default` only, and no text form.
 //!
 //! [`OwnedSessionId`] pairs a session id with the user id whose folder of the
 //! shared directory advertises the session, as `1001/session-<uuid>`.
@@ -188,29 +189,11 @@ impl FloatingPaneId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
-
-    /// Wrap an existing UUID without generating a new one.
-    #[must_use]
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    /// Borrow the underlying UUID.
-    #[must_use]
-    pub fn get_uuid(&self) -> &Uuid {
-        &self.0
-    }
 }
 
 impl Default for FloatingPaneId {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl fmt::Display for FloatingPaneId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "floating-pane-{}", self.0)
     }
 }
 
