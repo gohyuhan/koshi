@@ -13,24 +13,28 @@
 //! one under pane placement hits none, and a pane four columns wide has none, the tab strip reports its first visible tab, two
 //! clients of different sizes hit-test independently, degenerate
 //! frames are safe, and floating panes hit front to back over the tiled layer
-//! and the letterbox margin, with their content, border, titlebar and controls
-//! apart.
+//! and the letterbox margin: the strip row's grab handle, controls and blank
+//! cells apart, and below it each pane of the tree by its content, its border
+//! and its stack header. A gap cell inside a floating pane, and every cell below
+//! the strip of a floating pane whose every pane is suppressed, hits nothing.
 
 use super::*;
+use crate::render::tests::build_one_pane_floating_pane_slot;
 
-use koshi_core::geometry::{Direction, Point, Rect, Size};
+use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry};
-use koshi_layout::solver::StackHeader;
+use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing, StackHeader};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::render::tests::compute_version_badge_column_count;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, DrawnNotifications, FloatingPaneMoveDraft, FloatingPaneSlot,
-    MouseFrame, PaneSlot, PlacementHandleHover, RenderSnapshot, SessionSnapshot, TabMetadata,
-    TabSnapshot, ViewerChrome,
+    LayoutAreaSnapshot, MouseFrame, PaneSlot, PlacementHandleHover, RenderSnapshot,
+    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 
 fn build_screen_point(screen_column: u16, screen_row: u16) -> Point {
@@ -83,12 +87,14 @@ fn build_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id: active_tab_id,
                 tab_name: "active".to_string(),
-                pane_slots,
-                tab_size,
-                stack_headers: stack_headers.to_vec(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: tab_size,
+                    pane_slots,
+                    stack_headers: stack_headers.to_vec(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
@@ -914,6 +920,7 @@ fn degenerate_frames_hit_nothing() {
     suppressed
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
     assert_eq!(
         resolve_hit_region(
@@ -1331,6 +1338,7 @@ fn a_pane_content_rect_is_its_border_inset_shifted_into_the_centered_layout() {
     suppressed
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
     assert_eq!(
         find_pane_content_rect(
@@ -1473,6 +1481,7 @@ fn tabline_first_visible_is_none_when_no_tabline_is_drawn() {
     suppressed
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
     assert_eq!(
         find_first_visible_tab_index(suppressed.build_frame_layout(ViewerChrome::default())),
@@ -1610,11 +1619,9 @@ fn push_floating_pane_slot(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id,
-            outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            pane_id, outer_rect, false,
+        ));
 }
 
 /// Float `B` over float `A` over the tiled pane `T`: each cell goes to the
@@ -1716,6 +1723,15 @@ fn a_floating_pane_in_the_letterbox_margin_is_hit() {
             build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             build_screen_point(5, 1)
         ),
+        HitRegion::PaneTitlebar {
+            pane_id: floating_slot_pane_id
+        }
+    );
+    assert_eq!(
+        resolve_hit_region(
+            build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
+            build_screen_point(5, 2)
+        ),
         HitRegion::PaneBorder {
             pane_id: floating_slot_pane_id,
             side: Direction::Up,
@@ -1761,6 +1777,7 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
     assert_eq!(
         resolve_hit_region(
@@ -1778,10 +1795,11 @@ fn no_floating_pane_is_hit_while_placement_shows_or_every_pane_is_suppressed() {
     );
 }
 
-/// The titlebar row's controls sit where the floating pane's chrome draws
-/// them; its other cells and the separator row are titlebar.
+/// The strip row's controls sit where the floating pane's strip draws them,
+/// and its other cells are titlebar. Below the strip, the pane box hits its
+/// border and its content.
 #[test]
-fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
+fn a_floating_panes_strip_parts_and_pane_box_hit_where_they_are_drawn() {
     let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_floating_frame(PaneId::new(), FULL_PANE_AREA_TAB_SIZE);
     push_floating_pane_slot(
@@ -1797,91 +1815,252 @@ fn a_floating_panes_titlebar_parts_hit_where_they_are_drawn() {
         )
     };
     let pane_id = floating_slot_pane_id;
+    let build_border_hit_region =
+        |side: Direction, corner_horizontal_side: Option<Direction>| HitRegion::PaneBorder {
+            pane_id,
+            side,
+            corner_horizontal_side,
+        };
 
+    // The strip is row 0; the pane box `(0, 1)` `48x11` holds content
+    // `(1, 2)` `46x9`.
     for (pane_area_column, pane_area_row, expected_hit_region) in [
-        (2, 1, HitRegion::PlacementHandle { pane_id }),
-        (3, 1, HitRegion::PlacementHandle { pane_id }),
-        (4, 1, HitRegion::PaneTitlebar { pane_id }),
-        (5, 1, HitRegion::PaneTitlebar { pane_id }),
-        (6, 1, HitRegion::PaneTitlebar { pane_id }),
-        (35, 1, HitRegion::PaneTitlebar { pane_id }),
-        (36, 1, HitRegion::PanePinToggle { pane_id }),
-        (39, 1, HitRegion::PanePinToggle { pane_id }),
-        (40, 1, HitRegion::PaneTitlebar { pane_id }),
-        (41, 1, HitRegion::PaneMinimizeButton { pane_id }),
-        (42, 1, HitRegion::PaneTitlebar { pane_id }),
-        (44, 1, HitRegion::PaneCloseButton { pane_id }),
-        (46, 1, HitRegion::PaneTitlebar { pane_id }),
-        (5, 2, HitRegion::PaneTitlebar { pane_id }),
-        (5, 3, HitRegion::PaneContent { pane_id }),
+        (0, 0, HitRegion::PaneTitlebar { pane_id }),
+        (1, 0, HitRegion::PlacementHandle { pane_id }),
+        (2, 0, HitRegion::PlacementHandle { pane_id }),
+        (3, 0, HitRegion::PaneTitlebar { pane_id }),
+        (37, 0, HitRegion::PaneTitlebar { pane_id }),
+        (38, 0, HitRegion::PanePinToggle { pane_id }),
+        (41, 0, HitRegion::PanePinToggle { pane_id }),
+        (42, 0, HitRegion::PaneTitlebar { pane_id }),
+        (43, 0, HitRegion::PaneMinimizeButton { pane_id }),
+        (44, 0, HitRegion::PaneTitlebar { pane_id }),
+        (46, 0, HitRegion::PaneCloseButton { pane_id }),
+        (47, 0, HitRegion::PaneTitlebar { pane_id }),
         (
             0,
             1,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Left,
-                corner_horizontal_side: None,
-            },
+            build_border_hit_region(Direction::Left, Some(Direction::Up)),
         ),
-        (
-            0,
-            2,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Left,
-                corner_horizontal_side: None,
-            },
-        ),
+        (5, 1, build_border_hit_region(Direction::Up, None)),
         (
             47,
             1,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Right,
-                corner_horizontal_side: None,
-            },
+            build_border_hit_region(Direction::Right, Some(Direction::Up)),
         ),
-        (
-            5,
-            0,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Up,
-                corner_horizontal_side: None,
-            },
-        ),
-        (
-            5,
-            11,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Down,
-                corner_horizontal_side: None,
-            },
-        ),
-        (
-            0,
-            0,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Left,
-                corner_horizontal_side: Some(Direction::Up),
-            },
-        ),
+        (0, 5, build_border_hit_region(Direction::Left, None)),
+        (47, 5, build_border_hit_region(Direction::Right, None)),
+        (1, 2, HitRegion::PaneContent { pane_id }),
+        (46, 10, HitRegion::PaneContent { pane_id }),
+        (5, 11, build_border_hit_region(Direction::Down, None)),
         (
             47,
             11,
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Right,
-                corner_horizontal_side: Some(Direction::Down),
-            },
+            build_border_hit_region(Direction::Right, Some(Direction::Down)),
         ),
     ] {
         assert_eq!(
             resolve_pane_area_hit_region(pane_area_column, pane_area_row),
             expected_hit_region,
             "pane-area cell ({pane_area_column}, {pane_area_row})"
+        );
+    }
+}
+
+/// The slot of an unpinned floating pane at `outer_rect` whose input pane is
+/// `pane_id`: `layout_tree` solved tiled over the rows below the strip with
+/// `pane_sizing`.
+fn build_sized_floating_pane_slot(
+    pane_id: PaneId,
+    layout_tree: &LayoutNode,
+    outer_rect: Rect,
+    pane_sizing: PaneSizing,
+) -> FloatingPaneSlot {
+    let layout_size = Size {
+        column_count: outer_rect.size.column_count,
+        row_count: outer_rect.size.row_count - 1,
+    };
+    FloatingPaneSlot {
+        pane_id,
+        outer_rect,
+        is_pinned: false,
+        layout_area: LayoutAreaSnapshot::from_layout_solve(
+            &solve_layout_with_sizing(
+                layout_tree,
+                Rect::from_size_at_origin(layout_size),
+                pane_sizing,
+            ),
+            layout_size,
+            LayoutMode::Tiled,
+            pane_sizing.gap_cell_count,
+        ),
+    }
+}
+
+/// `vim` beside a stack of `logs` and `top`, `top` open, with a 2-cell gap,
+/// in a `40x12` floating pane at `(0, 0)`: below the strip, `vim` takes box
+/// `(0, 0)` `19x11`, the gap columns `19` and `20`, `logs` the header row
+/// `(21, 0)` `19x1` and `top` box `(21, 1)` `19x10`. Each cell hits the part
+/// of the tree under it, the gap hits nothing, and the grab handle names
+/// `vim`, the input pane.
+#[test]
+fn a_floating_panes_tree_hits_each_pane_its_stack_header_and_no_gap_cell() {
+    let [vim_pane_id, logs_pane_id, top_pane_id] = [PaneId::new(), PaneId::new(), PaneId::new()];
+    let mut render_snapshot = build_floating_frame(PaneId::new(), FULL_PANE_AREA_TAB_SIZE);
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(build_sized_floating_pane_slot(
+            vim_pane_id,
+            &LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Horizontal,
+                vec![
+                    LayoutNode::Pane(vim_pane_id),
+                    LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                        vec![logs_pane_id, top_pane_id],
+                        1,
+                    )),
+                ],
+            )),
+            build_cell_rect(0, 0, 40, 12),
+            PaneSizing {
+                gap_cell_count: 2,
+                ..PaneSizing::default()
+            },
+        ));
+    let mouse_frame = build_core_mouse_frame(&render_snapshot, ViewerChrome::default());
+    // A layout-area cell is one pane-area row and two screen rows lower.
+    let resolve_layout_area_hit_region = |layout_column: u16, layout_row: u16| {
+        resolve_hit_region(
+            mouse_frame.build_frame_layout(),
+            build_screen_point(layout_column, layout_row + 2),
+        )
+    };
+
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), build_screen_point(1, 1)),
+        HitRegion::PlacementHandle {
+            pane_id: vim_pane_id
+        }
+    );
+    for (layout_column, layout_row, expected_hit_region) in [
+        (
+            1,
+            1,
+            HitRegion::PaneContent {
+                pane_id: vim_pane_id,
+            },
+        ),
+        (
+            18,
+            5,
+            HitRegion::PaneBorder {
+                pane_id: vim_pane_id,
+                side: Direction::Right,
+                corner_horizontal_side: None,
+            },
+        ),
+        (19, 5, HitRegion::None),
+        (20, 0, HitRegion::None),
+        (
+            25,
+            0,
+            HitRegion::StackHeader {
+                pane_id: logs_pane_id,
+            },
+        ),
+        (
+            21,
+            1,
+            HitRegion::PaneBorder {
+                pane_id: top_pane_id,
+                side: Direction::Left,
+                corner_horizontal_side: Some(Direction::Up),
+            },
+        ),
+        (
+            22,
+            2,
+            HitRegion::PaneContent {
+                pane_id: top_pane_id,
+            },
+        ),
+    ] {
+        assert_eq!(
+            resolve_layout_area_hit_region(layout_column, layout_row),
+            expected_hit_region,
+            "layout-area cell ({layout_column}, {layout_row})"
+        );
+    }
+}
+
+/// A floating pane whose every pane is suppressed hits its strip and nothing
+/// below it, and the tiled pane under it is not hit there.
+#[test]
+fn a_floating_pane_whose_every_pane_is_suppressed_hits_its_strip_and_nothing_below_it() {
+    let floating_slot_pane_id = PaneId::new();
+    let mut render_snapshot = build_floating_frame(PaneId::new(), FULL_PANE_AREA_TAB_SIZE);
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(build_sized_floating_pane_slot(
+            floating_slot_pane_id,
+            &LayoutNode::Pane(floating_slot_pane_id),
+            build_cell_rect(0, 0, 20, 8),
+            PaneSizing {
+                minimum_size: Size {
+                    column_count: 80,
+                    row_count: 24,
+                },
+                ..PaneSizing::default()
+            },
+        ));
+    let mouse_frame = build_core_mouse_frame(&render_snapshot, ViewerChrome::default());
+
+    assert_eq!(
+        resolve_hit_region(mouse_frame.build_frame_layout(), build_screen_point(1, 1)),
+        HitRegion::PlacementHandle {
+            pane_id: floating_slot_pane_id
+        }
+    );
+    for screen_point in [build_screen_point(0, 2), build_screen_point(10, 5)] {
+        assert_eq!(
+            resolve_hit_region(mouse_frame.build_frame_layout(), screen_point),
+            HitRegion::None,
+            "{screen_point:?}"
+        );
+    }
+    assert_eq!(
+        find_pane_content_rect(mouse_frame.build_frame_layout(), floating_slot_pane_id),
+        None
+    );
+}
+
+/// A floating pane whose layout area says every pane is suppressed hits
+/// nothing below its strip, also on the box and the content of a slot that
+/// the layout area lists as visible.
+#[test]
+fn a_floating_pane_whose_every_pane_is_suppressed_hits_no_slot_it_lists_as_visible() {
+    let floating_slot_pane_id = PaneId::new();
+    let mut render_snapshot = build_floating_frame(PaneId::new(), FULL_PANE_AREA_TAB_SIZE);
+    let mut floating_pane_slot = build_sized_floating_pane_slot(
+        floating_slot_pane_id,
+        &LayoutNode::Pane(floating_slot_pane_id),
+        build_cell_rect(0, 0, 20, 8),
+        PaneSizing::default(),
+    );
+    floating_pane_slot.layout_area.is_every_pane_suppressed = true;
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(floating_pane_slot);
+    let mouse_frame = build_core_mouse_frame(&render_snapshot, ViewerChrome::default());
+
+    for screen_point in [build_screen_point(0, 2), build_screen_point(10, 5)] {
+        assert_eq!(
+            resolve_hit_region(mouse_frame.build_frame_layout(), screen_point),
+            HitRegion::None,
+            "{screen_point:?}"
         );
     }
 }
@@ -1909,7 +2088,7 @@ fn a_floating_panes_content_rect_takes_no_letterbox_offset() {
             build_core_mouse_frame(&render_snapshot, ViewerChrome::default()).build_frame_layout(),
             floating_slot_pane_id
         ),
-        Some(build_cell_rect(25, 12, 70, 18))
+        Some(build_cell_rect(25, 11, 70, 19))
     );
     assert_eq!(
         compute_clamped_pane_cell(
@@ -1917,7 +2096,7 @@ fn a_floating_panes_content_rect_takes_no_letterbox_offset() {
             floating_slot_pane_id,
             build_screen_point(30, 14)
         ),
-        Some(Point { column: 5, row: 2 })
+        Some(Point { column: 5, row: 3 })
     );
 }
 
@@ -1967,7 +2146,7 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
             build_core_mouse_frame(&render_snapshot, draft_viewer_chrome).build_frame_layout(),
             floating_slot_pane_id
         ),
-        Some(build_cell_rect(61, 24, 38, 11))
+        Some(build_cell_rect(61, 23, 38, 12))
     );
 }
 
@@ -2052,6 +2231,7 @@ fn a_closed_tray_leaves_its_cells_to_the_panes_and_keeps_its_button() {
     let tiled_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .pane_id;
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
@@ -2192,6 +2372,7 @@ fn a_sliding_notification_center_hits_the_cells_it_draws_as_the_cells_of_the_cen
     let tiled_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .pane_id;
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
@@ -2287,6 +2468,7 @@ fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_un
     let tiled_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .pane_id;
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);

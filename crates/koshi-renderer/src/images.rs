@@ -19,7 +19,7 @@ use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
 use koshi_terminal::style::Style as CellStyle;
 
-use crate::render::{list_visible_tiled_panes, FrameGeometry, PlacedFloatingPane};
+use crate::render::{list_visible_layout_area_panes, FrameGeometry, PlacedFloatingPane};
 use crate::snapshot::{
     ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot, RenderSnapshot,
 };
@@ -108,7 +108,8 @@ impl ImageCellSnapshot {
 /// viewport area, over the cells of `snapshot_area` inside it: the cells of
 /// every visible tiled pane, then those of each floating pane this viewer
 /// draws, back to front. A floating pane first resets every cell of its outer
-/// area to a blank cell, then writes the cells of its visible content area.
+/// area to a blank cell, then writes the cells of each visible pane of its
+/// tree, cut to its visible area.
 /// The viewer chrome decides which floating panes are drawn, as it does for
 /// [`render_frame`](crate::render_frame). The snapshot's `screen_area` is
 /// `snapshot_area` clipped to the viewport area, and each of its cells holds
@@ -139,9 +140,14 @@ pub fn build_image_cell_snapshot(
         });
     }
 
-    for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, frame_geometry.get_layout_origin())
-    {
+    for (pane_snapshot, placed_content_rect) in list_visible_layout_area_panes(
+        render_snapshot,
+        &render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area,
+        frame_geometry.get_layout_origin(),
+    ) {
         write_pane_cell_states(
             pane_snapshot,
             placed_content_rect,
@@ -158,18 +164,17 @@ pub fn build_image_cell_snapshot(
                 cell_states[cell_index] = ImageCellState::default();
             }
         }
-        let Some(pane_snapshot) =
-            render_snapshot.find_pane_snapshot(placed_floating_pane.floating_pane_slot.pane_id)
-        else {
-            continue;
-        };
-        write_pane_cell_states(
-            pane_snapshot,
-            placed_floating_pane.content_area,
-            placed_floating_pane.visible_content_area,
-            screen_area,
-            &mut cell_states,
-        )?;
+        for (pane_snapshot, content_area, visible_content_area) in
+            placed_floating_pane.list_visible_panes(render_snapshot)
+        {
+            write_pane_cell_states(
+                pane_snapshot,
+                content_area,
+                visible_content_area,
+                screen_area,
+                &mut cell_states,
+            )?;
+        }
     }
     Some(ImageCellSnapshot {
         screen_area,
@@ -330,8 +335,9 @@ impl ImagePaint {
 /// [`render_frame`](crate::render_frame).
 ///
 /// An image is anchored at its pane's content area and cut to the cells of it
-/// that are drawn: a tiled pane's content rect, or a floating pane's content
-/// rect inside the pane area, each cut to the viewport area. An image whose
+/// that are drawn: a tiled pane's content rect, or the content rect of a pane
+/// of a floating pane's tree inside the pane area, each cut to the viewport
+/// area. An image whose
 /// cut rectangle meets the outer rect of a floating pane drawn above its pane,
 /// the viewer's open floating pane tray, its open notification center, or the
 /// drawn cells of its toast is left out.
@@ -349,6 +355,7 @@ pub fn build_image_paints(frame_geometry: &FrameGeometry<'_>) -> Vec<ImagePaint>
         || render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     {
         return Vec::new();
@@ -357,9 +364,14 @@ pub fn build_image_paints(frame_geometry: &FrameGeometry<'_>) -> Vec<ImagePaint>
     let placed_floating_panes = &frame_geometry.placed_floating_panes;
     let mut image_paints = Vec::new();
 
-    for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, frame_geometry.get_layout_origin())
-    {
+    for (pane_snapshot, placed_content_rect) in list_visible_layout_area_panes(
+        render_snapshot,
+        &render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area,
+        frame_geometry.get_layout_origin(),
+    ) {
         push_pane_image_paints(
             pane_snapshot,
             placed_content_rect,
@@ -370,19 +382,18 @@ pub fn build_image_paints(frame_geometry: &FrameGeometry<'_>) -> Vec<ImagePaint>
         );
     }
     for (floating_pane_index, placed_floating_pane) in placed_floating_panes.iter().enumerate() {
-        let Some(pane_snapshot) =
-            render_snapshot.find_pane_snapshot(placed_floating_pane.floating_pane_slot.pane_id)
-        else {
-            continue;
-        };
-        push_pane_image_paints(
-            pane_snapshot,
-            placed_floating_pane.content_area,
-            placed_floating_pane.visible_content_area,
-            &placed_floating_panes[floating_pane_index + 1..],
-            screen_area,
-            &mut image_paints,
-        );
+        for (pane_snapshot, content_area, visible_content_area) in
+            placed_floating_pane.list_visible_panes(render_snapshot)
+        {
+            push_pane_image_paints(
+                pane_snapshot,
+                content_area,
+                visible_content_area,
+                &placed_floating_panes[floating_pane_index + 1..],
+                screen_area,
+                &mut image_paints,
+            );
+        }
     }
 
     for covering_overlay_area in frame_geometry.list_overlay_areas() {
@@ -412,7 +423,7 @@ fn push_pane_image_paints(
     pane_snapshot: &PaneSnapshot,
     content_area: RatatuiRect,
     clip_area: RatatuiRect,
-    covering_floating_panes: &[PlacedFloatingPane],
+    covering_floating_panes: &[PlacedFloatingPane<'_>],
     screen_area: RatatuiRect,
     image_paints: &mut Vec<ImagePaint>,
 ) {
@@ -487,15 +498,21 @@ pub(crate) fn compute_image_placeholder_rects(
         || render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     {
         return Vec::new();
     }
 
     let mut placeholder_rects = Vec::new();
-    for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, frame_geometry.get_layout_origin())
-    {
+    for (pane_snapshot, placed_content_rect) in list_visible_layout_area_panes(
+        render_snapshot,
+        &render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area,
+        frame_geometry.get_layout_origin(),
+    ) {
         if placement_presentation.is_some_and(|placement_presentation| {
             placement_presentation.is_pane_affected(pane_snapshot.pane_id)
         }) {
@@ -522,42 +539,43 @@ pub(crate) fn compute_image_placeholder_rects(
     placeholder_rects
 }
 
-/// Return the visible cell rectangles of one floating pane's images that show
-/// the unavailable-image text, in draw order: the images of
-/// `placed_floating_pane` cut to its visible content area and `screen_area`,
-/// under the rules of [`compute_image_placeholder_rects`].
-/// `covering_floating_panes` are the floating panes drawn above it.
+/// Return the visible cell rectangles of the images of one floating pane's
+/// panes that show the unavailable-image text, in draw order: the images of
+/// each visible pane of `placed_floating_pane`'s tree, in pane slot order, cut
+/// to its content rect inside the visible area and to `screen_area`, under the
+/// rules of [`compute_image_placeholder_rects`]. `covering_floating_panes` are
+/// the floating panes drawn above it.
 pub(crate) fn compute_floating_pane_image_placeholder_rects(
     render_snapshot: &RenderSnapshot,
-    placed_floating_pane: &PlacedFloatingPane,
-    covering_floating_panes: &[PlacedFloatingPane],
+    placed_floating_pane: &PlacedFloatingPane<'_>,
+    covering_floating_panes: &[PlacedFloatingPane<'_>],
     screen_area: RatatuiRect,
     image_mode: ImageRenderMode,
     unavailable_image_keys: &[ImagePlacementKey],
 ) -> Vec<RatatuiRect> {
-    let Some(pane_snapshot) =
-        render_snapshot.find_pane_snapshot(placed_floating_pane.floating_pane_slot.pane_id)
-    else {
-        return Vec::new();
-    };
-    list_drawn_image_placements(
-        pane_snapshot,
-        placed_floating_pane.content_area,
-        placed_floating_pane.visible_content_area,
-        screen_area,
-    )
-    .filter(|(image_placement_snapshot, _, target_area)| {
-        should_show_image_placeholder(
-            pane_snapshot.pane_id,
-            image_placement_snapshot,
-            *target_area,
-            covering_floating_panes,
-            image_mode,
-            unavailable_image_keys,
-        )
-    })
-    .map(|(_, _, target_area)| target_area)
-    .collect()
+    let mut placeholder_rects = Vec::new();
+    for (pane_snapshot, content_area, visible_content_area) in
+        placed_floating_pane.list_visible_panes(render_snapshot)
+    {
+        for (image_placement_snapshot, _, target_area) in list_drawn_image_placements(
+            pane_snapshot,
+            content_area,
+            visible_content_area,
+            screen_area,
+        ) {
+            if should_show_image_placeholder(
+                pane_snapshot.pane_id,
+                image_placement_snapshot,
+                target_area,
+                covering_floating_panes,
+                image_mode,
+                unavailable_image_keys,
+            ) {
+                placeholder_rects.push(target_area);
+            }
+        }
+    }
+    placeholder_rects
 }
 
 /// Each image placement of `pane_snapshot` that shows at least one cell, as
@@ -594,7 +612,7 @@ fn should_show_image_placeholder(
     pane_id: PaneId,
     image_placement_snapshot: &ImagePlacementSnapshot,
     target_area: RatatuiRect,
-    covering_floating_panes: &[PlacedFloatingPane],
+    covering_floating_panes: &[PlacedFloatingPane<'_>],
     image_mode: ImageRenderMode,
     unavailable_image_keys: &[ImagePlacementKey],
 ) -> bool {
@@ -616,7 +634,7 @@ fn should_show_image_placeholder(
 /// in `covering_floating_panes`.
 fn is_covered_by_floating_pane(
     target_area: RatatuiRect,
-    covering_floating_panes: &[PlacedFloatingPane],
+    covering_floating_panes: &[PlacedFloatingPane<'_>],
 ) -> bool {
     covering_floating_panes.iter().any(|placed_floating_pane| {
         !placed_floating_pane

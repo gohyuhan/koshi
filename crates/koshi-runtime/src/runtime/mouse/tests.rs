@@ -114,6 +114,7 @@ fn list_stacked_pane_sizes(server: &Server, client_id: ClientId) -> Vec<(PaneId,
     let mut stacked_pane_positions: Vec<(u16, PaneId, u16)> = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| {
@@ -605,6 +606,7 @@ fn get_pane_column_count(server: &Server, client_id: ClientId, pane_id: PaneId) 
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .find(|pane_slot| pane_slot.pane_id == pane_id)
@@ -899,6 +901,7 @@ fn get_pane_row_count(server: &Server, client_id: ClientId, pane_id: PaneId) -> 
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .find(|pane_slot| pane_slot.pane_id == pane_id)
@@ -1590,6 +1593,7 @@ fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
     let other_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -1973,6 +1977,7 @@ fn a_wheel_scrolls_the_pane_under_the_pointer_not_the_focused_one() {
     let other_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -2034,6 +2039,7 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
     let other_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -3778,17 +3784,17 @@ fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
     let mut alice_viewer = build_viewer(alice_client_id);
     let bob_frame_before_the_drag = server.build_snapshot(bob_client_id).expect("bob's frame");
 
-    // The grab handle sits on screen row 6, columns 12 and 13.
+    // The grab handle sits on screen row 5, columns 11 and 12.
     dispatch_mouse_input_at_time(
         &mut server,
         &mut alice_viewer,
-        build_left_press_input(12, 6),
+        build_left_press_input(12, 5),
         compute_separated_event_time(),
     );
     dispatch_mouse_input_at_time(
         &mut server,
         &mut alice_viewer,
-        build_mouse_input_at(MouseKind::Drag(MouseButton::Left), 17, 7),
+        build_mouse_input_at(MouseKind::Drag(MouseButton::Left), 17, 6),
         compute_separated_event_time(),
     );
     assert_eq!(
@@ -3804,7 +3810,7 @@ fn a_handle_drag_moves_only_the_dragging_viewers_view_of_the_floating_pane() {
     dispatch_mouse_input_at_time(
         &mut server,
         &mut alice_viewer,
-        build_mouse_input_at(MouseKind::Release(MouseButton::Left), 17, 7),
+        build_mouse_input_at(MouseKind::Release(MouseButton::Left), 17, 6),
         compute_separated_event_time(),
     );
 

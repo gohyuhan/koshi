@@ -31,7 +31,7 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, DrawnNotifications, FloatingPane, FloatingPaneSlot,
+    ClientSnapshot, CommittedRegions, DrawnNotifications, FloatingPane, LayoutAreaSnapshot,
     LinkStatus, MousePane, PaneSlot, PlacementSnapshot, PlacementTabSnapshot, Reconnecting,
     RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
 };
@@ -40,8 +40,8 @@ use koshi_test_support::fixtures::build_cell_rect;
 use crate::input::KeyOutcome;
 use crate::tests::{
     apply_frame_keeping_view, build_core_bound_action, build_expected_confirm_placement,
-    build_test_client, build_test_placement_snapshot, get_source_tab_snapshot_mut,
-    hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
+    build_one_pane_floating_pane_slot, build_test_client, build_test_placement_snapshot,
+    get_source_tab_snapshot_mut, hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{Client, PlacementMode, PlacementModeLifetime};
 
@@ -132,15 +132,17 @@ pub(crate) fn build_mouse_frame(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: "one".to_owned(),
-                pane_slots,
-                tab_size: Size {
-                    column_count: TEST_VIEWPORT_SIZE.column_count,
-                    row_count: TEST_VIEWPORT_SIZE.row_count - 2,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: Size {
+                        column_count: TEST_VIEWPORT_SIZE.column_count,
+                        row_count: TEST_VIEWPORT_SIZE.row_count - 2,
+                    },
+                    pane_slots,
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
                 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
             },
             tabs_metadata: vec![TabMetadata {
                 tab_id,
@@ -208,7 +210,11 @@ fn build_forwarded_mouse_action(
 
 /// A cell inside the content of the `pane_index`-th pane in a fixture frame.
 fn get_content_cell(mouse_frame: &MouseFrame, pane_index: usize) -> Point {
-    let content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[pane_index]
+    let content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[pane_index]
         .content_rect
         .expect("a visible pane");
     Point {
@@ -229,7 +235,8 @@ fn build_mouse_placement_snapshot(
     placement_snapshot.destination_tab_snapshot = None;
     placement_snapshot.swap_tab_sizes.clear();
     let frame_tab_snapshot = mouse_frame.session_snapshot.active_tab_snapshot.clone();
-    placement_snapshot.insertion_tab_sizes.destination_tab_size = Some(frame_tab_snapshot.tab_size);
+    placement_snapshot.insertion_tab_sizes.destination_tab_size =
+        Some(frame_tab_snapshot.layout_area.solved_size);
     let source_tab_snapshot = get_source_tab_snapshot_mut(&mut placement_snapshot);
     source_tab_snapshot.layout_tree = layout_tree;
     source_tab_snapshot.tab_snapshot = frame_tab_snapshot;
@@ -250,11 +257,13 @@ fn build_cross_tab_mouse_placement_snapshot(
     );
     get_source_tab_snapshot_mut(&mut placement_snapshot)
         .tab_snapshot
+        .layout_area
         .pane_slots
         .retain(|pane_slot| pane_slot.pane_id == source_pane_id);
 
     let frame_tab_snapshot = &mouse_frame.session_snapshot.active_tab_snapshot;
     let destination_pane_slots = frame_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .zip(destination_pane_ids)
@@ -275,19 +284,21 @@ fn build_cross_tab_mouse_placement_snapshot(
         tab_snapshot: TabSnapshot {
             tab_id: destination_tab_id,
             tab_name: "destination".to_owned(),
-            pane_slots: destination_pane_slots,
-            tab_size: frame_tab_snapshot.tab_size,
-            stack_headers: Vec::new(),
-            layout_mode: frame_tab_snapshot.layout_mode,
-            is_every_pane_suppressed: frame_tab_snapshot.is_every_pane_suppressed,
-            gap_cell_count: frame_tab_snapshot.gap_cell_count,
+            layout_area: LayoutAreaSnapshot {
+                solved_size: frame_tab_snapshot.layout_area.solved_size,
+                pane_slots: destination_pane_slots,
+                stack_headers: Vec::new(),
+                layout_mode: frame_tab_snapshot.layout_area.layout_mode,
+                is_every_pane_suppressed: frame_tab_snapshot.layout_area.is_every_pane_suppressed,
+                gap_cell_count: frame_tab_snapshot.layout_area.gap_cell_count,
+            },
         },
     };
     placement_snapshot.destination_tab_id = destination_tab_id;
     placement_snapshot.destination_tab_snapshot = Some(destination_tab_snapshot);
     let placement_tab_sizes = koshi_layout::placement::PlacementTabSizes {
-        destination_tab_size: Some(frame_tab_snapshot.tab_size),
-        source_tab_size: Some(frame_tab_snapshot.tab_size),
+        destination_tab_size: Some(frame_tab_snapshot.layout_area.solved_size),
+        source_tab_size: Some(frame_tab_snapshot.layout_area.solved_size),
     };
     placement_snapshot.swap_tab_sizes = destination_pane_ids
         .into_iter()
@@ -830,7 +841,12 @@ fn a_placement_drag_onto_the_right_arrow_before_a_repaint_steps_from_the_strip_t
 ) {
     let mouse_frame = build_overflowing_tab_strip_mouse_frame();
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
-    let source_pane_id = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0].pane_id;
+    let source_pane_id = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .pane_id;
     let right_scroll_arrow_column =
         find_painted_scroll_arrow_column(&mouse_frame, HitRegion::TablineScrollRight);
     let mut client = build_test_client();
@@ -1114,6 +1130,7 @@ fn a_frame_with_no_room_falls_through_to_the_focused_pane() {
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
 
     for screen_point in [
@@ -1426,7 +1443,11 @@ fn a_press_names_the_line_the_frame_showed_on_that_row() {
     let current_time = Instant::now();
 
     // The third visible row of the pane's content.
-    let content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+    let content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
         .content_rect
         .expect("a visible pane");
     let screen_point = Point {
@@ -1478,6 +1499,7 @@ fn output_between_the_paint_and_the_press_does_not_move_what_it_names() {
     let content_rect = painted_mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .content_rect
         .expect("a visible pane");
@@ -2011,11 +2033,19 @@ fn mouse_routing_uses_the_region_solve_committed_with_the_frame() {
     let mut watched_mouse_pane = build_plain_mouse_pane(pane_id);
     watched_mouse_pane.mouse_tracking = MouseTracking::AnyMotion;
     let mut mouse_frame = build_mouse_frame(&[watched_mouse_pane], Some(pane_id));
-    mouse_frame.session_snapshot.active_tab_snapshot.tab_size = Size {
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .solved_size = Size {
         column_count: 60,
         row_count: 22,
     };
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0] = PaneSlot {
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0] = PaneSlot {
         pane_id,
         outer_rect: Rect::from_origin_and_size(
             Point { column: 0, row: 0 },
@@ -2226,7 +2256,11 @@ fn a_drag_held_past_the_top_edge_scrolls_the_view_back_into_history() {
     mouse_pane.view_top_row_index = 100;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&mouse_frame, 0);
-    let content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+    let content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
         .content_rect
         .expect("a visible pane");
     // Above the pane's first content row, where the earlier lines are.
@@ -2354,7 +2388,11 @@ fn a_border_press_starts_no_resize_when_the_viewer_turned_it_off() {
     // The shared divider between the two bands: the second pane's top edge.
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -2417,7 +2455,11 @@ fn grabbing_a_border_with_no_pane_beside_it_starts_no_resize() {
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
     // The pane's own left edge: the tab's outer frame, with nothing beyond it.
     let outer_edge_point = Point {
-        column: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+        column: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[0]
             .outer_rect
             .origin
             .column,
@@ -2462,7 +2504,11 @@ fn the_drag_anchor_only_walks_over_the_cells_the_session_accepted() {
     );
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -2591,7 +2637,11 @@ fn a_left_release_ends_a_border_drag_and_a_strip_peek_drag_and_sends_nothing() {
     );
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -2706,7 +2756,11 @@ fn a_drag_held_past_the_bottom_edge_scrolls_on_the_clock() {
     mouse_pane.view_top_row_index = 100;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&mouse_frame, 0);
-    let content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+    let content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
         .content_rect
         .expect("a visible pane");
     let below_pane_point = Point {
@@ -2766,7 +2820,11 @@ fn a_scroll_that_moved_nothing_disarms_the_timer() {
     mouse_pane.view_top_row_index = 100;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&mouse_frame, 0);
-    let content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+    let content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
         .content_rect
         .expect("a visible pane");
     let below_pane_point = Point {
@@ -2811,7 +2869,11 @@ fn a_drag_held_past_the_edge_asks_for_no_wakeup_while_an_input_event_is_on_its_w
     mouse_pane.view_top_row_index = 100;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&mouse_frame, 0);
-    let content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+    let content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
         .content_rect
         .expect("a visible pane");
     let below_pane_point = Point {
@@ -3418,7 +3480,11 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
     // The shared divider between the two bands: the second pane's top edge.
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -3670,23 +3736,32 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count = 2;
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0].outer_rect =
-        Rect::from_origin_and_size(
-            Point { column: 0, row: 0 },
-            Size {
-                column_count: 40,
-                row_count: 20,
-            },
-        );
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1].outer_rect =
-        Rect::from_origin_and_size(
-            Point { column: 42, row: 0 },
-            Size {
-                column_count: 38,
-                row_count: 20,
-            },
-        );
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .outer_rect = Rect::from_origin_and_size(
+        Point { column: 0, row: 0 },
+        Size {
+            column_count: 40,
+            row_count: 20,
+        },
+    );
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
+        .outer_rect = Rect::from_origin_and_size(
+        Point { column: 42, row: 0 },
+        Size {
+            column_count: 38,
+            row_count: 20,
+        },
+    );
 
     assert!(
         has_border_neighbor(&mouse_frame, left_pane_id, Direction::Right),
@@ -3697,7 +3772,11 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
         "the left pane ends 2 cells before column 42"
     );
 
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
         .outer_rect
         .origin
         .column = 43;
@@ -3712,7 +3791,11 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
         Direction::Left
     ));
 
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
         .outer_rect
         .origin
         .column = 41;
@@ -3742,23 +3825,32 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count = 2;
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0].outer_rect =
-        Rect::from_origin_and_size(
-            Point { column: 0, row: 0 },
-            Size {
-                column_count: 40,
-                row_count: 20,
-            },
-        );
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1].outer_rect =
-        Rect::from_origin_and_size(
-            Point { column: 0, row: 22 },
-            Size {
-                column_count: 40,
-                row_count: 18,
-            },
-        );
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .outer_rect = Rect::from_origin_and_size(
+        Point { column: 0, row: 0 },
+        Size {
+            column_count: 40,
+            row_count: 20,
+        },
+    );
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
+        .outer_rect = Rect::from_origin_and_size(
+        Point { column: 0, row: 22 },
+        Size {
+            column_count: 40,
+            row_count: 18,
+        },
+    );
 
     assert!(
         has_border_neighbor(&mouse_frame, top_pane_id, Direction::Down),
@@ -3769,7 +3861,11 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
         "the top pane ends 2 cells before row 22"
     );
 
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
         .outer_rect
         .origin
         .row = 23;
@@ -3784,7 +3880,11 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
         Direction::Up
     ));
 
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
         .outer_rect
         .origin
         .row = 21;
@@ -3817,7 +3917,11 @@ fn ending_the_selection_leaves_a_border_drag_and_the_capture_alone() {
     let screen_point = get_content_cell(&mouse_frame, 0);
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -3947,7 +4051,11 @@ fn a_left_press_after_a_lost_release_ends_the_stale_border_drag() {
     let resized_pane_point = get_content_cell(&mouse_frame, 1);
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -4153,7 +4261,11 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
         pending_placement_command_id: None,
     });
     hold_placement_snapshot(&mut client, placement_snapshot);
-    let source_content_rect = mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+    let source_content_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
         .content_rect
         .expect("the source pane has content");
     let source_point = Point {
@@ -4161,8 +4273,12 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
         row: source_content_rect.origin.row + source_content_rect.size.row_count - 1,
     };
     let target_point = get_content_cell(&mouse_frame, 1);
-    let target_outer_rect =
-        mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1].outer_rect;
+    let target_outer_rect = mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[1]
+        .outer_rect;
     let target_border_point = Point {
         column: target_outer_rect.origin.column,
         row: target_outer_rect.origin.row + 1,
@@ -4271,31 +4387,37 @@ fn placement_target_uses_fixed_base_geometry_while_the_preview_moves_panes() {
     let first_pane_slot = moved_preview_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .clone();
     let second_pane_slot = moved_preview_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[1]
         .clone();
     moved_preview_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .outer_rect = second_pane_slot.outer_rect;
     moved_preview_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .content_rect = second_pane_slot.content_rect;
     moved_preview_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[1]
         .outer_rect = first_pane_slot.outer_rect;
     moved_preview_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[1]
         .content_rect = first_pane_slot.content_rect;
 
@@ -4615,6 +4737,7 @@ fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_stack_pane_id,
         header_rect: stack_header_rect,
@@ -4730,6 +4853,7 @@ fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_th
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_stack_pane_id,
         header_rect: Rect::from_origin_and_size(
@@ -4917,11 +5041,21 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
         gap_cell_count: 1,
         ..PaneSizing::default()
     };
-    let tab_rect =
-        Rect::from_size_at_origin(mouse_frame.session_snapshot.active_tab_snapshot.tab_size);
+    let tab_rect = Rect::from_size_at_origin(
+        mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .solved_size,
+    );
     let layout_solve =
         solve_layout_with_mode(&layout_tree, LayoutMode::Tiled, tab_rect, pane_sizing);
-    for pane_slot in &mut mouse_frame.session_snapshot.active_tab_snapshot.pane_slots {
+    for pane_slot in &mut mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots
+    {
         let pane_rect = layout_solve
             .find_pane_rect(pane_slot.pane_id)
             .expect("the layout solves every test pane");
@@ -5131,9 +5265,10 @@ fn a_non_left_placement_release_cancels_mouse_capture_without_submitting() {
 
 /// The box of the floating pane in [`build_floating_mouse_frame`], counted
 /// from the pane area at screen `(0, 1)`: screen columns 10–49, rows 5–16.
-/// Its content is screen `(11, 8)` `38x8`. On its titlebar row, screen row 6,
-/// the grab handle takes columns 12 and 13, the pin toggle 38–41, the minimize
-/// button 43 and the close button 46.
+/// On its titlebar strip, screen row 5, the grab handle takes columns 11 and
+/// 12, the pin toggle 40–43, the minimize button 45 and the close button 48.
+/// Its one pane's box takes rows 6–16, with its content at screen `(11, 7)`
+/// `38x9`.
 pub(crate) const FLOATING_PANE_OUTER_RECT: Rect = Rect {
     origin: Point { column: 10, row: 4 },
     size: Size {
@@ -5182,11 +5317,11 @@ pub(crate) fn add_floating_mouse_pane(
     mouse_frame
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_mouse_pane.pane_id,
+        .push(build_one_pane_floating_pane_slot(
+            floating_mouse_pane.pane_id,
             outer_rect,
             is_pinned,
-        });
+        ));
     mouse_frame.mouse_panes.push(floating_mouse_pane);
 }
 
@@ -5251,7 +5386,7 @@ fn build_focus_pane_mouse_action(client: &Client, pane_id: PaneId) -> MouseActio
 }
 
 /// Press the grab handle of the floating pane in `mouse_frame` at screen
-/// `(12, 6)`, drag it to screen `(17, 7)`, and release it there. Returns what
+/// `(12, 5)`, drag it to screen `(17, 6)`, and release it there. Returns what
 /// the release decided.
 fn drag_floating_pane_handle_by_five_and_one(
     client: &mut Client,
@@ -5259,17 +5394,17 @@ fn drag_floating_pane_handle_by_five_and_one(
     start_time: Instant,
 ) -> Vec<MouseAction> {
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         mouse_frame,
         start_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         mouse_frame,
         advance_time_by_seconds(start_time, 1),
     );
     client.handle_mouse(
-        build_left_mouse_release(Point { column: 17, row: 7 }),
+        build_left_mouse_release(Point { column: 17, row: 6 }),
         mouse_frame,
         advance_time_by_seconds(start_time, 2),
     )
@@ -5351,13 +5486,13 @@ fn a_press_on_the_focused_floating_panes_content_reaches_its_program_at_its_own_
     let mouse_actions = client.handle_mouse(press_input, &mouse_frame, Instant::now());
 
     // Screen (16, 10) is pane-area (16, 9); the content starts at pane-area
-    // (11, 7).
+    // (11, 6).
     assert_eq!(
         mouse_actions,
         vec![build_forwarded_mouse_action(
             floating_slot_pane_id,
             press_input,
-            Point { column: 5, row: 2 }
+            Point { column: 5, row: 3 }
         )]
     );
 }
@@ -5449,14 +5584,14 @@ fn a_selection_drag_inside_a_floating_pane_selects_its_text_and_outlives_the_nex
     assert_eq!(
         first_selection_args.selection.anchor,
         GridPosition {
-            row_index: 2,
+            row_index: 3,
             column_index: 5
         }
     );
     assert_eq!(
         first_selection_args.selection.cursor,
         GridPosition {
-            row_index: 3,
+            row_index: 4,
             column_index: 9
         }
     );
@@ -5465,7 +5600,7 @@ fn a_selection_drag_inside_a_floating_pane_selects_its_text_and_outlives_the_nex
     assert_eq!(
         second_selection_args.selection.cursor,
         GridPosition {
-            row_index: 3,
+            row_index: 4,
             column_index: 10
         }
     );
@@ -5515,15 +5650,14 @@ fn a_wheel_over_a_floating_panes_titlebar_border_handle_or_buttons_scrolls_that_
         tiled_pane_id,
     );
     let floating_pane_chrome_points = [
-        Point { column: 12, row: 6 },
+        Point { column: 12, row: 5 },
+        Point { column: 20, row: 5 },
+        Point { column: 41, row: 5 },
+        Point { column: 45, row: 5 },
+        Point { column: 48, row: 5 },
         Point { column: 20, row: 6 },
-        Point { column: 20, row: 7 },
-        Point { column: 39, row: 6 },
-        Point { column: 43, row: 6 },
-        Point { column: 46, row: 6 },
         Point { column: 10, row: 9 },
         Point { column: 49, row: 9 },
-        Point { column: 20, row: 5 },
         Point {
             column: 20,
             row: 16,
@@ -5595,7 +5729,7 @@ fn dragging_a_floating_panes_handle_draws_it_locally_and_sends_one_move_on_relea
     let current_time = Instant::now();
 
     let press_actions = client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
@@ -5608,7 +5742,7 @@ fn dragging_a_floating_panes_handle_draws_it_locally_and_sends_one_move_on_relea
         "the press focuses and raises the pane"
     );
     let drag_actions = client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -5623,7 +5757,7 @@ fn dragging_a_floating_panes_handle_draws_it_locally_and_sends_one_move_on_relea
     );
 
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 17, row: 7 }),
+        build_left_mouse_release(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
@@ -5652,7 +5786,7 @@ fn a_floating_pane_handle_drag_draws_and_sends_the_pane_inside_the_pane_area() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
@@ -5731,7 +5865,7 @@ fn a_held_handle_draws_and_sends_the_pane_inside_a_pane_area_that_shrank() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
@@ -5785,18 +5919,18 @@ fn a_handle_released_where_it_was_pressed_sends_no_move() {
     let current_time = Instant::now();
 
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
     // No drag reports the pointer's way back: the release names the cell.
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 12, row: 6 }),
+        build_left_mouse_release(Point { column: 12, row: 5 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
@@ -5824,7 +5958,7 @@ fn a_handle_released_where_it_was_pressed_sends_no_move_after_the_pane_area_shri
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
@@ -5835,7 +5969,7 @@ fn a_handle_released_where_it_was_pressed_sends_no_move_after_the_pane_area_shri
     );
 
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 12, row: 6 }),
+        build_left_mouse_release(Point { column: 12, row: 5 }),
         &small_mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -5857,14 +5991,14 @@ fn a_handle_release_that_leaves_the_pane_drawn_where_it_was_sends_no_move() {
         floating_slot_pane_id,
     );
     // The 40x12 pane at (40, 4) touches the right edge of the 80x22 pane area.
-    mouse_frame.session_snapshot.floating_pane_slots = vec![FloatingPaneSlot {
-        pane_id: floating_slot_pane_id,
-        outer_rect: Rect {
+    mouse_frame.session_snapshot.floating_pane_slots = vec![build_one_pane_floating_pane_slot(
+        floating_slot_pane_id,
+        Rect {
             origin: Point { column: 40, row: 4 },
             ..FLOATING_PANE_OUTER_RECT
         },
-        is_pinned: false,
-    }];
+        false,
+    )];
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
@@ -5897,12 +6031,12 @@ fn a_press_hits_a_moved_floating_pane_where_the_painted_frame_still_draws_it() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 42, row: 6 }),
+        build_left_mouse_release(Point { column: 42, row: 5 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -5960,18 +6094,18 @@ fn a_handle_release_moves_the_pane_by_the_release_cell_not_the_last_drag() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
 
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 20, row: 9 }),
+        build_left_mouse_release(Point { column: 20, row: 8 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
@@ -5995,12 +6129,12 @@ fn another_buttons_release_during_a_handle_drag_leaves_the_drag_held() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -6008,7 +6142,7 @@ fn another_buttons_release_during_a_handle_drag_leaves_the_drag_held() {
     let right_press_actions = client.handle_mouse(
         build_mouse_event(
             MouseKind::Press(MouseButton::Right),
-            Point { column: 17, row: 7 },
+            Point { column: 17, row: 6 },
             BindingModifierFlags::NONE,
         ),
         &mouse_frame,
@@ -6017,19 +6151,19 @@ fn another_buttons_release_during_a_handle_drag_leaves_the_drag_held() {
     let right_release_actions = client.handle_mouse(
         build_mouse_event(
             MouseKind::Release(MouseButton::Right),
-            Point { column: 17, row: 7 },
+            Point { column: 17, row: 6 },
             BindingModifierFlags::NONE,
         ),
         &mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 20, row: 8 }),
+        build_left_mouse_drag(Point { column: 20, row: 7 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 4),
     );
     let left_release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 20, row: 8 }),
+        build_left_mouse_release(Point { column: 20, row: 7 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 5),
     );
@@ -6055,12 +6189,12 @@ fn escape_during_a_handle_drag_drops_the_move() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -6075,7 +6209,7 @@ fn escape_during_a_handle_drag_drops_the_move() {
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
     assert_eq!(
         client.handle_mouse(
-            build_left_mouse_release(Point { column: 17, row: 7 }),
+            build_left_mouse_release(Point { column: 17, row: 6 }),
             &mouse_frame,
             advance_time_by_seconds(current_time, 3),
         ),
@@ -6095,12 +6229,12 @@ fn escape_during_a_handle_drag_also_drops_an_open_key_sequence() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -6143,12 +6277,12 @@ fn keyboard_placement_drops_a_held_handle_drag() {
     );
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -6165,7 +6299,7 @@ fn keyboard_placement_drops_a_held_handle_drag() {
     client.cancel_placement_mode();
     assert_eq!(
         client.handle_mouse(
-            build_left_mouse_release(Point { column: 17, row: 7 }),
+            build_left_mouse_release(Point { column: 17, row: 6 }),
             &mouse_frame,
             advance_time_by_seconds(current_time, 2),
         ),
@@ -6186,12 +6320,12 @@ fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() 
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -6201,7 +6335,7 @@ fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() 
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
     assert_eq!(
         client.handle_mouse(
-            build_left_mouse_release(Point { column: 17, row: 7 }),
+            build_left_mouse_release(Point { column: 17, row: 6 }),
             &mouse_frame,
             advance_time_by_seconds(current_time, 2),
         ),
@@ -6245,21 +6379,21 @@ fn a_handle_drag_ends_with_no_move_when_its_pane_leaves_the_frame() {
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
 
     client.drop_gestures_the_frame_ended(&frame_without_floating_pane);
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &frame_without_floating_pane,
         advance_time_by_seconds(current_time, 1),
     );
     // The pane is drawn again by the release.
     client.drop_gestures_the_frame_ended(&mouse_frame);
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 17, row: 7 }),
+        build_left_mouse_release(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
@@ -6281,7 +6415,11 @@ fn ending_a_handle_drag_leaves_a_border_drag_held() {
     );
     let divider_point = Point {
         column: 10,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -6324,12 +6462,12 @@ fn a_left_press_after_a_lost_release_drops_the_stale_handle_drag_and_sends_no_mo
     let mut client = build_test_client();
     let current_time = Instant::now();
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
@@ -6371,18 +6509,18 @@ fn a_pinned_floating_panes_handle_focuses_it_and_moves_nothing() {
     let current_time = Instant::now();
 
     let press_actions = client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     let drag_actions = client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 1),
     );
     let draft_while_dragging = find_floating_pane_move_draft(&client, &mouse_frame);
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 17, row: 7 }),
+        build_left_mouse_release(Point { column: 17, row: 6 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 2),
     );
@@ -6475,30 +6613,30 @@ fn a_handle_press_while_a_sent_move_waits_only_focuses_and_keeps_the_sent_move_d
     });
 
     // The repaint draws the pane at its draft, five columns right and one row
-    // down, so its grab handle starts at screen (17, 7).
+    // down, so its grab handle takes screen columns 16 and 17 on row 6.
     let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     assert_eq!(
         resolve_hit_region(
             painted_mouse_frame.build_frame_layout(),
-            Point { column: 17, row: 7 }
+            Point { column: 17, row: 6 }
         ),
         HitRegion::PlacementHandle {
             pane_id: floating_slot_pane_id
         }
     );
     let press_actions = client.handle_mouse(
-        build_left_mouse_press(Point { column: 17, row: 7 }),
+        build_left_mouse_press(Point { column: 17, row: 6 }),
         &painted_mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
     let drag_actions = client.handle_mouse(
-        build_left_mouse_drag(Point { column: 22, row: 9 }),
+        build_left_mouse_drag(Point { column: 22, row: 8 }),
         &painted_mouse_frame,
         advance_time_by_seconds(current_time, 4),
     );
     let draft_after_drag = find_floating_pane_move_draft(&client, &mouse_frame);
     let second_release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 22, row: 9 }),
+        build_left_mouse_release(Point { column: 22, row: 8 }),
         &painted_mouse_frame,
         advance_time_by_seconds(current_time, 5),
     );
@@ -6563,7 +6701,7 @@ fn dropped_events_forget_a_sent_move_and_leave_a_handle_drag() {
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
 
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
@@ -6854,13 +6992,13 @@ fn a_pinned_floating_panes_corner_drag_moves_only_its_right_and_bottom_borders()
     };
 
     assert_eq!(
-        drag_corner(Point { column: 10, row: 5 }, Point { column: 8, row: 3 }, 0),
+        drag_corner(Point { column: 10, row: 6 }, Point { column: 8, row: 4 }, 0),
         Vec::new()
     );
     assert_eq!(
         drag_corner(
-            Point { column: 49, row: 5 },
-            Point { column: 51, row: 3 },
+            Point { column: 49, row: 6 },
+            Point { column: 51, row: 4 },
             1
         ),
         vec![build_grow_move(Direction::Right, 2)]
@@ -6909,7 +7047,11 @@ fn a_tiled_panes_corner_drag_moves_each_border_with_a_pane_beside_it() {
     // band lies above it.
     let top_left_corner = Point {
         column: 0,
-        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .pane_slots[1]
             .outer_rect
             .origin
             .row
@@ -6966,6 +7108,7 @@ fn a_tiled_panes_corner_drag_moves_both_borders_when_a_pane_lies_beside_each() {
     for (pane_slot, outer_rect) in mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter_mut()
         .zip([
@@ -7050,14 +7193,14 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
     let current_time = Instant::now();
     let mut press_titlebar = |mouse_frame: &MouseFrame, column: u16, step_index: u64| {
         client.handle_mouse(
-            build_left_mouse_press(Point { column, row: 6 }),
+            build_left_mouse_press(Point { column, row: 5 }),
             mouse_frame,
             advance_time_by_seconds(current_time, step_index),
         )
     };
 
     assert_eq!(
-        press_titlebar(&unpinned_mouse_frame, 39, 0),
+        press_titlebar(&unpinned_mouse_frame, 41, 0),
         vec![MouseAction::Command(Box::new(
             Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs {
                 pane_id: Some(floating_slot_pane_id),
@@ -7065,7 +7208,7 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
         ))]
     );
     assert_eq!(
-        press_titlebar(&pinned_mouse_frame, 38, 1),
+        press_titlebar(&pinned_mouse_frame, 40, 1),
         vec![MouseAction::Command(Box::new(
             Command::ToggleFloatingPanePinned(ToggleFloatingPanePinnedArgs {
                 pane_id: Some(floating_slot_pane_id),
@@ -7073,7 +7216,7 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
         ))]
     );
     assert_eq!(
-        press_titlebar(&unpinned_mouse_frame, 43, 2),
+        press_titlebar(&unpinned_mouse_frame, 45, 2),
         vec![MouseAction::Command(Box::new(
             Command::SetFloatingPaneMinimized(SetFloatingPaneMinimizedArgs {
                 pane_id: Some(floating_slot_pane_id),
@@ -7082,7 +7225,7 @@ fn a_floating_panes_titlebar_controls_act_without_focusing_it() {
         ))]
     );
     assert_eq!(
-        press_titlebar(&unpinned_mouse_frame, 46, 3),
+        press_titlebar(&unpinned_mouse_frame, 48, 3),
         vec![MouseAction::Command(Box::new(Command::ClosePane(
             ClosePaneArgs {
                 pane_id: Some(floating_slot_pane_id),
@@ -7112,10 +7255,10 @@ fn a_floating_panes_titlebar_focuses_it_also_when_the_painted_frame_focuses_it()
     let mut client = build_test_client();
     let current_time = Instant::now();
 
-    // Column 20 of the titlebar row is the title; row 7 is the separator.
+    // Columns 20 and 30 of the strip row, screen row 5, hold no control.
     assert_eq!(
         client.handle_mouse(
-            build_left_mouse_press(Point { column: 20, row: 6 }),
+            build_left_mouse_press(Point { column: 20, row: 5 }),
             &unfocused_mouse_frame,
             current_time
         ),
@@ -7126,7 +7269,7 @@ fn a_floating_panes_titlebar_focuses_it_also_when_the_painted_frame_focuses_it()
     );
     assert_eq!(
         client.handle_mouse(
-            build_left_mouse_press(Point { column: 20, row: 7 }),
+            build_left_mouse_press(Point { column: 30, row: 5 }),
             &focused_mouse_frame,
             advance_time_by_seconds(current_time, 1)
         ),
@@ -7151,7 +7294,7 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle_and_its_top_border_sho
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
 
     client.handle_mouse(
-        build_mouse_motion(Point { column: 13, row: 6 }),
+        build_mouse_motion(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
@@ -7284,7 +7427,11 @@ fn moving_between_two_side_by_side_top_borders_shows_only_the_handle_under_the_p
         ],
         Some(left_pane_id),
     );
-    mouse_frame.session_snapshot.active_tab_snapshot.pane_slots = vec![
+    mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots = vec![
         build_visible_pane_slot(left_pane_id, build_cell_rect(0, 0, 40, 22)),
         build_visible_pane_slot(right_pane_id, build_cell_rect(40, 0, 40, 22)),
     ];
@@ -7345,7 +7492,7 @@ fn a_collapsed_stack_header_and_a_pane_four_columns_wide_show_no_handle() {
     );
     let header_rect = build_cell_rect(0, 0, 76, 1);
     let active_tab_snapshot = &mut mouse_frame.session_snapshot.active_tab_snapshot;
-    active_tab_snapshot.pane_slots = vec![
+    active_tab_snapshot.layout_area.pane_slots = vec![
         PaneSlot {
             pane_id: collapsed_pane_id,
             outer_rect: header_rect,
@@ -7356,7 +7503,7 @@ fn a_collapsed_stack_header_and_a_pane_four_columns_wide_show_no_handle() {
         build_visible_pane_slot(open_pane_id, build_cell_rect(0, 1, 76, 21)),
         build_visible_pane_slot(narrow_pane_id, build_cell_rect(76, 0, 4, 22)),
     ];
-    active_tab_snapshot.stack_headers = vec![StackHeader {
+    active_tab_snapshot.layout_area.stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect,
         member_index: 0,
@@ -7643,17 +7790,17 @@ fn a_viewer_with_no_link_shows_no_tiled_handle_until_it_is_linked_again() {
 }
 
 /// The placement handle hover `client` shows after a pointer motion to
-/// `(13, 6)`, the grab handle `⣿⣿` of the floating pane that
+/// `(12, 5)`, the grab handle `⣿⣿` of the floating pane that
 /// [`build_floating_mouse_frame`] draws at pane-area cell `(10, 4)`.
 fn find_grab_handle_hover(
     client: &mut Client,
     mouse_frame: &MouseFrame,
 ) -> Option<PlacementHandleHover> {
-    list_placement_handle_hovers(client, mouse_frame, &build_mouse_motions(&[(13, 6)]))[0]
+    list_placement_handle_hovers(client, mouse_frame, &build_mouse_motions(&[(12, 5)]))[0]
 }
 
 /// The screen cell of the grab handle that [`find_grab_handle_hover`] moves to.
-const GRAB_HANDLE_POSITION: Point = Point { column: 13, row: 6 };
+const GRAB_HANDLE_POSITION: Point = Point { column: 12, row: 5 };
 
 /// The grab-handle drag a left press on [`GRAB_HANDLE_POSITION`] starts for
 /// floating pane `floating_slot_pane_id`, drawn at pane-area cell `(10, 4)`.
@@ -7849,10 +7996,10 @@ fn a_locked_viewer_moves_and_pins_a_floating_pane_the_same_way() {
     let release_actions =
         drag_floating_pane_handle_by_five_and_one(&mut client, &mouse_frame, current_time);
     // The repaint draws the pane at its draft, five columns right and one row
-    // down, so its pin toggle starts at screen (43, 7).
+    // down, so its pin toggle starts at screen (45, 6).
     let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let pin_actions = client.handle_mouse(
-        build_left_mouse_press(Point { column: 43, row: 7 }),
+        build_left_mouse_press(Point { column: 45, row: 6 }),
         &painted_mouse_frame,
         advance_time_by_seconds(current_time, 3),
     );
@@ -7885,7 +8032,7 @@ fn ending_the_gestures_drops_a_held_or_sent_floating_pane_move() {
     let current_time = Instant::now();
 
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
@@ -7954,6 +8101,7 @@ fn a_captured_release_whose_pane_has_no_content_cell_goes_out_at_the_capture_cel
     frame_without_content
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .content_rect = None;
     client.drop_gestures_the_frame_ended(&frame_without_content);
@@ -8308,7 +8456,7 @@ fn a_press_and_release_on_the_selected_pane_keeps_the_arrow_keys_draft() {
     );
 
     // The grab handle moved one column right with the draft.
-    let handle_cell = Point { column: 13, row: 6 };
+    let handle_cell = Point { column: 13, row: 5 };
     client.handle_mouse(
         build_left_mouse_press(handle_cell),
         &mouse_frame,
@@ -8493,12 +8641,12 @@ fn escape_during_a_handle_drag_in_floating_pane_move_mode_ends_only_the_drag() {
     let current_time = Instant::now();
     let escape_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc));
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         current_time,
     );

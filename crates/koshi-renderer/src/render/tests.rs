@@ -36,9 +36,9 @@
 //! pane that prints under a floating pane keeps the floating cells on top. A
 //! pane border draws the cells a bordered ratatui block draws.
 //!
-//! The walk over visible tiled panes keeps slot order, finds each snapshot by
-//! pane id, and leaves out a hidden slot, a slot with no content rect and a
-//! slot with no snapshot.
+//! The walk over the visible panes of a layout area keeps slot order, finds
+//! each snapshot by pane id, and leaves out a hidden slot, a slot with no
+//! content rect and a slot with no snapshot.
 
 use super::*;
 
@@ -58,6 +58,7 @@ use koshi_test_support::fixtures::build_cell_rect;
 use koshi_test_support::output_workloads::SeededSequence;
 use ratatui::widgets::{Block, Borders, Widget};
 
+use koshi_layout::tree::LayoutNode;
 use koshi_terminal::state::CursorShape;
 
 use super::tabline::format_version_badge_text;
@@ -68,7 +69,57 @@ use crate::snapshot::{
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
-use koshi_layout::solver::StackHeader;
+use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
+
+/// The slot of a floating pane at `outer_rect` whose input pane is `pane_id`,
+/// with `is_pinned`: `layout_tree` solved in `layout_mode` over the rows below
+/// the strip, with the default pane sizing and no gap.
+pub(crate) fn build_floating_pane_slot(
+    pane_id: PaneId,
+    layout_tree: &LayoutNode,
+    layout_mode: LayoutMode,
+    outer_rect: Rect,
+    is_pinned: bool,
+) -> FloatingPaneSlot {
+    let layout_size = Size {
+        column_count: outer_rect.size.column_count,
+        row_count: outer_rect.size.row_count.saturating_sub(1),
+    };
+    let layout_solve = solve_layout_with_mode(
+        layout_tree,
+        layout_mode,
+        Rect::from_size_at_origin(layout_size),
+        PaneSizing::default(),
+    );
+    FloatingPaneSlot {
+        pane_id,
+        outer_rect,
+        is_pinned,
+        layout_area: LayoutAreaSnapshot::from_layout_solve(
+            &layout_solve,
+            layout_size,
+            layout_mode,
+            0,
+        ),
+    }
+}
+
+/// The slot of a floating pane at `outer_rect` that holds `pane_id` alone,
+/// with `is_pinned`, tiled ([`build_floating_pane_slot`]). A `40x12` outer
+/// rect gives one pane box `(0, 0)` `40x11` with content `(1, 1)` `38x9`.
+pub(crate) fn build_one_pane_floating_pane_slot(
+    pane_id: PaneId,
+    outer_rect: Rect,
+    is_pinned: bool,
+) -> FloatingPaneSlot {
+    build_floating_pane_slot(
+        pane_id,
+        &LayoutNode::Pane(pane_id),
+        LayoutMode::Tiled,
+        outer_rect,
+        is_pinned,
+    )
+}
 
 /// Build a snapshot from explicit pieces. `pane_layouts` are `(pane_id, outer rect, visible)`;
 /// a visible pane's content rect is the outer rect inset by its one-cell border.
@@ -138,12 +189,14 @@ fn build_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: "active".to_string(),
-                pane_slots,
-                tab_size: viewport_size,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: viewport_size,
+                    pane_slots,
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
@@ -382,7 +435,8 @@ fn committed_core_regions_keep_the_default_frame_byte_identical() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .tab_size = Size {
+        .layout_area
+        .solved_size = Size {
         column_count: 80,
         row_count: 22,
     };
@@ -426,7 +480,8 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .tab_size = tab_size;
+        .layout_area
+        .solved_size = tab_size;
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView::from_grid(
         &Grid::build_blank(36, 98, TermStyle::default()),
         0,
@@ -1501,6 +1556,7 @@ fn placement_preview_preserves_collapsed_source_header_title_and_position() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: source_pane_id,
         header_rect: build_cell_rect(0, 1, 14, 1),
@@ -1558,6 +1614,7 @@ fn placement_preview_preserves_collapsed_destination_header_title_and_position()
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: target_pane_id,
         header_rect: build_cell_rect(0, 1, 14, 1),
@@ -1615,6 +1672,7 @@ fn placement_preview_tints_pane_body_and_header_during_source_expansion() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: source_pane_id,
         header_rect: build_cell_rect(0, 3, 14, 1),
@@ -1669,6 +1727,7 @@ fn placement_preview_preserves_destination_header_during_expansion() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: target_pane_id,
         header_rect: build_cell_rect(0, 3, 14, 1),
@@ -1723,6 +1782,7 @@ fn placement_preview_preserves_other_pane_header_under_moving_message() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: target_pane_id,
         header_rect: build_cell_rect(0, 3, 14, 1),
@@ -1781,6 +1841,7 @@ fn placement_preview_preserves_other_pane_header_under_destination_message() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(14, 3, 14, 1),
@@ -2151,6 +2212,7 @@ fn stack_headers_render_collapsed_strips() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![
         StackHeader {
             pane_id: first_collapsed_pane_id,
@@ -2327,6 +2389,7 @@ fn five_child_stack_shows_n_minus_one_headers() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = member_pane_ids
         .iter()
         .enumerate()
@@ -2374,6 +2437,7 @@ fn stack_header_without_title_still_shows_arrow_and_indicator() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(0, 1, 30, 1),
@@ -2410,6 +2474,7 @@ fn narrow_stack_header_indicator_does_not_bleed_left() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(10, 1, 3, 1),
@@ -2461,6 +2526,7 @@ fn a_stack_header_naming_a_pane_the_frame_dropped_shows_an_empty_title() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: pruned_pane_id,
         header_rect: build_cell_rect(0, 1, 30, 1),
@@ -2497,6 +2563,7 @@ fn a_zero_size_stack_header_strip_draws_nothing() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .stack_headers = vec![StackHeader {
             pane_id: collapsed_pane_id,
             header_rect,
@@ -3218,10 +3285,12 @@ fn build_too_small_render_snapshot(viewport_size: Size) -> RenderSnapshot {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .is_suppressed = true;
     render_snapshot
@@ -3360,7 +3429,8 @@ fn build_letterbox_render_snapshot(
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .tab_size = tab_size;
+        .layout_area
+        .solved_size = tab_size;
     render_snapshot
 }
 
@@ -3468,6 +3538,7 @@ fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots[0]
             .content_rect
             .expect("the slot is visible")
@@ -3597,6 +3668,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(0, 8, column_count, 1),
@@ -3682,7 +3754,8 @@ fn an_effective_size_larger_than_the_pane_area_draws_no_letterbox() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .tab_size = Size {
+        .layout_area
+        .solved_size = Size {
         column_count: 80,
         row_count: 20,
     };
@@ -3952,6 +4025,68 @@ fn a_shown_tiled_handle_and_the_title_take_separate_top_border_cells() {
 }
 
 #[test]
+fn a_zoomed_tiled_pane_tags_its_label_and_cuts_the_title_before_the_tag() {
+    let render_top_border = |outer_column_count: u16, pane_title: &str, is_zoomed: bool| {
+        let pane_id = PaneId::new();
+        let mut render_snapshot = build_render_snapshot(
+            "sess",
+            &[("shell", true)],
+            &[(pane_id, build_cell_rect(0, 1, outer_column_count, 6), true)],
+            Some(pane_id),
+            LockMode::Normal,
+            Size {
+                column_count: outer_column_count,
+                row_count: 8,
+            },
+        );
+        render_snapshot.pane_snapshots[0].pane_title =
+            (!pane_title.is_empty()).then(|| pane_title.to_string());
+        if is_zoomed {
+            render_snapshot
+                .session_snapshot
+                .active_tab_snapshot
+                .layout_area
+                .layout_mode = LayoutMode::Fullscreen {
+                focused_pane_id: pane_id,
+            };
+        }
+        let render_buffer = render_snapshot_with_viewer_chrome(
+            &render_snapshot,
+            ViewerChrome::default(),
+            outer_column_count,
+            8,
+        );
+        format_rendered_row_text(&render_buffer, 1)
+    };
+
+    // The label cells are the pane width less 6: 24, 16, 14 and 13 here.
+    for (outer_column_count, pane_title, is_zoomed, expected_top_border) in [
+        (30, "vim", false, format!("┌─── vim {}┐", "─".repeat(20))),
+        (
+            30,
+            "vim",
+            true,
+            format!("┌─── vim [fullscreen] {}┐", "─".repeat(7)),
+        ),
+        (22, "vim", true, "┌─── v [fullscreen] ─┐".to_string()),
+        (20, "vim", true, "┌─── [fullscreen] ─┐".to_string()),
+        (19, "vim", true, format!("┌─── vim {}┐", "─".repeat(9))),
+        (
+            30,
+            "",
+            true,
+            format!("┌─── [fullscreen] {}┐", "─".repeat(11)),
+        ),
+    ] {
+        assert_eq!(
+            render_top_border(outer_column_count, pane_title, is_zoomed),
+            expected_top_border,
+            "{outer_column_count} columns, title {pane_title:?}, zoomed: {is_zoomed}"
+        );
+    }
+}
+
+#[test]
 fn a_tiled_pane_too_narrow_for_its_title_keeps_its_handle() {
     for (outer_column_count, is_handle_shown, expected_top_border) in [
         (4, true, "┌──┐"),
@@ -4002,6 +4137,7 @@ fn a_shown_handle_of_an_open_stack_member_leaves_its_title_and_the_header_above_
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(0, 1, 30, 1),
@@ -4050,6 +4186,7 @@ fn pane_placement_mode_keeps_pane_and_stack_titles_visible() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![StackHeader {
         pane_id: collapsed_pane_id,
         header_rect: build_cell_rect(0, 1, 40, 1),
@@ -4185,6 +4322,7 @@ fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .retain(|pane_slot| pane_slot.pane_id != orphaned_pane_id);
     // The orphaned pane carries a grid and a visible cursor.
@@ -4211,12 +4349,14 @@ fn a_visible_slot_with_no_content_rect_places_no_cursor() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .content_rect = None;
     assert!(
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots[0]
             .is_visible
     );
@@ -4244,6 +4384,7 @@ fn a_slot_whose_pane_snapshot_is_gone_places_no_cursor() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots[0]
             .is_visible
     );
@@ -4251,6 +4392,7 @@ fn a_slot_whose_pane_snapshot_is_gone_places_no_cursor() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots[0]
             .content_rect,
         Some(build_cell_rect(1, 2, 38, 4))
@@ -4711,7 +4853,7 @@ fn display_widths_force_only_a_glyph_ratatui_measures_at_another_width() {
 /// A `60x12` client over the compiled-in regions, whose pane area starts at
 /// row `1`, viewing a `40x8` tiled layout centered at `(10, 2)`. On top shows
 /// one focused floating pane with outer rect `(9, 0)` `30x8` and content rect
-/// `(10, 3)` `28x4`, whose `4x28` grid has its cursor at row `2`, column `5`.
+/// `(10, 2)` `28x5`, whose `5x28` grid has its cursor at row `2`, column `5`.
 /// Returns the frame and the floating pane id.
 fn build_focused_floating_pane_render_snapshot() -> (RenderSnapshot, PaneId) {
     let tiled_pane_id = PaneId::new();
@@ -4731,15 +4873,15 @@ fn build_focused_floating_pane_render_snapshot() -> (RenderSnapshot, PaneId) {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: floating_outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            floating_outer_rect,
+            false,
+        ));
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
-        &Grid::build_blank(4, 28, TermStyle::default()),
+        &Grid::build_blank(5, 28, TermStyle::default()),
         0,
     ));
     floating_pane_snapshot.cursor_snapshot = CursorSnapshot {
@@ -4786,11 +4928,11 @@ fn get_core_cursor_position(
 fn a_focused_floating_panes_cursor_maps_from_its_content_cell_with_no_letterbox_offset() {
     let (render_snapshot, _floating_slot_pane_id) = build_focused_floating_pane_render_snapshot();
 
-    // Content `(10, 3)` in the pane area starting at `(0, 1)` is screen
-    // `(10, 4)`; row `2`, column `5` from there is `(15, 6)`.
+    // Content `(10, 2)` in the pane area starting at `(0, 1)` is screen
+    // `(10, 3)`; row `2`, column `5` from there is `(15, 5)`.
     assert_eq!(
         get_core_cursor_position(&render_snapshot, ViewerChrome::default()),
-        Some(Position::new(15, 6))
+        Some(Position::new(15, 5))
     );
 }
 
@@ -4803,7 +4945,7 @@ fn a_focused_floating_panes_cursor_is_clamped_to_its_last_content_cell() {
     cursor_snapshot.row_index = 99;
     cursor_snapshot.column_index = 99;
 
-    // Content `(10, 4)` `28x4` on screen ends at `(37, 7)`.
+    // Content `(10, 3)` `28x5` on screen ends at `(37, 7)`.
     assert_eq!(
         get_core_cursor_position(&render_snapshot, ViewerChrome::default()),
         Some(Position::new(37, 7))
@@ -4867,6 +5009,7 @@ fn a_floating_pane_over_the_focused_tiled_panes_cursor_cell_hides_the_cursor() {
     let tiled_pane_id = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0]
         .pane_id;
     render_snapshot.client_snapshot.focused_pane_id = Some(tiled_pane_id);
@@ -4900,14 +5043,14 @@ fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell()
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: PaneId::new(),
-            outer_rect: covering_outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            PaneId::new(),
+            covering_outer_rect,
+            false,
+        ));
 
     // The covering pane's outer area `(14, 5)` `10x5` holds the cursor cell
-    // `(15, 6)`.
+    // `(15, 5)`.
     assert_eq!(
         get_core_cursor_position(&render_snapshot, ViewerChrome::default()),
         None
@@ -4917,7 +5060,7 @@ fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell()
         build_cell_rect(30, 0, 10, 5);
     assert_eq!(
         get_core_cursor_position(&render_snapshot, ViewerChrome::default()),
-        Some(Position::new(15, 6))
+        Some(Position::new(15, 5))
     );
 }
 
@@ -4925,11 +5068,11 @@ fn a_floating_pane_drawn_above_the_focused_floating_pane_hides_its_cursor_cell()
 fn a_floating_panes_cursor_cell_past_the_pane_area_places_no_cursor() {
     let (mut render_snapshot, floating_slot_pane_id) =
         build_focused_floating_pane_render_snapshot();
-    render_snapshot.session_snapshot.floating_pane_slots[0] = FloatingPaneSlot {
-        pane_id: floating_slot_pane_id,
-        outer_rect: build_cell_rect(9, 4, 30, 8),
-        is_pinned: false,
-    };
+    render_snapshot.session_snapshot.floating_pane_slots[0] = build_one_pane_floating_pane_slot(
+        floating_slot_pane_id,
+        build_cell_rect(9, 5, 30, 8),
+        false,
+    );
 
     // The content starts at screen `(10, 8)` and the pane area ends after row
     // `10`: cursor row `2` lands on row `10`, inside it.
@@ -5140,11 +5283,12 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
         viewport_size,
     );
     let active_tab_snapshot = &mut render_snapshot.session_snapshot.active_tab_snapshot;
-    active_tab_snapshot.tab_size = tab_size;
-    active_tab_snapshot.is_every_pane_suppressed = seeded_sequence.compute_next_index(20) == 0;
+    active_tab_snapshot.layout_area.solved_size = tab_size;
+    active_tab_snapshot.layout_area.is_every_pane_suppressed =
+        seeded_sequence.compute_next_index(20) == 0;
     if seeded_sequence.compute_next_index(4) == 0 {
         let header_outer_rect = tiled_pane_layouts[0].1;
-        active_tab_snapshot.stack_headers = vec![StackHeader {
+        active_tab_snapshot.layout_area.stack_headers = vec![StackHeader {
             pane_id: PaneId::new(),
             header_rect: build_cell_rect(
                 header_outer_rect.origin.column,
@@ -5166,14 +5310,9 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
             seeded_sequence.compute_next_in_range(3, usize::from(pane_area_row_count)) as u16,
         );
         let is_pinned = seeded_sequence.compute_next_index(2) == 0;
-        render_snapshot
-            .session_snapshot
-            .floating_pane_slots
-            .push(FloatingPaneSlot {
-                pane_id: floating_slot_pane_id,
-                outer_rect,
-                is_pinned,
-            });
+        render_snapshot.session_snapshot.floating_pane_slots.push(
+            build_one_pane_floating_pane_slot(floating_slot_pane_id, outer_rect, is_pinned),
+        );
         let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
         floating_pane_snapshot.pane_id = floating_slot_pane_id;
         render_snapshot.pane_snapshots.push(floating_pane_snapshot);
@@ -5181,6 +5320,7 @@ fn build_seeded_frame(seeded_sequence: &mut SeededSequence) -> (RenderSnapshot, 
     let content_sizes: Vec<(PaneId, Size)> = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .filter_map(|pane_slot| {
@@ -5361,7 +5501,8 @@ fn build_one_grid_render_snapshot() -> (RenderSnapshot, Grid) {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .tab_size = Size {
+        .layout_area
+        .solved_size = Size {
         column_count: 20,
         row_count: 8,
     };
@@ -5454,7 +5595,8 @@ fn only_the_printing_pane_of_four_lists_its_rows() {
     previous_render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .tab_size = Size {
+        .layout_area
+        .solved_size = Size {
         column_count: 40,
         row_count: 8,
     };
@@ -5503,12 +5645,12 @@ fn a_letterboxed_pane_row_lists_the_row_its_centered_content_area_shows_it_on() 
     let active_tab_snapshot = &mut previous_render_snapshot
         .session_snapshot
         .active_tab_snapshot;
-    active_tab_snapshot.tab_size = Size {
+    active_tab_snapshot.layout_area.solved_size = Size {
         column_count: 10,
         row_count: 6,
     };
-    active_tab_snapshot.pane_slots[0].outer_rect = build_cell_rect(0, 0, 10, 6);
-    active_tab_snapshot.pane_slots[0].content_rect = Some(build_cell_rect(1, 1, 8, 4));
+    active_tab_snapshot.layout_area.pane_slots[0].outer_rect = build_cell_rect(0, 0, 10, 6);
+    active_tab_snapshot.layout_area.pane_slots[0].content_rect = Some(build_cell_rect(1, 1, 8, 4));
     let mut grid = Grid::build_blank(4, 8, TermStyle::default());
     previous_render_snapshot.pane_snapshots[0].terminal_grid_view =
         Some(GridView::from_grid(&grid, 0));
@@ -5531,11 +5673,11 @@ fn a_floating_pane_row_lists_the_row_its_visible_content_area_shows_it_on() {
     previous_render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: build_cell_rect(2, 3, 12, 7),
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            build_cell_rect(2, 4, 12, 7),
+            false,
+        ));
     let mut floating_pane_snapshot = previous_render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_slot_pane_id;
     let mut floating_grid = Grid::build_blank(3, 10, TermStyle::default());
@@ -5694,11 +5836,11 @@ fn a_tiled_pane_printing_under_a_floating_pane_keeps_the_floating_cells_on_top()
     previous_render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: build_cell_rect(4, 1, 10, 6),
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            build_cell_rect(4, 1, 10, 6),
+            false,
+        ));
     let mut floating_grid = Grid::build_blank(2, 8, TermStyle::default());
     for row_index in 0..2 {
         for column_index in 0..8 {
@@ -5763,7 +5905,7 @@ fn a_tiled_pane_printing_under_a_floating_pane_keeps_the_floating_cells_on_top()
 }
 
 #[test]
-fn the_visible_tiled_pane_walk_keeps_slot_order_and_leaves_out_hidden_rectless_and_snapshotless_slots(
+fn the_visible_layout_area_pane_walk_keeps_slot_order_and_leaves_out_hidden_rectless_and_snapshotless_slots(
 ) {
     let first_shown_pane_id = PaneId::new();
     let hidden_pane_id = PaneId::new();
@@ -5790,6 +5932,7 @@ fn the_visible_tiled_pane_walk_keeps_slot_order_and_leaves_out_hidden_rectless_a
     let pane_slots = &mut render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots;
     pane_slots[1].content_rect = Some(build_cell_rect(11, 1, 8, 3));
     pane_slots[2].content_rect = None;
@@ -5798,12 +5941,16 @@ fn the_visible_tiled_pane_walk_keeps_slot_order_and_leaves_out_hidden_rectless_a
         .retain(|pane_snapshot| pane_snapshot.pane_id != snapshotless_pane_id);
     render_snapshot.pane_snapshots.reverse();
 
-    let walked_panes: Vec<(PaneId, RatatuiRect)> =
-        list_visible_tiled_panes(&render_snapshot, Point { column: 3, row: 2 })
-            .map(|(pane_snapshot, placed_content_rect)| {
-                (pane_snapshot.pane_id, placed_content_rect)
-            })
-            .collect();
+    let walked_panes: Vec<(PaneId, RatatuiRect)> = list_visible_layout_area_panes(
+        &render_snapshot,
+        &render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area,
+        Point { column: 3, row: 2 },
+    )
+    .map(|(pane_snapshot, placed_content_rect)| (pane_snapshot.pane_id, placed_content_rect))
+    .collect();
 
     assert_eq!(
         walked_panes,

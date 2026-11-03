@@ -4,6 +4,7 @@
 //! image's frames stay under the frame cap; and a placement preview travels
 //! field for field.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use koshi_core::geometry::SplitDirection;
@@ -20,9 +21,9 @@ use koshi_layout::placement::PlacementTabSizes;
 use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
+    ImagePlacementSnapshot, LayoutAreaSnapshot, PaneSlot, PaneSnapshot, PlacementSnapshot,
+    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
@@ -159,50 +160,52 @@ pub(crate) fn build_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: String::from("tab"),
-                pane_slots: vec![
-                    PaneSlot {
-                        pane_id: content_pane_id,
-                        outer_rect: Rect {
-                            origin: Point { column: 0, row: 0 },
-                            size: Size {
-                                column_count: 5,
-                                row_count: 3,
-                            },
-                        },
-                        content_rect: Some(Rect {
-                            origin: Point { column: 1, row: 1 },
-                            size: Size {
-                                column_count: 3,
-                                row_count: 1,
-                            },
-                        }),
-                        is_visible: true,
-                        is_suppressed: false,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: Size {
+                        column_count: 10,
+                        row_count: 3,
                     },
-                    PaneSlot {
-                        pane_id: empty_pane_id,
-                        outer_rect: Rect {
-                            origin: Point { column: 5, row: 0 },
-                            size: Size {
-                                column_count: 5,
-                                row_count: 3,
+                    pane_slots: vec![
+                        PaneSlot {
+                            pane_id: content_pane_id,
+                            outer_rect: Rect {
+                                origin: Point { column: 0, row: 0 },
+                                size: Size {
+                                    column_count: 5,
+                                    row_count: 3,
+                                },
                             },
+                            content_rect: Some(Rect {
+                                origin: Point { column: 1, row: 1 },
+                                size: Size {
+                                    column_count: 3,
+                                    row_count: 1,
+                                },
+                            }),
+                            is_visible: true,
+                            is_suppressed: false,
                         },
-                        content_rect: None,
-                        is_visible: false,
-                        is_suppressed: true,
+                        PaneSlot {
+                            pane_id: empty_pane_id,
+                            outer_rect: Rect {
+                                origin: Point { column: 5, row: 0 },
+                                size: Size {
+                                    column_count: 5,
+                                    row_count: 3,
+                                },
+                            },
+                            content_rect: None,
+                            is_visible: false,
+                            is_suppressed: true,
+                        },
+                    ],
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Fullscreen {
+                        focused_pane_id: content_pane_id,
                     },
-                ],
-                tab_size: Size {
-                    column_count: 10,
-                    row_count: 3,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
                 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Fullscreen {
-                    focused_pane_id: content_pane_id,
-                },
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
             },
             tabs_metadata: vec![
                 TabMetadata {
@@ -326,12 +329,12 @@ fn a_placement_preview_travels_field_for_field() {
     let tab_snapshot = TabSnapshot {
         tab_id,
         tab_name: String::from("work"),
-        pane_slots: list_pane_slots(&layout_solve),
-        tab_size,
-        stack_headers: layout_solve.stack_headers,
-        layout_mode: LayoutMode::Tiled,
-        is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-        gap_cell_count: pane_sizing.gap_cell_count,
+        layout_area: LayoutAreaSnapshot::from_layout_solve(
+            &layout_solve,
+            tab_size,
+            LayoutMode::Tiled,
+            pane_sizing.gap_cell_count,
+        ),
     };
     let insertion_tab_sizes = PlacementTabSizes {
         destination_tab_size: Some(tab_size),
@@ -523,16 +526,86 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             row_count: 6,
         },
     };
+    let collapsed_pane_id = PaneId::new();
+    let collapsed_header_rect = Rect {
+        origin: Point { column: 0, row: 0 },
+        size: Size {
+            column_count: 6,
+            row_count: 1,
+        },
+    };
+    let stack_header = StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect: collapsed_header_rect,
+        member_index: 0,
+        member_count: 2,
+    };
+    let lower_pane_rect = Rect {
+        origin: Point { column: 0, row: 0 },
+        size: Size {
+            column_count: 8,
+            row_count: 4,
+        },
+    };
+    let upper_pane_rect = Rect {
+        origin: Point { column: 0, row: 1 },
+        size: Size {
+            column_count: 6,
+            row_count: 4,
+        },
+    };
     render_snapshot.session_snapshot.floating_pane_slots = vec![
         FloatingPaneSlot {
             pane_id: lower_floating_pane_id,
             outer_rect: lower_outer_rect,
             is_pinned: false,
+            layout_area: LayoutAreaSnapshot {
+                solved_size: lower_pane_rect.size,
+                pane_slots: vec![PaneSlot {
+                    pane_id: lower_floating_pane_id,
+                    outer_rect: lower_pane_rect,
+                    content_rect: Some(lower_pane_rect.compute_inner_with_border()),
+                    is_visible: true,
+                    is_suppressed: false,
+                }],
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                is_every_pane_suppressed: false,
+                gap_cell_count: 0,
+            },
         },
         FloatingPaneSlot {
             pane_id: upper_floating_pane_id,
             outer_rect: upper_outer_rect,
             is_pinned: true,
+            layout_area: LayoutAreaSnapshot {
+                solved_size: Size {
+                    column_count: 6,
+                    row_count: 5,
+                },
+                pane_slots: vec![
+                    PaneSlot {
+                        pane_id: collapsed_pane_id,
+                        outer_rect: collapsed_header_rect,
+                        content_rect: None,
+                        is_visible: false,
+                        is_suppressed: true,
+                    },
+                    PaneSlot {
+                        pane_id: upper_floating_pane_id,
+                        outer_rect: upper_pane_rect,
+                        content_rect: Some(upper_pane_rect.compute_inner_with_border()),
+                        is_visible: true,
+                        is_suppressed: false,
+                    },
+                ],
+                stack_headers: vec![stack_header],
+                layout_mode: LayoutMode::Fullscreen {
+                    focused_pane_id: upper_floating_pane_id,
+                },
+                is_every_pane_suppressed: false,
+                gap_cell_count: 1,
+            },
         },
     ];
     let minimized_pane_id = PaneId::new();
@@ -544,6 +617,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
         FloatingPane::Minimized {
             pane_id: minimized_pane_id,
             pane_title: Some("htop".to_string()),
+            pane_count: NonZeroUsize::new(3).expect("3 is above 0"),
         },
         FloatingPane::Shown {
             pane_id: lower_floating_pane_id,
@@ -551,6 +625,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
         FloatingPane::Minimized {
             pane_id: untitled_minimized_pane_id,
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         },
     ];
 
@@ -563,11 +638,53 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
                 pane_id: lower_floating_pane_id,
                 outer_rect: lower_outer_rect,
                 is_pinned: false,
+                layout_area: FrameLayoutArea {
+                    solved_size: lower_pane_rect.size,
+                    pane_slots: vec![FrameSlot {
+                        pane_id: lower_floating_pane_id,
+                        outer_rect: lower_pane_rect,
+                        content_rect: Some(lower_pane_rect.compute_inner_with_border()),
+                        is_visible: true,
+                        is_suppressed: false,
+                    }],
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             FrameFloatingPaneSlot {
                 pane_id: upper_floating_pane_id,
                 outer_rect: upper_outer_rect,
                 is_pinned: true,
+                layout_area: FrameLayoutArea {
+                    solved_size: Size {
+                        column_count: 6,
+                        row_count: 5,
+                    },
+                    pane_slots: vec![
+                        FrameSlot {
+                            pane_id: collapsed_pane_id,
+                            outer_rect: collapsed_header_rect,
+                            content_rect: None,
+                            is_visible: false,
+                            is_suppressed: true,
+                        },
+                        FrameSlot {
+                            pane_id: upper_floating_pane_id,
+                            outer_rect: upper_pane_rect,
+                            content_rect: Some(upper_pane_rect.compute_inner_with_border()),
+                            is_visible: true,
+                            is_suppressed: false,
+                        },
+                    ],
+                    stack_headers: vec![stack_header],
+                    layout_mode: LayoutMode::Fullscreen {
+                        focused_pane_id: upper_floating_pane_id,
+                    },
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 1,
+                },
             },
         ]
     );
@@ -580,6 +697,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             FrameFloatingPane::Minimized {
                 pane_id: minimized_pane_id,
                 pane_title: Some("htop".to_string()),
+                pane_count: NonZeroUsize::new(3).expect("3 is above 0"),
             },
             FrameFloatingPane::Shown {
                 pane_id: lower_floating_pane_id,
@@ -587,6 +705,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             FrameFloatingPane::Minimized {
                 pane_id: untitled_minimized_pane_id,
                 pane_title: None,
+                pane_count: NonZeroUsize::MIN,
             },
         ]
     );
@@ -621,7 +740,11 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         String::from("tab")
     );
     assert_eq!(
-        painted_frame.session_snapshot.active_tab_snapshot.tab_size,
+        painted_frame
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .solved_size,
         Size {
             column_count: 10,
             row_count: 3
@@ -631,6 +754,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .stack_headers,
         Vec::new()
     );
@@ -638,6 +762,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .layout_mode,
         LayoutMode::Fullscreen { focused_pane_id }
     );
@@ -645,12 +770,14 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         !painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
     assert_eq!(
         painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots,
         vec![
             FrameSlot {
@@ -738,6 +865,7 @@ fn the_tab_gap_travels_with_the_frame() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count = 2;
 
     let painted_frame = build_wire_frame(&render_snapshot);
@@ -746,6 +874,7 @@ fn the_tab_gap_travels_with_the_frame() {
         painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .gap_cell_count,
         2
     );
@@ -771,10 +900,12 @@ fn the_tab_stack_headers_and_all_suppressed_flag_travel_with_the_frame() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .stack_headers = vec![stack_header];
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
 
     let painted_frame = build_wire_frame(&render_snapshot);
@@ -783,6 +914,7 @@ fn the_tab_stack_headers_and_all_suppressed_flag_travel_with_the_frame() {
         painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .stack_headers,
         vec![stack_header]
     );
@@ -790,6 +922,7 @@ fn the_tab_stack_headers_and_all_suppressed_flag_travel_with_the_frame() {
         painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
 }

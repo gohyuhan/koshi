@@ -1,6 +1,8 @@
 //! Tests for painted-frame wire encoding, image placement and transfer limits,
 //! and compatibility defaults. They verify that exact field names stay on the
-//! wire, and that a frame without its floating pane slots is refused.
+//! wire, that a frame without its floating pane slots is refused, and that a
+//! floating pane slot with no pane slot, or naming a pane outside its layout
+//! area, is refused.
 
 use koshi_core::geometry::Point;
 use serde_json::json;
@@ -8,10 +10,45 @@ use uuid::Uuid;
 
 use super::*;
 
+/// The layout area of a `4x5` floating pane that holds `pane_id` alone: one
+/// pane box `(0, 0)` `4x4` with content `(1, 1)` `2x2`, solved over `4x4`.
+fn build_floating_layout_area(pane_id: PaneId) -> FrameLayoutArea {
+    FrameLayoutArea {
+        solved_size: Size {
+            column_count: 4,
+            row_count: 4,
+        },
+        pane_slots: vec![FrameSlot {
+            pane_id,
+            outer_rect: Rect {
+                origin: Point { column: 0, row: 0 },
+                size: Size {
+                    column_count: 4,
+                    row_count: 4,
+                },
+            },
+            content_rect: Some(Rect {
+                origin: Point { column: 1, row: 1 },
+                size: Size {
+                    column_count: 2,
+                    row_count: 2,
+                },
+            }),
+            is_visible: true,
+            is_suppressed: false,
+        }],
+        stack_headers: Vec::new(),
+        layout_mode: LayoutMode::Tiled,
+        is_every_pane_suppressed: false,
+        gap_cell_count: 0,
+    }
+}
+
 /// A one-pane frame at fixed ids, so its encoding is byte-stable. The pane
 /// reports button-event mouse tracking, which travels as
 /// [`MouseTracking::ButtonMotion`]. The client shows one pinned floating pane,
-/// `pane-5`, at `(0, 0)` `4x5`.
+/// `pane-5`, at `(0, 0)` `4x5`, whose layout area holds `pane-5` alone over
+/// `4x4`, and minimized `pane-6` with 3 panes and `pane-8` with 1.
 pub(crate) fn build_painted_frame() -> PaintedFrame {
     let tab_id = TabId::from_uuid(Uuid::from_u128(2));
     let pane_id = PaneId::from_uuid(Uuid::from_u128(4));
@@ -23,33 +60,35 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
             active_tab_snapshot: FrameTab {
                 tab_id,
                 tab_name: "edit".to_string(),
-                pane_slots: vec![FrameSlot {
-                    pane_id,
-                    outer_rect: Rect {
-                        origin: Point { column: 0, row: 0 },
-                        size: Size {
-                            column_count: 4,
-                            row_count: 3,
-                        },
+                layout_area: FrameLayoutArea {
+                    solved_size: Size {
+                        column_count: 4,
+                        row_count: 3,
                     },
-                    content_rect: Some(Rect {
-                        origin: Point { column: 1, row: 1 },
-                        size: Size {
-                            column_count: 2,
-                            row_count: 1,
+                    pane_slots: vec![FrameSlot {
+                        pane_id,
+                        outer_rect: Rect {
+                            origin: Point { column: 0, row: 0 },
+                            size: Size {
+                                column_count: 4,
+                                row_count: 3,
+                            },
                         },
-                    }),
-                    is_visible: true,
-                    is_suppressed: false,
-                }],
-                tab_size: Size {
-                    column_count: 4,
-                    row_count: 3,
+                        content_rect: Some(Rect {
+                            origin: Point { column: 1, row: 1 },
+                            size: Size {
+                                column_count: 2,
+                                row_count: 1,
+                            },
+                        }),
+                        is_visible: true,
+                        is_suppressed: false,
+                    }],
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
                 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
             },
             tab_snapshots: vec![FrameTabMetadata {
                 tab_id,
@@ -67,11 +106,13 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                     },
                 },
                 is_pinned: true,
+                layout_area: build_floating_layout_area(PaneId::from_uuid(Uuid::from_u128(5))),
             }],
             floating_panes: vec![
                 FrameFloatingPane::Minimized {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(6)),
                     pane_title: Some("htop".to_string()),
+                    pane_count: NonZeroUsize::new(3).expect("3 is not zero"),
                 },
                 FrameFloatingPane::Shown {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(5)),
@@ -79,6 +120,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 FrameFloatingPane::Minimized {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(8)),
                     pane_title: None,
+                    pane_count: NonZeroUsize::MIN,
                 },
             ],
         },
@@ -176,14 +218,16 @@ fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
             {
                 "Minimized": {
                     "pane_id": Uuid::from_u128(6).to_string(),
-                    "pane_title": "htop"
+                    "pane_title": "htop",
+                    "pane_count": 3
                 }
             },
             { "Shown": { "pane_id": Uuid::from_u128(5).to_string() } },
             {
                 "Minimized": {
                     "pane_id": Uuid::from_u128(8).to_string(),
-                    "pane_title": null
+                    "pane_title": null,
+                    "pane_count": 1
                 }
             }
         ])
@@ -372,24 +416,26 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "active_tab_snapshot": {
                     "tab_id": "00000000-0000-0000-0000-000000000002",
                     "tab_name": "edit",
-                    "pane_slots": [{
-                        "pane_id": "00000000-0000-0000-0000-000000000004",
-                        "outer_rect": {
-                            "origin": { "column": 0, "row": 0 },
-                            "size": { "column_count": 4, "row_count": 3 }
-                        },
-                        "content_rect": {
-                            "origin": { "column": 1, "row": 1 },
-                            "size": { "column_count": 2, "row_count": 1 }
-                        },
-                        "is_visible": true,
-                        "is_suppressed": false
-                    }],
-                    "tab_size": { "column_count": 4, "row_count": 3 },
-                    "stack_headers": [],
-                    "layout_mode": "Tiled",
-                    "is_every_pane_suppressed": false,
-                    "gap_cell_count": 0
+                    "layout_area": {
+                        "solved_size": { "column_count": 4, "row_count": 3 },
+                        "pane_slots": [{
+                            "pane_id": "00000000-0000-0000-0000-000000000004",
+                            "outer_rect": {
+                                "origin": { "column": 0, "row": 0 },
+                                "size": { "column_count": 4, "row_count": 3 }
+                            },
+                            "content_rect": {
+                                "origin": { "column": 1, "row": 1 },
+                                "size": { "column_count": 2, "row_count": 1 }
+                            },
+                            "is_visible": true,
+                            "is_suppressed": false
+                        }],
+                        "stack_headers": [],
+                        "layout_mode": "Tiled",
+                        "is_every_pane_suppressed": false,
+                        "gap_cell_count": 0
+                    }
                 },
                 "tab_snapshots": [{
                     "tab_id": "00000000-0000-0000-0000-000000000002",
@@ -403,13 +449,34 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                         "origin": { "column": 0, "row": 0 },
                         "size": { "column_count": 4, "row_count": 5 }
                     },
-                    "is_pinned": true
+                    "is_pinned": true,
+                    "layout_area": {
+                        "solved_size": { "column_count": 4, "row_count": 4 },
+                        "pane_slots": [{
+                            "pane_id": "00000000-0000-0000-0000-000000000005",
+                            "outer_rect": {
+                                "origin": { "column": 0, "row": 0 },
+                                "size": { "column_count": 4, "row_count": 4 }
+                            },
+                            "content_rect": {
+                                "origin": { "column": 1, "row": 1 },
+                                "size": { "column_count": 2, "row_count": 2 }
+                            },
+                            "is_visible": true,
+                            "is_suppressed": false
+                        }],
+                        "stack_headers": [],
+                        "layout_mode": "Tiled",
+                        "is_every_pane_suppressed": false,
+                        "gap_cell_count": 0
+                    }
                 }],
                 "floating_panes": [
                     {
                         "Minimized": {
                             "pane_id": "00000000-0000-0000-0000-000000000006",
-                            "pane_title": "htop"
+                            "pane_title": "htop",
+                            "pane_count": 3
                         }
                     },
                     {
@@ -420,7 +487,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     {
                         "Minimized": {
                             "pane_id": "00000000-0000-0000-0000-000000000008",
-                            "pane_title": null
+                            "pane_title": null,
+                            "pane_count": 1
                         }
                     }
                 ]
@@ -479,62 +547,83 @@ fn a_frame_carrying_an_unknown_field_ignores_it() {
     );
 }
 
-/// A frame with no `gap_cell_count` reads as `0`, and a frame that carries one
-/// reads back the value it was written with.
+/// A frame whose active tab carries no `gap_cell_count` is refused, and a
+/// frame that carries one reads back the value it was written with.
 #[test]
-fn a_frame_without_a_gap_reads_as_zero() {
+fn a_frame_without_a_gap_is_refused() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    encoded_json["session_snapshot"]["active_tab_snapshot"]
+    encoded_json["session_snapshot"]["active_tab_snapshot"]["layout_area"]
         .as_object_mut()
-        .expect("a tab encodes as an object")
+        .expect("a layout area encodes as an object")
         .remove("gap_cell_count")
-        .expect("the tab encodes a gap");
-
-    // Decoded from text, the way the transport does it.
-    let decoded_painted_frame: PaintedFrame =
-        serde_json::from_str(&encoded_json.to_string()).expect("a frame with no gap decodes");
+        .expect("the layout area encodes a gap");
     assert_eq!(
-        decoded_painted_frame
-            .session_snapshot
-            .active_tab_snapshot
-            .gap_cell_count,
-        0
+        serde_json::from_value::<PaintedFrame>(encoded_json)
+            .expect_err("a frame with no gap is refused")
+            .to_string(),
+        "missing field `gap_cell_count`"
     );
 
     let mut gapped_painted_frame = build_painted_frame();
     gapped_painted_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count = 2;
     let encoded_json = serde_json::to_value(&gapped_painted_frame).expect("frame encodes");
     let decoded_painted_frame: PaintedFrame =
         serde_json::from_str(&encoded_json.to_string()).expect("a frame with a gap decodes");
-    assert_eq!(
-        decoded_painted_frame
-            .session_snapshot
-            .active_tab_snapshot
-            .gap_cell_count,
-        2
-    );
+    assert_eq!(decoded_painted_frame, gapped_painted_frame);
 }
 
-/// A `gap_cell_count` that is not a cell count — negative, or a string — reads as `0`
-/// and leaves the rest of the frame intact.
+/// A `gap_cell_count` that is not a cell count is refused with serde's own
+/// message for a `u16`.
 #[test]
-fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {
-    for invalid_gap_value in [
-        serde_json::json!(-1),
-        serde_json::json!("2"),
-        serde_json::json!(null),
-        serde_json::json!(70_000),
+fn a_frame_whose_gap_is_not_a_count_is_refused() {
+    for (invalid_gap_value, expected_error_text) in [
+        (json!(-1), "invalid value: integer `-1`, expected u16"),
+        (json!("2"), "invalid type: string \"2\", expected u16"),
+        (json!(null), "invalid type: null, expected u16"),
+        (
+            json!(70_000),
+            "invalid value: integer `70000`, expected u16",
+        ),
     ] {
         let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-        encoded_json["session_snapshot"]["active_tab_snapshot"]["gap_cell_count"] =
+        encoded_json["session_snapshot"]["active_tab_snapshot"]["layout_area"]["gap_cell_count"] =
             invalid_gap_value;
-        let decoded_painted_frame: PaintedFrame = serde_json::from_str(&encoded_json.to_string())
-            .expect("a frame with a bad gap decodes");
-        assert_eq!(decoded_painted_frame, build_painted_frame());
+        assert_eq!(
+            serde_json::from_value::<PaintedFrame>(encoded_json)
+                .expect_err("a frame with a bad gap is refused")
+                .to_string(),
+            expected_error_text
+        );
     }
+}
+
+/// A floating pane slot whose layout area holds no pane slot is refused, and
+/// so is one whose input pane is not among its pane slots.
+#[test]
+fn a_floating_pane_slot_without_its_input_pane_is_refused() {
+    let mut empty_area_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
+    empty_area_json["session_snapshot"]["floating_pane_slots"][0]["layout_area"]["pane_slots"] =
+        json!([]);
+    assert_eq!(
+        serde_json::from_value::<PaintedFrame>(empty_area_json)
+            .expect_err("a floating pane slot with no pane slot is refused")
+            .to_string(),
+        "floating pane slot holds no pane slot"
+    );
+
+    let mut foreign_pane_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
+    foreign_pane_json["session_snapshot"]["floating_pane_slots"][0]["pane_id"] =
+        json!(Uuid::from_u128(9).to_string());
+    assert_eq!(
+        serde_json::from_value::<PaintedFrame>(foreign_pane_json)
+            .expect_err("a floating pane slot naming a foreign pane is refused")
+            .to_string(),
+        "floating pane slot names a pane its layout area does not hold"
+    );
 }
 
 /// An optional value that is `None` travels as `null`, never as an absent
@@ -543,7 +632,12 @@ fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {
 #[test]
 fn absent_optional_values_encode_as_null() {
     let mut bare_frame = build_painted_frame();
-    bare_frame.session_snapshot.active_tab_snapshot.pane_slots[0].content_rect = None;
+    bare_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .content_rect = None;
     bare_frame.pane_snapshots[0].pane_title = None;
     bare_frame.pane_snapshots[0].selection_spans = None;
     bare_frame.client_snapshot.focused_pane_id = None;

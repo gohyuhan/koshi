@@ -690,13 +690,15 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
         expected_render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
     assert_eq!(
         expected_render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .tab_size,
+            .layout_area
+            .solved_size,
         Size {
             column_count: 0,
             row_count: 0

@@ -3,7 +3,8 @@
 //!
 //! [`build_wire_frame`] is a plain field-for-field mapping of everything but
 //! the rows, the cursor and the scroll position: the session, its solved
-//! active tab, the tab-bar entries, the floating panes, each pane's title,
+//! active tab, the tab-bar entries, the floating panes with their solved
+//! trees, each pane's title,
 //! modes, highlight and image placements, and the viewing client's own state.
 //! Those parts already hold shared types
 //! ([`Rect`](koshi_core::geometry::Rect),
@@ -21,8 +22,9 @@ use koshi_core::ids::PaneId;
 use koshi_ipc::frame::{
     FrameClient, FrameFloatingPane, FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction,
     FrameImageDimension, FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader,
-    FrameImageTransfer, FramePane, FrameSelection, FrameSession, FrameSixelBackground, FrameSlot,
-    FrameTab, FrameTabMetadata, PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
+    FrameImageTransfer, FrameLayoutArea, FramePane, FrameSelection, FrameSession,
+    FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata, PaintedFrame,
+    MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
 };
 use koshi_ipc::placement::{
     PanePlacementPreview as WirePlacementPreview, PanePlacementSizing as WirePlacementSizing,
@@ -30,8 +32,9 @@ use koshi_ipc::placement::{
     PanePlacementTabSnapshot as WirePlacementTabSnapshot,
 };
 use koshi_renderer::snapshot::{
-    FloatingPane, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPreview,
-    PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabMetadata, TabSnapshot,
+    FloatingPane, ImagePlacementSnapshot, LayoutAreaSnapshot, PaneSlot, PaneSnapshot,
+    PlacementPreview, PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabMetadata,
+    TabSnapshot,
 };
 use koshi_terminal::graphics::{
     GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
@@ -81,6 +84,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
                     pane_id: floating_pane_slot.pane_id,
                     outer_rect: floating_pane_slot.outer_rect,
                     is_pinned: floating_pane_slot.is_pinned,
+                    layout_area: build_wire_layout_area(&floating_pane_slot.layout_area),
                 })
                 .collect(),
             floating_panes: session_snapshot
@@ -93,9 +97,11 @@ pub(crate) fn build_wire_frame_with_content_ids(
                     FloatingPane::Minimized {
                         pane_id,
                         pane_title,
+                        pane_count,
                     } => FrameFloatingPane::Minimized {
                         pane_id: *pane_id,
                         pane_title: pane_title.clone(),
+                        pane_count: *pane_count,
                     },
                 })
                 .collect(),
@@ -219,16 +225,19 @@ fn build_wire_tab(tab_snapshot: &TabSnapshot) -> FrameTab {
     FrameTab {
         tab_id: tab_snapshot.tab_id,
         tab_name: tab_snapshot.tab_name.clone(),
-        pane_slots: tab_snapshot
-            .pane_slots
-            .iter()
-            .map(build_wire_slot)
-            .collect(),
-        tab_size: tab_snapshot.tab_size,
-        stack_headers: tab_snapshot.stack_headers.clone(),
-        layout_mode: tab_snapshot.layout_mode,
-        is_every_pane_suppressed: tab_snapshot.is_every_pane_suppressed,
-        gap_cell_count: tab_snapshot.gap_cell_count,
+        layout_area: build_wire_layout_area(&tab_snapshot.layout_area),
+    }
+}
+
+/// One solved tree of a tab or of a floating pane, as it travels.
+fn build_wire_layout_area(layout_area: &LayoutAreaSnapshot) -> FrameLayoutArea {
+    FrameLayoutArea {
+        solved_size: layout_area.solved_size,
+        pane_slots: layout_area.pane_slots.iter().map(build_wire_slot).collect(),
+        stack_headers: layout_area.stack_headers.clone(),
+        layout_mode: layout_area.layout_mode,
+        is_every_pane_suppressed: layout_area.is_every_pane_suppressed,
+        gap_cell_count: layout_area.gap_cell_count,
     }
 }
 

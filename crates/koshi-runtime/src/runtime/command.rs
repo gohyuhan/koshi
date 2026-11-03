@@ -67,7 +67,6 @@ use koshi_layout::{
 };
 use koshi_pty::backend::state::{PtyBackend, UNOBSERVED_EXIT};
 use koshi_pty::resize::{compute_pty_size, resize_for_layout_change};
-use koshi_renderer::floating_chrome::compute_floating_content_size;
 use koshi_session::client::{
     compute_floating_pane_size_cap, place_floating_pane, Client, ClientOrigin, FloatingPaneView,
 };
@@ -85,7 +84,7 @@ use koshi_session::session::{
         compute_placement_tab_sizes, find_lifted_floating_pane_rect, find_nearest_dock_target,
         PlacementCommitError,
     },
-    state::{compute_floating_pane_minimum_size, FloatingPane, Session},
+    state::{compute_one_pane_floating_content_size, FloatingPane, Session},
     tab_ops,
 };
 
@@ -989,26 +988,38 @@ impl Server {
                     .map(|client_solve| list_content_rects(&client_solve))
             })
             .collect();
+        Self::merge_smallest_content_rects(&per_viewer_content_rects)
+    }
 
-        // No viewer: no client draws any of these panes, so none of them is
-        // resized and every PTY keeps the size it has.
-        let Some(first_viewer_layouts) = per_viewer_content_rects.first() else {
+    /// Each pane of the first viewer's content rects in
+    /// `per_viewer_content_rects`, in that viewer's order, with its smallest
+    /// content rect across every viewer that draws content for it: the
+    /// per-axis minimum of their sizes, at the origin of the first one. `None`
+    /// for a pane no viewer draws content for. Empty when
+    /// `per_viewer_content_rects` is empty.
+    ///
+    /// Viewers `[(a, 80x20), (b, None)]` and `[(b, 30x10), (a, 60x24)]` give
+    /// `[(a, 60x20), (b, 30x10)]`.
+    fn merge_smallest_content_rects(
+        per_viewer_content_rects: &[Vec<(PaneId, Option<Rect>)>],
+    ) -> Vec<(PaneId, Option<Rect>)> {
+        // No viewer gives an empty list.
+        let Some(first_viewer_content_rects) = per_viewer_content_rects.first() else {
             return Vec::new();
         };
 
-        // Merge by pane id: a pane's smallest rect across the viewers that draw
-        // it. The merge keys on the id alone, so it holds however each solve
-        // orders its panes.
+        // Keys each pane's smallest content rect by its pane id, in any order
+        // of the panes in each viewer's list.
         let mut smallest_content_rect_by_pane_id: HashMap<PaneId, Option<Rect>> =
-            HashMap::with_capacity(first_viewer_layouts.len());
-        for viewer_content_rects in &per_viewer_content_rects {
+            HashMap::with_capacity(first_viewer_content_rects.len());
+        for viewer_content_rects in per_viewer_content_rects {
             for &(pane_id, content_rect) in viewer_content_rects {
                 let smallest_content_rect = smallest_content_rect_by_pane_id
                     .entry(pane_id)
                     .or_insert(None);
                 let Some(rect) = content_rect else {
-                    // This viewer draws no content for the pane, and asks
-                    // nothing of its size.
+                    // A viewer that draws no content for the pane leaves the
+                    // pane's entry as it is.
                     continue;
                 };
                 *smallest_content_rect = match *smallest_content_rect {
@@ -1021,8 +1032,8 @@ impl Server {
             }
         }
 
-        // Emit in the first viewer's solve order.
-        first_viewer_layouts
+        // Lists the panes in the first viewer's order.
+        first_viewer_content_rects
             .iter()
             .map(|&(pane_id, _)| {
                 (
@@ -1108,21 +1119,29 @@ impl Server {
     /// terminal engine ([`Self::update_pane_cell_sizes`]); with no reported
     /// cell size, each engine keeps its own.
     /// With a [`Session::get_shared_floating_viewport`],
-    /// [`Session::update_floating_pane_sizes`] solves each floating pane with
-    /// the pane minimum of [`Server::get_pane_sizing`]. With none — no client
+    /// [`Session::update_floating_pane_sizes`] solves each floating pane and
+    /// its tree with the session's pane sizing. With none — no client
     /// attached, or no client with a floating viewport — every solved size
-    /// stays as it is. Then the PTY of each pane of a floating pane takes
-    /// [`compute_floating_content_size`] of the floating pane's solved outer
-    /// size: `40x12` → `38x8`. A pane undocked while no client
-    /// has a floating viewport resizes from its tiled size to the floating
-    /// minimum. A session this server does not hold changes nothing.
+    /// stays as it is.
+    ///
+    /// Then the PTY of each pane of a floating pane takes the smallest content
+    /// rect that an attached client with a floating viewport draws it at, each
+    /// client by its own solve of the floating pane
+    /// ([`Session::compute_client_floating_pane_solve`],
+    /// [`Self::merge_smallest_content_rects`]). With no such client, it takes
+    /// its content rect in the floating pane's own solve
+    /// ([`FloatingPane::get_layout_solve`](koshi_session::session::state::FloatingPane::get_layout_solve)).
+    /// A pane suppressed in every such solve keeps its PTY size. A `40x12`
+    /// floating pane of one pane gives `38x9`. A pane undocked while no client
+    /// has a floating viewport resizes from its tiled size to its content rect
+    /// in the floating pane's own solve. A session this server does not hold
+    /// changes nothing.
     pub(crate) fn reflow_floating_panes(
         &mut self,
         backend: &dyn PtyBackend,
         session_id: SessionId,
         emitted_events: &mut Vec<Event>,
     ) {
-        let pane_minimum_size = self.get_pane_sizing().minimum_size;
         let Some(session) = self.session_by_id.get(&session_id) else {
             return;
         };
@@ -1134,20 +1153,30 @@ impl Server {
             return;
         };
         if let Some(shared_floating_viewport) = session.get_shared_floating_viewport() {
-            session.update_floating_pane_sizes(shared_floating_viewport, pane_minimum_size);
+            session.update_floating_pane_sizes(shared_floating_viewport);
         }
+        let session = &*session;
         let content_rects: Vec<(PaneId, Option<Rect>)> = session
             .floating_set
             .list_floating_panes()
             .iter()
             .flat_map(|floating_pane| {
-                let content_rect = Rect::from_size_at_origin(compute_floating_content_size(
-                    floating_pane.get_solved_size(),
-                ));
-                floating_pane
-                    .list_pane_ids()
-                    .into_iter()
-                    .map(move |pane_id| (pane_id, Some(content_rect)))
+                let floating_pane_id = floating_pane.get_floating_pane_id();
+                let per_viewer_content_rects: Vec<Vec<(PaneId, Option<Rect>)>> = session
+                    .clients
+                    .list_attached_clients()
+                    .filter(|client| client.get_floating_viewport().is_some())
+                    .filter_map(|client| {
+                        session
+                            .compute_client_floating_pane_solve(client, floating_pane_id)
+                            .map(list_content_rects)
+                    })
+                    .collect();
+                if per_viewer_content_rects.is_empty() {
+                    list_content_rects(floating_pane.get_layout_solve())
+                } else {
+                    Self::merge_smallest_content_rects(&per_viewer_content_rects)
+                }
             })
             .collect();
         self.reflow_changed(backend, content_rects, emitted_events);

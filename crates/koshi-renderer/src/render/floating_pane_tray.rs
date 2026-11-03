@@ -13,8 +13,6 @@ use crate::floating_pane_tray::{
 use crate::snapshot::{FloatingPane, FloatingPaneTray, RenderSnapshot};
 use crate::theme::Theme;
 
-use crate::floating_chrome::FloatingTitlebarControls;
-
 use super::floating::draw_floating_frame;
 use super::style::{
     compute_focused_border_style, compute_hover_border_style, compute_placement_hover_border_style,
@@ -31,8 +29,8 @@ const NEW_FLOATING_PANE_TILE_TEXT: &str = "+ new";
 /// Draw the open tray `tray_layout` over every cell drawn before it, in this
 /// order:
 ///
-/// 1. Draws the floating chrome ([`draw_floating_frame`]) with the close
-///    button only, in the focused border style.
+/// 1. Draws the floating chrome ([`draw_floating_frame`]) in the focused
+///    border style.
 /// 2. Writes the title of the tile under the pointer
 ///    (`floating_pane_tray.hovered_tile_index`), else of the selected tile
 ///    ([`find_floating_pane_title`]), in the titlebar's tile title cells, and
@@ -42,11 +40,16 @@ const NEW_FLOATING_PANE_TILE_TEXT: &str = "+ new";
 /// 3. Draws each slot's border ring. Slot `i` shows the session's floating
 ///    pane `i`: its number `i + 1` on the top border as ` <number> `, and its
 ///    title on the row under it ([`write_pane_title_clipped`]), each in the
-///    eight cells inside the ring. A tile whose pane has no title shows its
-///    number alone. The slot right after the last floating pane, while a slot
-///    is free ([`compute_tray_tile_count`]), is the `+ new` tile: no number,
-///    and ` + new` on the row under the top border. Every other slot draws its
-///    ring alone.
+///    eight cells inside the ring. A floating pane that holds `n` panes, `n`
+///    of 2 or more, shows `[n]` at the right end of that row and its title cut
+///    to the cells before it ([`write_counted_tile_label`]): the panes of the
+///    layout area of its slot while the viewer shows it, and the count
+///    [`FloatingPane::Minimized`] carries while the viewer minimized it. A
+///    tile whose pane has no title shows its number alone, and `[n]` while it
+///    holds 2 panes or more. The slot right after the last floating pane,
+///    while a slot is free ([`compute_tray_tile_count`]), is the `+ new`
+///    tile: no number, and ` + new` on the row under the top border. Every
+///    other slot draws its ring alone.
 ///
 /// A tile is lit while the viewer did not minimize its pane, and gray while
 /// the viewer minimized it ([`FloatingPane::is_minimized`]). The `+ new` tile
@@ -60,7 +63,8 @@ const NEW_FLOATING_PANE_TILE_TEXT: &str = "+ new";
 ///
 /// Example: tile `0` of `htop`, lit and selected, at `(7, 4)` reads
 /// `┌ 1 ─────┐`, `│ htop   │` and `└────────┘`. Tile `1` of `logserver`
-/// reads `┌ 2 ─────┐`, `│ logser…│` and `└────────┘`.
+/// reads `┌ 2 ─────┐`, `│ logser…│` and `└────────┘`, and reads `│log… [3]│`
+/// on its title row while its floating pane holds 3 panes.
 pub(super) fn draw_floating_pane_tray(
     render_snapshot: &RenderSnapshot,
     tray_layout: &FloatingPaneTrayLayout,
@@ -75,13 +79,7 @@ pub(super) fn draw_floating_pane_tray(
     }
     let session_snapshot = &render_snapshot.session_snapshot;
     let tray_style = compute_focused_border_style(theme);
-    draw_floating_frame(
-        tray_area,
-        FloatingTitlebarControls::CLOSE_BUTTON_ONLY,
-        tray_style,
-        drawn_rows,
-        screen_buffer,
-    );
+    draw_floating_frame(tray_area, tray_style, drawn_rows, screen_buffer);
 
     if drawn_rows.is_row_drawn(tray_area.y.saturating_add(1)) {
         let header_tile_index = floating_pane_tray
@@ -158,21 +156,85 @@ pub(super) fn draw_floating_pane_tray(
             },
             number_rect.size,
         );
+        if !drawn_rows.is_row_drawn(slot_area.y + 1) {
+            continue;
+        }
         let tile_title = match floating_pane {
             Some(floating_pane) => find_floating_pane_title(render_snapshot, floating_pane),
             None => Some(NEW_FLOATING_PANE_TILE_TEXT),
         };
-        if let Some(tile_title) = tile_title {
-            if drawn_rows.is_row_drawn(slot_area.y + 1) {
-                write_pane_title_clipped(
-                    screen_buffer,
-                    title_row_rect,
-                    tile_title,
-                    tile_text_style,
-                );
-            }
+        let pane_count = match floating_pane {
+            Some(FloatingPane::Shown { pane_id }) => session_snapshot
+                .floating_pane_slots
+                .iter()
+                .find(|floating_pane_slot| floating_pane_slot.pane_id == *pane_id)
+                .map_or(0, |floating_pane_slot| {
+                    floating_pane_slot.layout_area.pane_slots.len()
+                }),
+            Some(FloatingPane::Minimized { pane_count, .. }) => pane_count.get(),
+            None => 0,
+        };
+        if pane_count >= 2 {
+            write_counted_tile_label(
+                screen_buffer,
+                title_row_rect,
+                tile_title,
+                &format!("[{pane_count}]"),
+                tile_text_style,
+            );
+        } else if let Some(tile_title) = tile_title {
+            write_pane_title_clipped(screen_buffer, title_row_rect, tile_title, tile_text_style);
         }
     }
+}
+
+/// Write `pane_count_text` in `text_style` at the right end of the one-row
+/// `text_rect`, and `tile_title` in the cells before it less one blank cell,
+/// whole when it fits and ending in `…` when it is wider
+/// ([`write_text_fitted`]). With no title, or no cell left for it, the count
+/// alone.
+///
+/// In 8 cells with `[3]`, `htop` reads `htop [3]`, `vim` reads `vim  [3]`,
+/// `logserver` reads `log… [3]`, and no title reads `     [3]`.
+fn write_counted_tile_label(
+    screen_buffer: &mut Buffer,
+    text_rect: Rect,
+    tile_title: Option<&str>,
+    pane_count_text: &str,
+    text_style: Style,
+) {
+    let column_count = text_rect.size.column_count;
+    let count_start_offset = column_count.saturating_sub(get_text_width(pane_count_text));
+    let title_column_count = count_start_offset.saturating_sub(1);
+    if let Some(tile_title) = tile_title.filter(|_| title_column_count > 0) {
+        write_text_fitted(
+            screen_buffer,
+            Rect::from_origin_and_size(
+                text_rect.origin,
+                Size {
+                    column_count: title_column_count,
+                    row_count: 1,
+                },
+            ),
+            tile_title,
+            text_style,
+        );
+    }
+    write_text_clipped(
+        screen_buffer,
+        Rect::from_origin_and_size(
+            Point {
+                column: text_rect.origin.column + count_start_offset,
+                row: text_rect.origin.row,
+            },
+            Size {
+                column_count: column_count - count_start_offset,
+                row_count: 1,
+            },
+        ),
+        pane_count_text,
+        text_style,
+    );
 }
 
 /// The title of `floating_pane` in `render_snapshot`: the title of the pane's

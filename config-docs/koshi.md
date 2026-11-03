@@ -105,7 +105,7 @@ A floating pane takes the mouse on every cell it covers, the margin around
 the tiled panes too. A wheel notch on any of those cells, the titlebar and the
 border included, goes to that floating pane.
 
-On a floating pane's titlebar row:
+On a floating pane's titlebar strip, the top row of its box:
 
 - Drag the grab handle `⣿⣿` to move the pane in your own view. The pane follows
   the pointer and stays inside the pane area. The move is sent when you

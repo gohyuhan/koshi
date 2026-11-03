@@ -1248,8 +1248,8 @@ impl Server {
     ///   solved against the shared floating viewport; with no shared floating
     ///   viewport the pane takes the floating minimum
     ///   ([`Session::compute_new_floating_pane_size`]).
-    /// - The PTY takes [`compute_floating_content_size`] of the solved
-    ///   outer size.
+    /// - The PTY takes [`compute_one_pane_floating_content_size`] of the
+    ///   solved outer size: `40x12` → `38x9`.
     /// - The designated client's position is `Moved(top_left_cell)`,
     ///   `Pinned(top_left_cell)` when `is_pinned`, the drawn default placement
     ///   pinned when `is_pinned` without `top_left_cell`, and
@@ -1290,9 +1290,8 @@ impl Server {
             )?)
         };
         let desired_size = size.unwrap_or(DEFAULT_FLOATING_PANE_SIZE);
-        let solved_size = session
-            .compute_new_floating_pane_size(desired_size, self.get_pane_sizing().minimum_size);
-        let content_size = compute_floating_content_size(solved_size);
+        let solved_size = session.compute_new_floating_pane_size(desired_size);
+        let content_size = compute_one_pane_floating_content_size(solved_size);
         let designated_position = match (top_left_cell, is_pinned, designated_client_id) {
             (None, false, _) => FloatingPanePosition::Default,
             (Some(_), _, None) | (None, true, None) => {
@@ -1350,8 +1349,9 @@ impl Server {
     /// client is not attached to the pane's session is
     /// [`RejectReason::TargetNotFound`]. The resized axis is the width
     /// for `Left` and `Right` and the height for `Up` and `Down`: the solved
-    /// outer size plus `resize_amount_cells`, kept between the floating minimum
-    /// ([`compute_floating_pane_minimum_size`]) and the shared floating
+    /// outer size plus `resize_amount_cells`, kept between the floating pane's
+    /// minimum ([`FloatingPane::compute_minimum_size`] with the session's pane
+    /// sizing) and the shared floating
     /// viewport, and stored as cells. A growth also stops at the edge
     /// of the acting client's pane area on the moved side, so the edge
     /// opposite the moved border keeps its cell. A shrink never grows the axis
@@ -1418,7 +1418,7 @@ impl Server {
             ));
         };
         let floating_pane_minimum_size =
-            compute_floating_pane_minimum_size(self.get_pane_sizing().minimum_size);
+            floating_pane.compute_minimum_size(session.get_pane_sizing());
         let client = Self::require_client(session, client_id)?;
         let client_position = Self::require_floating_pane_view(client, floating_pane_id)?.position;
         let direction = command_args.direction;

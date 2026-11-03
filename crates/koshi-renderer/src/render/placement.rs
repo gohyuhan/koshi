@@ -36,16 +36,19 @@ pub(super) fn draw_pane_placement_presentation(
         theme.hover_border_color,
         DESTINATION_PANE_TINT_PERCENTAGE,
     );
-    let tab_snapshot = &render_snapshot.session_snapshot.active_tab_snapshot;
+    let tab_layout_area = &render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area;
     let source_pane_slot =
-        tab_snapshot.find_visible_pane_slot(placement_presentation.source_pane_id);
+        tab_layout_area.find_visible_pane_slot(placement_presentation.source_pane_id);
     let source_visible_pane_area =
         source_pane_slot.map(|pane_slot| place_cell_rect(pane_slot.outer_rect, layout_origin));
-    let has_source_stack_header = tab_snapshot
+    let has_source_stack_header = tab_layout_area
         .stack_headers
         .iter()
         .any(|stack_header| stack_header.pane_id == placement_presentation.source_pane_id);
-    let mut blocked_message_areas = tab_snapshot
+    let mut blocked_message_areas = tab_layout_area
         .stack_headers
         .iter()
         .map(|stack_header| place_cell_rect(stack_header.header_rect, layout_origin))
@@ -64,13 +67,13 @@ pub(super) fn draw_pane_placement_presentation(
                 )
             })
     };
-    let pane_areas = tab_snapshot
+    let pane_areas = tab_layout_area
         .pane_slots
         .iter()
         .filter(|pane_slot| pane_slot.is_visible)
         .map(|pane_slot| (pane_slot.pane_id, pane_slot.outer_rect))
         .chain(
-            tab_snapshot
+            tab_layout_area
                 .stack_headers
                 .iter()
                 .map(|stack_header| (stack_header.pane_id, stack_header.header_rect)),
@@ -196,17 +199,20 @@ fn find_legible_target_message_area(
     visible_buffer_area: RatatuiRect,
     blocked_message_areas: &[RatatuiRect],
 ) -> Option<RatatuiRect> {
-    let tab_snapshot = &render_snapshot.session_snapshot.active_tab_snapshot;
+    let tab_layout_area = &render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area;
     let mut selected_message_area: Option<RatatuiRect> = None;
     for pane_id in target_pane_ids {
-        if tab_snapshot
+        if tab_layout_area
             .stack_headers
             .iter()
             .any(|stack_header| stack_header.pane_id == *pane_id)
         {
             continue;
         }
-        let pane_content_rect = tab_snapshot
+        let pane_content_rect = tab_layout_area
             .find_visible_pane_slot(*pane_id)
             .and_then(|pane_slot| pane_slot.content_rect);
         let Some(pane_content_rect) = pane_content_rect else {

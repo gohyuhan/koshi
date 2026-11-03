@@ -44,7 +44,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::notification::NotificationQueueOwner;
 use koshi_core::process::PtySize;
 use koshi_layout::mode::LayoutMode;
-use koshi_renderer::snapshot::{ClientSnapshot, SessionSnapshot, TabSnapshot};
+use koshi_renderer::snapshot::{ClientSnapshot, LayoutAreaSnapshot, SessionSnapshot, TabSnapshot};
 use koshi_test_support::fixtures::{
     build_counting_bytes, build_fixed_epoch_notification_queue, build_test_uuid_with_suffix,
 };
@@ -90,15 +90,17 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: String::from("tab"),
-                pane_slots: Vec::new(),
-                tab_size: Size {
-                    column_count: 80,
-                    row_count: 24,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: Size {
+                        column_count: 80,
+                        row_count: 24,
+                    },
+                    pane_slots: Vec::new(),
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
                 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
             },
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),

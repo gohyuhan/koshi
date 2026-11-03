@@ -6,6 +6,7 @@
 //! wide (CJK), emoji, and combining-mark titles.
 
 use super::*;
+use std::num::NonZeroUsize;
 
 use crate::render::tests::{compute_version_badge_column_count, format_rendered_cells};
 use crate::snapshot::{
@@ -52,12 +53,14 @@ fn build_tabline_frame(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: "active".to_string(),
-                pane_slots: Vec::new(),
-                tab_size: viewport_size,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: viewport_size,
+                    pane_slots: Vec::new(),
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
@@ -1463,6 +1466,7 @@ fn both_buttons_show_with_no_floating_pane_and_no_notification_and_a_floating_pa
         .push(FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         });
 
     let tabline_layout_with_float = solve_tabline_layout(&tabline_test_frame, tabline_area);
@@ -1534,6 +1538,7 @@ fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there(
         .push(FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         });
     tabline_test_frame.viewer_chrome.notification_button = NotificationButton {
         unread_entry_count: 3,
@@ -1626,6 +1631,7 @@ fn the_tray_button_is_reversed_only_while_the_lock_mode_is_floating_pane_tray() 
         .push(FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         });
     let tabline_column_count = 40 + compute_version_badge_column_count();
     let mode_style = compute_mode_style(&Theme::default());

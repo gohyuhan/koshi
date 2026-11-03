@@ -1,6 +1,8 @@
 //! Tests for drawing the floating pane tray: its floating chrome and titlebar
 //! over the floating panes, one ring per slot with the tile's number and
-//! title or the `+ new` text, a title cut with `…` where it does not fit, the
+//! title or the `+ new` text, a title cut with `…` where it does not fit, a
+//! tile of a floating pane that holds two panes or more with its pane count
+//! `[N]` at the right end and its title fitted before it, the
 //! lit, gray, `+ new`, selected and empty styles, the title of the tile under
 //! the pointer in the titlebar, the tabline button in reverse video while the
 //! tray is open, and no cursor under the tray.
@@ -22,9 +24,14 @@ use crate::images::ImageRenderMode;
 use crate::notification::tests::build_test_notification_view;
 use crate::notification::NotificationCenterEntries;
 use crate::render::style::compute_mode_style;
-use crate::render::tests::{build_viewport_area, format_rendered_cells};
+use crate::render::tests::{build_floating_pane_slot, build_viewport_area, format_rendered_cells};
 use crate::render::{build_frame_geometry, get_cursor_position, render_frame};
 use crate::snapshot::{CommittedRegions, GridView, KeymapHints, ViewerChrome};
+use koshi_core::geometry::SplitDirection;
+use koshi_core::ids::PaneId;
+use koshi_layout::mode::LayoutMode;
+use koshi_layout::tree::{LayoutNode, SplitNode};
+use std::num::NonZeroUsize;
 
 /// A session with floating panes `htop`, shown at `(16, 4)` `48x13`, and
 /// `logs`, minimized, on an `80x24` viewport.
@@ -120,6 +127,44 @@ fn the_open_tray_draws_its_titlebar_its_slots_and_each_tiles_number_and_title() 
 }
 
 #[test]
+fn a_tile_of_a_floating_pane_with_several_panes_reads_its_title_and_its_pane_count() {
+    let mut render_snapshot = build_tray_test_render_snapshot(
+        EIGHTY_BY_TWENTY_FOUR_SIZE,
+        &["htop", "logserver", "vim", "zsh"],
+    );
+    let htop_pane_id =
+        show_tray_test_floating_pane(&mut render_snapshot, 0, build_cell_rect(16, 4, 48, 13));
+    render_snapshot.session_snapshot.floating_pane_slots[0] = build_floating_pane_slot(
+        htop_pane_id,
+        &LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(htop_pane_id),
+                LayoutNode::Pane(PaneId::new()),
+                LayoutNode::Pane(PaneId::new()),
+            ],
+        )),
+        LayoutMode::Tiled,
+        build_cell_rect(16, 4, 48, 13),
+        false,
+    );
+    let three_pane_count = NonZeroUsize::new(3).expect("3 is above 0");
+    for floating_pane in &mut render_snapshot.session_snapshot.floating_panes[1..3] {
+        let FloatingPane::Minimized { pane_count, .. } = floating_pane else {
+            panic!("tiles 1 and 2 are minimized");
+        };
+        *pane_count = three_pane_count;
+    }
+
+    let render_buffer = render_tray_frame(&render_snapshot, build_open_tray_viewer_chrome(0));
+
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 5, 5..74),
+        "│ │htop [3]│ │log… [3]│ │vim  [3]│ │ zsh    │ │ + new  │ │        │ │"
+    );
+}
+
+#[test]
 fn a_title_too_long_for_its_cells_ends_in_an_ellipsis_and_every_tile_keeps_its_number() {
     let mut render_snapshot = build_tray_test_render_snapshot(
         EIGHTY_BY_TWENTY_FOUR_SIZE,
@@ -173,8 +218,9 @@ fn a_closed_tray_draws_nothing_over_the_floating_pane() {
     let open_render_buffer = render_tray_frame(&render_snapshot, build_open_tray_viewer_chrome(0));
     let closed_render_buffer = render_tray_frame(&render_snapshot, ViewerChrome::default());
 
-    // The `htop` box takes screen rows 5 to 17: its titlebar on row 6 and
-    // its content from row 8. The tray's bottom border is row 10.
+    // The `htop` box takes screen rows 5 to 17: its strip on row 5, its pane
+    // box's top border on row 6 and its content from row 7. The tray's bottom
+    // border is row 10.
     assert_eq!(
         format_rendered_cells(&open_render_buffer, 10, 17..21),
         "────"
@@ -184,8 +230,12 @@ fn a_closed_tray_draws_nothing_over_the_floating_pane() {
         "    "
     );
     assert_eq!(
+        format_rendered_cells(&closed_render_buffer, 5, 16..24),
+        " ⣿⣿     "
+    );
+    assert_eq!(
         format_rendered_cells(&closed_render_buffer, 6, 16..24),
-        "│ ⣿⣿  ht"
+        "┌─── hto"
     );
 }
 

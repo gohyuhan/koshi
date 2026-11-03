@@ -10,8 +10,8 @@ use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, LinkStatus, Reconnecting, RenderSnapshot, SessionSnapshot,
-    TabMetadata, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, LayoutAreaSnapshot, LinkStatus, Reconnecting, RenderSnapshot,
+    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 
 /// A frame of one session named `one`, holding one tab named `first` with no
@@ -26,15 +26,17 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: "first".to_string(),
-                pane_slots: Vec::new(),
-                tab_size: Size {
-                    column_count: 80,
-                    row_count: 24,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: Size {
+                        column_count: 80,
+                        row_count: 24,
+                    },
+                    pane_slots: Vec::new(),
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
                 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
             },
             tabs_metadata: vec![TabMetadata {
                 tab_id,

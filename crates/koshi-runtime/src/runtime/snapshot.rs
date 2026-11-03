@@ -15,22 +15,24 @@
 //! `session_snapshot.active_tab_snapshot` holds *this* client's viewed tab, and
 //! always names the same tab as `client_snapshot.active_tab_id`, and
 //! `session_snapshot.floating_pane_slots` holds the floating panes *this*
-//! client shows, at its own positions, while
+//! client shows, at its own positions and in its own solve of each one's
+//! tree, while
 //! `session_snapshot.session_name`/`tabs_metadata` are the session-wide data.
 //!
 //! A snapshot carries no hint-bar data: the viewer draws that bar from its own
 //! keymap.
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::FloatingPanePosition;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans,
-    SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
+    ImagePlacementSnapshot, LayoutAreaSnapshot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
+    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_session::client::Client;
 use koshi_session::session::state::Session;
@@ -54,12 +56,14 @@ impl Server {
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) is
     /// solved at `0x0`: every pane is suppressed and the frame carries
     /// `is_every_pane_suppressed`. `session_snapshot.floating_pane_slots`
-    /// holds the floating panes the client shows, placed for it.
+    /// holds the floating panes the client shows, placed for it, each with
+    /// the client's solve of its tree.
     /// `session_snapshot.floating_panes` lists every floating pane of the
     /// session, in the order they were created: `Shown` while the
-    /// client shows it, and `Minimized` with its title while the client
-    /// minimized it. `pane_snapshots` holds one entry per tiled slot, then one
-    /// per floating pane slot, then one per pane of the client's placement
+    /// client shows it, and `Minimized` with the title of its input pane and
+    /// its pane count while the client minimized it. `pane_snapshots` holds
+    /// one entry per tiled slot, then one per pane slot of each floating pane
+    /// slot, back to front, then one per pane of the client's placement
     /// preview that neither lists
     /// (`ClientPlacementPreview::list_preview_pane_ids`).
     /// `placement_preview` is the client's preview while it names a target in
@@ -75,12 +79,12 @@ impl Server {
         let active_tab_snapshot = TabSnapshot {
             tab_id: tab.get_tab_id(),
             tab_name: tab.get_tab_name().to_owned(),
-            pane_slots: list_pane_slots(&client_solve),
-            tab_size: tab.get_solved_tab_size(),
-            stack_headers: client_solve.stack_headers.clone(),
-            layout_mode,
-            is_every_pane_suppressed: client_solve.is_every_pane_suppressed,
-            gap_cell_count: session.get_pane_sizing().gap_cell_count,
+            layout_area: LayoutAreaSnapshot::from_layout_solve(
+                &client_solve,
+                tab.get_solved_tab_size(),
+                layout_mode,
+                session.get_pane_sizing().gap_cell_count,
+            ),
         };
 
         // Metadata for every tab in the session, in display (index) order.
@@ -119,6 +123,7 @@ impl Server {
                                 resolve_pane_title(terminal_engine.get_terminal_state())
                             },
                         ),
+                        pane_count: NonZeroUsize::new(floating_pane.list_pane_ids().len())?,
                     })
                 })
                 .collect(),
@@ -130,19 +135,20 @@ impl Server {
             },
         );
         // One content snapshot per solved slot, in slot order, then one per
-        // floating pane slot, back to front, then one per preview pane not
-        // listed yet.
+        // pane slot of each floating pane slot, back to front, then one per
+        // preview pane not listed yet.
         let mut pane_ids: Vec<PaneId> = session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
-            .map(|pane_slot| pane_slot.pane_id)
             .chain(
                 session_snapshot
                     .floating_pane_slots
                     .iter()
-                    .map(|floating_pane_slot| floating_pane_slot.pane_id),
+                    .flat_map(|floating_pane_slot| &floating_pane_slot.layout_area.pane_slots),
             )
+            .map(|pane_slot| pane_slot.pane_id)
             .collect();
         if let Some(client_placement_preview) = client_placement_preview {
             let mut listed_pane_ids: HashSet<PaneId> = pane_ids.iter().copied().collect();
@@ -261,11 +267,16 @@ impl Server {
 /// pane is the first pane of the client's focus history inside the floating
 /// pane ([`Client::find_floating_pane_input_pane_id`]). A slot's outer rect is
 /// the rectangle the session places the floating pane in for the client
-/// ([`Session::find_client_floating_pane_rect`]). Empty when the client has no
-/// floating viewport ([`Client::get_floating_viewport`]).
+/// ([`Session::find_client_floating_pane_rect`]). A slot's layout area is the
+/// client's solve of the floating pane's tree
+/// ([`Session::compute_client_floating_pane_solve`]) at the size it is solved
+/// over, in the layout mode of the client's view of it, with the session's
+/// gap. Empty when the client has no floating viewport
+/// ([`Client::get_floating_viewport`]).
 ///
 /// A `72x22` pane at the default position, alone in the session, on a client
-/// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`.
+/// whose floating viewport is `120x38` → outer rect `(24, 8)` `72x22`, and a
+/// layout area of one pane slot solved over `72x21`.
 fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingPaneSlot> {
     client
         .list_shown_floating_pane_ids()
@@ -274,10 +285,21 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
             let floating_pane_view = client.get_floating_pane_view(floating_pane_id)?;
             let pane_id = client.find_floating_pane_input_pane_id(floating_pane_id)?;
             let outer_rect = session.find_client_floating_pane_rect(client, floating_pane_id)?;
+            let (_, floating_pane) = session
+                .floating_set
+                .find_floating_pane_by_id(floating_pane_id)?;
+            let layout_solve =
+                session.compute_client_floating_pane_solve(client, floating_pane_id)?;
             Some(FloatingPaneSlot {
                 pane_id,
                 outer_rect,
                 is_pinned: matches!(floating_pane_view.position, FloatingPanePosition::Pinned(_)),
+                layout_area: LayoutAreaSnapshot::from_layout_solve(
+                    layout_solve,
+                    floating_pane.get_solved_layout_size(),
+                    floating_pane_view.get_layout_mode(),
+                    session.get_pane_sizing().gap_cell_count,
+                ),
             })
         })
         .collect()

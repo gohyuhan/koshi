@@ -4,6 +4,8 @@
 //! mode, a pane with no grid at all, the highlight rows, and the floating pane
 //! slots in their order.
 
+use std::num::NonZeroUsize;
+
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -32,6 +34,7 @@ use koshi_terminal::style::{Color, Style, UnderlineStyle};
 use koshi_test_support::fixtures::build_image_chunk_frame;
 
 use super::*;
+use crate::tests::build_one_pane_floating_pane_slot;
 
 fn build_image_placement_snapshot() -> ImagePlacementSnapshot {
     ImagePlacementSnapshot::with_content_id(
@@ -303,50 +306,52 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             active_tab_snapshot: TabSnapshot {
                 tab_id: active_tab_id,
                 tab_name: String::from("tab"),
-                pane_slots: vec![
-                    PaneSlot {
-                        pane_id: content_pane_id,
-                        outer_rect: Rect {
-                            origin: Point { column: 0, row: 0 },
-                            size: Size {
-                                column_count: 6,
-                                row_count: 4,
-                            },
-                        },
-                        content_rect: Some(Rect {
-                            origin: Point { column: 1, row: 1 },
-                            size: Size {
-                                column_count: 4,
-                                row_count: 2,
-                            },
-                        }),
-                        is_visible: true,
-                        is_suppressed: false,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: Size {
+                        column_count: 12,
+                        row_count: 4,
                     },
-                    PaneSlot {
-                        pane_id: empty_pane_id,
-                        outer_rect: Rect {
-                            origin: Point { column: 6, row: 0 },
-                            size: Size {
-                                column_count: 6,
-                                row_count: 4,
+                    pane_slots: vec![
+                        PaneSlot {
+                            pane_id: content_pane_id,
+                            outer_rect: Rect {
+                                origin: Point { column: 0, row: 0 },
+                                size: Size {
+                                    column_count: 6,
+                                    row_count: 4,
+                                },
                             },
+                            content_rect: Some(Rect {
+                                origin: Point { column: 1, row: 1 },
+                                size: Size {
+                                    column_count: 4,
+                                    row_count: 2,
+                                },
+                            }),
+                            is_visible: true,
+                            is_suppressed: false,
                         },
-                        content_rect: None,
-                        is_visible: false,
-                        is_suppressed: true,
+                        PaneSlot {
+                            pane_id: empty_pane_id,
+                            outer_rect: Rect {
+                                origin: Point { column: 6, row: 0 },
+                                size: Size {
+                                    column_count: 6,
+                                    row_count: 4,
+                                },
+                            },
+                            content_rect: None,
+                            is_visible: false,
+                            is_suppressed: true,
+                        },
+                    ],
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Fullscreen {
+                        focused_pane_id: content_pane_id,
                     },
-                ],
-                tab_size: Size {
-                    column_count: 12,
-                    row_count: 4,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
                 },
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Fullscreen {
-                    focused_pane_id: content_pane_id,
-                },
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
             },
             tabs_metadata: vec![
                 TabMetadata {
@@ -469,28 +474,28 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
     expected_render_snapshot
         .session_snapshot
         .floating_pane_slots = vec![
-        FloatingPaneSlot {
-            pane_id: lower_floating_slot_pane_id,
-            outer_rect: Rect {
+        build_one_pane_floating_pane_slot(
+            lower_floating_slot_pane_id,
+            Rect {
                 origin: Point { column: 2, row: 1 },
                 size: Size {
                     column_count: 10,
                     row_count: 5,
                 },
             },
-            is_pinned: false,
-        },
-        FloatingPaneSlot {
-            pane_id: upper_floating_slot_pane_id,
-            outer_rect: Rect {
+            false,
+        ),
+        build_one_pane_floating_pane_slot(
+            upper_floating_slot_pane_id,
+            Rect {
                 origin: Point { column: 8, row: 0 },
                 size: Size {
                     column_count: 12,
                     row_count: 6,
                 },
             },
-            is_pinned: true,
-        },
+            true,
+        ),
     ];
     expected_render_snapshot.session_snapshot.floating_panes = vec![
         FloatingPane::Shown {
@@ -499,6 +504,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: Some("htop".to_string()),
+            pane_count: NonZeroUsize::MIN,
         },
         FloatingPane::Shown {
             pane_id: lower_floating_slot_pane_id,
@@ -1583,6 +1589,7 @@ fn the_tabs_gap_arrives_with_the_frame() {
     painted_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count = 2;
 
     assert_eq!(
@@ -1592,6 +1599,7 @@ fn the_tabs_gap_arrives_with_the_frame() {
         ))
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count,
         2
     );
@@ -1853,6 +1861,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
     expected_render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
         pane_id: minimized_floating_slot_pane_id,
         pane_title: Some(String::from("htop\u{1b}[2J")),
+        pane_count: NonZeroUsize::MIN,
     }];
     let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
         focused_pane_id,
@@ -1903,6 +1912,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         [FloatingPane::Minimized {
             pane_id: minimized_floating_slot_pane_id,
             pane_title: Some(String::from("htop[2J")),
+            pane_count: NonZeroUsize::MIN,
         }],
         "the minimized floating pane's title reaches the tray"
     );

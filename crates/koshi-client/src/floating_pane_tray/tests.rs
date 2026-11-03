@@ -11,6 +11,7 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use koshi_config::conflict::KeymapVerdict;
@@ -72,6 +73,7 @@ pub(crate) fn build_tray_mouse_frame(is_shown_by_tile: &[bool]) -> (MouseFrame, 
                 .push(FloatingPane::Minimized {
                     pane_id: floating_slot_pane_id,
                     pane_title: None,
+                    pane_count: NonZeroUsize::MIN,
                 });
         }
     }
@@ -881,9 +883,9 @@ fn a_click_outside_the_open_tray_closes_it_and_acts_as_with_no_tray() {
     let (mouse_frame, floating_slot_pane_ids) = build_tray_mouse_frame(&[true, false]);
     let mut tray_client = build_client_with_open_tray(&mouse_frame);
     let mut plain_client = build_client_viewing(&mouse_frame);
-    // Floating pane 0's titlebar row is screen row 14, its title cells from
-    // screen column 8.
-    let titlebar_press = build_left_mouse_press(Point { column: 8, row: 14 });
+    // Floating pane 0's titlebar strip is screen row 13, and its screen column
+    // 6 holds no control.
+    let titlebar_press = build_left_mouse_press(Point { column: 6, row: 13 });
     let press_time = Instant::now();
 
     assert_eq!(
@@ -989,6 +991,7 @@ fn a_press_on_a_placement_handle_under_a_tray_closed_before_its_frame_repaints_s
     let tiled_pane_slot = mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter_mut()
         .find(|pane_slot| pane_slot.pane_id == tiled_pane_id)
@@ -1049,6 +1052,7 @@ fn a_tray_opened_before_its_frame_repaints_leaves_the_cells_beside_it_to_the_pan
         .push(FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         });
     mouse_frame.client_snapshot.is_mouse_selection_enabled = true;
     let mut client = build_client_with_open_tray(&mouse_frame);

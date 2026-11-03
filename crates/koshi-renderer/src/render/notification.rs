@@ -7,7 +7,6 @@ use ratatui::style::Style;
 
 use koshi_core::geometry::Rect;
 
-use crate::floating_chrome::FloatingTitlebarControls;
 use crate::notification::{
     build_row_rect, compute_card_dismiss_button_column, compute_card_text_column_count,
     compute_toast_close_rect, format_notification_header, list_notification_center_rows,
@@ -75,8 +74,8 @@ pub(super) fn draw_notification_center(
 /// Draw the center at rest, `center_layout.center_rect`, into
 /// `screen_buffer`, in this order:
 ///
-/// 1. Draws the floating chrome ([`draw_floating_frame`]) with the close
-///    button only, in the focused border style, and writes `Notifications`
+/// 1. Draws the floating chrome ([`draw_floating_frame`]) in the focused
+///    border style, and writes `Notifications`
 ///    in the title cells ([`write_text_fitted`]).
 /// 2. Writes `Clear all` in its cells on the last content row.
 /// 3. Writes the body rows ([`list_notification_center_rows`]) from where
@@ -102,7 +101,6 @@ fn draw_notification_center_box(
     let frame_style = compute_focused_border_style(theme);
     draw_floating_frame(
         place_screen_rect(center_layout.center_rect),
-        FloatingTitlebarControls::CLOSE_BUTTON_ONLY,
         frame_style,
         drawn_rows,
         screen_buffer,

@@ -19,7 +19,7 @@ use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::LayoutNode;
 use serde::{Deserialize, Serialize};
 
-use crate::frame::FrameTab;
+use crate::frame::{FrameLayoutArea, FrameTab};
 
 /// One placement target a viewer previews: the pane it places and the tab it
 /// may place the pane in.
@@ -223,6 +223,7 @@ impl PanePlacementSnapshot {
             )?;
             if !source_tab_snapshot
                 .tab_snapshot
+                .layout_area
                 .pane_slots
                 .iter()
                 .any(|pane_slot| pane_slot.pane_id == self.source_pane_id)
@@ -249,6 +250,7 @@ impl PanePlacementSnapshot {
             (PanePlacementSource::Tiled(_), Some(destination_tab_snapshot)) => {
                 destination_tab_snapshot
                     .tab_snapshot
+                    .layout_area
                     .pane_slots
                     .iter()
                     .map(|pane_slot| pane_slot.pane_id)
@@ -272,14 +274,14 @@ fn validate_tab_snapshot(
     expected_gap_cell_count: u16,
     preview_pane_ids: &mut HashSet<PaneId>,
 ) -> Result<(), PanePlacementSnapshotValidationError> {
-    let tab_snapshot = &placement_tab_snapshot.tab_snapshot;
-    if tab_snapshot.layout_mode != LayoutMode::Tiled
-        || tab_snapshot.gap_cell_count != expected_gap_cell_count
+    let layout_area = &placement_tab_snapshot.tab_snapshot.layout_area;
+    if layout_area.layout_mode != LayoutMode::Tiled
+        || layout_area.gap_cell_count != expected_gap_cell_count
     {
         return Err(PanePlacementSnapshotValidationError::LayoutMismatch);
     }
     let layout_pane_ids = collect_layout_pane_ids(&placement_tab_snapshot.layout_tree)?;
-    let slot_pane_ids: Vec<PaneId> = tab_snapshot
+    let slot_pane_ids: Vec<PaneId> = layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -300,8 +302,8 @@ fn validate_tab_snapshot(
         }
     }
 
-    let tab_rect = Rect::from_size_at_origin(tab_snapshot.tab_size);
-    for pane_slot in &tab_snapshot.pane_slots {
+    let tab_rect = Rect::from_size_at_origin(layout_area.solved_size);
+    for pane_slot in &layout_area.pane_slots {
         if !pane_slot.outer_rect.is_inside_rect(tab_rect)
             || pane_slot.is_visible != pane_slot.content_rect.is_some()
             || pane_slot.content_rect.is_some_and(|content_rect| {
@@ -312,15 +314,15 @@ fn validate_tab_snapshot(
             return Err(PanePlacementSnapshotValidationError::PaneSlotMismatch);
         }
     }
-    let is_every_pane_suppressed = !tab_snapshot.pane_slots.is_empty()
-        && tab_snapshot
+    let is_every_pane_suppressed = !layout_area.pane_slots.is_empty()
+        && layout_area
             .pane_slots
             .iter()
             .all(|pane_slot| pane_slot.is_suppressed);
-    if tab_snapshot.is_every_pane_suppressed != is_every_pane_suppressed {
+    if layout_area.is_every_pane_suppressed != is_every_pane_suppressed {
         return Err(PanePlacementSnapshotValidationError::PaneSlotMismatch);
     }
-    validate_stack_headers(tab_snapshot, &layout_pane_id_set)
+    validate_stack_headers(layout_area, &layout_pane_id_set)
 }
 
 /// The panes of `layout_tree`, in leaf order.
@@ -382,12 +384,12 @@ fn is_valid_size_weight(size_weight: &koshi_layout::size::SizeWeight) -> bool {
 /// Check that each stack header names a pane of `layout_pane_ids` once, counts
 /// at least two members with its index among them, and sits inside the tab.
 fn validate_stack_headers(
-    tab_snapshot: &FrameTab,
+    layout_area: &FrameLayoutArea,
     layout_pane_ids: &HashSet<PaneId>,
 ) -> Result<(), PanePlacementSnapshotValidationError> {
     let mut header_pane_ids = HashSet::new();
-    let tab_rect = Rect::from_size_at_origin(tab_snapshot.tab_size);
-    for stack_header in &tab_snapshot.stack_headers {
+    let tab_rect = Rect::from_size_at_origin(layout_area.solved_size);
+    for stack_header in &layout_area.stack_headers {
         if !layout_pane_ids.contains(&stack_header.pane_id)
             || !header_pane_ids.insert(stack_header.pane_id)
             || stack_header.member_count < 2

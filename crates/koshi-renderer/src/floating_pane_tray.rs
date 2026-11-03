@@ -25,10 +25,10 @@
 //! Every rect here is in screen cells, `(0, 0)` at the viewport's top-left
 //! cell.
 
-use koshi_core::constant::{FLOATING_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION};
+use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::geometry::{Point, Rect, Size};
 
-use crate::floating_chrome::{compute_floating_titlebar, FloatingTitlebarControls};
+use crate::floating_chrome::{compute_floating_titlebar, FLOATING_CHROME_SIZE};
 use crate::hit_test::{compute_frame_pane_area, compute_tabline_area, compute_viewport_area};
 use crate::render::{
     compute_right_block_start_column, find_floating_pane_tray_button_column, get_text_width,
@@ -103,6 +103,7 @@ pub fn find_floating_pane_tray_button_rect(frame_layout: FrameLayout<'_>) -> Opt
         || frame_layout
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     {
         return None;
@@ -215,8 +216,7 @@ pub fn compute_floating_pane_tray_layout(
         )
     });
 
-    let titlebar =
-        compute_floating_titlebar(tray_rect, FloatingTitlebarControls::CLOSE_BUTTON_ONLY);
+    let titlebar = compute_floating_titlebar(tray_rect);
     let label_column_count =
         select_toggle_minimize_all_label_text(frame_layout.session_snapshot).map(get_text_width);
     let (tile_title_rect, toggle_minimize_all_rect) =

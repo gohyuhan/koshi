@@ -1328,7 +1328,6 @@ impl Server {
         let acting_session = self.resolve_acting_session(command_source)?;
         let undock_target =
             self.resolve_undock_pane_target(command_args, command_source, acting_session)?;
-        let pane_sizing = self.get_pane_sizing();
         let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
             .session_by_id
@@ -1352,8 +1351,7 @@ impl Server {
             Some(top_left_cell) => FloatingPanePosition::Moved(top_left_cell),
             None => lifted_position,
         };
-        let solved_size =
-            session.compute_new_floating_pane_size(desired_size, pane_sizing.minimum_size);
+        let solved_size = session.compute_new_floating_pane_size(desired_size);
         let mut emitted_events = vec![Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
             source_pane_id: undock_target.source_pane_id,

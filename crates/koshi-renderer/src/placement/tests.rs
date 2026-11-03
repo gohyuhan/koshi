@@ -52,12 +52,12 @@ fn build_test_tab_snapshot(
         tab_snapshot: TabSnapshot {
             tab_id,
             tab_name: "work".to_owned(),
-            pane_slots: list_pane_slots(&layout_solve),
-            tab_size,
-            stack_headers: layout_solve.stack_headers,
-            layout_mode: LayoutMode::Tiled,
-            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-            gap_cell_count: pane_sizing.gap_cell_count,
+            layout_area: LayoutAreaSnapshot::from_layout_solve(
+                &layout_solve,
+                tab_size,
+                LayoutMode::Tiled,
+                pane_sizing.gap_cell_count,
+            ),
         },
     }
 }
@@ -123,12 +123,16 @@ fn build_expected_placed_preview(
             tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: "work".to_owned(),
-                pane_slots: list_pane_slots(&layout_solve),
-                tab_size,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    stack_headers: Vec::new(),
+                    is_every_pane_suppressed: false,
+                    ..LayoutAreaSnapshot::from_layout_solve(
+                        &layout_solve,
+                        tab_size,
+                        LayoutMode::Tiled,
+                        0,
+                    )
+                },
             },
         },
         placed_tab_layout: PlacedTabLayout {
@@ -382,6 +386,7 @@ fn build_placed_preview_shows_each_stack_at_the_member_the_focus_history_gives()
     assert_eq!(
         placed_tab_snapshot
             .tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .filter(|pane_slot| pane_slot.is_visible)
@@ -721,7 +726,7 @@ fn list_drawable_pane_ids_by_building_every_placement(
     }
     let mut drawable_pane_ids = Vec::new();
     for tab_snapshot in &placed_tab_snapshots {
-        for pane_slot in &tab_snapshot.pane_slots {
+        for pane_slot in &tab_snapshot.layout_area.pane_slots {
             if pane_slot.is_visible && !drawable_pane_ids.contains(&pane_slot.pane_id) {
                 drawable_pane_ids.push(pane_slot.pane_id);
             }

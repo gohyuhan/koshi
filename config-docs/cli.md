@@ -737,15 +737,17 @@ pane that floats above the tiled panes and belongs to no tab. The client that
 `--client` names, else the issuing client, else the session's only attached
 client, shows it and gives it its input. Every other client holds it
 minimized. A client that cannot draw floating panes also holds it minimized,
-and its input stays where it was: its pane area is smaller than `5x6`, or its
+and its input stays where it was: its pane area is smaller than `5x5`, or its
 tab shows `Terminal too small — enlarge window` in place of every pane.
 
 - `--cols` and `--rows` set its size: a cell count such as `80`, or a percent
   of the pane area such as `60%`. Each needs the other. Without them the pane
   takes 60% of each axis. Each axis is cut to 90% of the smallest pane area of
   the attached clients, rounded down: `--cols 100% --rows 100%` on an `80x22`
-  pane area gives `72x19`. A client with a pane area smaller than `5x6` does
-  not count.
+  pane area gives `72x19`. A client with a pane area smaller than `5x5` does
+  not count. The size counts the whole box: the titlebar strip on its top
+  row, then the pane with its border and its title in the top border. A
+  `40x12` box gives the program `38x9` cells.
 - `--x` and `--y` set its top-left cell, counted from the top-left corner of
   the pane area. Each needs the other.
 - `--pinned` pins it on the client that shows it.
@@ -1781,7 +1783,7 @@ line per attached client says what that client draws:
 - `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the floating pane
   there. Layer `0` draws first, and a higher layer draws over a lower one.
 - `minimized`: the client holds the floating pane minimized. A client whose
-  pane area is smaller than `5x6`, or that has no room to draw a pane, holds
+  pane area is smaller than `5x5`, or that has no room to draw a pane, holds
   every floating pane minimized.
 
 Each client line ends with the position that client stored: `default`,

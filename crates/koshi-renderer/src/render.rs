@@ -20,8 +20,9 @@
 //! surrounding margin is filled with a dim letterbox.
 //!
 //! The floating panes the viewing client shows draw over the tiled panes and
-//! the letterbox, back to front, each in a box with a titlebar. They sit in
-//! the pane area at their own cells, with no letterbox offset. The viewer's
+//! the letterbox, back to front, each as a titlebar strip over its own layout
+//! tree. The tree draws as the tiled panes of a tab draw. They sit in the pane
+//! area at their own cells, with no letterbox offset. The viewer's
 //! open notification center, its open floating pane tray and its toast draw
 //! over the floating panes, in that order.
 //!
@@ -59,13 +60,18 @@ use crate::notification::{
 };
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
-    CommittedRegions, CursorStyle, GridView, KeymapHints, PanePlacementPresentation, PaneSnapshot,
-    PlacementHandleHover, Reconnecting, RenderSnapshot, SelectionSpans, ViewerChrome,
+    CommittedRegions, CursorStyle, GridView, KeymapHints, LayoutAreaSnapshot,
+    PanePlacementPresentation, PaneSnapshot, PlacementHandleHover, Reconnecting, RenderSnapshot,
+    SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
 
 const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
+
+/// The tag a pane that the viewing client zooms writes after its title in
+/// its top border, with one blank cell on each side.
+const FULLSCREEN_TAG_TEXT: &str = " [fullscreen] ";
 
 mod floating;
 mod floating_pane_tray;
@@ -133,12 +139,12 @@ pub struct FrameGeometry<'a> {
     pub(crate) viewer_chrome: ViewerChrome,
     /// The buffer area the frame is painted over.
     pub(crate) viewport_area: RatatuiRect,
-    /// The active tab's `tab_size` centered in the pane area
+    /// The active tab's solved size centered in the pane area
     /// ([`compute_content_rect`]): the cells the tiled layout covers.
     pub(crate) effective_layout_rect: RatatuiRect,
     /// The floating panes this viewer draws, back to front
     /// ([`list_placed_floating_panes`]).
-    pub(crate) placed_floating_panes: Vec<PlacedFloatingPane>,
+    pub(crate) placed_floating_panes: Vec<PlacedFloatingPane<'a>>,
     /// The viewer's open floating pane tray
     /// ([`find_drawn_floating_pane_tray_layout`]). `None` while the tray is
     /// closed or the frame has no room for it.
@@ -213,7 +219,8 @@ pub fn build_frame_geometry<'a>(
             render_snapshot
                 .session_snapshot
                 .active_tab_snapshot
-                .tab_size,
+                .layout_area
+                .solved_size,
         ),
         placed_floating_panes: list_placed_floating_panes(
             render_snapshot,
@@ -244,8 +251,8 @@ pub fn build_frame_geometry<'a>(
 ///
 /// 1. Blanks every cell of `viewport_area`.
 /// 2. Draws one bordered box per visible pane: the terminal title in the top
-///    border, and the scroll position in the bottom border when the pane is
-///    scrolled back.
+///    border, `[fullscreen]` after it while the viewer zooms the pane, and the
+///    scroll position in the bottom border when the pane is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect, and
 ///    tints the content of the pane whose placement handle the pointer rests
 ///    on.
@@ -258,12 +265,12 @@ pub fn build_frame_geometry<'a>(
 /// 7. Fills the letterbox margin: every cell of `viewport_area` outside the centered
 ///    layout, the chrome rows included.
 /// 8. Draws the floating panes this viewer draws, back to front, over every
-///    cell drawn before them: each one's chrome and cells, then the
-///    unavailable-image text over its images. They sit in the pane area with
-///    no letterbox offset. While `viewer_chrome.is_pane_placement_visible` is
-///    `true`, only the placement source pane is drawn, and only while the
-///    active tab holds no slot of it. None is drawn while every pane of the
-///    active tab is suppressed.
+///    cell drawn before them: each one's titlebar strip and layout tree, then
+///    the unavailable-image text over the images of its panes. They sit in
+///    the pane area with no letterbox offset. While
+///    `viewer_chrome.is_pane_placement_visible` is `true`, only the placement
+///    source pane is drawn, and only while the active tab holds no slot of
+///    it. None is drawn while every pane of the active tab is suppressed.
 /// 9. Draws the viewer's notification center, open or sliding, over every
 ///    cell drawn before it, on the cells of `frame_geometry`'s
 ///    `notification_center_layout` that its slide draws, while
@@ -357,12 +364,12 @@ pub fn render_frame(
     clear_drawn_rows(viewport_area, drawn_rows, screen_buffer);
 
     // No room for any pane: the whole frame becomes the too-small overlay.
-    if render_snapshot
+    let active_layout_area = &render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .is_every_pane_suppressed
-    {
-        draw_too_small_overlay(viewport_area, screen_buffer);
+        .layout_area;
+    if active_layout_area.is_every_pane_suppressed {
+        draw_too_small_overlay(viewport_area, drawn_rows, screen_buffer);
         return;
     }
 
@@ -373,21 +380,31 @@ pub fn render_frame(
     let effective_layout_rect = frame_geometry.effective_layout_rect;
     let layout_origin = frame_geometry.get_layout_origin();
     let placed_floating_panes = &frame_geometry.placed_floating_panes;
+    let placed_active_layout_area = PlacedLayoutArea {
+        layout_area: active_layout_area,
+        layout_area_surface: LayoutAreaSurface::ActiveTab,
+        layout_origin,
+        content_clip_area: screen_buffer.area,
+    };
 
     draw_panes(
         render_snapshot,
-        theme,
+        placed_active_layout_area,
         viewer_chrome,
         placement_target,
-        layout_origin,
+        theme,
         drawn_rows,
         screen_buffer,
     );
-    draw_pane_contents(render_snapshot, layout_origin, drawn_rows, screen_buffer);
-    draw_placement_hover_tints(
+    draw_pane_contents(
         render_snapshot,
+        placed_active_layout_area,
+        drawn_rows,
+        screen_buffer,
+    );
+    draw_placement_hover_tints(
+        placed_active_layout_area,
         viewer_chrome,
-        layout_origin,
         drawn_rows,
         screen_buffer,
     );
@@ -400,10 +417,10 @@ pub fn render_frame(
     draw_image_placeholders(&placeholder_rects, screen_buffer);
     draw_stack_headers(
         render_snapshot,
-        theme,
+        placed_active_layout_area,
         viewer_chrome,
         placement_target,
-        layout_origin,
+        theme,
         drawn_rows,
         screen_buffer,
     );
@@ -571,14 +588,15 @@ pub fn list_changed_screen_rows(
         let pane_id = next_pane_snapshot.pane_id;
         let tiled_content_area = session_snapshot
             .active_tab_snapshot
+            .layout_area
             .find_visible_pane_slot(pane_id)
             .and_then(|pane_slot| pane_slot.content_rect)
             .map(|content_rect| place_cell_rect(content_rect, layout_origin));
         let floating_content_area = next_frame_geometry
             .placed_floating_panes
             .iter()
-            .find(|placed_floating_pane| placed_floating_pane.floating_pane_slot.pane_id == pane_id)
-            .map(|placed_floating_pane| placed_floating_pane.visible_content_area);
+            .find_map(|placed_floating_pane| placed_floating_pane.find_pane_content_areas(pane_id))
+            .map(|(_, visible_content_area)| visible_content_area);
         for content_area in [tiled_content_area, floating_content_area]
             .into_iter()
             .flatten()
@@ -685,20 +703,20 @@ fn clear_drawn_rows(
 /// the layout with; a floating pane's takes none.
 ///
 /// Returns `None` when the client has no focused pane; that pane is neither a
-/// floating pane this viewer draws nor a placed slot of the active tab; it has
-/// no content snapshot; it is not visible or has no content area (suppressed,
-/// hidden, a collapsed stack member, or a slot of two or fewer columns or rows,
-/// whose content rect holds no cells); it has no terminal grid this frame; its
-/// view is scrolled back into history; the application has hidden its cursor;
-/// the cursor cell of a floating pane lies outside the pane area; a floating
-/// pane drawn above the focused pane covers the cursor cell; or the viewer's
-/// open floating pane tray, its open notification center or its toast covers
-/// it.
+/// visible slot of a floating pane this viewer draws nor a visible slot of the
+/// active tab; it has no content snapshot; it is not visible or has no
+/// content area (suppressed, hidden, a collapsed stack member, or a slot of
+/// two or fewer columns or rows, whose content rect holds no cells); it has
+/// no terminal grid this frame; its view is scrolled back into history; the
+/// application has hidden its cursor; the cursor cell of a floating pane lies
+/// outside the pane area; a floating pane drawn above the focused pane covers
+/// the cursor cell; or the viewer's open floating pane tray, its open
+/// notification center or its toast covers it.
 ///
 /// A `120x40` viewport with a 20-column left region places the same pane cursor
-/// 20 columns farther right than a whole-area layout. A focused floating pane
-/// whose content starts at `(10, 3)` in a pane area at `(0, 1)` puts a cursor
-/// at row `2`, column `5` at `(15, 6)`.
+/// 20 columns farther right than a whole-area layout. A focused pane of a
+/// floating pane whose content starts at `(10, 3)` in a pane area at `(0, 1)`
+/// puts a cursor at row `2`, column `5` at `(15, 6)`.
 pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Position> {
     let render_snapshot = frame_geometry.render_snapshot;
     let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id?;
@@ -706,39 +724,37 @@ pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Positio
 
     // The content area the cursor sits in, the part of it that is drawn, and
     // the floating panes drawn above it.
-    let focused_floating_pane_index =
-        placed_floating_panes
-            .iter()
-            .position(|placed_floating_pane| {
-                placed_floating_pane.floating_pane_slot.pane_id == focused_pane_id
-            });
-    let (content_area, visible_content_area, covering_floating_panes) =
-        match focused_floating_pane_index {
-            Some(floating_pane_index) => {
-                let placed_floating_pane = &placed_floating_panes[floating_pane_index];
-                (
-                    placed_floating_pane.content_area,
-                    placed_floating_pane.visible_content_area,
-                    &placed_floating_panes[floating_pane_index + 1..],
-                )
-            }
-            None => {
-                let pane_slot = render_snapshot
-                    .session_snapshot
-                    .active_tab_snapshot
-                    .find_visible_pane_slot(focused_pane_id)?;
-                // `content_rect` is in tab-layout space; `place_cell_rect`
-                // shifts it by the same letterbox offset `render_frame`
-                // centers with.
-                let placed_content_rect =
-                    place_cell_rect(pane_slot.content_rect?, frame_geometry.get_layout_origin());
-                (
-                    placed_content_rect,
-                    placed_content_rect,
-                    &placed_floating_panes[..],
-                )
-            }
-        };
+    let focused_floating_pane = placed_floating_panes.iter().enumerate().find_map(
+        |(floating_pane_index, placed_floating_pane)| {
+            let content_areas = placed_floating_pane.find_pane_content_areas(focused_pane_id)?;
+            Some((floating_pane_index, content_areas))
+        },
+    );
+    let (content_area, visible_content_area, covering_floating_panes) = match focused_floating_pane
+    {
+        Some((floating_pane_index, (content_area, visible_content_area))) => (
+            content_area,
+            visible_content_area,
+            &placed_floating_panes[floating_pane_index + 1..],
+        ),
+        None => {
+            let pane_slot = render_snapshot
+                .session_snapshot
+                .active_tab_snapshot
+                .layout_area
+                .find_visible_pane_slot(focused_pane_id)?;
+            // `content_rect` is in tab-layout space; `place_cell_rect`
+            // shifts it by the same letterbox offset `render_frame`
+            // centers with.
+            let placed_content_rect =
+                place_cell_rect(pane_slot.content_rect?, frame_geometry.get_layout_origin());
+            (
+                placed_content_rect,
+                placed_content_rect,
+                &placed_floating_panes[..],
+            )
+        }
+    };
     if content_area.width == 0 || content_area.height == 0 {
         return None;
     }
@@ -804,49 +820,121 @@ pub fn get_cursor_style(render_snapshot: &RenderSnapshot) -> Option<CursorStyle>
     Some(cursor_style)
 }
 
-/// Draw a bordered box for every visible pane in the active tab, coloring the
-/// focused pane's border (and an unfocused hovered pane's), writing its title
-/// into the top border, and drawing its scroll position when it is scrolled back.
+/// The surface a layout area is drawn on. It decides which panes take the
+/// placement hover style and tint, and whether a pane draws its placement
+/// handle `⠿⠿⠿`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LayoutAreaSurface {
+    /// The active tab's tiled layer.
+    ActiveTab,
+    /// The layout tree of a floating pane. No pane of it draws a placement
+    /// handle.
+    FloatingPane {
+        /// Whether `viewer_chrome.placement_handle_hover` is
+        /// [`FloatingHandle`](PlacementHandleHover::FloatingHandle) of the
+        /// floating pane with its pin state.
+        is_grab_handle_hovered: bool,
+    },
+}
+
+impl LayoutAreaSurface {
+    /// Whether the pane `pane_id` of the tab `displayed_tab_id` takes the
+    /// placement hover style as a placement candidate: on the active tab,
+    /// while `placement_target` names it ([`is_placement_target_pane`]); in a
+    /// floating pane, while the pointer rests on the grab handle.
+    fn is_placement_candidate(
+        self,
+        pane_id: PaneId,
+        displayed_tab_id: TabId,
+        placement_target: Option<&TiledPlacementTarget>,
+    ) -> bool {
+        match self {
+            LayoutAreaSurface::ActiveTab => {
+                is_placement_target_pane(pane_id, displayed_tab_id, placement_target)
+            }
+            LayoutAreaSurface::FloatingPane {
+                is_grab_handle_hovered,
+            } => is_grab_handle_hovered,
+        }
+    }
+
+    /// Whether the pointer rests on the handle that moves the pane `pane_id`:
+    /// on the active tab, while `viewer_chrome.placement_handle_hover` is
+    /// [`TiledHandle`](PlacementHandleHover::TiledHandle) of `pane_id`; in a
+    /// floating pane, while it rests on the grab handle.
+    fn is_placement_handle_hovered(self, pane_id: PaneId, viewer_chrome: ViewerChrome) -> bool {
+        match self {
+            LayoutAreaSurface::ActiveTab => {
+                viewer_chrome.placement_handle_hover
+                    == Some(PlacementHandleHover::TiledHandle { pane_id })
+            }
+            LayoutAreaSurface::FloatingPane {
+                is_grab_handle_hovered,
+            } => is_grab_handle_hovered,
+        }
+    }
+}
+
+/// One layout area placed in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PlacedLayoutArea<'a> {
+    /// The tree to draw.
+    pub(super) layout_area: &'a LayoutAreaSnapshot,
+    /// The surface the tree is drawn on.
+    pub(super) layout_area_surface: LayoutAreaSurface,
+    /// The buffer cell where the layout area's `(0, 0)` cell lands.
+    pub(super) layout_origin: Point,
+    /// The cells the pane contents and their tints may cover. The borders,
+    /// the titles and the stack headers are cut to the buffer only.
+    pub(super) content_clip_area: RatatuiRect,
+}
+
+/// Draw a bordered box for every visible pane of `placed_layout_area`,
+/// coloring the focused pane's border (and an unfocused hovered pane's),
+/// writing its label into the top border ([`draw_pane_label`]), and drawing
+/// its scroll position when it is scrolled back.
 ///
 /// Each border takes [`compute_pane_border_style`], with the placement hover
-/// style for every pane `placement_target` names as a placement target and for
-/// the pane whose `viewer_chrome.placement_handle_hover` is
-/// [`TiledHandle`](PlacementHandleHover::TiledHandle). The title ` <title> ` is
-/// cut to the label cells [`compute_tiled_pane_top_border`] gives. The top
-/// border of the pane that shows its placement handle
-/// ([`is_placement_handle_shown`]) draws the handle `⠿⠿⠿` on the handle cells
-/// that function gives, so `user@host` reads `┌⠿⠿⠿ user@host ─┐`. While
-/// `viewer_chrome.is_pane_placement_visible` is `true`, the pointer hover color
-/// is not drawn: hovering `pane-123` does not change its border color.
-/// `layout_origin` shifts each pane into the centered content rect. A
-/// box that covers no row `drawn_rows` draws is not drawn. The title, the
-/// handle and the scroll position are drawn only when `drawn_rows` draws
-/// their row.
+/// style for every pane that is a placement candidate
+/// ([`LayoutAreaSurface::is_placement_candidate`]) or whose placement handle
+/// the pointer rests on ([`LayoutAreaSurface::is_placement_handle_hovered`]).
+/// The label is cut to the label cells [`compute_tiled_pane_top_border`]
+/// gives. On the active tab, the top border of the pane that shows its
+/// placement handle ([`is_placement_handle_shown`]) draws the handle `⠿⠿⠿` on
+/// the handle cells that function gives, so `user@host` reads
+/// `┌⠿⠿⠿ user@host ─┐`. While `viewer_chrome.is_pane_placement_visible` is
+/// `true`, the pointer hover color is not drawn: hovering `pane-123` does not
+/// change its border color. `layout_origin` shifts each pane into the frame. A
+/// box that covers no row `drawn_rows` draws is not drawn. The label, the
+/// handle and the scroll position are drawn only when `drawn_rows` draws their
+/// row.
 fn draw_panes(
     render_snapshot: &RenderSnapshot,
-    theme: &Theme,
+    placed_layout_area: PlacedLayoutArea<'_>,
     viewer_chrome: ViewerChrome,
     placement_target: Option<&TiledPlacementTarget>,
-    layout_origin: Point,
+    theme: &Theme,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
-    for pane_slot in &render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-    {
+    let PlacedLayoutArea {
+        layout_area,
+        layout_area_surface,
+        layout_origin,
+        content_clip_area: _,
+    } = placed_layout_area;
+    for pane_slot in &layout_area.pane_slots {
         let pane_rect = place_cell_rect(pane_slot.outer_rect, layout_origin);
         if !pane_slot.is_visible || !drawn_rows.is_area_drawn(pane_rect) {
             continue;
         }
-        let is_placement_hovered =
-            is_placement_target_pane(pane_slot.pane_id, displayed_tab_id, placement_target)
-                || viewer_chrome.placement_handle_hover
-                    == Some(PlacementHandleHover::TiledHandle {
-                        pane_id: pane_slot.pane_id,
-                    });
+        let is_placement_hovered = layout_area_surface.is_placement_candidate(
+            pane_slot.pane_id,
+            displayed_tab_id,
+            placement_target,
+        ) || layout_area_surface
+            .is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome);
         let border_style = compute_pane_border_style(
             render_snapshot,
             pane_slot.pane_id,
@@ -858,27 +946,27 @@ fn draw_panes(
 
         let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
 
-        let pane_label = pane_snapshot
-            .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
-            .unwrap_or("");
         let top_border = compute_tiled_pane_top_border(pane_slot.outer_rect);
         let is_top_border_drawn = drawn_rows.is_row_drawn(pane_rect.y);
-        if !pane_label.is_empty() && is_top_border_drawn {
+        if is_top_border_drawn {
             if let Some(title_rect) = top_border.title_rect {
-                let title_area = place_cell_rect(title_rect, layout_origin);
-                let pane_label_line =
-                    Line::from(Span::styled(format!(" {pane_label} "), border_style));
-                set_line_clipped(
+                let pane_title = pane_snapshot
+                    .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
+                    .unwrap_or("");
+                draw_pane_label(
+                    place_cell_rect(title_rect, layout_origin),
+                    pane_title,
+                    layout_area.is_pane_zoomed(pane_slot.pane_id),
+                    border_style,
                     screen_buffer,
-                    title_area.x,
-                    title_area.y,
-                    &pane_label_line,
-                    title_area.width,
                 );
             }
         }
 
-        if is_top_border_drawn && is_placement_handle_shown(pane_slot.pane_id, viewer_chrome) {
+        if is_top_border_drawn
+            && layout_area_surface == LayoutAreaSurface::ActiveTab
+            && is_placement_handle_shown(pane_slot.pane_id, viewer_chrome)
+        {
             if let Some(handle_rect) = top_border.placement_handle_rect {
                 let handle_area = place_cell_rect(handle_rect, layout_origin);
                 screen_buffer.set_string(
@@ -895,6 +983,50 @@ fn draw_panes(
         {
             draw_pane_scroll_position(pane_snapshot, pane_rect, border_style, screen_buffer);
         }
+    }
+}
+
+/// Write a pane's label into `label_area`, the one-row label cells of its top
+/// border, in `border_style`: ` <title> `, or ` <title> [fullscreen] ` while
+/// `is_zoomed` is `true` and `label_area` holds the 14 cells of
+/// ` [fullscreen] `. The title takes the cells the tag leaves and is cut
+/// before the tag. An empty title writes nothing, or ` [fullscreen] ` while
+/// the tag shows.
+///
+/// Example: in 20 cells a zoomed `vim` reads ` vim [fullscreen] `, in 16 cells
+/// ` v [fullscreen] `, and in 13 cells ` vim `.
+fn draw_pane_label(
+    label_area: RatatuiRect,
+    pane_title: &str,
+    is_zoomed: bool,
+    border_style: Style,
+    screen_buffer: &mut Buffer,
+) {
+    let fullscreen_tag_width = get_text_width(FULLSCREEN_TAG_TEXT);
+    let is_fullscreen_tag_shown = is_zoomed && label_area.width >= fullscreen_tag_width;
+    let (title_text, title_width) = match (pane_title.is_empty(), is_fullscreen_tag_shown) {
+        (true, _) => (String::new(), 0),
+        (false, true) => (
+            format!(" {pane_title}"),
+            label_area.width - fullscreen_tag_width,
+        ),
+        (false, false) => (format!(" {pane_title} "), label_area.width),
+    };
+    let title_end_column = set_line_clipped(
+        screen_buffer,
+        label_area.x,
+        label_area.y,
+        &Line::from(Span::styled(title_text, border_style)),
+        title_width,
+    );
+    if is_fullscreen_tag_shown {
+        set_line_clipped(
+            screen_buffer,
+            title_end_column,
+            label_area.y,
+            &Line::from(Span::styled(FULLSCREEN_TAG_TEXT, border_style)),
+            fullscreen_tag_width,
+        );
     }
 }
 
@@ -1043,26 +1175,20 @@ pub fn is_placement_target_pane(
     }
 }
 
-/// Tint the content of the tiled pane whose
-/// `viewer_chrome.placement_handle_hover` is
-/// [`TiledHandle`](PlacementHandleHover::TiledHandle), on each row
-/// `drawn_rows` draws.
+/// Tint the content of each visible pane of `placed_layout_area` whose
+/// placement handle the pointer rests on
+/// ([`LayoutAreaSurface::is_placement_handle_hovered`]), cut to its
+/// `content_clip_area`, on each row `drawn_rows` draws.
 fn draw_placement_hover_tints(
-    render_snapshot: &RenderSnapshot,
+    placed_layout_area: PlacedLayoutArea<'_>,
     viewer_chrome: ViewerChrome,
-    layout_origin: Point,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
-    for pane_slot in &render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-    {
-        let is_handle_hovered = viewer_chrome.placement_handle_hover
-            == Some(PlacementHandleHover::TiledHandle {
-                pane_id: pane_slot.pane_id,
-            });
+    for pane_slot in &placed_layout_area.layout_area.pane_slots {
+        let is_handle_hovered = placed_layout_area
+            .layout_area_surface
+            .is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome);
         if !pane_slot.is_visible || !is_handle_hovered {
             continue;
         }
@@ -1070,7 +1196,8 @@ fn draw_placement_hover_tints(
             continue;
         };
         draw_placement_hover_tint(
-            place_cell_rect(content_rect, layout_origin),
+            place_cell_rect(content_rect, placed_layout_area.layout_origin)
+                .intersection(placed_layout_area.content_clip_area),
             drawn_rows,
             screen_buffer,
         );
@@ -1094,52 +1221,64 @@ fn draw_placement_hover_tint(
 }
 
 /// Draw the "terminal too small" overlay: one centered, bold line telling the
-/// user to enlarge the window, shown when the tab has no room for any pane.
+/// user to enlarge the window, shown when a tab or a floating pane has no room
+/// for any pane.
 ///
-/// Centered on the middle row of `viewport_area` and horizontally within it. A
-/// message wider than `viewport_area` is clipped at its right edge.
-fn draw_too_small_overlay(viewport_area: RatatuiRect, screen_buffer: &mut Buffer) {
+/// Centered on the middle row of `overlay_area` and horizontally within it. A
+/// message wider than `overlay_area` is clipped at its right edge. An
+/// `overlay_area` with no row, or a middle row `drawn_rows` does not draw,
+/// writes nothing.
+fn draw_too_small_overlay(
+    overlay_area: RatatuiRect,
+    drawn_rows: DrawnRows<'_>,
+    screen_buffer: &mut Buffer,
+) {
+    let message_row = overlay_area.y + overlay_area.height / 2;
+    if overlay_area.height == 0 || !drawn_rows.is_row_drawn(message_row) {
+        return;
+    }
     let too_small_message = Line::from(Span::styled(
         "Terminal too small — enlarge window",
         compute_too_small_overlay_style(),
     ));
     let too_small_message_width = get_line_width(&too_small_message);
     let too_small_message_start_column =
-        viewport_area.x + viewport_area.width.saturating_sub(too_small_message_width) / 2;
-    let message_row = viewport_area.y + viewport_area.height / 2;
+        overlay_area.x + overlay_area.width.saturating_sub(too_small_message_width) / 2;
     set_line_clipped(
         screen_buffer,
         too_small_message_start_column,
         message_row,
         &too_small_message,
-        viewport_area
+        overlay_area
             .right()
             .saturating_sub(too_small_message_start_column),
     );
 }
 
-/// Paint each visible terminal pane's cells into its content rect.
+/// Paint the cells of each visible terminal pane of `placed_layout_area` into
+/// its content rect, cut to its `content_clip_area`.
 ///
 /// For every visible pane slot that has a content rect and a terminal grid,
-/// draws the grid into that rect. Panes with no grid or no content rect
-/// (suppressed, hidden, or a collapsed stack member) draw nothing.
-/// `layout_origin` shifts each content rect into the centered content area.
-/// Only the rows `drawn_rows` draws are drawn.
+/// draws the grid into that rect ([`list_visible_layout_area_panes`]). Panes
+/// with no grid or no content rect (suppressed, hidden, or a collapsed stack
+/// member) draw nothing. Only the rows `drawn_rows` draws are drawn.
 fn draw_pane_contents(
     render_snapshot: &RenderSnapshot,
-    layout_origin: Point,
+    placed_layout_area: PlacedLayoutArea<'_>,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
-    for (pane_snapshot, placed_content_rect) in
-        list_visible_tiled_panes(render_snapshot, layout_origin)
-    {
+    for (pane_snapshot, placed_content_rect) in list_visible_layout_area_panes(
+        render_snapshot,
+        placed_layout_area.layout_area,
+        placed_layout_area.layout_origin,
+    ) {
         let Some(terminal_grid_view) = &pane_snapshot.terminal_grid_view else {
             continue;
         };
         draw_grid(
             terminal_grid_view,
-            placed_content_rect,
+            placed_content_rect.intersection(placed_layout_area.content_clip_area),
             pane_snapshot.is_reverse_video,
             pane_snapshot.selection_spans.as_ref(),
             drawn_rows,
@@ -1333,28 +1472,27 @@ fn get_cell_color(cell_color: CellColor) -> Color {
     }
 }
 
-/// Draw one header strip for each collapsed stack member: a collapse arrow and
-/// the pane title on the left, and a `[position/total]` indicator on the right.
-/// The strip of `viewer_chrome.placement_source_pane_id` takes the focus color, and
-/// a strip that `placement_target` names takes the placement hover color.
-/// `layout_origin` shifts each strip into the centered content rect. A strip
-/// on no row `drawn_rows` draws is not drawn.
+/// Draw one header strip for each collapsed stack member of
+/// `placed_layout_area`: a collapse arrow and the pane title on the left, and
+/// a `[position/total]` indicator on the right. The strip of
+/// `viewer_chrome.placement_source_pane_id` takes the focus color, and the
+/// strip of a placement candidate
+/// ([`LayoutAreaSurface::is_placement_candidate`]) takes the placement hover
+/// color. `layout_origin` shifts each strip into the frame. A strip on no row
+/// `drawn_rows` draws is not drawn.
 fn draw_stack_headers(
     render_snapshot: &RenderSnapshot,
-    theme: &Theme,
+    placed_layout_area: PlacedLayoutArea<'_>,
     viewer_chrome: ViewerChrome,
     placement_target: Option<&TiledPlacementTarget>,
-    layout_origin: Point,
+    theme: &Theme,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
     let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
-    for stack_header in &render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .stack_headers
-    {
-        let header_rect = place_cell_rect(stack_header.header_rect, layout_origin);
+    for stack_header in &placed_layout_area.layout_area.stack_headers {
+        let header_rect =
+            place_cell_rect(stack_header.header_rect, placed_layout_area.layout_origin);
         if header_rect.width == 0
             || header_rect.height == 0
             || !drawn_rows.is_area_drawn(header_rect)
@@ -1362,16 +1500,17 @@ fn draw_stack_headers(
             continue;
         }
 
-        let stack_header_style = if Some(stack_header.pane_id)
-            == viewer_chrome.placement_source_pane_id
-        {
-            compute_focused_border_style(theme)
-        } else if is_placement_target_pane(stack_header.pane_id, displayed_tab_id, placement_target)
-        {
-            compute_placement_hover_border_style(theme)
-        } else {
-            compute_stack_header_style(theme)
-        };
+        let stack_header_style =
+            if Some(stack_header.pane_id) == viewer_chrome.placement_source_pane_id {
+                compute_focused_border_style(theme)
+            } else if placed_layout_area
+                .layout_area_surface
+                .is_placement_candidate(stack_header.pane_id, displayed_tab_id, placement_target)
+            {
+                compute_placement_hover_border_style(theme)
+            } else {
+                compute_stack_header_style(theme)
+            };
 
         // Fill the whole row first: the gap between the pane label and indicator
         // carries the strip background too.
@@ -1499,6 +1638,19 @@ fn get_area_origin(screen_area: RatatuiRect) -> Point {
     }
 }
 
+/// `screen_area` as a koshi-core rect with the same cells: the inverse of
+/// [`place_screen_rect`]. An area at `column: 20, row: 1`, `10x3` gives the
+/// rect at `(20, 1)` `10x3`.
+fn get_area_rect(screen_area: RatatuiRect) -> Rect {
+    Rect::from_origin_and_size(
+        get_area_origin(screen_area),
+        Size {
+            column_count: screen_area.width,
+            row_count: screen_area.height,
+        },
+    )
+}
+
 /// Place a koshi-core cell rect into a ratatui area by shifting its origin.
 ///
 /// A region solution starts at `(0, 0)`; a ratatui frame area can start elsewhere.
@@ -1517,17 +1669,17 @@ pub(crate) fn place_screen_rect(screen_rect: Rect) -> RatatuiRect {
     place_cell_rect(screen_rect, Point { column: 0, row: 0 })
 }
 
-/// Each visible tiled pane of the active tab that has a content rect and a pane
-/// snapshot, in pane slot order: its snapshot, and its content rect placed at
-/// `layout_origin` by [`place_cell_rect`]. A hidden pane, a pane with no
-/// content rect, and a pane with no snapshot are left out.
-pub(crate) fn list_visible_tiled_panes(
-    render_snapshot: &RenderSnapshot,
+/// Each visible pane of `layout_area` that has a content rect and a pane
+/// snapshot in `render_snapshot`, in pane slot order: its snapshot, and its
+/// content rect placed at `layout_origin` by [`place_cell_rect`]. A hidden
+/// pane, a pane with no content rect, and a pane with no snapshot are left
+/// out.
+pub(crate) fn list_visible_layout_area_panes<'a>(
+    render_snapshot: &'a RenderSnapshot,
+    layout_area: &'a LayoutAreaSnapshot,
     layout_origin: Point,
-) -> impl Iterator<Item = (&PaneSnapshot, RatatuiRect)> + '_ {
-    render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
+) -> impl Iterator<Item = (&'a PaneSnapshot, RatatuiRect)> + 'a {
+    layout_area
         .pane_slots
         .iter()
         .filter(|pane_slot| pane_slot.is_visible)

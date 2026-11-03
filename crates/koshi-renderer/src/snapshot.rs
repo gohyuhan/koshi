@@ -29,10 +29,12 @@
 //! floating pane it moves. The session stores none of them.
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ActionReference;
+use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::event::{
     HeldCommandRejection, PanePlacementCommitted, RejectReason, SubscriberLagged,
 };
@@ -45,7 +47,7 @@ use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
 use koshi_layout::regions::SolvedRegions;
-use koshi_layout::solver::{LayoutSolve, PaneSizing, StackHeader};
+use koshi_layout::solver::{LayoutSolve, PaneSizing, StackHeader, PANE_BORDER_SIZE};
 use koshi_layout::tree::LayoutNode;
 use koshi_terminal::graphics::{
     ImageAction, ImageRecord, MAX_IMAGE_BYTE_COUNT, MAX_IMAGE_PIXEL_COUNT,
@@ -66,17 +68,17 @@ pub use koshi_config::hints::{HintBinding, KeymapHints};
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
 /// The renderer joins [`pane_snapshots`](Self::pane_snapshots) to the
-/// [`PaneSlot`]s in [`session_snapshot`](Self::session_snapshot)'s active tab
-/// and to its [`FloatingPaneSlot`]s by [`PaneId`]: a slot says where a pane
-/// sits, and its [`PaneSnapshot`] says what is inside it.
+/// [`PaneSlot`]s of [`session_snapshot`](Self::session_snapshot)'s active tab
+/// and of each of its [`FloatingPaneSlot`]s by [`PaneId`]: a slot says where a
+/// pane sits, and its [`PaneSnapshot`] says what is inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSnapshot {
     /// The session being viewed: its identity, active tab, tab list, and the
     /// floating panes the viewing client shows.
     pub session_snapshot: SessionSnapshot,
     /// Per-pane content (grid, cursor, title): one entry per pane slot in the
-    /// active tab and one per floating pane slot, matched to its slot by
-    /// [`PaneId`].
+    /// active tab and one per pane slot of each floating pane slot, matched to
+    /// its slot by [`PaneId`].
     pub pane_snapshots: Vec<PaneSnapshot>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: ClientSnapshot,
@@ -740,10 +742,11 @@ impl<'a> FrameLayout<'a> {
 
     /// The floating panes this viewer draws in this frame, back to front:
     /// every slot in the session's
-    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots). The
-    /// unpinned slot that `viewer_chrome.floating_pane_move_draft` names starts
-    /// at the draft's top-left cell, then moves left and up until it lies
-    /// inside this frame's pane area ([`Rect::compute_moved_inside`]). While
+    /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots), each at
+    /// its own outer rect. The unpinned slot whose input pane
+    /// `viewer_chrome.floating_pane_move_draft` names is drawn at the draft's
+    /// top-left cell, moved left and up until it lies inside this frame's pane
+    /// area ([`Rect::compute_moved_inside`]). While
     /// `viewer_chrome.is_pane_placement_visible` is `true`, the only slot is
     /// that of `viewer_chrome.placement_source_pane_id`, and only while the
     /// active tab holds no slot of that pane. None while the active tab's
@@ -755,10 +758,11 @@ impl<'a> FrameLayout<'a> {
     /// in a `120x38` pane area draws at `(48, 16)`.
     pub fn list_drawn_floating_pane_slots(
         &self,
-    ) -> impl DoubleEndedIterator<Item = FloatingPaneSlot> + 'a {
+    ) -> impl DoubleEndedIterator<Item = DrawnFloatingPaneSlot<'a>> + 'a {
         let floating_pane_slots: &'a [FloatingPaneSlot] = if self
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
         {
             &[]
@@ -773,6 +777,7 @@ impl<'a> FrameLayout<'a> {
                     && !frame_layout
                         .session_snapshot
                         .active_tab_snapshot
+                        .layout_area
                         .pane_slots
                         .iter()
                         .any(|pane_slot| pane_slot.pane_id == floating_pane_slot.pane_id))
@@ -781,7 +786,7 @@ impl<'a> FrameLayout<'a> {
             .iter()
             .filter(is_drawn_floating_pane_slot)
             .map(move |floating_pane_slot| {
-                match frame_layout.viewer_chrome.floating_pane_move_draft {
+                let outer_rect = match frame_layout.viewer_chrome.floating_pane_move_draft {
                     Some(floating_pane_move_draft)
                         if floating_pane_move_draft.pane_id == floating_pane_slot.pane_id
                             && !floating_pane_slot.is_pinned =>
@@ -790,31 +795,37 @@ impl<'a> FrameLayout<'a> {
                             frame_layout,
                             compute_viewport_area(frame_layout),
                         );
-                        FloatingPaneSlot {
-                            outer_rect: Rect::from_origin_and_size(
-                                floating_pane_move_draft.top_left_cell,
-                                floating_pane_slot.outer_rect.size,
-                            )
-                            .compute_moved_inside(Size {
-                                column_count: frame_pane_area.width,
-                                row_count: frame_pane_area.height,
-                            }),
-                            ..*floating_pane_slot
-                        }
+                        Rect::from_origin_and_size(
+                            floating_pane_move_draft.top_left_cell,
+                            floating_pane_slot.outer_rect.size,
+                        )
+                        .compute_moved_inside(Size {
+                            column_count: frame_pane_area.width,
+                            row_count: frame_pane_area.height,
+                        })
                     }
-                    _ => *floating_pane_slot,
+                    _ => floating_pane_slot.outer_rect,
+                };
+                DrawnFloatingPaneSlot {
+                    floating_pane_slot,
+                    outer_rect,
                 }
             })
     }
 
-    /// The slot of the floating pane `pane_id` as this frame draws it
-    /// ([`list_drawn_floating_pane_slots`](Self::list_drawn_floating_pane_slots)),
+    /// The floating pane whose input pane is `pane_id`, as this frame draws
+    /// it ([`list_drawn_floating_pane_slots`](Self::list_drawn_floating_pane_slots)),
     /// at its move draft's cell while one names it, or `None` when the frame
     /// draws no such floating pane.
     #[must_use]
-    pub fn find_drawn_floating_pane_slot(&self, pane_id: PaneId) -> Option<FloatingPaneSlot> {
+    pub fn find_drawn_floating_pane_slot(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<DrawnFloatingPaneSlot<'a>> {
         self.list_drawn_floating_pane_slots()
-            .find(|floating_pane_slot| floating_pane_slot.pane_id == pane_id)
+            .find(|drawn_floating_pane_slot| {
+                drawn_floating_pane_slot.floating_pane_slot.pane_id == pane_id
+            })
     }
 }
 
@@ -1024,9 +1035,11 @@ impl SessionSnapshot {
 }
 
 /// One floating pane of the session, shown or minimized for the viewing
-/// client. The frame carries each pane's title once: in the pane's
-/// [`PaneSnapshot`] while the client shows the pane, and here while the
-/// client minimized it.
+/// client, named by the pane that takes the client's input inside it. The
+/// frame carries the input pane's title and the floating pane's pane count
+/// once each: in the input pane's [`PaneSnapshot`] and the floating pane's
+/// [`FloatingPaneSlot`] while the client shows it, and here while the client
+/// minimized it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloatingPane {
     /// The viewing client shows the pane. The frame holds the pane's slot in
@@ -1047,6 +1060,8 @@ pub enum FloatingPane {
         /// [`PaneSnapshot::pane_title`]. `None` when the pane has reported
         /// neither a working directory nor a title.
         pane_title: Option<String>,
+        /// The panes the floating pane holds.
+        pane_count: NonZeroUsize,
     },
 }
 
@@ -1088,41 +1103,105 @@ pub struct TabSnapshot {
     pub tab_id: TabId,
     /// The tab's display name.
     pub tab_name: String,
+    /// The tab's solved layout. Its
+    /// [`solved_size`](LayoutAreaSnapshot::solved_size) is the per-axis
+    /// minimum pane area across the clients viewing this tab, or `0x0` while
+    /// each of them reports
+    /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving). A
+    /// client whose own [`viewport_size`](ClientSnapshot::viewport_size) is
+    /// larger draws this layout centered and letterboxes the surrounding
+    /// margin; a client at exactly this size draws it edge to edge. While
+    /// every pane is suppressed, the renderer fills the whole frame with the
+    /// "terminal too small" overlay.
+    pub layout_area: LayoutAreaSnapshot,
+}
+
+/// One layout tree solved for the viewing client into placed pane slots: a
+/// tab's, or a floating pane's below its titlebar strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutAreaSnapshot {
+    /// The size the tree was solved for. The [`pane_slots`](Self::pane_slots)
+    /// and [`stack_headers`](Self::stack_headers) rects live in this space
+    /// with origin `(0, 0)`.
+    pub solved_size: Size,
     /// The solved layout: one [`PaneSlot`] per pane, giving outer and content
     /// rects and coarse status.
     pub pane_slots: Vec<PaneSlot>,
-    /// The size the tab's layout was solved for: the per-axis minimum pane
-    /// area across the clients viewing this tab, or `0x0` while each of them
-    /// reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving).
-    /// The [`pane_slots`](Self::pane_slots) rects live in this space with
-    /// origin `(0, 0)`. A client whose own
-    /// [`viewport_size`](ClientSnapshot::viewport_size)
-    /// is larger draws this layout centered and letterboxes the surrounding
-    /// margin; a client at exactly this size draws it edge to edge.
-    pub tab_size: Size,
     /// Header strips for stacked panes (title bars for collapsed stack members).
     pub stack_headers: Vec<StackHeader>,
-    /// Whether **this snapshot's client** sees the tab tiled, or sees a single
-    /// pane zoomed to fill it. Zoom is per-client, so another client viewing the
-    /// same tab in the same frame can carry a different value here.
+    /// Whether **this snapshot's client** sees the tree tiled, or sees a single
+    /// pane zoomed to fill it. Zoom is per client: another client viewing the
+    /// same tree in the same frame can carry a different value here.
     pub layout_mode: LayoutMode,
-    /// True when every pane is suppressed because the tab has no room to draw —
-    /// the renderer fills the whole frame with the "terminal too small" overlay.
+    /// True when the tree has no room to draw and every pane is suppressed.
     pub is_every_pane_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
-    /// vertical split, in the [`tab_size`](Self::tab_size) space.
+    /// vertical split, in the [`solved_size`](Self::solved_size) space.
     pub gap_cell_count: u16,
 }
 
-impl TabSnapshot {
+impl LayoutAreaSnapshot {
+    /// The snapshot of `layout_solve`, a solve at `solved_size` that the
+    /// viewing client draws in `layout_mode` with `gap_cell_count` between
+    /// split children: its stack headers, its `is_every_pane_suppressed`, and
+    /// one [`PaneSlot`] per leaf in solve order, with the outer rect from the
+    /// solve, the content rect from [`list_content_rects`], and
+    /// `is_suppressed` for each pane in
+    /// [`suppressed_pane_ids`](LayoutSolve::suppressed_pane_ids).
+    #[must_use]
+    pub fn from_layout_solve(
+        layout_solve: &LayoutSolve,
+        solved_size: Size,
+        layout_mode: LayoutMode,
+        gap_cell_count: u16,
+    ) -> Self {
+        let suppressed_pane_ids: HashSet<PaneId> =
+            layout_solve.suppressed_pane_ids.iter().copied().collect();
+        let pane_slots = layout_solve
+            .pane_rects
+            .iter()
+            .zip(list_content_rects(layout_solve))
+            .map(
+                |(&(pane_id, outer_rect), (content_pane_id, content_rect))| {
+                    debug_assert_eq!(pane_id, content_pane_id);
+                    PaneSlot {
+                        pane_id,
+                        outer_rect,
+                        content_rect,
+                        is_visible: content_rect.is_some(),
+                        is_suppressed: suppressed_pane_ids.contains(&pane_id),
+                    }
+                },
+            )
+            .collect();
+        Self {
+            solved_size,
+            pane_slots,
+            stack_headers: layout_solve.stack_headers.clone(),
+            layout_mode,
+            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
+            gap_cell_count,
+        }
+    }
+
     /// The slot of `pane_id` when its [`is_visible`](PaneSlot::is_visible) is
-    /// `true`. `None` when the tab has no slot for `pane_id`, or the slot is
+    /// `true`. `None` when the tree has no slot for `pane_id`, or the slot is
     /// hidden.
     #[must_use]
     pub fn find_visible_pane_slot(&self, pane_id: PaneId) -> Option<&PaneSlot> {
         self.pane_slots
             .iter()
             .find(|pane_slot| pane_slot.is_visible && pane_slot.pane_id == pane_id)
+    }
+
+    /// Whether the viewing client zooms `pane_id` in this tree: its
+    /// [`layout_mode`](Self::layout_mode) is `Fullscreen` on `pane_id`.
+    #[must_use]
+    pub fn is_pane_zoomed(&self, pane_id: PaneId) -> bool {
+        self.layout_mode
+            == LayoutMode::Fullscreen {
+                focused_pane_id: pane_id,
+            }
     }
 }
 
@@ -1155,52 +1234,164 @@ pub struct PaneSlot {
     pub is_suppressed: bool,
 }
 
-/// One [`PaneSlot`] per leaf of `layout_solve`, in solve order: the outer rect
-/// from the solve, the content rect from [`list_content_rects`], and
-/// `is_suppressed` for each pane in
-/// [`suppressed_pane_ids`](LayoutSolve::suppressed_pane_ids).
-#[must_use]
-pub fn list_pane_slots(layout_solve: &LayoutSolve) -> Vec<PaneSlot> {
-    let suppressed_pane_ids: HashSet<PaneId> =
-        layout_solve.suppressed_pane_ids.iter().copied().collect();
-    layout_solve
-        .pane_rects
-        .iter()
-        .zip(list_content_rects(layout_solve))
-        .map(
-            |(&(pane_id, outer_rect), (content_pane_id, content_rect))| {
-                debug_assert_eq!(pane_id, content_pane_id);
-                PaneSlot {
-                    pane_id,
-                    outer_rect,
-                    content_rect,
-                    is_visible: content_rect.is_some(),
-                    is_suppressed: suppressed_pane_ids.contains(&pane_id),
-                }
-            },
-        )
-        .collect()
-}
-
 /// One floating pane the viewing client shows, placed for that client.
-/// Paired with a [`PaneSnapshot`] by [`pane_id`](Self::pane_id).
 ///
 /// The outer rect counts cells from the client's pane-area origin, with no
 /// letterbox offset: an outer rect at column `150` draws at pane-area column
 /// `150`, also when the client's tiled layout starts at column `60`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatingPaneSlot {
-    /// The floating pane this slot places.
+    /// The pane that takes the viewing client's input inside the floating
+    /// pane: the first pane of its focus history there. One of the panes of
+    /// [`layout_area`](Self::layout_area).
     pub pane_id: PaneId,
-    /// The pane's box with its chrome: the border ring, the titlebar row and
-    /// the separator row. The renderer draws the pane's cells and places its
-    /// cursor in the content rect of this box
-    /// ([`compute_floating_content_rect`](crate::floating_chrome::compute_floating_content_rect)),
-    /// the size of the pane's PTY. Outer `(24, 8)` `72x22` → content
-    /// `(25, 11)` `70x18`.
+    /// The floating pane's whole box: the titlebar strip on its first row,
+    /// and the layout area on the rows below it
+    /// ([`compute_floating_pane_layout_origin`](crate::floating_chrome::compute_floating_pane_layout_origin)).
+    /// Outer `(24, 8)` `72x22` → layout area at `(24, 9)`, `72x21`.
     pub outer_rect: Rect,
-    /// Whether the viewing client pinned the pane at its cell.
+    /// Whether the viewing client pinned the floating pane at its cell.
     pub is_pinned: bool,
+    /// The floating pane's tree, solved for the viewing client, with rects
+    /// counted from the first cell below the strip.
+    pub layout_area: LayoutAreaSnapshot,
+}
+
+impl FloatingPaneSlot {
+    /// This slot drawn at `outer_rect` by a slide: the same pane and pin
+    /// state, and the layout area scaled to the rows of `outer_rect` below the
+    /// strip. Each rect of a pane slot and of a stack header has each of its
+    /// edges moved to `edge * scaled / solved` cells, rounded down, per axis.
+    /// A scaled pane box of 3x3 cells or more has the content rect inside its
+    /// one-cell border, when the slot had one; any other box has none, and is
+    /// not visible. The layout mode, the suppression flags and the gap stay.
+    ///
+    /// A one-pane slot solved over `40x11`, drawn at a `20x6` outer rect, has
+    /// its pane box at `(0, 0)` `20x5` and its content rect at `(1, 1)` `18x3`.
+    #[must_use]
+    pub fn build_resized_slot(&self, outer_rect: Rect) -> FloatingPaneSlot {
+        let solved_size = self.layout_area.solved_size;
+        let scaled_size = Size {
+            column_count: outer_rect.size.column_count,
+            row_count: outer_rect
+                .size
+                .row_count
+                .saturating_sub(FLOATING_TITLEBAR_STRIP_ROW_COUNT),
+        };
+        let scale_edge = |edge: u16, solved_cell_count: u16, scaled_cell_count: u16| -> u16 {
+            if solved_cell_count == 0 {
+                return 0;
+            }
+            let scaled_edge =
+                u32::from(edge) * u32::from(scaled_cell_count) / u32::from(solved_cell_count);
+            u16::try_from(scaled_edge).unwrap_or(u16::MAX)
+        };
+        let scale_rect = |solved_rect: Rect| -> Rect {
+            let left_column = scale_edge(
+                solved_rect.origin.column,
+                solved_size.column_count,
+                scaled_size.column_count,
+            );
+            let top_row = scale_edge(
+                solved_rect.origin.row,
+                solved_size.row_count,
+                scaled_size.row_count,
+            );
+            let right_column = scale_edge(
+                solved_rect
+                    .origin
+                    .column
+                    .saturating_add(solved_rect.size.column_count),
+                solved_size.column_count,
+                scaled_size.column_count,
+            );
+            let bottom_row = scale_edge(
+                solved_rect
+                    .origin
+                    .row
+                    .saturating_add(solved_rect.size.row_count),
+                solved_size.row_count,
+                scaled_size.row_count,
+            );
+            Rect::from_origin_and_size(
+                Point {
+                    column: left_column,
+                    row: top_row,
+                },
+                Size {
+                    column_count: right_column - left_column,
+                    row_count: bottom_row - top_row,
+                },
+            )
+        };
+        let pane_slots = self
+            .layout_area
+            .pane_slots
+            .iter()
+            .map(|pane_slot| {
+                let outer_rect = scale_rect(pane_slot.outer_rect);
+                let has_content_room = outer_rect.size.column_count > PANE_BORDER_SIZE.column_count
+                    && outer_rect.size.row_count > PANE_BORDER_SIZE.row_count;
+                let content_rect =
+                    (pane_slot.content_rect.is_some() && has_content_room).then(|| {
+                        Rect::from_origin_and_size(
+                            Point {
+                                column: outer_rect.origin.column + 1,
+                                row: outer_rect.origin.row + 1,
+                            },
+                            Size {
+                                column_count: outer_rect.size.column_count
+                                    - PANE_BORDER_SIZE.column_count,
+                                row_count: outer_rect.size.row_count - PANE_BORDER_SIZE.row_count,
+                            },
+                        )
+                    });
+                PaneSlot {
+                    pane_id: pane_slot.pane_id,
+                    outer_rect,
+                    content_rect,
+                    is_visible: content_rect.is_some(),
+                    is_suppressed: pane_slot.is_suppressed,
+                }
+            })
+            .collect();
+        let stack_headers = self
+            .layout_area
+            .stack_headers
+            .iter()
+            .map(|stack_header| StackHeader {
+                pane_id: stack_header.pane_id,
+                header_rect: scale_rect(stack_header.header_rect),
+                member_index: stack_header.member_index,
+                member_count: stack_header.member_count,
+            })
+            .collect();
+        FloatingPaneSlot {
+            pane_id: self.pane_id,
+            outer_rect,
+            is_pinned: self.is_pinned,
+            layout_area: LayoutAreaSnapshot {
+                solved_size: scaled_size,
+                pane_slots,
+                stack_headers,
+                layout_mode: self.layout_area.layout_mode,
+                is_every_pane_suppressed: self.layout_area.is_every_pane_suppressed,
+                gap_cell_count: self.layout_area.gap_cell_count,
+            },
+        }
+    }
+}
+
+/// One floating pane slot as a frame draws it: the slot, and the outer rect
+/// it is drawn at, which a viewer's floating pane move draft can move
+/// ([`FrameLayout::list_drawn_floating_pane_slots`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawnFloatingPaneSlot<'a> {
+    /// The slot the frame carries.
+    pub floating_pane_slot: &'a FloatingPaneSlot,
+    /// The outer rect the frame draws the slot at, counted from the pane-area
+    /// origin.
+    pub outer_rect: Rect,
 }
 
 /// One pane's content: what the renderer paints inside the content rect of
