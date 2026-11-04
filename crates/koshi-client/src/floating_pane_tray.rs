@@ -10,7 +10,7 @@
 
 use koshi_core::command::{Command, ToggleFloatingPaneMinimizedArgs};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
-use koshi_core::ids::{CommandId, PaneId};
+use koshi_core::ids::{CommandId, FloatingPaneId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::resolve::build_new_floating_pane_command;
@@ -394,8 +394,8 @@ pub(crate) enum FloatingPaneTrayAnchor {
 }
 
 impl FloatingPaneTrayAnchor {
-    /// The box the floating pane `pane_id` of `session_snapshot` minimizes
-    /// into and restores out of, counted from the pane-area origin: the cell
+    /// The box the floating pane `floating_pane_id` of `session_snapshot`
+    /// minimizes into and restores out of, counted from the pane-area origin: the cell
     /// under the glyph for every pane while the tray is closed, and the
     /// pane's tile while it is open. `None` when the open tray holds no tile
     /// for the pane, or the tile sits left of or above the pane area.
@@ -405,7 +405,7 @@ impl FloatingPaneTrayAnchor {
     pub(crate) fn find_anchor_rect(
         &self,
         session_snapshot: &SessionSnapshot,
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
     ) -> Option<Rect> {
         match self {
             Self::ClosedTrayGlyphCell(glyph_cell_rect) => Some(*glyph_cell_rect),
@@ -413,7 +413,13 @@ impl FloatingPaneTrayAnchor {
                 tray_layout,
                 pane_area_origin,
             } => {
-                let tile_index = session_snapshot.find_floating_pane_index(pane_id)?;
+                let tile_index =
+                    session_snapshot
+                        .floating_panes
+                        .iter()
+                        .position(|floating_pane| {
+                            floating_pane.get_floating_pane_id() == floating_pane_id
+                        })?;
                 let tile_rect = *tray_layout.slot_rects.get(tile_index)?;
                 Some(Rect::from_origin_and_size(
                     Point {

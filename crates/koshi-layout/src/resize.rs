@@ -29,8 +29,8 @@ pub enum ResizeError {
     /// The pane to resize is not in this layout.
     #[error("pane {pane_id} is not in this layout")]
     PaneNotFound { pane_id: PaneId },
-    /// No border exists on that side: the pane touches the tab edge there
-    /// at every level of the tree.
+    /// No border exists on that side: the pane touches the tree's outer edge
+    /// there at every level of the tree.
     #[error("pane {pane_id} has no {direction:?} border to adjust")]
     NoAdjacentBorder {
         pane_id: PaneId,
@@ -76,7 +76,7 @@ pub enum ResizeError {
 /// the matching axis (horizontal for left/right, vertical for up/down) and
 /// has a sibling on the `direction` side. A pane on its inner split's edge
 /// moves the enclosing split's border. Splits below a collapsed stack
-/// member are skipped. `tab_rect` is the rect the tree solves into.
+/// member are skipped. `layout_rect` is the rect the tree solves into.
 ///
 /// The move adds a count of resize offset cells to the receiving sibling and
 /// takes as many from the donating sibling, then solves the split again and
@@ -122,7 +122,7 @@ pub enum ResizeError {
 ///   cell.
 pub fn resize_layout_with_sizing(
     layout_tree: &LayoutNode,
-    tab_rect: Rect,
+    layout_rect: Rect,
     pane_id: PaneId,
     direction: Direction,
     resize_cell_delta: i16,
@@ -153,7 +153,7 @@ pub fn resize_layout_with_sizing(
     };
 
     let split_path = &pane_path[..resize_split_depth];
-    let split_rect = compute_rect_at_path(layout_tree, tab_rect, split_path, pane_sizing);
+    let split_rect = compute_rect_at_path(layout_tree, layout_rect, split_path, pane_sizing);
     let mut updated_layout_tree = layout_tree.clone();
     let split_node = updated_layout_tree.get_split_at_path_mut(split_path);
     // Missing weights are padded with the default share up to the child
@@ -420,18 +420,18 @@ fn find_resize_border(
     None
 }
 
-/// The rect the node at `pane_path` solves into, starting from `tab_rect`.
+/// The rect the node at `pane_path` solves into, starting from `layout_rect`.
 ///
 /// A directional level takes the child rect [`compute_directional_child_rects`]
 /// derives; a stacked level the child rect [`compute_stacked_child_rects`] derives.
 fn compute_rect_at_path(
     layout_tree: &LayoutNode,
-    tab_rect: Rect,
+    layout_rect: Rect,
     pane_path: &[usize],
     pane_sizing: PaneSizing,
 ) -> Rect {
     let mut layout_node = layout_tree;
-    let mut current_layout_node_rect = tab_rect;
+    let mut current_layout_node_rect = layout_rect;
     for &child_index in pane_path {
         let LayoutNode::Split(split) = layout_node else {
             unreachable!("pane path was built over this tree");

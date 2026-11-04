@@ -31,10 +31,11 @@ use std::fmt;
 
 use crate::action::{ActionHandlerReference, ActionReference, ClientActionKind};
 use crate::command::{
-    ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget, PlacePaneArgs, QuitArgs,
-    ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs,
-    SetFloatingPanePinnedArgs, TabTarget, ToggleFloatingPanePinnedArgs, ToggleLockModeArgs,
+    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs,
+    FocusTarget, LockModeArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget,
+    PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs,
+    SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs, TabTarget,
+    ToggleFloatingPanePinnedArgs, ToggleLockModeArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -171,6 +172,7 @@ fn resolve_core_action(
             should_force_close: false,
             should_kill_process_tree: true,
         }),
+        "close-floating-pane" => Command::CloseFloatingPane(CloseFloatingPaneArgs::default()),
         "resize-pane-left" => build_resize_pane_command(Direction::Left),
         "resize-pane-down" => build_resize_pane_command(Direction::Down),
         "resize-pane-up" => build_resize_pane_command(Direction::Up),

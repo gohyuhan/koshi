@@ -105,6 +105,7 @@ fn build_render_snapshot_with_images(
                 .floating_pane_slots
                 .iter()
                 .map(|frame_floating_pane_slot| FloatingPaneSlot {
+                    floating_pane_id: frame_floating_pane_slot.floating_pane_id,
                     pane_id: frame_floating_pane_slot.pane_id,
                     outer_rect: frame_floating_pane_slot.outer_rect,
                     is_pinned: frame_floating_pane_slot.is_pinned,
@@ -116,14 +117,20 @@ fn build_render_snapshot_with_images(
                 .floating_panes
                 .iter()
                 .map(|frame_floating_pane| match frame_floating_pane {
-                    FrameFloatingPane::Shown { pane_id } => {
-                        FloatingPane::Shown { pane_id: *pane_id }
-                    }
+                    FrameFloatingPane::Shown {
+                        floating_pane_id,
+                        pane_id,
+                    } => FloatingPane::Shown {
+                        floating_pane_id: *floating_pane_id,
+                        pane_id: *pane_id,
+                    },
                     FrameFloatingPane::Minimized {
+                        floating_pane_id,
                         pane_id,
                         pane_title,
                         pane_count,
                     } => FloatingPane::Minimized {
+                        floating_pane_id: *floating_pane_id,
                         pane_id: *pane_id,
                         pane_title: pane_title.as_deref().map(sanitize_reported_text),
                         pane_count: *pane_count,

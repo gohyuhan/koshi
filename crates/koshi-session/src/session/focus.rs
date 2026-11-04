@@ -15,8 +15,9 @@
 //! client's input, floating or tiled, and
 //! [`build_floating_pane_minimized_changed_events`] a change of the floating
 //! panes one client shows. [`apply_tiled_pane_focus`] focuses a tiled pane for one
-//! client and reports both. [`update_client_tab_focus`] focuses a tiled pane
-//! in one tab for one client and leaves its input where it is.
+//! client and reports both, and [`apply_floating_pane_focus`] does the same for
+//! a pane inside a floating pane. [`update_client_tab_focus`] focuses a tiled
+//! pane in one tab for one client and leaves its input where it is.
 
 use koshi_core::{
     event::{Event, FloatingPaneMinimizedChanged, PaneFocused},
@@ -163,6 +164,43 @@ pub fn apply_tiled_pane_focus(
             previous_pane_id: tiled_pane_focus_change.previous_pane_id,
         }));
     }
+    emitted_events
+}
+
+/// Focus `pane_id` inside the floating pane `floating_pane_id` for `client`:
+/// show the floating pane, draw it above the client's other floating panes and
+/// focus it ([`Client::focus_floating_pane`]), and move `pane_id` to the front
+/// of the client's focus history inside it
+/// ([`Client::update_floating_pane_focused_pane`]). `pane_id` then takes the
+/// client's input. `floating_set` is the floating set of `client`'s session.
+///
+/// Returns one [`Event::FloatingPaneMinimizedChanged`] with `is_minimized:
+/// false` when the client had minimized the floating pane, then the
+/// [`Event::PaneFocused`] of the input change ([`build_pane_focused_event`]).
+/// Focusing `zsh` inside the shown floating pane `[htop | zsh]` after `htop`
+/// → `PaneFocused { tab_id: None, pane_id: zsh, previous_pane_id: Some(htop) }`.
+/// No events when `pane_id` took the input already.
+pub fn apply_floating_pane_focus(
+    client: &mut Client,
+    floating_set: &FloatingSet,
+    floating_pane_id: FloatingPaneId,
+    pane_id: PaneId,
+) -> Vec<Event> {
+    let previous_focused_pane_id = client.get_active_focused_pane_id();
+    let is_floating_pane_restored = client.focus_floating_pane(floating_pane_id);
+    client.update_floating_pane_focused_pane(floating_pane_id, pane_id);
+    let mut emitted_events: Vec<Event> = if is_floating_pane_restored {
+        build_floating_pane_minimized_changed_events(
+            client.get_client_id(),
+            floating_set,
+            &[floating_pane_id],
+            false,
+        )
+        .collect()
+    } else {
+        Vec::new()
+    };
+    emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
     emitted_events
 }
 

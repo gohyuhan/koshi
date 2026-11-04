@@ -18,6 +18,8 @@
 //! and its stack header. A gap cell inside a floating pane, and every cell below
 //! the strip of a floating pane whose every pane is suppressed, hits nothing.
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 use crate::render::tests::build_one_pane_floating_pane_slot;
 
@@ -1881,6 +1883,7 @@ fn build_sized_floating_pane_slot(
         row_count: outer_rect.size.row_count - 1,
     };
     FloatingPaneSlot {
+        floating_pane_id: build_floating_pane_id(pane_id),
         pane_id,
         outer_rect,
         is_pinned: false,
@@ -2114,7 +2117,8 @@ fn a_move_draft_moves_the_floating_pane_it_names() {
     );
     let draft_viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: floating_slot_pane_id,
+            floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+
             top_left_cell: Point {
                 column: 60,
                 row: 20,

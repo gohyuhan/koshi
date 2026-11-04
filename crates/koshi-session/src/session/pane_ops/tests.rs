@@ -1160,7 +1160,7 @@ fn commit_new_floating_pane_for_a_client_that_is_not_attached_minimizes_it_for_e
             .get_client_by_id(client_id)
             .expect("the client is attached")
             .list_floating_pane_views(),
-        &std::collections::HashMap::from([(
+        std::collections::HashMap::from([(
             get_floating_pane_id_holding(&session, new_pane_id),
             build_floating_pane_view(FloatingPanePosition::Default, true, new_pane_id)
         )])
@@ -1268,7 +1268,7 @@ fn commit_new_floating_pane_at_the_default_position_shows_it_at_the_default_plac
             .get_client_by_id(client_id)
             .expect("the client is attached")
             .list_floating_pane_views(),
-        &std::collections::HashMap::from([(
+        std::collections::HashMap::from([(
             get_floating_pane_id_holding(&session, new_pane_id),
             build_floating_pane_view(FloatingPanePosition::Default, false, new_pane_id)
         )])

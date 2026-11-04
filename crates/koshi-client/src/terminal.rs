@@ -216,7 +216,8 @@ pub(crate) fn build_placement_render_snapshot(
                 .session_snapshot
                 .floating_pane_slots
                 .iter()
-                .map(|floating_pane_slot| floating_pane_slot.pane_id),
+                .flat_map(|floating_pane_slot| &floating_pane_slot.layout_area.pane_slots)
+                .map(|pane_slot| pane_slot.pane_id),
         )
         .collect::<HashSet<_>>();
     placement_render_snapshot
@@ -240,8 +241,8 @@ pub(crate) fn build_placement_render_snapshot(
 /// Build the frame shown while a committed placement or a floating pane
 /// slides: `render_snapshot` with `animated_tab_snapshot`, when `Some`, as its
 /// active tab, and with each of `animated_floating_pane_slots` in place of the
-/// floating pane slot that names the same pane. A slot whose pane has no
-/// floating pane slot joins after every floating pane slot, on top.
+/// floating pane slot of the same floating pane. A slot whose floating pane
+/// has no floating pane slot joins after every floating pane slot, on top.
 pub(crate) fn build_committed_placement_render_snapshot(
     render_snapshot: &RenderSnapshot,
     animated_tab_snapshot: Option<TabSnapshot>,
@@ -258,7 +259,7 @@ pub(crate) fn build_committed_placement_render_snapshot(
         .floating_pane_slots;
     for animated_floating_pane_slot in animated_floating_pane_slots {
         match floating_pane_slots.iter_mut().find(|floating_pane_slot| {
-            floating_pane_slot.pane_id == animated_floating_pane_slot.pane_id
+            floating_pane_slot.floating_pane_id == animated_floating_pane_slot.floating_pane_id
         }) {
             Some(floating_pane_slot) => *floating_pane_slot = animated_floating_pane_slot.clone(),
             None => floating_pane_slots.push(animated_floating_pane_slot.clone()),

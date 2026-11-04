@@ -222,9 +222,9 @@ pub fn log_event(runtime_event: &Event) {
 
         // --- no line. The module doc names the kinds left out.
         //
-        // Faster than a person acts: `PtyResized` and `LayoutChanged` fire
-        // once per pane per frame of a window drag; `SelectionChanged` fires
-        // once per mouse motion.
+        // Faster than a person acts: `PtyResized`, `LayoutChanged` and
+        // `FloatingPaneLayoutChanged` fire once per pane per frame of a window
+        // or border drag; `SelectionChanged` fires once per mouse motion.
         //
         // Announcements: `PaneClosing` starts the close `PaneRemoved`
         // completes.
@@ -234,6 +234,7 @@ pub fn log_event(runtime_event: &Event) {
         Event::PaneClosing(_)
         | Event::PtyResized(_)
         | Event::LayoutChanged(_)
+        | Event::FloatingPaneLayoutChanged(_)
         | Event::PaneCommandStarted(_)
         | Event::PaneCommandFinished(_)
         | Event::SelectionChanged(_) => {}

@@ -8,7 +8,12 @@
 //! `(7 + 11 * (i % 6), 4 + 3 * (i / 6))` `10x3` and the header label from
 //! `(56, 2)`.
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
+use koshi_core::ids::PaneId;
+
 use super::*;
+use koshi_core::ids::FloatingPaneId;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -71,6 +76,7 @@ pub(crate) fn build_tray_mouse_frame(is_shown_by_tile: &[bool]) -> (MouseFrame, 
                 .session_snapshot
                 .floating_panes
                 .push(FloatingPane::Minimized {
+                    floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
                     pane_id: floating_slot_pane_id,
                     pane_title: None,
                     pane_count: NonZeroUsize::MIN,
@@ -1050,6 +1056,7 @@ fn a_tray_opened_before_its_frame_repaints_leaves_the_cells_beside_it_to_the_pan
         .session_snapshot
         .floating_panes
         .push(FloatingPane::Minimized {
+            floating_pane_id: FloatingPaneId::new(),
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
@@ -1236,8 +1243,10 @@ fn the_anchor_is_the_cell_under_the_closed_trays_glyph_or_the_open_trays_tile() 
         FloatingPaneTrayAnchor::ClosedTrayGlyphCell(glyph_cell_rect)
     );
     assert_eq!(
-        closed_tray_anchor
-            .find_anchor_rect(&render_snapshot.session_snapshot, floating_slot_pane_ids[1]),
+        closed_tray_anchor.find_anchor_rect(
+            &render_snapshot.session_snapshot,
+            build_floating_pane_id(floating_slot_pane_ids[1]),
+        ),
         Some(glyph_cell_rect)
     );
 
@@ -1270,8 +1279,10 @@ fn the_anchor_is_the_cell_under_the_closed_trays_glyph_or_the_open_trays_tile() 
         }
     );
     assert_eq!(
-        open_tray_anchor
-            .find_anchor_rect(&render_snapshot.session_snapshot, floating_slot_pane_ids[1]),
+        open_tray_anchor.find_anchor_rect(
+            &render_snapshot.session_snapshot,
+            build_floating_pane_id(floating_slot_pane_ids[1]),
+        ),
         Some(Rect::from_origin_and_size(
             Point { column: 18, row: 3 },
             Size {
@@ -1281,7 +1292,7 @@ fn the_anchor_is_the_cell_under_the_closed_trays_glyph_or_the_open_trays_tile() 
         ))
     );
     assert_eq!(
-        open_tray_anchor.find_anchor_rect(&render_snapshot.session_snapshot, PaneId::new()),
+        open_tray_anchor.find_anchor_rect(&render_snapshot.session_snapshot, FloatingPaneId::new()),
         None
     );
     assert_eq!(

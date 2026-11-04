@@ -2740,6 +2740,21 @@ fn list_solved_sizes(floating_set: &FloatingSet) -> Vec<Size> {
         .collect()
 }
 
+/// Each floating pane of `floating_set` with the solve its tree holds, in the
+/// order the floating panes were created.
+fn list_held_layout_solves(floating_set: &FloatingSet) -> Vec<(FloatingPaneId, LayoutSolve)> {
+    floating_set
+        .list_floating_panes()
+        .iter()
+        .map(|floating_pane| {
+            (
+                floating_pane.floating_pane_id,
+                floating_pane.layout_area.layout_solve.clone(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn update_floating_pane_sizes_resolves_a_percent_against_the_shared_viewport_rounding_down() {
     let mut floating_set = build_floating_set_asking_for(&[(
@@ -2747,19 +2762,24 @@ fn update_floating_pane_sizes_resolves_a_percent_against_the_shared_viewport_rou
         build_percent_dimension(60),
     )]);
 
-    assert!(floating_set.update_floating_pane_sizes(
-        Size {
-            column_count: 80,
-            row_count: 22,
-        },
-        PaneSizing {
-            minimum_size: Size {
-                column_count: 2,
-                row_count: 1,
+    let held_layout_solves = list_held_layout_solves(&floating_set);
+
+    assert_eq!(
+        floating_set.update_floating_pane_sizes(
+            Size {
+                column_count: 80,
+                row_count: 22,
             },
-            ..PaneSizing::default()
-        }
-    ));
+            PaneSizing {
+                minimum_size: Size {
+                    column_count: 2,
+                    row_count: 1,
+                },
+                ..PaneSizing::default()
+            }
+        ),
+        held_layout_solves
+    );
 
     assert_eq!(
         list_solved_sizes(&floating_set),
@@ -2785,13 +2805,20 @@ fn update_floating_pane_sizes_solves_each_changed_tree_over_its_new_size_less_th
         row_count: 1,
     };
 
-    assert!(floating_set.update_floating_pane_sizes(
-        shared_floating_viewport,
-        PaneSizing {
-            minimum_size: pane_minimum_size,
-            ..PaneSizing::default()
-        }
-    ));
+    // The second floating pane asks for the 4x5 it holds already, so only the
+    // first one's size changes.
+    let held_layout_solves = list_held_layout_solves(&floating_set);
+
+    assert_eq!(
+        floating_set.update_floating_pane_sizes(
+            shared_floating_viewport,
+            PaneSizing {
+                minimum_size: pane_minimum_size,
+                ..PaneSizing::default()
+            }
+        ),
+        vec![held_layout_solves[0].clone()]
+    );
 
     let layout_sizes: Vec<Size> = floating_set
         .list_floating_panes()
@@ -2819,13 +2846,16 @@ fn update_floating_pane_sizes_solves_each_changed_tree_over_its_new_size_less_th
                 .compute_layout_solve(PaneSizing::default())
         );
     }
-    assert!(!floating_set.update_floating_pane_sizes(
-        shared_floating_viewport,
-        PaneSizing {
-            minimum_size: pane_minimum_size,
-            ..PaneSizing::default()
-        }
-    ));
+    assert_eq!(
+        floating_set.update_floating_pane_sizes(
+            shared_floating_viewport,
+            PaneSizing {
+                minimum_size: pane_minimum_size,
+                ..PaneSizing::default()
+            }
+        ),
+        vec![]
+    );
 }
 
 #[test]
@@ -2839,19 +2869,24 @@ fn update_floating_pane_sizes_raises_each_floating_pane_to_the_minimum_and_cuts_
     // `pane { min-cols 20 min-rows 6 }`: one pane box needs 22x8, and the
     // strip row makes the floating minimum 22x9. The 80x22 viewport caps a
     // floating pane at 72x19.
-    assert!(floating_set.update_floating_pane_sizes(
-        Size {
-            column_count: 80,
-            row_count: 22,
-        },
-        PaneSizing {
-            minimum_size: Size {
-                column_count: 20,
-                row_count: 6,
+    let held_layout_solves = list_held_layout_solves(&floating_set);
+
+    assert_eq!(
+        floating_set.update_floating_pane_sizes(
+            Size {
+                column_count: 80,
+                row_count: 22,
             },
-            ..PaneSizing::default()
-        }
-    ));
+            PaneSizing {
+                minimum_size: Size {
+                    column_count: 20,
+                    row_count: 6,
+                },
+                ..PaneSizing::default()
+            }
+        ),
+        held_layout_solves
+    );
 
     assert_eq!(
         list_solved_sizes(&floating_set),
@@ -3121,7 +3156,7 @@ fn remove_floating_pane_keeps_the_order_of_the_rest_and_clears_every_client_view
     assert_eq!(pinning_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         pinning_client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 middle_floating_pane_id,
                 build_default_floating_pane_view(true, middle_pane_id),
@@ -3252,7 +3287,7 @@ fn attach_client_gives_the_attaching_client_a_minimized_view_of_every_floating_p
     let client = get_attached_client_mut(&mut session, client_id);
     assert_eq!(
         client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 first_floating_pane_id,
                 build_default_floating_pane_view(true, first_pane_id),
@@ -3869,6 +3904,54 @@ fn build_cells_size(column_count: u16, row_count: u16) -> FloatingPaneSize {
         width: build_cells_dimension(column_count),
         height: build_cells_dimension(row_count),
     }
+}
+
+#[test]
+fn a_floating_pane_its_panes_held_above_the_size_it_asks_for_shrinks_when_a_pane_leaves() {
+    let mut session = build_empty_session();
+    let [a_pane_id, b_pane_id] = [PaneId::new(), PaneId::new()];
+    let mut floating_pane = build_multi_pane_floating_pane(&[a_pane_id, b_pane_id]);
+    floating_pane.desired_size = FloatingPaneSize {
+        width: build_percent_dimension(60),
+        height: build_percent_dimension(60),
+    };
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    let a_layout_tree = build_floating_pane(a_pane_id).layout_area.layout;
+    session
+        .add_floating_pane(floating_pane, &[])
+        .expect("the floating set has room");
+    let shared_floating_viewport = Size {
+        column_count: 10,
+        row_count: 10,
+    };
+    let read_solved_size = |session: &Session| {
+        let (_, floating_pane) = session
+            .floating_set
+            .find_floating_pane_by_id(floating_pane_id)
+            .expect("the floating pane");
+        floating_pane.get_solved_size()
+    };
+
+    // `60%` of 10 columns asks for 6; `[A | B]` needs 8.
+    let _ = session.update_floating_pane_sizes(shared_floating_viewport);
+    assert_eq!(
+        read_solved_size(&session),
+        Size {
+            column_count: 8,
+            row_count: 6,
+        }
+    );
+
+    let _ = session.update_floating_pane_layout(floating_pane_id, a_layout_tree);
+    let _ = session.update_floating_pane_sizes(shared_floating_viewport);
+
+    assert_eq!(
+        read_solved_size(&session),
+        Size {
+            column_count: 6,
+            row_count: 6,
+        }
+    );
 }
 
 #[test]
@@ -5114,9 +5197,15 @@ fn floating_set_changes_are_recorded_once_per_real_change() {
         column_count: 30,
         row_count: 10,
     };
-    session.update_floating_pane_sizes(shared_floating_viewport);
+    assert_eq!(
+        session.update_floating_pane_sizes(shared_floating_viewport),
+        vec![]
+    );
     assert!(session.take_view_changes().is_floating_set_changed);
-    session.update_floating_pane_sizes(shared_floating_viewport);
+    assert_eq!(
+        session.update_floating_pane_sizes(shared_floating_viewport),
+        vec![]
+    );
     assert!(!session.take_view_changes().is_floating_set_changed);
 
     assert!(session.remove_floating_pane(floating_pane_id).is_some());
@@ -5327,6 +5416,57 @@ fn a_client_with_the_default_view_draws_the_floating_panes_own_solve_with_no_cop
 }
 
 #[test]
+fn a_tree_edit_of_one_floating_pane_keeps_each_clients_kept_solve_of_another_floating_pane() {
+    let (mut session, stack_floating_pane_id, [alice_client_id, _], pane_ids) =
+        build_two_client_floating_stack_session();
+    let [_, second_stack_pane_id, _] = pane_ids;
+    let logs_floating_pane = build_floating_pane(PaneId::new());
+    let logs_floating_pane_id = logs_floating_pane.get_floating_pane_id();
+    let logs_layout_tree = logs_floating_pane.layout_area.layout.clone();
+    session
+        .add_floating_pane(logs_floating_pane, &[])
+        .expect("the floating set has room");
+    get_attached_client_mut(&mut session, alice_client_id)
+        .update_floating_pane_focused_pane(stack_floating_pane_id, second_stack_pane_id);
+    let alice_stack_solve = solve_tree_at(
+        &build_stack_beside_pane_tree(pane_ids, 1),
+        TEST_FLOATING_LAYOUT_SIZE,
+        PaneSizing::default(),
+    );
+    assert_eq!(
+        read_client_floating_pane_solve(&session, alice_client_id, stack_floating_pane_id),
+        Some(&alice_stack_solve)
+    );
+
+    let _ = session.update_floating_pane_layout(logs_floating_pane_id, logs_layout_tree);
+
+    let alice_client = session
+        .clients
+        .get_client_by_id(alice_client_id)
+        .expect("alice is attached");
+    assert_eq!(
+        alice_client.get_own_floating_pane_solve(stack_floating_pane_id, || None),
+        Some(&alice_stack_solve),
+        "an edit of another floating pane keeps alice's solve"
+    );
+
+    let _ = session.update_floating_pane_layout(
+        stack_floating_pane_id,
+        build_stack_beside_pane_tree(pane_ids, 0),
+    );
+
+    let alice_client = session
+        .clients
+        .get_client_by_id(alice_client_id)
+        .expect("alice is attached");
+    assert_eq!(
+        alice_client.get_own_floating_pane_solve(stack_floating_pane_id, || None),
+        None,
+        "an edit of the floating pane empties alice's solve of it"
+    );
+}
+
+#[test]
 fn one_clients_focus_history_and_zoom_inside_a_floating_pane_leave_the_other_clients_solve_as_it_is(
 ) {
     let (mut session, floating_pane_id, [alice_client_id, bob_client_id], pane_ids) =
@@ -5416,10 +5556,13 @@ fn a_floating_panes_new_size_and_the_new_pane_sizing_reach_each_clients_next_sol
 
     // A `30x10` floating viewport caps the `40x10` floating pane at `27x9`:
     // its tree is solved at `27x8`.
-    session.update_floating_pane_sizes(Size {
-        column_count: 30,
-        row_count: 10,
-    });
+    assert_eq!(
+        session.update_floating_pane_sizes(Size {
+            column_count: 30,
+            row_count: 10,
+        }),
+        vec![]
+    );
     let small_layout_size = Size {
         column_count: 27,
         row_count: 8,

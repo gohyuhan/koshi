@@ -111,6 +111,10 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             tab_id: Some(layout_changed.tab_id),
             ..recent_event_without_entity_ids
         },
+        Event::FloatingPaneLayoutChanged(floating_pane_layout_changed) => RecentEvent {
+            pane_id: floating_pane_layout_changed.pane_ids.first().copied(),
+            ..recent_event_without_entity_ids
+        },
         Event::PanePlacementCommitted(pane_placement_committed) => RecentEvent {
             tab_id: pane_placement_committed.destination_tab_id,
             pane_id: Some(pane_placement_committed.source_pane_id),

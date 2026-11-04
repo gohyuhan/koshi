@@ -44,7 +44,7 @@ use koshi_ipc::protocol::{
 use koshi_ipc::transport::Connection;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{
-    place_pane_within_tab, solve_placed_tab, PlacedTabLayout, PlacementTarget,
+    place_pane_within_tree, solve_placed_tab, PlacedTabLayout, PlacementTarget,
 };
 use koshi_layout::solver::PaneSizing;
 use koshi_runtime::runtime::painted_update::{ReceivedPaintedFrame, SessionFrame};
@@ -1788,7 +1788,7 @@ fn build_same_tab_placed_tab_layout(
         .insertion_tab_sizes
         .destination_tab_size
         .expect("the session sizes the tab");
-    let placed_layout_tree = place_pane_within_tab(
+    let placed_layout_tree = place_pane_within_tree(
         &source_tab_snapshot.layout_tree,
         placement_snapshot.source_pane_id,
         &PlacementTarget::from_tiled_placement_target(placement_target),

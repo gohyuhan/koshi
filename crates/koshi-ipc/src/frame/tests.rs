@@ -10,6 +10,13 @@ use uuid::Uuid;
 
 use super::*;
 
+/// The floating pane id that the UUID `uuid_value` names, decoded as it
+/// travels: `9` gives the id `00000000-0000-0000-0000-000000000009`.
+fn build_floating_pane_id(uuid_value: u128) -> FloatingPaneId {
+    serde_json::from_value(json!(Uuid::from_u128(uuid_value).to_string()))
+        .expect("a UUID string decodes as a floating pane id")
+}
+
 /// The layout area of a `4x5` floating pane that holds `pane_id` alone: one
 /// pane box `(0, 0)` `4x4` with content `(1, 1)` `2x2`, solved over `4x4`.
 fn build_floating_layout_area(pane_id: PaneId) -> FrameLayoutArea {
@@ -97,6 +104,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 is_active: true,
             }],
             floating_pane_slots: vec![FrameFloatingPaneSlot {
+                floating_pane_id: build_floating_pane_id(9),
                 pane_id: PaneId::from_uuid(Uuid::from_u128(5)),
                 outer_rect: Rect {
                     origin: Point { column: 0, row: 0 },
@@ -110,14 +118,17 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
             }],
             floating_panes: vec![
                 FrameFloatingPane::Minimized {
+                    floating_pane_id: build_floating_pane_id(10),
                     pane_id: PaneId::from_uuid(Uuid::from_u128(6)),
                     pane_title: Some("htop".to_string()),
                     pane_count: NonZeroUsize::new(3).expect("3 is not zero"),
                 },
                 FrameFloatingPane::Shown {
+                    floating_pane_id: build_floating_pane_id(9),
                     pane_id: PaneId::from_uuid(Uuid::from_u128(5)),
                 },
                 FrameFloatingPane::Minimized {
+                    floating_pane_id: build_floating_pane_id(11),
                     pane_id: PaneId::from_uuid(Uuid::from_u128(8)),
                     pane_title: None,
                     pane_count: NonZeroUsize::MIN,
@@ -217,14 +228,21 @@ fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
         json!([
             {
                 "Minimized": {
+                    "floating_pane_id": Uuid::from_u128(10).to_string(),
                     "pane_id": Uuid::from_u128(6).to_string(),
                     "pane_title": "htop",
                     "pane_count": 3
                 }
             },
-            { "Shown": { "pane_id": Uuid::from_u128(5).to_string() } },
+            {
+                "Shown": {
+                    "floating_pane_id": Uuid::from_u128(9).to_string(),
+                    "pane_id": Uuid::from_u128(5).to_string()
+                }
+            },
             {
                 "Minimized": {
+                    "floating_pane_id": Uuid::from_u128(11).to_string(),
                     "pane_id": Uuid::from_u128(8).to_string(),
                     "pane_title": null,
                     "pane_count": 1
@@ -444,6 +462,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     "is_active": true
                 }],
                 "floating_pane_slots": [{
+                    "floating_pane_id": "00000000-0000-0000-0000-000000000009",
                     "pane_id": "00000000-0000-0000-0000-000000000005",
                     "outer_rect": {
                         "origin": { "column": 0, "row": 0 },
@@ -474,6 +493,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "floating_panes": [
                     {
                         "Minimized": {
+                            "floating_pane_id": "00000000-0000-0000-0000-00000000000a",
                             "pane_id": "00000000-0000-0000-0000-000000000006",
                             "pane_title": "htop",
                             "pane_count": 3
@@ -481,11 +501,13 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     },
                     {
                         "Shown": {
+                            "floating_pane_id": "00000000-0000-0000-0000-000000000009",
                             "pane_id": "00000000-0000-0000-0000-000000000005"
                         }
                     },
                     {
                         "Minimized": {
+                            "floating_pane_id": "00000000-0000-0000-0000-00000000000b",
                             "pane_id": "00000000-0000-0000-0000-000000000008",
                             "pane_title": null,
                             "pane_count": 1
@@ -624,6 +646,37 @@ fn a_floating_pane_slot_without_its_input_pane_is_refused() {
             .to_string(),
         "floating pane slot names a pane its layout area does not hold"
     );
+}
+
+/// A floating pane slot, a shown floating pane and a minimized floating pane
+/// that carry no `floating_pane_id` are each refused.
+#[test]
+fn a_floating_pane_without_its_floating_pane_id_is_refused() {
+    let encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
+    let mut slot_json = encoded_json.clone();
+    slot_json["session_snapshot"]["floating_pane_slots"][0]
+        .as_object_mut()
+        .expect("a slot is an object")
+        .remove("floating_pane_id");
+    let mut minimized_json = encoded_json.clone();
+    minimized_json["session_snapshot"]["floating_panes"][0]["Minimized"]
+        .as_object_mut()
+        .expect("a minimized floating pane is an object")
+        .remove("floating_pane_id");
+    let mut shown_json = encoded_json;
+    shown_json["session_snapshot"]["floating_panes"][1]["Shown"]
+        .as_object_mut()
+        .expect("a shown floating pane is an object")
+        .remove("floating_pane_id");
+
+    for frame_json in [slot_json, minimized_json, shown_json] {
+        assert_eq!(
+            serde_json::from_value::<PaintedFrame>(frame_json)
+                .expect_err("a floating pane with no id is refused")
+                .to_string(),
+            "missing field `floating_pane_id`"
+        );
+    }
 }
 
 /// An optional value that is `None` travels as `null`, never as an absent

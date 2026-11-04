@@ -11,6 +11,8 @@
 //! notification center and toast control carries its label, and every
 //! unclassified cell carries the letterbox backdrop.
 
+use koshi_core::ids::FloatingPaneId;
+use koshi_test_support::fixtures::build_floating_pane_id;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::time::SystemTime;
@@ -97,6 +99,7 @@ fn build_one_pane_floating_pane_slot(pane_id: PaneId, outer_rect: Rect) -> Float
         PaneSizing::default(),
     );
     FloatingPaneSlot {
+        floating_pane_id: build_floating_pane_id(pane_id),
         pane_id,
         outer_rect,
         is_pinned: false,
@@ -677,9 +680,11 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
     render_snapshot.pane_snapshots.push(htop_pane_snapshot);
     render_snapshot.session_snapshot.floating_panes = vec![
         FloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(htop_pane_id),
             pane_id: htop_pane_id,
         },
         FloatingPane::Minimized {
+            floating_pane_id: FloatingPaneId::new(),
             pane_id: PaneId::new(),
             pane_title: Some("logs".to_string()),
             pane_count: NonZeroUsize::MIN,
@@ -975,7 +980,8 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     ));
     let viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: floating_slot_pane_id,
+            floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+
             top_left_cell: Point { column: 50, row: 9 },
         }),
         ..ViewerChrome::default()

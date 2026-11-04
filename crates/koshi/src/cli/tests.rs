@@ -2063,12 +2063,13 @@ fn every_direction_value_parses_to_its_core_direction() {
 }
 
 #[test]
-fn close_pane_parses_target_and_force() {
+fn close_pane_parses_target_force_and_all() {
     assert_eq!(
         parse_cli_command(&["koshi", "close-pane"]),
         CliCommand::ClosePane {
             pane_id: None,
             should_force_close: false,
+            should_close_floating_pane: false,
         }
     );
     let pane_flag = format!("pane-{}", build_fixed_test_uuid());
@@ -2077,6 +2078,15 @@ fn close_pane_parses_target_and_force() {
         CliCommand::ClosePane {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             should_force_close: true,
+            should_close_floating_pane: false,
+        }
+    );
+    assert_eq!(
+        parse_cli_command(&["koshi", "close-pane", "--all"]),
+        CliCommand::ClosePane {
+            pane_id: None,
+            should_force_close: false,
+            should_close_floating_pane: true,
         }
     );
 }
@@ -3195,6 +3205,7 @@ fn ids_parse_prefixed_and_bare_forms() {
         CliCommand::ClosePane {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             should_force_close: false,
+            should_close_floating_pane: false,
         }
     );
     let prefixed = format!("pane-{}", build_fixed_test_uuid());
@@ -3203,6 +3214,7 @@ fn ids_parse_prefixed_and_bare_forms() {
         CliCommand::ClosePane {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             should_force_close: false,
+            should_close_floating_pane: false,
         }
     );
 }
@@ -3510,6 +3522,22 @@ fn action_subcommands_map_to_their_exact_commands() {
             "close-pane",
             Command::ClosePane(ClosePaneArgs {
                 pane_id: None,
+                should_force_close: true,
+                should_kill_process_tree: false,
+            }),
+        ),
+        (
+            vec![
+                "koshi",
+                "close-pane",
+                "--pane",
+                &pane_flag,
+                "--all",
+                "--force",
+            ],
+            "close-pane",
+            Command::CloseFloatingPane(CloseFloatingPaneArgs {
+                pane_id: Some(pane_id),
                 should_force_close: true,
                 should_kill_process_tree: false,
             }),
@@ -4557,6 +4585,7 @@ fn a_bare_uppercase_uuid_parses() {
         CliCommand::ClosePane {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             should_force_close: false,
+            should_close_floating_pane: false,
         }
     );
 }
@@ -5144,7 +5173,7 @@ fn build_actions_run_request_for(action_reference_text: &str) -> Result<SessionR
 fn every_registered_action_runs_as_its_key_does_or_names_the_verb_that_takes_its_arguments() {
     let action_registry = ActionRegistry::new();
     let action_seeds = build_core_action_seeds();
-    assert_eq!(action_seeds.len(), 92);
+    assert_eq!(action_seeds.len(), 93);
     for (action_reference, action_metadata) in &action_seeds {
         let key_dispatch_plan = koshi_core::resolve::resolve_action_with_scroll_line_count(
             action_reference,

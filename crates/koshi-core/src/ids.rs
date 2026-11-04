@@ -178,8 +178,8 @@ impl fmt::Display for PaneId {
 }
 
 /// Identifies a floating pane: the container that holds one layout tree of
-/// panes. It names the floating pane inside one session only; no CLI flag,
-/// request or event carries it.
+/// panes. It names the floating pane inside one session only. A painted frame
+/// carries it on each floating pane; no CLI flag, command or event carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FloatingPaneId(Uuid);
 

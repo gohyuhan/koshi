@@ -4,12 +4,12 @@
 //! Like [`crate::session::tab_ops`], this layer edits state and drafts events
 //! only — it never spawns a process or touches a terminal. The runtime builds
 //! and validates the split or the floating pane, spawns the pane's process,
-//! and only then calls [`commit_new_pane`] or [`commit_new_floating_pane`] to
-//! apply it.
+//! and only then calls [`commit_new_pane`], [`commit_new_pane_in_floating_pane`]
+//! or [`commit_new_floating_pane`] to apply it.
 
 use std::path::PathBuf;
 
-use koshi_core::event::{Event, LayoutChanged, PaneCreated, TabFocused};
+use koshi_core::event::{Event, FloatingPaneLayoutChanged, LayoutChanged, PaneCreated, TabFocused};
 use koshi_core::geometry::{FloatingPanePosition, FloatingPaneSize, Size};
 use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
 use koshi_core::process::SpawnSpec;
@@ -17,7 +17,9 @@ use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 
 use crate::error::FloatingSetError;
-use crate::session::focus::{apply_tiled_pane_focus, build_pane_focused_event};
+use crate::session::focus::{
+    apply_floating_pane_focus, apply_tiled_pane_focus, build_pane_focused_event,
+};
 use crate::session::state::{FloatingPane, Session};
 
 /// What to record on a freshly created pane: the working directory it launched
@@ -169,6 +171,101 @@ pub fn commit_new_pane(
         emitted_events.extend(session.update_tab_solve(previous_tab_id));
     }
     (previous_tab_id, emitted_events)
+}
+
+/// Commit a split or a stacked pane inside the floating pane
+/// `floating_pane_id`: the session-state half of a [`Command::NewPane`] whose
+/// source pane is a pane of that floating pane, as [`commit_new_pane`] is for
+/// a tab.
+///
+/// The caller (the runtime) has minted `new_pane_id`, built
+/// `candidate_layout_tree` from the floating pane's tree with
+/// [`koshi_layout::edit::split_leaf`] or
+/// [`koshi_layout::edit::add_pane_to_stack`], checked that it fits the size
+/// the floating pane's tree is solved at, and spawned the child under
+/// `new_pane_id`.
+///
+/// The op registers the pane with `new_pane_spec` and swaps in the tree
+/// ([`Session::update_floating_pane_layout`]). The floating pane's outer size
+/// stays as it is. Then, as a tab drops a zoom that would hide the new pane:
+/// - **With a `focus_client_id`** that is attached: that client's zoom inside
+///   the floating pane drops, and it focuses the new pane inside it. When the
+///   client can draw floating panes ([`Session::can_client_draw_floating_panes`]),
+///   it shows the floating pane above its other floating panes and the new
+///   pane takes its input ([`apply_floating_pane_focus`]). When it cannot, its
+///   view stays minimized and its input stays where it was. Every other
+///   client keeps its zoom and its focus.
+/// - **With none**: every attached client's zoom inside the floating pane
+///   drops, and no client's focus moves.
+///
+/// Returns the events to emit: [`Event::PaneCreated`] with `tab_id: None`,
+/// [`Event::FloatingPaneLayoutChanged`] with the panes of
+/// `candidate_layout_tree`, the events of the new tree's solve, then the focus
+/// events of the client that focuses the new pane. A split of `htop` inside
+/// the floating pane `[htop]`, focused by client `1`, gives `PaneCreated
+/// { zsh, None }`, `FloatingPaneLayoutChanged { [htop, zsh] }` and
+/// `PaneFocused { 1, None, zsh, Some(htop) }`.
+///
+/// A `floating_pane_id` the session does not hold is a no-op with no events:
+/// nothing is registered and nothing is emitted.
+///
+/// [`Command::NewPane`]: koshi_core::command::Command::NewPane
+#[must_use]
+pub fn commit_new_pane_in_floating_pane(
+    session: &mut Session,
+    new_pane_id: PaneId,
+    floating_pane_id: FloatingPaneId,
+    candidate_layout_tree: LayoutNode,
+    focus_client_id: Option<ClientId>,
+    new_pane_spec: NewPaneSpec,
+) -> Vec<Event> {
+    if session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+        .is_none()
+    {
+        return Vec::new();
+    }
+    register_spawned_pane(session, new_pane_id, new_pane_spec);
+    let mut emitted_events = vec![
+        Event::PaneCreated(PaneCreated {
+            pane_id: new_pane_id,
+            tab_id: None,
+        }),
+        Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
+            pane_ids: candidate_layout_tree.list_leaf_pane_ids(),
+        }),
+    ];
+    emitted_events
+        .extend(session.update_floating_pane_layout(floating_pane_id, candidate_layout_tree));
+
+    let focusing_client_id =
+        focus_client_id.filter(|&client_id| session.clients.get_client_by_id(client_id).is_some());
+    let Some(focusing_client_id) = focusing_client_id else {
+        for client in session.clients.list_attached_clients_mut() {
+            client.clear_floating_pane_zoom(floating_pane_id);
+        }
+        return emitted_events;
+    };
+    let can_draw_floating_panes = session
+        .clients
+        .get_client_by_id(focusing_client_id)
+        .is_some_and(|client| session.can_client_draw_floating_panes(client));
+    let Some(client) = session.clients.get_client_mut_by_id(focusing_client_id) else {
+        return emitted_events;
+    };
+    client.clear_floating_pane_zoom(floating_pane_id);
+    if can_draw_floating_panes {
+        emitted_events.extend(apply_floating_pane_focus(
+            client,
+            &session.floating_set,
+            floating_pane_id,
+            new_pane_id,
+        ));
+    } else {
+        client.update_floating_pane_focused_pane(floating_pane_id, new_pane_id);
+    }
+    emitted_events
 }
 
 /// Apply an already-spawned floating pane: append a new floating pane whose

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use koshi_core::command::{NewPaneArgs, NewPanePlacement};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{FloatingPaneId, PaneId, SessionId};
 use koshi_core::key::{
     BindingModifierFlags, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
@@ -30,6 +30,16 @@ use koshi_ipc::transport::{Connection, FrameReader, FrameWriter, Listener};
 use serde_json::value::RawValue;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+/// The floating pane id whose UUID is `pane_id`'s. A test names a floating
+/// pane after its input pane, so a slot, a list entry, a move draft and a
+/// hover built for the same pane carry the same floating pane id: `pane-…0005`
+/// gives the floating pane id `…0005`.
+#[must_use]
+pub fn build_floating_pane_id(pane_id: PaneId) -> FloatingPaneId {
+    serde_json::from_value(serde_json::to_value(pane_id).expect("a pane id encodes"))
+        .expect("a pane id's UUID decodes as a floating pane id")
+}
 
 /// How long [`start_program_process`] keeps trying while the operating system
 /// reports the program file as held open for writing: 20 seconds.

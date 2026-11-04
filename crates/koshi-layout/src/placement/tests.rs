@@ -126,7 +126,7 @@ fn swapping_d_with_b_exchanges_the_two_leaves_and_keeps_every_weight() {
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let swapped_tree = place_pane_within_tab(
+    let swapped_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_swap_target(pane_b),
@@ -171,7 +171,7 @@ fn swapping_a_pane_with_itself_returns_the_tree_unchanged() {
     let pane_ids = build_sorted_pane_ids();
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let swapped_tree = place_pane_within_tab(
+    let swapped_tree = place_pane_within_tree(
         &fixture_tree,
         pane_ids[3],
         &build_swap_target(pane_ids[3]),
@@ -197,7 +197,7 @@ fn swapping_inside_an_unnormalized_tree_keeps_its_nesting() {
         &[1, 1],
     );
 
-    let swapped_tree = place_pane_within_tab(
+    let swapped_tree = place_pane_within_tree(
         &nested_tree,
         pane_a,
         &build_swap_target(pane_c),
@@ -228,7 +228,7 @@ fn swapping_with_an_unknown_target_is_target_not_found() {
     let unknown_pane_id = PaneId::new();
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_ids[3],
             &build_swap_target(unknown_pane_id),
@@ -249,7 +249,7 @@ fn a_source_outside_the_tree_is_source_not_found() {
     let unknown_pane_id = PaneId::new();
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             unknown_pane_id,
             &build_swap_target(pane_ids[0]),
@@ -261,7 +261,7 @@ fn a_source_outside_the_tree_is_source_not_found() {
         })
     );
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             unknown_pane_id,
             &build_insert_target(PanePlacementAnchor::Tab, Direction::Up),
@@ -282,7 +282,7 @@ fn inserting_d_above_the_right_hand_group_puts_d_over_b_and_c() {
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(
@@ -329,7 +329,7 @@ fn inserting_d_above_the_whole_tab_gives_d_the_full_width() {
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(PanePlacementAnchor::Tab, Direction::Up),
@@ -366,7 +366,7 @@ fn inserting_d_left_of_a_merges_into_the_root_split_with_exact_shares() {
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(PanePlacementAnchor::Pane(pane_a), Direction::Left),
@@ -406,7 +406,7 @@ fn inserting_d_above_c_collapses_the_emptied_split_and_merges_the_column() {
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(PanePlacementAnchor::Pane(pane_c), Direction::Up),
@@ -442,7 +442,7 @@ fn inserting_beside_a_group_that_collapses_to_the_source_neighbor_reproduces_the
 
     // Removing D leaves the group {C, D} as C alone; D right of it is where D
     // already was.
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(
@@ -467,7 +467,7 @@ fn inserting_the_only_pane_beside_the_tab_returns_the_bare_leaf() {
         build_horizontal_split(vec![build_pane_leaf(pane_a)], &[1]),
     ] {
         assert_eq!(
-            place_pane_within_tab(
+            place_pane_within_tree(
                 &lone_tree,
                 pane_a,
                 &build_insert_target(PanePlacementAnchor::Tab, Direction::Down),
@@ -497,7 +497,7 @@ fn an_insertion_result_tiles_the_tab_for_every_pane_anchor_and_direction() {
                 if source_pane_id == anchor_pane_id {
                     continue;
                 }
-                let placed_tree = place_pane_within_tab(
+                let placed_tree = place_pane_within_tree(
                     &fixture_tree,
                     source_pane_id,
                     &build_insert_target(PanePlacementAnchor::Pane(anchor_pane_id), direction),
@@ -527,7 +527,7 @@ fn an_anchor_naming_the_source_is_refused() {
         PanePlacementAnchor::Group(vec![pane_d]),
     ] {
         assert_eq!(
-            place_pane_within_tab(
+            place_pane_within_tree(
                 &fixture_tree,
                 pane_d,
                 &build_insert_target(anchor, Direction::Up),
@@ -547,7 +547,7 @@ fn a_group_repeating_a_pane_is_refused() {
     let fixture_tree = build_fixture_tree(pane_ids);
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_d,
             &build_insert_target(
@@ -569,7 +569,7 @@ fn a_group_naming_an_absent_pane_is_target_not_found() {
     let unknown_pane_id = PaneId::new();
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_d,
             &build_insert_target(
@@ -584,7 +584,7 @@ fn a_group_naming_an_absent_pane_is_target_not_found() {
         })
     );
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_d,
             &build_insert_target(PanePlacementAnchor::Pane(unknown_pane_id), Direction::Up),
@@ -603,7 +603,7 @@ fn an_empty_group_is_not_one_subtree() {
     let fixture_tree = build_fixture_tree(pane_ids);
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_ids[3],
             &build_insert_target(PanePlacementAnchor::Group(Vec::new()), Direction::Up),
@@ -628,7 +628,7 @@ fn a_group_that_is_not_one_subtree_is_refused() {
         vec![pane_a, pane_d],
     ] {
         assert_eq!(
-            place_pane_within_tab(
+            place_pane_within_tree(
                 &fixture_tree,
                 pane_d,
                 &build_insert_target(
@@ -654,7 +654,7 @@ fn the_whole_tree_as_a_group_is_a_valid_anchor() {
 
     // Removing D leaves {A, B, C} at the root; inserting D above it equals
     // inserting above the tab.
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(
@@ -665,7 +665,7 @@ fn the_whole_tree_as_a_group_is_a_valid_anchor() {
         PaneSizing::default(),
     )
     .expect("insertion succeeds");
-    let tab_placed_tree = place_pane_within_tab(
+    let tab_placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(PanePlacementAnchor::Tab, Direction::Up),
@@ -691,7 +691,7 @@ fn an_anchor_inside_a_stack_is_refused_with_the_stack_members() {
     let source_tree = build_pane_leaf(pane_d);
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &stack_tree,
             pane_a,
             &build_insert_target(PanePlacementAnchor::Pane(pane_b), Direction::Up),
@@ -761,7 +761,7 @@ fn inserting_beside_a_whole_stack_keeps_the_stack_intact() {
         &[1, 1],
     );
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &stack_tree,
         pane_a,
         &build_insert_target(
@@ -835,7 +835,7 @@ fn a_pane_swapped_into_a_nested_stack_keeps_every_active_member() {
         active_child_index: 0,
     });
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &outer_stack,
         pane_a,
         &build_swap_target(pane_c),
@@ -1119,7 +1119,7 @@ fn a_same_tab_insertion_that_needs_more_rows_than_the_tab_has_is_refused() {
     let tab_rect = build_cell_rect(0, 0, 12, 3);
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &row_tree,
             pane_c,
             &build_insert_target(PanePlacementAnchor::Tab, Direction::Up),
@@ -1225,7 +1225,7 @@ fn every_listed_insertion_span_places_without_error() {
             Direction::Up,
             Direction::Down,
         ] {
-            let placed_tree = place_pane_within_tab(
+            let placed_tree = place_pane_within_tree(
                 &fixture_tree,
                 pane_d,
                 &build_insert_target(insertion_span.anchor.clone(), direction),
@@ -1242,7 +1242,7 @@ fn every_listed_insertion_span_places_without_error() {
         }
     }
     for target_pane_slot in destinations.target_pane_slots {
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_d,
             &build_swap_target(target_pane_slot.pane_id),
@@ -1275,7 +1275,7 @@ fn an_insertion_that_restores_the_source_layout_is_a_noop() {
         PaneSizing::default(),
     ));
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_d,
             &insertion_target,
@@ -1566,7 +1566,7 @@ fn swapping_twice_restores_the_original_tree() {
     let [_, pane_b, _, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let swapped_tree = place_pane_within_tab(
+    let swapped_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_swap_target(pane_b),
@@ -1574,7 +1574,7 @@ fn swapping_twice_restores_the_original_tree() {
         PaneSizing::default(),
     )
     .expect("swap succeeds");
-    let restored_tree = place_pane_within_tab(
+    let restored_tree = place_pane_within_tree(
         &swapped_tree,
         pane_d,
         &build_swap_target(pane_b),
@@ -1592,7 +1592,7 @@ fn inserting_d_below_a_puts_d_after_a_in_a_new_vertical_split() {
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
     let fixture_tree = build_fixture_tree(pane_ids);
 
-    let placed_tree = place_pane_within_tab(
+    let placed_tree = place_pane_within_tree(
         &fixture_tree,
         pane_d,
         &build_insert_target(PanePlacementAnchor::Pane(pane_a), Direction::Down),
@@ -1639,7 +1639,7 @@ fn swapping_the_active_stack_member_out_leaves_the_active_slot_to_the_target() {
         &[1, 1],
     );
 
-    let swapped_tree = place_pane_within_tab(
+    let swapped_tree = place_pane_within_tree(
         &stack_tree,
         pane_b,
         &build_swap_target(pane_a),
@@ -1668,7 +1668,7 @@ fn a_group_naming_the_source_and_an_absent_pane_reports_the_absent_pane() {
     let unknown_pane_id = PaneId::new();
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_d,
             &build_insert_target(
@@ -1855,7 +1855,7 @@ fn stacking_a_onto_b_in_a_row_gives_a_stack_of_b_then_a_with_b_active() {
         &[1, 1],
     );
 
-    let placed_layout_tree = place_pane_within_tab(
+    let placed_layout_tree = place_pane_within_tree(
         &layout_tree,
         pane_a,
         &build_stack_target(pane_b),
@@ -1872,7 +1872,7 @@ fn stacking_d_onto_b_turns_b_into_a_stack_and_collapses_the_emptied_split() {
     let pane_ids = build_sorted_pane_ids();
     let [pane_a, pane_b, pane_c, pane_d] = pane_ids;
 
-    let placed_layout_tree = place_pane_within_tab(
+    let placed_layout_tree = place_pane_within_tree(
         &build_fixture_tree(pane_ids),
         pane_d,
         &build_stack_target(pane_b),
@@ -1910,7 +1910,7 @@ fn stacking_onto_a_member_appends_the_source_last_and_keeps_the_active_member() 
         &[1, 1],
     );
 
-    let placed_layout_tree = place_pane_within_tab(
+    let placed_layout_tree = place_pane_within_tree(
         &layout_tree,
         pane_a,
         &build_stack_target(second_stack_pane_id),
@@ -1931,7 +1931,7 @@ fn stacking_a_pane_onto_itself_returns_the_tree_unchanged() {
     let fixture_tree = build_fixture_tree(pane_ids);
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_ids[3],
             &build_stack_target(pane_ids[3]),
@@ -1949,7 +1949,7 @@ fn stacking_onto_an_unknown_pane_is_target_not_found_in_both_tab_cases() {
     let fixture_tree = build_fixture_tree(pane_ids);
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &fixture_tree,
             pane_ids[3],
             &build_stack_target(missing_pane_id),
@@ -2101,7 +2101,7 @@ fn a_stack_one_header_row_taller_than_the_tab_is_refused_from_every_source() {
     );
 
     assert_eq!(
-        place_pane_within_tab(
+        place_pane_within_tree(
             &row_tree,
             pane_a,
             &build_stack_target(pane_b),

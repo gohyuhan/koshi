@@ -164,10 +164,12 @@ pub(super) fn draw_floating_pane_tray(
             None => Some(NEW_FLOATING_PANE_TILE_TEXT),
         };
         let pane_count = match floating_pane {
-            Some(FloatingPane::Shown { pane_id }) => session_snapshot
+            Some(FloatingPane::Shown {
+                floating_pane_id, ..
+            }) => session_snapshot
                 .floating_pane_slots
                 .iter()
-                .find(|floating_pane_slot| floating_pane_slot.pane_id == *pane_id)
+                .find(|floating_pane_slot| floating_pane_slot.floating_pane_id == *floating_pane_id)
                 .map_or(0, |floating_pane_slot| {
                     floating_pane_slot.layout_area.pane_slots.len()
                 }),
@@ -246,7 +248,7 @@ fn find_floating_pane_title<'a>(
     floating_pane: &'a FloatingPane,
 ) -> Option<&'a str> {
     match floating_pane {
-        FloatingPane::Shown { pane_id } => render_snapshot
+        FloatingPane::Shown { pane_id, .. } => render_snapshot
             .find_pane_snapshot(*pane_id)
             .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref()),
         FloatingPane::Minimized { pane_title, .. } => pane_title.as_deref(),

@@ -19,10 +19,10 @@
 //! pane in its own box:
 //!
 //! ```text
-//!  ⣿⣿                         [ ]  –  ✕    row 0: titlebar strip
-//! ┌──── vim ──────┐ ┌──── htop ──────┐     rows 1 to the last: layout area
-//! │               │ │                │
-//! └───────────────┘ └────────────────┘
+//!  ⣿⣿                     [ ]  –  ✕     row 0: titlebar strip
+//! ┌─── vim ───────┐┌─── htop ──────┐    rows 1 to the last: layout area
+//! │               ││               │
+//! └───────────────┘└───────────────┘
 //! ```
 //!
 //! Every rect here counts the same cells as the outer rect it comes from.

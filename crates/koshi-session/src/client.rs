@@ -115,6 +115,26 @@ impl FloatingPaneView {
     }
 }
 
+/// One client's view of one floating pane, with the solve that client draws
+/// the floating pane with, kept from the first read
+/// ([`Client::get_own_floating_pane_solve`]). It encodes as the view alone.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+struct FloatingPaneViewWithOwnSolve {
+    /// The client's view of the floating pane.
+    floating_pane_view: FloatingPaneView,
+    /// The kept solve: `Some` when the client's solve of the floating pane is
+    /// its own, for a zoom or for a stack that shows the client another member
+    /// than its active one, and `None` when the client draws the floating
+    /// pane's own solve. Empty until the first read. A change to the focus
+    /// history or zoom of `floating_pane_view` empties it, and so does every
+    /// solve of the floating pane's tree
+    /// ([`ClientRegistry::clear_own_floating_pane_solves`]). The resume file
+    /// does not carry it.
+    #[serde(skip)]
+    own_solve: OnceCell<Option<LayoutSolve>>,
+}
+
 /// What [`Client::focus_tiled_pane`] changed for one client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TiledPaneFocusChange {
@@ -267,20 +287,10 @@ pub struct Client {
     /// not carry it.
     #[serde(skip)]
     own_active_tab_solve: OnceCell<Option<LayoutSolve>>,
-    /// The solve this client draws each floating pane with when that solve is
-    /// its own, for a zoom or for a stack that shows this client another
-    /// member than its active one, keyed by floating pane id, kept from the
-    /// first read ([`Client::get_own_floating_pane_solves`]). A floating pane
-    /// this client draws with the floating pane's own solve has no entry.
-    /// Every change to this client's floating pane views empties it, and so
-    /// does every solve of a floating pane's tree
-    /// ([`ClientRegistry::clear_own_floating_pane_solves`]). The resume file
-    /// does not carry it.
-    #[serde(skip)]
-    own_floating_pane_solve_by_floating_pane_id: OnceCell<HashMap<FloatingPaneId, LayoutSolve>>,
-    /// This client's view of each floating pane of its session, keyed by
-    /// floating pane id: one entry per floating pane.
-    floating_pane_view_by_floating_pane_id: HashMap<FloatingPaneId, FloatingPaneView>,
+    /// This client's view of each floating pane of its session, with the
+    /// solve it draws that floating pane with, keyed by floating pane id: one
+    /// entry per floating pane.
+    floating_pane_view_by_floating_pane_id: HashMap<FloatingPaneId, FloatingPaneViewWithOwnSolve>,
     /// The floating panes this client shows, oldest first: the order this
     /// client draws them in, the newest on top. Focusing or restoring a
     /// floating pane moves it to the end, and minimizing it removes it. A
@@ -344,7 +354,6 @@ impl Client {
             selection_by_pane_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             own_active_tab_solve: OnceCell::new(),
-            own_floating_pane_solve_by_floating_pane_id: OnceCell::new(),
             floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
             focused_floating_pane_id: None,
@@ -464,10 +473,14 @@ impl Client {
         &self,
         floating_pane_id: FloatingPaneId,
     ) -> Option<PaneId> {
-        let floating_pane_view = self
+        let view_with_own_solve = self
             .floating_pane_view_by_floating_pane_id
             .get(&floating_pane_id)?;
-        floating_pane_view.focus_history.first().copied()
+        view_with_own_solve
+            .floating_pane_view
+            .focus_history
+            .first()
+            .copied()
     }
 
     /// Every tab's focus history this client holds
@@ -517,8 +530,8 @@ impl Client {
         self.clear_own_active_tab_solve();
     }
 
-    /// Leave zoom in every tab where this client was zoomed on `pane_id`. The
-    /// client sees those tabs tiled again.
+    /// Leave zoom in every tab and every floating pane where this client was
+    /// zoomed on `pane_id`. The client sees those trees tiled again.
     ///
     /// Called when a pane is removed.
     pub fn clear_zoom_of_pane(&mut self, pane_id: PaneId) {
@@ -527,6 +540,17 @@ impl Client {
             .retain(|_, zoomed_pane_id| *zoomed_pane_id != pane_id);
         self.is_view_changed |= self.zoomed_pane_id_by_tab_id.len() != zoomed_tab_count;
         self.clear_own_active_tab_solve();
+        let floating_pane_ids: Vec<FloatingPaneId> = self
+            .floating_pane_view_by_floating_pane_id
+            .iter()
+            .filter(|(_, view_with_own_solve)| {
+                view_with_own_solve.floating_pane_view.zoomed_pane_id == Some(pane_id)
+            })
+            .map(|(&floating_pane_id, _)| floating_pane_id)
+            .collect();
+        for floating_pane_id in floating_pane_ids {
+            self.clear_floating_pane_zoom(floating_pane_id);
+        }
     }
 
     /// Returns how many lines `pane_id` is scrolled above the live bottom.
@@ -780,22 +804,34 @@ impl Client {
         self.own_active_tab_solve = OnceCell::new();
     }
 
-    /// The solves this client draws floating panes with when they are its
-    /// own, keyed by floating pane id. The first call after the kept solves
-    /// were emptied runs `build_own_solves` and keeps its result; each call
-    /// after it returns the kept result and runs nothing.
-    pub(crate) fn get_own_floating_pane_solves(
+    /// The solve this client draws the floating pane `floating_pane_id` with
+    /// when that solve is its own, or `None` when it draws the floating pane's
+    /// own solve. The first call after that floating pane's kept solve was
+    /// emptied runs `build_own_solve` and keeps its result; each call after it
+    /// returns the kept result and runs nothing. A floating pane this client
+    /// holds no view of runs nothing and returns `None`.
+    pub(crate) fn get_own_floating_pane_solve(
         &self,
-        build_own_solves: impl FnOnce() -> HashMap<FloatingPaneId, LayoutSolve>,
-    ) -> &HashMap<FloatingPaneId, LayoutSolve> {
-        self.own_floating_pane_solve_by_floating_pane_id
-            .get_or_init(build_own_solves)
+        floating_pane_id: FloatingPaneId,
+        build_own_solve: impl FnOnce() -> Option<LayoutSolve>,
+    ) -> Option<&LayoutSolve> {
+        self.floating_pane_view_by_floating_pane_id
+            .get(&floating_pane_id)?
+            .own_solve
+            .get_or_init(build_own_solve)
+            .as_ref()
     }
 
-    /// Empty the kept floating pane solves of this client
-    /// ([`Client::get_own_floating_pane_solves`]).
-    fn clear_own_floating_pane_solves(&mut self) {
-        self.own_floating_pane_solve_by_floating_pane_id = OnceCell::new();
+    /// Empty this client's kept solve of the floating pane `floating_pane_id`
+    /// ([`Client::get_own_floating_pane_solve`]). The kept solves of the other
+    /// floating panes stay.
+    fn clear_own_floating_pane_solve(&mut self, floating_pane_id: FloatingPaneId) {
+        if let Some(view_with_own_solve) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+        {
+            view_with_own_solve.own_solve = OnceCell::new();
+        }
     }
 
     /// Set this client's viewport size to `viewport_size`.
@@ -863,13 +899,22 @@ impl Client {
     ) -> Option<&FloatingPaneView> {
         self.floating_pane_view_by_floating_pane_id
             .get(&floating_pane_id)
+            .map(|view_with_own_solve| &view_with_own_solve.floating_pane_view)
     }
 
-    /// Every floating pane view this client holds, keyed by floating pane id:
-    /// one per floating pane of its session.
+    /// A copy of every floating pane view this client holds, keyed by floating
+    /// pane id: one per floating pane of its session.
     #[must_use]
-    pub fn list_floating_pane_views(&self) -> &HashMap<FloatingPaneId, FloatingPaneView> {
-        &self.floating_pane_view_by_floating_pane_id
+    pub fn list_floating_pane_views(&self) -> HashMap<FloatingPaneId, FloatingPaneView> {
+        self.floating_pane_view_by_floating_pane_id
+            .iter()
+            .map(|(&floating_pane_id, view_with_own_solve)| {
+                (
+                    floating_pane_id,
+                    view_with_own_solve.floating_pane_view.clone(),
+                )
+            })
+            .collect()
     }
 
     /// The floating panes this client shows, oldest first: the order it draws
@@ -912,14 +957,16 @@ impl Client {
         }
         self.floating_pane_view_by_floating_pane_id.insert(
             floating_pane_id,
-            FloatingPaneView {
-                position,
-                is_minimized: true,
-                focus_history: floating_pane.list_pane_ids().into_iter().take(1).collect(),
-                zoomed_pane_id: None,
+            FloatingPaneViewWithOwnSolve {
+                floating_pane_view: FloatingPaneView {
+                    position,
+                    is_minimized: true,
+                    focus_history: floating_pane.list_pane_ids().into_iter().take(1).collect(),
+                    zoomed_pane_id: None,
+                },
+                own_solve: OnceCell::new(),
             },
         );
-        self.clear_own_floating_pane_solves();
     }
 
     /// Show `floating_pane_id` for this client, draw it above its other
@@ -935,6 +982,7 @@ impl Client {
         let Some(floating_pane_view) = self
             .floating_pane_view_by_floating_pane_id
             .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
         else {
             return false;
         };
@@ -955,6 +1003,10 @@ impl Client {
     /// takes this client's input while the floating pane is focused. The
     /// history `[a, b, c]` focusing `c` → `[c, a, b]`. A floating pane this
     /// client holds no view of changes nothing.
+    ///
+    /// **Zoom follows focus**, as [`update_focused_pane`](Self::update_focused_pane)
+    /// moves it in a tab: while this client zooms a pane inside the floating
+    /// pane, the zoom moves to `pane_id`.
     pub fn update_floating_pane_focused_pane(
         &mut self,
         floating_pane_id: FloatingPaneId,
@@ -963,6 +1015,7 @@ impl Client {
         let Some(floating_pane_view) = self
             .floating_pane_view_by_floating_pane_id
             .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
         else {
             return;
         };
@@ -973,8 +1026,78 @@ impl Client {
             .focus_history
             .retain(|&history_pane_id| history_pane_id != pane_id);
         floating_pane_view.focus_history.insert(0, pane_id);
+        if floating_pane_view.zoomed_pane_id.is_some() {
+            floating_pane_view.zoomed_pane_id = Some(pane_id);
+        }
         self.is_view_changed = true;
-        self.clear_own_floating_pane_solves();
+        self.clear_own_floating_pane_solve(floating_pane_id);
+    }
+
+    /// Take `pane_id` out of this client's focus history inside the floating
+    /// pane `floating_pane_id`. The history `[a, b, c]` without `b` is
+    /// `[a, c]`. The caller keeps the history from emptying: it focuses
+    /// another pane inside the floating pane first when `pane_id` is the only
+    /// entry. A floating pane this client holds no view of changes nothing.
+    pub fn remove_pane_from_floating_pane_focus_history(
+        &mut self,
+        floating_pane_id: FloatingPaneId,
+        pane_id: PaneId,
+    ) {
+        let Some(floating_pane_view) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
+        else {
+            return;
+        };
+        let focus_history_length = floating_pane_view.focus_history.len();
+        floating_pane_view
+            .focus_history
+            .retain(|&history_pane_id| history_pane_id != pane_id);
+        if floating_pane_view.focus_history.len() == focus_history_length {
+            return;
+        }
+        self.is_view_changed = true;
+        self.clear_own_floating_pane_solve(floating_pane_id);
+    }
+
+    /// Zoom `pane_id` for this client inside the floating pane
+    /// `floating_pane_id`: it fills the floating pane and the floating pane's
+    /// other panes are hidden, for this client's view alone. A floating pane
+    /// this client holds no view of changes nothing.
+    pub fn zoom_pane_in_floating_pane(
+        &mut self,
+        floating_pane_id: FloatingPaneId,
+        pane_id: PaneId,
+    ) {
+        let Some(floating_pane_view) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
+        else {
+            return;
+        };
+        let previous_zoomed_pane_id = floating_pane_view.zoomed_pane_id.replace(pane_id);
+        self.is_view_changed |= previous_zoomed_pane_id != Some(pane_id);
+        self.clear_own_floating_pane_solve(floating_pane_id);
+    }
+
+    /// Leave zoom inside the floating pane `floating_pane_id`: this client
+    /// sees its tree tiled again. A floating pane this client holds no view
+    /// of, or does not zoom, changes nothing.
+    pub fn clear_floating_pane_zoom(&mut self, floating_pane_id: FloatingPaneId) {
+        let Some(floating_pane_view) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
+        else {
+            return;
+        };
+        if floating_pane_view.zoomed_pane_id.take().is_none() {
+            return;
+        }
+        self.is_view_changed = true;
+        self.clear_own_floating_pane_solve(floating_pane_id);
     }
 
     /// Minimize `floating_pane_id` for this client when this client shows it:
@@ -990,6 +1113,7 @@ impl Client {
         let Some(floating_pane_view) = self
             .floating_pane_view_by_floating_pane_id
             .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
         else {
             return false;
         };
@@ -1013,6 +1137,7 @@ impl Client {
             if let Some(floating_pane_view) = self
                 .floating_pane_view_by_floating_pane_id
                 .get_mut(floating_pane_id)
+                .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
             {
                 floating_pane_view.is_minimized = true;
             }
@@ -1088,6 +1213,7 @@ impl Client {
         let Some(floating_pane_view) = self
             .floating_pane_view_by_floating_pane_id
             .get_mut(&floating_pane_id)
+            .map(|view_with_own_solve| &mut view_with_own_solve.floating_pane_view)
         else {
             return;
         };
@@ -1103,7 +1229,6 @@ impl Client {
     pub(crate) fn remove_floating_pane_view(&mut self, floating_pane_id: FloatingPaneId) {
         self.floating_pane_view_by_floating_pane_id
             .remove(&floating_pane_id);
-        self.clear_own_floating_pane_solves();
         self.remove_shown_floating_pane(floating_pane_id);
     }
 
@@ -1155,53 +1280,60 @@ impl Client {
                         .is_some_and(|floating_pane_view| !floating_pane_view.is_minimized)
             })
             .collect();
-        let floating_pane_view_by_floating_pane_id: HashMap<FloatingPaneId, FloatingPaneView> =
-            floating_set
-                .list_floating_panes()
-                .iter()
-                .map(|floating_pane| {
-                    let floating_pane_id = floating_pane.get_floating_pane_id();
-                    let saved_floating_pane_view = saved_floating_pane_views.get(&floating_pane_id);
-                    let mut focus_history: Vec<PaneId> = saved_floating_pane_view
-                        .map(|floating_pane_view| {
-                            floating_pane_view
-                                .focus_history
-                                .iter()
-                                .copied()
-                                .filter(|&history_pane_id| floating_pane.has_pane(history_pane_id))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if focus_history.is_empty() {
-                        focus_history = floating_pane.list_pane_ids().into_iter().take(1).collect();
-                    }
-                    let floating_pane_view = FloatingPaneView {
-                        position: saved_floating_pane_view
-                            .map_or(FloatingPanePosition::Default, |floating_pane_view| {
-                                floating_pane_view.position
-                            }),
-                        is_minimized: !shown_floating_pane_ids.contains(&floating_pane_id),
-                        focus_history,
-                        zoomed_pane_id: saved_floating_pane_view
-                            .and_then(|floating_pane_view| floating_pane_view.zoomed_pane_id)
-                            .filter(|&zoomed_pane_id| floating_pane.has_pane(zoomed_pane_id)),
-                    };
-                    (floating_pane_id, floating_pane_view)
-                })
-                .collect();
+        let floating_pane_view_by_floating_pane_id: HashMap<
+            FloatingPaneId,
+            FloatingPaneViewWithOwnSolve,
+        > = floating_set
+            .list_floating_panes()
+            .iter()
+            .map(|floating_pane| {
+                let floating_pane_id = floating_pane.get_floating_pane_id();
+                let saved_floating_pane_view = saved_floating_pane_views.get(&floating_pane_id);
+                let mut focus_history: Vec<PaneId> = saved_floating_pane_view
+                    .map(|floating_pane_view| {
+                        floating_pane_view
+                            .focus_history
+                            .iter()
+                            .copied()
+                            .filter(|&history_pane_id| floating_pane.has_pane(history_pane_id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if focus_history.is_empty() {
+                    focus_history = floating_pane.list_pane_ids().into_iter().take(1).collect();
+                }
+                let floating_pane_view = FloatingPaneView {
+                    position: saved_floating_pane_view
+                        .map_or(FloatingPanePosition::Default, |floating_pane_view| {
+                            floating_pane_view.position
+                        }),
+                    is_minimized: !shown_floating_pane_ids.contains(&floating_pane_id),
+                    focus_history,
+                    zoomed_pane_id: saved_floating_pane_view
+                        .and_then(|floating_pane_view| floating_pane_view.zoomed_pane_id)
+                        .filter(|&zoomed_pane_id| floating_pane.has_pane(zoomed_pane_id)),
+                };
+                (
+                    floating_pane_id,
+                    FloatingPaneViewWithOwnSolve {
+                        floating_pane_view,
+                        own_solve: OnceCell::new(),
+                    },
+                )
+            })
+            .collect();
         let focused_floating_pane_id = shown_floating_pane_ids.last().copied();
         let has_shown_floating_view_changed = shown_floating_pane_ids
             != self.shown_floating_pane_ids
             || focused_floating_pane_id != self.focused_floating_pane_id
-            || shown_floating_pane_ids.iter().any(|floating_pane_id| {
-                floating_pane_view_by_floating_pane_id.get(floating_pane_id)
-                    != self
-                        .floating_pane_view_by_floating_pane_id
-                        .get(floating_pane_id)
+            || shown_floating_pane_ids.iter().any(|&floating_pane_id| {
+                floating_pane_view_by_floating_pane_id
+                    .get(&floating_pane_id)
+                    .map(|view_with_own_solve| &view_with_own_solve.floating_pane_view)
+                    != self.get_floating_pane_view(floating_pane_id)
             });
         self.is_view_changed |= has_shown_floating_view_changed;
         self.floating_pane_view_by_floating_pane_id = floating_pane_view_by_floating_pane_id;
-        self.clear_own_floating_pane_solves();
         self.shown_floating_pane_ids = shown_floating_pane_ids;
         self.focused_floating_pane_id = focused_floating_pane_id;
     }
@@ -1301,11 +1433,12 @@ impl ClientRegistry {
         }
     }
 
-    /// Empty the kept floating pane solves
-    /// ([`Client::get_own_floating_pane_solves`]) of every attached client.
-    pub(crate) fn clear_own_floating_pane_solves(&mut self) {
+    /// Empty every attached client's kept solve of the floating pane
+    /// `floating_pane_id` ([`Client::get_own_floating_pane_solve`]). The kept
+    /// solves of the other floating panes stay.
+    pub(crate) fn clear_own_floating_pane_solves(&mut self, floating_pane_id: FloatingPaneId) {
         for client in self.client_by_id.values_mut() {
-            client.clear_own_floating_pane_solves();
+            client.clear_own_floating_pane_solve(floating_pane_id);
         }
     }
 

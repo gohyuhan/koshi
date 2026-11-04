@@ -1118,6 +1118,7 @@ fn in_session_command_with_no_flags_routes_home_without_probing() {
     let command = CliCommand::ClosePane {
         pane_id: None,
         should_force_close: false,
+        should_close_floating_pane: false,
     };
     let command_route = resolve_command_route_in_runtime_directory(
         runtime_directory.path(),

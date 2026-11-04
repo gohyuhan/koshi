@@ -11,28 +11,26 @@
 //! [`remove_pane_cascade`] is the cascade proper: drop the pane, collapse the
 //! layout, repair each affected client's focus, and — if that empties the tab —
 //! close the tab, and if that empties the session, quit. A tab's layout holds
-//! no pane of a floating pane: [`remove_floating_pane`] drops such a pane from
-//! the registry and its floating pane from the floating set and every client's
-//! view, moves the input of each client the pane held, and closes nothing
-//! above it. Each function
+//! no pane of a floating pane: [`remove_pane_from_floating_pane`] takes such a
+//! pane out of its floating pane's tree and repairs the focus inside it the
+//! way a tab does, and [`remove_floating_pane`] drops a whole floating pane
+//! from the floating set and every client's view, with every pane it holds.
+//! Neither closes a tab. Each function
 //! returns the events describing what it did, for the caller to emit; none
 //! touches the terminal or spawns a process.
 
-use std::collections::HashSet;
-
 use koshi_core::event::{
-    Event, LayoutChanged, PaneClosing, PaneProcessExited, PaneRemoved, TerminalTooSmallCause,
-    TerminalTooSmallEntered,
+    Event, FloatingPaneLayoutChanged, LayoutChanged, PaneClosing, PaneProcessExited, PaneRemoved,
+    TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{PaneArea, Rect};
-use koshi_core::ids::{ClientId, PaneId, TabId};
-use koshi_layout::edit::{remove_pane, RemoveError};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
+use koshi_layout::edit::{remove_pane_and_normalize, RemoveError};
 use koshi_layout::focus::compute_focus_candidates;
 use koshi_layout::mode::LayoutMode;
-use koshi_layout::normalize::normalize_layout_tree;
 use koshi_layout::solver::LayoutSolve;
 
-use crate::client::{compute_default_pane_area_size, Client};
+use crate::client::compute_default_pane_area_size;
 use crate::session::focus::{
     build_pane_focused_event, repair_focus, update_client_tab_focus, FocusRepairResult,
 };
@@ -109,19 +107,11 @@ pub(crate) fn remove_pane_from_tab(
     let mut emitted_events = Vec::new();
 
     // Removing the only pane yields `LastPane`: the tab is now empty. The
-    // removal edit leaves canonicalization to `normalize_layout_tree`, which
-    // collapses the unary split the removed leaf leaves behind; every
-    // surviving leaf is live, so the pass canonicalizes shape only and drops
-    // nothing. A pane that is no leaf of the tab leaves the layout as it is,
-    // emits no `LayoutChanged`, and still moves zoom and focus off the pane.
-    let is_tab_empty = match remove_pane(tab.get_layout_tree(), pane_id) {
-        Ok(edited_layout_tree) => {
-            let live_pane_ids: HashSet<PaneId> = edited_layout_tree
-                .list_leaf_pane_ids()
-                .into_iter()
-                .collect();
-            let canonical_layout_tree = normalize_layout_tree(&edited_layout_tree, &live_pane_ids)
-                .unwrap_or(edited_layout_tree);
+    // unary split the removed leaf leaves behind collapses into its child. A
+    // pane that is no leaf of the tab leaves the layout as it is, emits no
+    // `LayoutChanged`, and still moves zoom and focus off the pane.
+    let is_tab_empty = match remove_pane_and_normalize(tab.get_layout_tree(), pane_id) {
+        Ok(canonical_layout_tree) => {
             emitted_events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
             emitted_events.extend(session.update_tab_layout(tab_id, canonical_layout_tree));
             false
@@ -178,7 +168,7 @@ pub(crate) fn list_focused_client_rects(
 /// pane `departed_pane_id` is no longer a leaf of `tab_id`, ranked against the
 /// rect it names ([`repair_client_focus`]). Then take `departed_pane_id` out
 /// of every attached client's focus history in `tab_id`
-/// ([`Client::remove_pane_from_focus_history`]).
+/// ([`Client::remove_pane_from_focus_history`](crate::client::Client::remove_pane_from_focus_history)).
 ///
 /// A client whose floating pane takes its input keeps that input. A tab id the
 /// session does not hold changes no focus and emits no events.
@@ -268,7 +258,7 @@ pub(crate) fn hand_off_suppressed_focus(
 /// The candidates come from the client's own view of the tab
 /// ([`Session::compute_client_solve`], [`compute_focus_candidates`]), ranked
 /// against `ranking_pane_rect`, and [`repair_focus`] picks the verdict from
-/// the client's focus history ([`Client::list_focus_history`]). The
+/// the client's focus history ([`Client::list_focus_history`](crate::client::Client::list_focus_history)). The
 /// inheriting pane is the verdict's pane for [`FocusRepairResult::Focused`],
 /// and the client's landing pane ([`find_landing_pane`]) for
 /// [`FocusRepairResult::TerminalTooSmall`]. No inheriting pane is a stack
@@ -411,33 +401,38 @@ fn resolve_terminal_too_small_cause(
     TerminalTooSmallCause::Terminal
 }
 
-/// Remove `pane_id`, the pane of a floating pane: drop its registry record,
-/// the floating pane that holds it from the floating set, and every attached
-/// client's view of that floating pane ([`Session::remove_floating_pane`]). No
-/// layout changes and no tab closes. A client whose floating focus was on that
-/// floating pane focuses the newest floating pane it still shows, else its
-/// input returns to the pane it focused in its active tab.
+/// Remove `pane_id`, a pane of a floating pane, and follow the consequences
+/// inside that floating pane. When it is the floating pane's only pane, the
+/// whole floating pane leaves ([`remove_floating_pane`]), as in a session
+/// where a floating pane holds one pane. Otherwise:
+/// 1. drop the pane from the registry and emit [`Event::PaneClosing`] and
+///    [`Event::PaneRemoved`] with `tab_id: None`;
+/// 2. collapse its leaf out of the floating pane's tree, emit
+///    [`Event::FloatingPaneLayoutChanged`] with the panes left, solve the tree
+///    again ([`Session::update_floating_pane_layout`]), and drop the zoom of
+///    every client zoomed on the removed pane;
+/// 3. for every client whose focused pane inside the floating pane it was,
+///    focus the pane that inherits it, ranked against the rect the pane held
+///    in that client's own view of the floating pane before the removal;
+/// 4. take the pane out of every client's focus history inside the floating
+///    pane.
 ///
-/// Returns [`Event::PaneClosing`] then [`Event::PaneRemoved`] with
-/// `tab_id: None`, then, in client id order, one [`Event::PaneFocused`] with
-/// `previous_pane_id: Some(pane_id)` for each client whose input `pane_id`
-/// took and that has a pane to take its input now
-/// ([`build_pane_focused_event`]). A `pane_id` that no floating pane holds
-/// changes nothing and returns no events.
+/// A pane no floating pane holds changes nothing and returns no events.
+/// `[vim | htop]` with `htop` focused by a client whose history is
+/// `[htop, vim]`: removing `htop` leaves `[vim]`, and that client focuses
+/// `vim`.
 #[must_use]
-pub fn remove_floating_pane(session: &mut Session, pane_id: PaneId) -> Vec<Event> {
+pub fn remove_pane_from_floating_pane(session: &mut Session, pane_id: PaneId) -> Vec<Event> {
     let Some((_, floating_pane)) = session.floating_set.find_floating_pane_by_pane_id(pane_id)
     else {
         return Vec::new();
     };
     let floating_pane_id = floating_pane.get_floating_pane_id();
-    let focusing_client_ids: Vec<ClientId> = session
-        .clients
-        .list_attached_clients()
-        .filter(|client| client.get_active_focused_pane_id() == Some(pane_id))
-        .map(Client::get_client_id)
-        .collect();
-    let _ = session.remove_floating_pane(floating_pane_id);
+    if floating_pane.list_pane_ids() == [pane_id] {
+        return remove_floating_pane(session, floating_pane_id);
+    }
+    let focused_client_rects =
+        list_floating_pane_focused_client_rects(session, floating_pane_id, pane_id);
     session.panes.remove_pane_record(pane_id);
     let mut emitted_events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),
@@ -446,12 +441,297 @@ pub fn remove_floating_pane(session: &mut Session, pane_id: PaneId) -> Vec<Event
             tab_id: None,
         }),
     ];
-    for client_id in focusing_client_ids {
+    emitted_events.extend(remove_pane_leaf_from_floating_pane(
+        session,
+        floating_pane_id,
+        pane_id,
+    ));
+    emitted_events.extend(repair_floating_pane_focus_after_pane_left(
+        session,
+        floating_pane_id,
+        pane_id,
+        &focused_client_rects,
+    ));
+    emitted_events
+}
+
+/// Take `pane_id`'s leaf out of the floating pane `floating_pane_id`: step 2
+/// of [`remove_pane_from_floating_pane`] without the registry drop. The
+/// pane registry keeps the record, and the only focus that moves is the
+/// hand-off of [`Session::update_floating_pane_layout`].
+///
+/// When `pane_id` is the floating pane's only pane, the floating pane leaves
+/// the floating set and every client's view of it
+/// ([`Session::remove_floating_pane`]), and no event is returned. Otherwise
+/// the events are [`Event::FloatingPaneLayoutChanged`] with the panes left in
+/// layout order, then the events of the new tree's solve. `[vim | htop]`
+/// without `htop` gives `[vim]` and `FloatingPaneLayoutChanged { pane_ids:
+/// [vim] }`.
+///
+/// A floating pane id the session does not hold, and a pane that is no leaf
+/// of it, change nothing and return no events.
+#[must_use]
+pub(crate) fn remove_pane_leaf_from_floating_pane(
+    session: &mut Session,
+    floating_pane_id: FloatingPaneId,
+    pane_id: PaneId,
+) -> Vec<Event> {
+    let Some((_, floating_pane)) = session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+    else {
+        return Vec::new();
+    };
+    let canonical_layout_tree =
+        match remove_pane_and_normalize(floating_pane.get_layout_tree(), pane_id) {
+            Ok(canonical_layout_tree) => canonical_layout_tree,
+            Err(RemoveError::LastPane { .. }) => {
+                let _ = session.remove_floating_pane(floating_pane_id);
+                return Vec::new();
+            }
+            Err(RemoveError::PaneNotFound { .. }) => return Vec::new(),
+        };
+    let mut emitted_events = vec![Event::FloatingPaneLayoutChanged(
+        FloatingPaneLayoutChanged {
+            pane_ids: canonical_layout_tree.list_leaf_pane_ids(),
+        },
+    )];
+    emitted_events
+        .extend(session.update_floating_pane_layout(floating_pane_id, canonical_layout_tree));
+    for client in session.clients.list_attached_clients_mut() {
+        client.clear_zoom_of_pane(pane_id);
+    }
+    emitted_events
+}
+
+/// Every attached client whose focused pane inside the floating pane
+/// `floating_pane_id` is `pane_id`
+/// ([`Client::find_floating_pane_input_pane_id`](crate::client::Client::find_floating_pane_input_pane_id)),
+/// in client id order, each with the rect `pane_id` holds in that client's
+/// own view of the floating pane
+/// ([`Session::compute_client_floating_pane_solve`]). The rect is empty at
+/// the origin when that view holds none. Called before the pane leaves the
+/// floating pane, to rank the focus repair of
+/// [`repair_floating_pane_focus_after_pane_left`].
+#[must_use]
+pub(crate) fn list_floating_pane_focused_client_rects(
+    session: &Session,
+    floating_pane_id: FloatingPaneId,
+    pane_id: PaneId,
+) -> Vec<(ClientId, Rect)> {
+    session
+        .clients
+        .list_attached_clients()
+        .filter(|client| client.find_floating_pane_input_pane_id(floating_pane_id) == Some(pane_id))
+        .map(|client| {
+            let pane_rect = session
+                .compute_client_floating_pane_solve(client, floating_pane_id)
+                .and_then(|client_solve| client_solve.find_pane_rect(pane_id))
+                .unwrap_or_else(Rect::build_empty_at_origin);
+            (client.get_client_id(), pane_rect)
+        })
+        .collect()
+}
+
+/// Repair the focus inside the floating pane `floating_pane_id` of each
+/// client of `focused_client_rects`, whose focused pane there,
+/// `departed_pane_id`, is no longer a leaf of it, ranked against the rect it
+/// names ([`repair_floating_pane_client_focus`]). Then take
+/// `departed_pane_id` out of every attached client's focus history inside
+/// the floating pane
+/// ([`Client::remove_pane_from_floating_pane_focus_history`](crate::client::Client::remove_pane_from_floating_pane_focus_history)).
+///
+/// Only a client whose input the floating pane takes changes its input. A
+/// floating pane id the session does not hold changes nothing and emits no
+/// events.
+#[must_use]
+pub(crate) fn repair_floating_pane_focus_after_pane_left(
+    session: &mut Session,
+    floating_pane_id: FloatingPaneId,
+    departed_pane_id: PaneId,
+    focused_client_rects: &[(ClientId, Rect)],
+) -> Vec<Event> {
+    let mut emitted_events = Vec::new();
+    for &(client_id, departed_pane_rect) in focused_client_rects {
+        emitted_events.extend(repair_floating_pane_client_focus(
+            session,
+            floating_pane_id,
+            client_id,
+            departed_pane_rect,
+        ));
+    }
+    for client in session.clients.list_attached_clients_mut() {
+        client.remove_pane_from_floating_pane_focus_history(floating_pane_id, departed_pane_id);
+    }
+    emitted_events
+}
+
+/// Remove the floating pane `floating_pane_id` with every pane it holds: drop
+/// each pane's registry record, the floating pane from the floating set, and
+/// every attached client's view of it ([`Session::remove_floating_pane`]). No
+/// layout changes and no tab closes. A client whose floating focus was on the
+/// floating pane focuses the newest floating pane it still shows, else its
+/// input returns to the pane it focused in its active tab.
+///
+/// Returns, for each pane in layout order, [`Event::PaneClosing`] then
+/// [`Event::PaneRemoved`] with `tab_id: None`; then, in client id order, one
+/// [`Event::PaneFocused`] for each client whose input a pane of the floating
+/// pane took and that has a pane to take its input now
+/// ([`build_pane_focused_event`]). A `floating_pane_id` the session does not
+/// hold changes nothing and returns no events.
+#[must_use]
+pub fn remove_floating_pane(session: &mut Session, floating_pane_id: FloatingPaneId) -> Vec<Event> {
+    let Some((_, floating_pane)) = session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+    else {
+        return Vec::new();
+    };
+    let pane_ids = floating_pane.list_pane_ids();
+    let focusing_clients: Vec<(ClientId, PaneId)> = session
+        .clients
+        .list_attached_clients()
+        .filter(|client| client.get_focused_floating_pane_id() == Some(floating_pane_id))
+        .filter_map(|client| {
+            let input_pane_id = client.get_active_focused_pane_id()?;
+            Some((client.get_client_id(), input_pane_id))
+        })
+        .collect();
+    let _ = session.remove_floating_pane(floating_pane_id);
+    let mut emitted_events = Vec::new();
+    for pane_id in pane_ids {
+        session.panes.remove_pane_record(pane_id);
+        emitted_events.push(Event::PaneClosing(PaneClosing { pane_id }));
+        emitted_events.push(Event::PaneRemoved(PaneRemoved {
+            pane_id,
+            tab_id: None,
+        }));
+    }
+    for (client_id, previous_input_pane_id) in focusing_clients {
         if let Some(client) = session.clients.get_client_by_id(client_id) {
-            emitted_events.extend(build_pane_focused_event(client, Some(pane_id)));
+            emitted_events.extend(build_pane_focused_event(
+                client,
+                Some(previous_input_pane_id),
+            ));
         }
     }
     emitted_events
+}
+
+/// Move the focus of every attached client whose focused pane inside the
+/// floating pane `floating_pane_id` the floating pane's own solve suppresses,
+/// to the pane that inherits it ([`repair_floating_pane_client_focus`]),
+/// ranked against that pane's rect in `previous_layout_solve`, else in the
+/// current solve. Suppressed panes are handled in the solve's suppressed
+/// order, and the clients focused on one pane in client id order.
+///
+/// A client zoomed on the suppressed pane keeps its focus: its own view of
+/// the floating pane shows that pane. A floating pane whose solve suppresses
+/// every pane keeps every client's focus. A floating pane id the session does
+/// not hold changes nothing and emits no events.
+///
+/// `[vim | htop]` solved so narrow that `htop` is suppressed: a client
+/// focused on `htop` focuses `vim`.
+#[must_use]
+pub(crate) fn hand_off_suppressed_floating_focus(
+    session: &mut Session,
+    floating_pane_id: FloatingPaneId,
+    previous_layout_solve: Option<&LayoutSolve>,
+) -> Vec<Event> {
+    let Some((_, floating_pane)) = session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+    else {
+        return Vec::new();
+    };
+    let layout_solve = floating_pane.get_layout_solve();
+    if layout_solve.is_every_pane_suppressed {
+        return Vec::new();
+    }
+    let mut repaired_client_rects: Vec<(ClientId, Rect)> = Vec::new();
+    for &suppressed_pane_id in &layout_solve.suppressed_pane_ids {
+        let ranking_pane_rect = previous_layout_solve
+            .and_then(|previous_layout_solve| {
+                previous_layout_solve.find_pane_rect(suppressed_pane_id)
+            })
+            .or_else(|| layout_solve.find_pane_rect(suppressed_pane_id))
+            .unwrap_or_else(Rect::build_empty_at_origin);
+        repaired_client_rects.extend(
+            session
+                .clients
+                .list_attached_clients()
+                .filter(|client| {
+                    client.get_floating_pane_view(floating_pane_id).is_some_and(
+                        |floating_pane_view| {
+                            floating_pane_view.focus_history.first() == Some(&suppressed_pane_id)
+                        },
+                    )
+                })
+                .map(|client| (client.get_client_id(), ranking_pane_rect)),
+        );
+    }
+    let mut emitted_events = Vec::new();
+    for (client_id, ranking_pane_rect) in repaired_client_rects {
+        emitted_events.extend(repair_floating_pane_client_focus(
+            session,
+            floating_pane_id,
+            client_id,
+            ranking_pane_rect,
+        ));
+    }
+    emitted_events
+}
+
+/// Move `client_id`'s focus inside the floating pane `floating_pane_id` to
+/// the pane that inherits it from a pane that held `ranking_pane_rect`, by the
+/// rules [`repair_client_focus`] applies in a tab.
+///
+/// The candidates come from the client's own view of the floating pane
+/// ([`Session::compute_client_floating_pane_solve`],
+/// [`compute_focus_candidates`]), ranked against `ranking_pane_rect`, and
+/// [`repair_focus`] picks the verdict from the client's focus history inside
+/// the floating pane. For [`FocusRepairResult::TerminalTooSmall`], the
+/// inheriting pane is the floating pane's first pane in layout order. The
+/// client focuses the inheriting pane
+/// ([`Client::update_floating_pane_focused_pane`](crate::client::Client::update_floating_pane_focused_pane)).
+///
+/// Returns the [`Event::PaneFocused`] of the client's input change
+/// ([`build_pane_focused_event`]): only a client whose focused floating pane
+/// this is changes its input, and every other client returns `None`. A client
+/// that is not attached, or that holds no view of the floating pane, changes
+/// nothing and returns `None`.
+fn repair_floating_pane_client_focus(
+    session: &mut Session,
+    floating_pane_id: FloatingPaneId,
+    client_id: ClientId,
+    ranking_pane_rect: Rect,
+) -> Option<Event> {
+    let client = session.clients.get_client_by_id(client_id)?;
+    let client_solve = session.compute_client_floating_pane_solve(client, floating_pane_id)?;
+    let candidates = compute_focus_candidates(
+        ranking_pane_rect,
+        &client_solve.pane_rects,
+        &client_solve.stack_headers,
+    );
+    let floating_pane_view = client.get_floating_pane_view(floating_pane_id)?;
+    let verdict = repair_focus(
+        &floating_pane_view.focus_history,
+        &session.panes,
+        candidates,
+    );
+    let inheriting_pane_id = match verdict {
+        FocusRepairResult::Focused(focused_pane_id) => focused_pane_id,
+        FocusRepairResult::TerminalTooSmall => {
+            let (_, floating_pane) = session
+                .floating_set
+                .find_floating_pane_by_id(floating_pane_id)?;
+            *floating_pane.list_pane_ids().first()?
+        }
+    };
+    let previous_focused_pane_id = client.get_active_focused_pane_id();
+    let client = session.clients.get_client_mut_by_id(client_id)?;
+    client.update_floating_pane_focused_pane(floating_pane_id, inheriting_pane_id);
+    build_pane_focused_event(client, previous_focused_pane_id)
 }
 
 /// Handle a pane's child process exiting.

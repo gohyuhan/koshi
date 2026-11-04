@@ -33,6 +33,8 @@ use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::state::CursorShape;
 use koshi_terminal::style::{Color, Style, UnderlineStyle};
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 use crate::runtime::painted_update::PaintedUpdateSender;
 
@@ -556,6 +558,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
     };
     render_snapshot.session_snapshot.floating_pane_slots = vec![
         FloatingPaneSlot {
+            floating_pane_id: build_floating_pane_id(lower_floating_pane_id),
             pane_id: lower_floating_pane_id,
             outer_rect: lower_outer_rect,
             is_pinned: false,
@@ -575,6 +578,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             },
         },
         FloatingPaneSlot {
+            floating_pane_id: build_floating_pane_id(upper_floating_pane_id),
             pane_id: upper_floating_pane_id,
             outer_rect: upper_outer_rect,
             is_pinned: true,
@@ -612,17 +616,21 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
     let untitled_minimized_pane_id = PaneId::new();
     render_snapshot.session_snapshot.floating_panes = vec![
         FloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(upper_floating_pane_id),
             pane_id: upper_floating_pane_id,
         },
         FloatingPane::Minimized {
+            floating_pane_id: build_floating_pane_id(minimized_pane_id),
             pane_id: minimized_pane_id,
             pane_title: Some("htop".to_string()),
             pane_count: NonZeroUsize::new(3).expect("3 is above 0"),
         },
         FloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(lower_floating_pane_id),
             pane_id: lower_floating_pane_id,
         },
         FloatingPane::Minimized {
+            floating_pane_id: build_floating_pane_id(untitled_minimized_pane_id),
             pane_id: untitled_minimized_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
@@ -635,6 +643,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
         painted_frame.session_snapshot.floating_pane_slots,
         [
             FrameFloatingPaneSlot {
+                floating_pane_id: build_floating_pane_id(lower_floating_pane_id),
                 pane_id: lower_floating_pane_id,
                 outer_rect: lower_outer_rect,
                 is_pinned: false,
@@ -654,6 +663,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
                 },
             },
             FrameFloatingPaneSlot {
+                floating_pane_id: build_floating_pane_id(upper_floating_pane_id),
                 pane_id: upper_floating_pane_id,
                 outer_rect: upper_outer_rect,
                 is_pinned: true,
@@ -692,17 +702,21 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
         painted_frame.session_snapshot.floating_panes,
         [
             FrameFloatingPane::Shown {
+                floating_pane_id: build_floating_pane_id(upper_floating_pane_id),
                 pane_id: upper_floating_pane_id,
             },
             FrameFloatingPane::Minimized {
+                floating_pane_id: build_floating_pane_id(minimized_pane_id),
                 pane_id: minimized_pane_id,
                 pane_title: Some("htop".to_string()),
                 pane_count: NonZeroUsize::new(3).expect("3 is above 0"),
             },
             FrameFloatingPane::Shown {
+                floating_pane_id: build_floating_pane_id(lower_floating_pane_id),
                 pane_id: lower_floating_pane_id,
             },
             FrameFloatingPane::Minimized {
+                floating_pane_id: build_floating_pane_id(untitled_minimized_pane_id),
                 pane_id: untitled_minimized_pane_id,
                 pane_title: None,
                 pane_count: NonZeroUsize::MIN,

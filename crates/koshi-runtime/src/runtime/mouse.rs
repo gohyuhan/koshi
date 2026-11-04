@@ -118,18 +118,20 @@ impl Server {
     /// The whole distance travels in one [`Command::ResizePane`], which is
     /// asked for `requested_cell_count` cells in that direction, at most
     /// `i16::MAX`, and moves the border as far as the donating pane's minimum
-    /// size and the layout allow. A tiled pane returns the cells that command
-    /// moved its border on screen, and `0` when the session refuses it. The
+    /// size and the layout allow. A border between two panes, in a tab or
+    /// inside a floating pane, returns the cells that command moved it on
+    /// screen, and `0` when the session refuses it. The
     /// returned count never passes `requested_cell_count`, and a
     /// `requested_cell_count` of `0` sends no command and returns `0`. A step
     /// of `3` asking for `2` cells moves the border `2` cells.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     ///
-    /// A floating pane returns how many cells its outer size changed on the
-    /// axis `border_side` moves along: its width for `Left` and `Right`, its
-    /// height for `Up` and `Down`. The count is `0` when the session refuses
-    /// the resize. A `40`-column float with `10` columns of room, dragged `15`
+    /// A border on the outer edge of a floating pane returns how many cells the
+    /// floating pane's outer size changed on the axis `border_side` moves
+    /// along: its width for `Left` and `Right`, its height for `Up` and
+    /// `Down`. The count is `0` when the session refuses the resize. A
+    /// `40`-column float with `10` columns of room, dragged `15`
     /// cells wider, returns `10`. A `40`-column float pinned at column `20` and
     /// drawn at column `10` of a `50`-column pane area, dragged `3` cells
     /// narrower from its right border, is drawn `37` columns wide at column
@@ -158,8 +160,11 @@ impl Server {
         });
         let (_, moved_cell_count) =
             self.dispatch_mouse_command(client_id, CommandId::new(), resize_command);
+        if let Some(moved_cell_count) = moved_cell_count {
+            return moved_cell_count;
+        }
         let Some(previous_floating_cell_count) = previous_floating_cell_count else {
-            return moved_cell_count.unwrap_or(0);
+            return 0;
         };
         self.find_floating_pane_axis_cell_count(client_id, pane_id, border_side)
             .map_or(0, |cell_count| {

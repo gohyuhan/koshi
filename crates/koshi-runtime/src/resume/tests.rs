@@ -401,7 +401,7 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
         .expect("the first client");
     assert_eq!(
         first_client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 percent_floating_pane_id,
                 FloatingPaneView {
@@ -440,7 +440,7 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
         .expect("the second client");
     assert_eq!(
         second_client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 percent_floating_pane_id,
                 FloatingPaneView {
@@ -1994,7 +1994,7 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
         .clients
         .get_client_by_id(first_client_id)
         .expect("the first client");
-    let expected_floating_pane_views = first_client.list_floating_pane_views().clone();
+    let expected_floating_pane_views = first_client.list_floating_pane_views();
     assert_eq!(
         expected_floating_pane_views,
         HashMap::from([
@@ -2051,7 +2051,7 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
         .expect("the first client");
     assert_eq!(
         resumed_first_client.list_floating_pane_views(),
-        &expected_floating_pane_views
+        expected_floating_pane_views
     );
     assert_eq!(
         resumed_first_client.list_shown_floating_pane_ids(),

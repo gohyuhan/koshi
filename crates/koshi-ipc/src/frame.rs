@@ -20,7 +20,7 @@
 use std::num::NonZeroUsize;
 
 use koshi_core::geometry::{Rect, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
@@ -100,15 +100,17 @@ pub struct FrameSession {
 }
 
 /// One floating pane of the session, shown or minimized for the viewing
-/// client, named by the pane that takes the client's input inside it. The
-/// frame carries the input pane's title and the floating pane's pane count
-/// once each: in the input pane's [`FramePane`] and the floating pane's
-/// [`FrameFloatingPaneSlot`] while the client shows it, and here while the
-/// client minimized it.
+/// client, named by its id and by the pane that takes the client's input
+/// inside it. The frame carries the input pane's title and the floating
+/// pane's pane count once each: in the input pane's [`FramePane`] and the
+/// floating pane's [`FrameFloatingPaneSlot`] while the client shows it, and
+/// here while the client minimized it.
 ///
-/// A shown floating pane travels as `{"Shown": {"pane_id": …}}`, and a
-/// minimized one of 3 panes whose input pane is titled `htop` as
-/// `{"Minimized": {"pane_id": …, "pane_title": "htop", "pane_count": 3}}`.
+/// A shown floating pane travels as
+/// `{"Shown": {"floating_pane_id": …, "pane_id": …}}`, and a minimized one of
+/// 3 panes whose input pane is titled `htop` as
+/// `{"Minimized": {"floating_pane_id": …, "pane_id": …, "pane_title": "htop",
+/// "pane_count": 3}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameFloatingPane {
     /// The viewing client shows the pane. The frame holds the pane's slot in
@@ -117,13 +119,19 @@ pub enum FrameFloatingPane {
     /// viewport has every pane it shows minimized by the session in the same
     /// change.
     Shown {
-        /// The floating pane.
+        /// The floating pane's id inside its session.
+        floating_pane_id: FloatingPaneId,
+        /// The pane that takes the viewing client's input inside the floating
+        /// pane.
         pane_id: PaneId,
     },
     /// The viewing client minimized the pane. The frame holds no slot and no
     /// [`FramePane`] of it.
     Minimized {
-        /// The floating pane.
+        /// The floating pane's id inside its session.
+        floating_pane_id: FloatingPaneId,
+        /// The pane that takes the viewing client's input inside the floating
+        /// pane.
         pane_id: PaneId,
         /// The pane's resolved display title, by the rule of
         /// [`FramePane::pane_title`]. `None` when the pane has reported
@@ -226,6 +234,8 @@ pub struct FrameSlot {
 /// pane slot of its layout area, fails to decode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameFloatingPaneSlot {
+    /// The floating pane's id inside its session.
+    pub floating_pane_id: FloatingPaneId,
     /// The pane that takes the viewing client's input inside the floating
     /// pane: the first pane of its focus history there.
     pub pane_id: PaneId,
@@ -247,6 +257,7 @@ impl<'de> Deserialize<'de> for FrameFloatingPaneSlot {
     {
         #[derive(Deserialize)]
         struct FrameFloatingPaneSlotFields {
+            floating_pane_id: FloatingPaneId,
             pane_id: PaneId,
             outer_rect: Rect,
             is_pinned: bool,
@@ -268,6 +279,7 @@ impl<'de> Deserialize<'de> for FrameFloatingPaneSlot {
             ));
         }
         Ok(Self {
+            floating_pane_id: slot_fields.floating_pane_id,
             pane_id: slot_fields.pane_id,
             outer_rect: slot_fields.outer_rect,
             is_pinned: slot_fields.is_pinned,

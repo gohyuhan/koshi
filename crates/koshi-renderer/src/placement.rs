@@ -20,7 +20,7 @@ use koshi_core::ids::{PaneId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{
     list_shown_placement_destinations, place_floating_pane_in_tab, place_pane_across_tabs,
-    place_pane_within_tab, solve_placed_tab, PlacedTabLayout, PlacementDestinations,
+    place_pane_within_tree, solve_placed_tab, PlacedTabLayout, PlacementDestinations,
     PlacementError, PlacementTarget,
 };
 use koshi_layout::solver::is_layout_within_rect;
@@ -124,7 +124,7 @@ impl PlacementSnapshot {
     }
 
     /// The displayed tab as `placement_target` leaves it, built with the
-    /// layout functions the session commits with: [`place_pane_within_tab`]
+    /// layout functions the session commits with: [`place_pane_within_tree`]
     /// within the source pane's tab, [`place_pane_across_tabs`] into another
     /// tab, and [`place_floating_pane_in_tab`] for a floating source pane. The
     /// placed tab is solved with [`solve_placed_tab`] at the tab size the
@@ -178,7 +178,7 @@ impl PlacementSnapshot {
                         .insertion_tab_sizes
                         .destination_tab_size
                         .ok_or(PlacementPreviewError::NoDestinationTabSize)?;
-                    let placed_layout_tree = place_pane_within_tab(
+                    let placed_layout_tree = place_pane_within_tree(
                         &source_tab_snapshot.layout_tree,
                         self.source_pane_id,
                         &layout_target,

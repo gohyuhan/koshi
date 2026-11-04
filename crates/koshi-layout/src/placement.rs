@@ -31,7 +31,9 @@ use koshi_core::ids::{PaneId, TabId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::edit::{add_pane_to_stack, remove_leaf, PaneRemovalStatus};
+use crate::edit::{
+    add_pane_to_stack, remove_leaf, remove_pane_and_normalize, PaneRemovalStatus, RemoveError,
+};
 use crate::neighbor::{compute_bottom_edge, compute_right_edge};
 use crate::normalize::normalize_layout_tree;
 use crate::solver::{
@@ -235,13 +237,14 @@ pub fn solve_placed_tab(
     }
 }
 
-/// Place `source_pane_id` at `placement_target` inside its own tab.
+/// Place `source_pane_id` at `placement_target` inside its own layout tree,
+/// a tab's or a floating pane's.
 ///
-/// `layout_tree` is the tab's tree, `tab_rect` the rectangle it solves into
+/// `layout_tree` is that tree, `layout_rect` the rectangle it solves into
 /// and `pane_sizing` the caller's own [`PaneSizing`].
 ///
 /// A swap or a stack with itself returns `layout_tree` unchanged. An
-/// insertion when the source is the only leaf, anchored on the tab, returns
+/// insertion when the source is the only leaf, anchored on the tree, returns
 /// the bare leaf.
 ///
 /// `H[A, V[B, H[C, D]]]` with D swapped with B gives `H[A, V[D, H[C, B]]]`,
@@ -252,11 +255,11 @@ pub fn solve_placed_tab(
 ///
 /// Every [`PlacementError`] variant except
 /// [`PlacementError::PaneInBothTrees`]; see each variant for its condition.
-pub fn place_pane_within_tab(
+pub fn place_pane_within_tree(
     layout_tree: &LayoutNode,
     source_pane_id: PaneId,
     placement_target: &PlacementTarget,
-    tab_rect: Rect,
+    layout_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, PlacementError> {
     let source_pane_path =
@@ -280,7 +283,7 @@ pub fn place_pane_within_tab(
                 LayoutNode::Pane(*target_pane_id);
             *swapped_layout_tree.get_node_at_path_mut(&target_pane_path) =
                 LayoutNode::Pane(source_pane_id);
-            validate_layout_fit(swapped_layout_tree, tab_rect, pane_sizing)
+            validate_layout_fit(swapped_layout_tree, layout_rect, pane_sizing)
         }
         PlacementTarget::Insert {
             anchor: placement_anchor,
@@ -299,7 +302,7 @@ pub fn place_pane_within_tab(
                 placement_anchor,
                 *direction,
             );
-            validate_layout_fit(inserted_layout_tree, tab_rect, pane_sizing)
+            validate_layout_fit(inserted_layout_tree, layout_rect, pane_sizing)
         }
         PlacementTarget::Stack { target_pane_id } => {
             if *target_pane_id == source_pane_id {
@@ -317,7 +320,7 @@ pub fn place_pane_within_tab(
             };
             let stacked_layout_tree =
                 stack_pane_onto_target(&removed_layout_tree, source_pane_id, *target_pane_id)?;
-            validate_layout_fit(stacked_layout_tree, tab_rect, pane_sizing)
+            validate_layout_fit(stacked_layout_tree, layout_rect, pane_sizing)
         }
     }
 }
@@ -331,7 +334,7 @@ pub fn is_same_tab_placement_noop(
     tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> bool {
-    place_pane_within_tab(
+    place_pane_within_tree(
         layout_tree,
         source_pane_id,
         placement_target,
@@ -546,11 +549,10 @@ pub fn place_floating_pane_in_tab(
 /// `source_tree` without the leaf `source_pane_id`, normalized, or `None` when
 /// that leaf was its only one. `source_tree` holds `source_pane_id`.
 fn remove_source_leaf(source_tree: &LayoutNode, source_pane_id: PaneId) -> Option<LayoutNode> {
-    let mut removed_source_tree = source_tree.clone();
-    match remove_leaf(&mut removed_source_tree, source_pane_id) {
-        PaneRemovalStatus::Removed => Some(normalize_all_leaves(&removed_source_tree)),
-        PaneRemovalStatus::SubtreeEmpty => None,
-        PaneRemovalStatus::PaneNotFound => unreachable!("presence checked by the caller"),
+    match remove_pane_and_normalize(source_tree, source_pane_id) {
+        Ok(remaining_source_tree) => Some(remaining_source_tree),
+        Err(RemoveError::LastPane { .. }) => None,
+        Err(RemoveError::PaneNotFound { .. }) => unreachable!("presence checked by the caller"),
     }
 }
 
