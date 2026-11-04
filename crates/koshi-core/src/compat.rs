@@ -87,6 +87,14 @@ pub struct Surface {
 ///   fails to decode.
 /// - A minimized floating pane of a painted frame carries `pane_count`: the
 ///   panes the floating pane holds. A frame with `0` fails to decode.
+/// - Each floating pane slot and each shown or minimized floating pane of a
+///   painted frame carries `floating_pane_id`, the floating pane's id inside
+///   its session. A frame without it fails to decode.
+/// - The `CloseFloatingPane` command closes every pane of the floating pane
+///   that holds the pane it names.
+/// - The `FloatingPaneLayoutChanged` event in a command result carries
+///   `pane_ids`: every pane of a floating pane whose tree, or one client's
+///   zoom or shown stack member in it, changed, in layout order.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

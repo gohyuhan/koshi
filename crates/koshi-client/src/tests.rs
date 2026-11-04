@@ -36,6 +36,8 @@ use koshi_renderer::snapshot::{
     RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 
 pub(crate) use koshi_test_support::fixtures::build_key_input_for_chord;
@@ -93,6 +95,21 @@ pub(crate) fn build_one_pane_floating_pane_slot(
     outer_rect: Rect,
     is_pinned: bool,
 ) -> FloatingPaneSlot {
+    build_floating_pane_slot(&LayoutNode::Pane(pane_id), pane_id, outer_rect, is_pinned)
+}
+
+/// The slot of a floating pane at `outer_rect` that holds `layout_tree`, with
+/// `is_pinned`, whose pane `input_pane_id` takes the viewer's input and names
+/// the floating pane ([`build_floating_pane_id`]): the tree solved tiled over
+/// the rows below the strip, with the default pane sizing and no gap. A `40x12`
+/// outer rect around `[vim | htop]` gives the pane boxes `(0, 0)` `20x11` and
+/// `(20, 0)` `20x11`.
+pub(crate) fn build_floating_pane_slot(
+    layout_tree: &LayoutNode,
+    input_pane_id: PaneId,
+    outer_rect: Rect,
+    is_pinned: bool,
+) -> FloatingPaneSlot {
     let layout_size = Size {
         column_count: outer_rect.size.column_count,
         row_count: outer_rect
@@ -101,13 +118,14 @@ pub(crate) fn build_one_pane_floating_pane_slot(
             .saturating_sub(FLOATING_TITLEBAR_STRIP_ROW_COUNT),
     };
     let layout_solve = solve_layout_with_mode(
-        &LayoutNode::Pane(pane_id),
+        layout_tree,
         LayoutMode::Tiled,
         Rect::from_size_at_origin(layout_size),
         PaneSizing::default(),
     );
     FloatingPaneSlot {
-        pane_id,
+        floating_pane_id: build_floating_pane_id(input_pane_id),
+        pane_id: input_pane_id,
         outer_rect,
         is_pinned,
         layout_area: LayoutAreaSnapshot::from_layout_solve(
@@ -2329,6 +2347,7 @@ fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
     let floating_slot_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(ClientId::new(), LockMode::Normal, false);
     render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
+        floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
         pane_id: floating_slot_pane_id,
         pane_title: None,
         pane_count: NonZeroUsize::MIN,

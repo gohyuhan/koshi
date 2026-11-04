@@ -312,7 +312,7 @@ The default leader is Ctrl.
 | `<C-p> s` | Open pane in the focused pane's stack |
 | `<C-p> f` | Open a floating pane above the tiled panes |
 | `<C-p> m` | Enter pane placement mode: pick a pane and a destination, then Enter |
-| `<C-p> u` | Float the focused pane, or dock a floating pane beside the tiled pane under its center |
+| `<C-p> u` | Float the focused pane, or dock the focused pane of a floating pane beside the tiled pane under its center |
 | `<C-p> x` | Close pane and its process tree |
 | `<C-p> ←` / `↓` / `↑` / `→` | Focus nearby pane |
 | `<C-p> Tab` / `Shift+Tab` | Show and focus the next / previous floating pane |
@@ -445,7 +445,7 @@ Outside Koshi, give a target unless exactly one running session can be chosen.
 |---|---|
 | `koshi new-pane [--direction right\|down\|left\|up \| --stacked] [--pane <PANE_ID>] [--tab <NAME_OR_ID>] [--session <NAME_OR_ID>] [--client <CLIENT_ID>]` | Open a shell pane |
 | `koshi run [new-pane options] -- <COMMAND>...` | Open a pane running one command |
-| `koshi close-pane [--pane <PANE_ID>] [--force]` | Close a pane |
+| `koshi close-pane [--pane <PANE_ID>] [--force] [--all]` | Close a pane, or with `--all` every pane of its floating pane |
 | `koshi resize-pane --direction <DIRECTION> [--size <SIZE>] [--pane <PANE_ID>] [--client <CLIENT_ID>]` | Move one pane border |
 | `koshi move-pane --direction <DIRECTION> [--pane <PANE_ID>]` | Swap a pane with its visible neighbor |
 | `koshi place-pane --pane <PANE_ID> --tab <NAME_OR_ID> --direction <DIRECTION> [--client <CLIENT_ID>]` | Insert a pane into another tab |

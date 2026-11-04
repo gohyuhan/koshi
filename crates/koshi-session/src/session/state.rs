@@ -35,10 +35,21 @@ use serde::{Deserialize, Serialize};
 use crate::{
     client::{compute_floating_pane_size_cap, place_floating_pane, Client, ClientRegistry},
     error::{FloatingSetError, InvalidTransition, SessionConsistencyError},
-    session::cascade::hand_off_suppressed_focus,
+    session::cascade::{hand_off_suppressed_floating_focus, hand_off_suppressed_focus},
     session::focus::{build_floating_pane_minimized_changed_events, build_pane_focused_event},
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent},
 };
+
+/// The layout tree that holds a pane: the tree of a tab, or the tree of a
+/// floating pane. [`Session::find_layout_area_id_by_pane_id`] gives it for a
+/// pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayoutAreaId {
+    /// The layout tree of the tab `TabId`.
+    Tab(TabId),
+    /// The layout tree of the floating pane `FloatingPaneId`.
+    FloatingPane(FloatingPaneId),
+}
 
 /// One layout tree, the size it is solved at, and the tiled solve of the tree
 /// at that size. A tab holds one ([`Tab`]), and so does each floating pane
@@ -321,6 +332,12 @@ impl FloatingPane {
         self.solved_size
     }
 
+    /// This floating pane's layout tree.
+    #[must_use]
+    pub fn get_layout_tree(&self) -> &LayoutNode {
+        &self.layout_area.layout
+    }
+
     /// The size this floating pane's tree is solved at:
     /// [`compute_floating_layout_size`] of its solved size.
     #[must_use]
@@ -475,14 +492,16 @@ impl FloatingSet {
     /// `shared_floating_viewport` with [`solve_floating_pane_size`] and the
     /// floating pane's own minimum ([`FloatingPane::compute_minimum_size`]),
     /// then solve the tree of each floating pane whose outer size changed with
-    /// `pane_sizing` over [`compute_floating_layout_size`] of it. Returns
-    /// whether a floating pane's solved size changed.
+    /// `pane_sizing` over [`compute_floating_layout_size`] of it.
+    ///
+    /// Returns each floating pane whose solved size changed, with the solve
+    /// its tree held before, in the order the floating panes were created.
     fn update_floating_pane_sizes(
         &mut self,
         shared_floating_viewport: Size,
         pane_sizing: PaneSizing,
-    ) -> bool {
-        let mut has_solved_size_changed = false;
+    ) -> Vec<(FloatingPaneId, LayoutSolve)> {
+        let mut previous_layout_solves = Vec::new();
         for floating_pane in &mut self.floating_panes {
             let solved_size = solve_floating_pane_size(
                 floating_pane.desired_size,
@@ -492,12 +511,12 @@ impl FloatingSet {
             if floating_pane.solved_size == solved_size {
                 continue;
             }
-            has_solved_size_changed = true;
             floating_pane.solved_size = solved_size;
             floating_pane.layout_area.solved_size = compute_floating_layout_size(solved_size);
-            let _ = floating_pane.layout_area.update_layout_solve(pane_sizing);
+            let previous_layout_solve = floating_pane.layout_area.update_layout_solve(pane_sizing);
+            previous_layout_solves.push((floating_pane.floating_pane_id, previous_layout_solve));
         }
-        has_solved_size_changed
+        previous_layout_solves
     }
 
     /// Set the desired size of the floating pane `floating_pane_id`. Its
@@ -634,8 +653,8 @@ pub struct SessionViewChanges {
     pub changed_client_ids: BTreeSet<ClientId>,
     /// A tab was added, removed, or moved in the tab bar.
     pub is_tab_bar_changed: bool,
-    /// A floating pane was added or removed, or a floating pane's solved size
-    /// changed.
+    /// A floating pane was added or removed, or a floating pane's tree or
+    /// solved size changed.
     pub is_floating_set_changed: bool,
     /// The pane sizing changed ([`Session::update_pane_sizing`]).
     pub is_pane_sizing_changed: bool,
@@ -779,15 +798,66 @@ impl Session {
     /// ([`FloatingPane::compute_minimum_size`]), and solve the tree of each
     /// floating pane whose outer size changed with that pane sizing. When a
     /// solved size changed, record a floating set change and empty every
-    /// attached client's kept floating pane solves.
-    pub fn update_floating_pane_sizes(&mut self, shared_floating_viewport: Size) {
-        let has_solved_size_changed = self
+    /// attached client's kept floating pane solves. Then each client whose
+    /// focused pane inside such a floating pane the new solve suppresses
+    /// focuses a pane the solve shows. A client zoomed inside the floating
+    /// pane keeps its focus.
+    ///
+    /// Returns the events of those focus moves.
+    #[must_use]
+    pub fn update_floating_pane_sizes(&mut self, shared_floating_viewport: Size) -> Vec<Event> {
+        let previous_layout_solves = self
             .floating_set
             .update_floating_pane_sizes(shared_floating_viewport, self.pane_sizing);
-        if has_solved_size_changed {
-            self.view_changes.is_floating_set_changed = true;
-            self.clients.clear_own_floating_pane_solves();
+        if previous_layout_solves.is_empty() {
+            return Vec::new();
         }
+        self.view_changes.is_floating_set_changed = true;
+        self.clients.clear_own_floating_pane_solves();
+        let mut emitted_events = Vec::new();
+        for (floating_pane_id, previous_layout_solve) in previous_layout_solves {
+            emitted_events.extend(hand_off_suppressed_floating_focus(
+                self,
+                floating_pane_id,
+                Some(&previous_layout_solve),
+            ));
+        }
+        emitted_events
+    }
+
+    /// Replace the tree of the floating pane `floating_pane_id` with
+    /// `layout_tree`, solve it again at the size it is solved at with
+    /// [`Session::get_pane_sizing`], record a floating set change and empty
+    /// every attached client's kept floating pane solves. Then each client
+    /// whose focused pane inside the floating pane the new solve suppresses
+    /// focuses a pane the solve shows. A client zoomed inside the floating
+    /// pane keeps its focus.
+    /// The floating pane's outer size stays as it is: the next
+    /// [`Session::update_floating_pane_sizes`] solves it against the new
+    /// tree's minimum.
+    ///
+    /// Returns the events of those focus moves. A floating pane id the
+    /// session does not hold changes nothing and returns none.
+    #[must_use]
+    pub fn update_floating_pane_layout(
+        &mut self,
+        floating_pane_id: FloatingPaneId,
+        layout_tree: LayoutNode,
+    ) -> Vec<Event> {
+        let pane_sizing = self.pane_sizing;
+        let Some(floating_pane) = self
+            .floating_set
+            .floating_panes
+            .iter_mut()
+            .find(|floating_pane| floating_pane.floating_pane_id == floating_pane_id)
+        else {
+            return Vec::new();
+        };
+        floating_pane.layout_area.layout = layout_tree;
+        let previous_layout_solve = floating_pane.layout_area.update_layout_solve(pane_sizing);
+        self.view_changes.is_floating_set_changed = true;
+        self.clients.clear_own_floating_pane_solves();
+        hand_off_suppressed_floating_focus(self, floating_pane_id, Some(&previous_layout_solve))
     }
 
     /// Everything frames and placement previews read that changed since the
@@ -875,6 +945,19 @@ impl Session {
         detached_client
     }
 
+    /// The layout tree that holds `pane_id` as a leaf: a tab's
+    /// ([`Session::find_tab_by_pane_id`]), else a floating pane's
+    /// ([`FloatingSet::find_floating_pane_by_pane_id`]). `None` when the
+    /// session holds no such pane.
+    #[must_use]
+    pub fn find_layout_area_id_by_pane_id(&self, pane_id: PaneId) -> Option<LayoutAreaId> {
+        if let Some(tab) = self.find_tab_by_pane_id(pane_id) {
+            return Some(LayoutAreaId::Tab(tab.tab_id));
+        }
+        let (_, floating_pane) = self.floating_set.find_floating_pane_by_pane_id(pane_id)?;
+        Some(LayoutAreaId::FloatingPane(floating_pane.floating_pane_id))
+    }
+
     /// The tab whose layout holds `pane_id` as a leaf. `None` when no tab
     /// does: a floating pane, or a pane this session does not hold.
     #[must_use]
@@ -939,7 +1022,11 @@ impl Session {
     /// order, each followed by step 1 of [`Session::update_tab_layout`]. After
     /// the last tab, every floating pane's tree is solved again with
     /// `pane_sizing` at the size it is solved at, every attached client's kept
-    /// floating pane solves are emptied, then step 2 runs once. Every
+    /// floating pane solves are emptied, and, floating pane by floating pane
+    /// in the order they were created, each client whose focused pane inside
+    /// it the new solve suppresses focuses a pane the solve shows. A client
+    /// zoomed inside the floating pane keeps its focus. Then step 2 runs
+    /// once. Every
     /// tab and every floating pane is solved, whether or not `pane_sizing` or
     /// its solve size changed.
     ///
@@ -970,10 +1057,25 @@ impl Session {
                 Some(&previous_layout_solve),
             ));
         }
-        for floating_pane in &mut self.floating_set.floating_panes {
-            let _ = floating_pane.layout_area.update_layout_solve(pane_sizing);
-        }
+        let previous_floating_layout_solves: Vec<(FloatingPaneId, LayoutSolve)> = self
+            .floating_set
+            .floating_panes
+            .iter_mut()
+            .map(|floating_pane| {
+                (
+                    floating_pane.floating_pane_id,
+                    floating_pane.layout_area.update_layout_solve(pane_sizing),
+                )
+            })
+            .collect();
         self.clients.clear_own_floating_pane_solves();
+        for (floating_pane_id, previous_layout_solve) in previous_floating_layout_solves {
+            emitted_events.extend(hand_off_suppressed_floating_focus(
+                self,
+                floating_pane_id,
+                Some(&previous_layout_solve),
+            ));
+        }
         emitted_events.extend(self.minimize_undrawable_floating_panes());
         emitted_events
     }
@@ -1126,30 +1228,39 @@ impl Session {
         )
     }
 
-    /// The solve of `tab_id` in `layout_mode`, with each stack showing its
-    /// active member. `Tiled` is the tab's own solve
-    /// ([`Tab::get_layout_solve`]). `Fullscreen` on a leaf of the tab's tree
-    /// gives that pane the whole tab and every other pane zero area at the
-    /// tab's solved size, and suppresses the pane when that size is below its
+    /// The solve of the layout tree `layout_area_id` names, a tab's or a
+    /// floating pane's, in `layout_mode`, with each stack showing its active
+    /// member. `Tiled` is the tree's own solve ([`Tab::get_layout_solve`],
+    /// [`FloatingPane::get_layout_solve`]). `Fullscreen` on a leaf of the tree
+    /// gives that pane the whole area and every other pane zero area at the
+    /// tree's solved size, and suppresses the pane when that size is below its
     /// border-inclusive floor ([`solve_layout_with_mode`]). `Fullscreen` on a
-    /// pane the tree does not hold is the tab's own solve. `None` when the
-    /// session holds no `tab_id`.
+    /// pane the tree does not hold is the tree's own solve. `None` when the
+    /// session holds no such tab or floating pane.
     ///
     /// `Tiled` on an `80x22` tab gives the tab's solve with no copy.
     #[must_use]
     pub fn compute_layout_mode_solve(
         &self,
-        tab_id: TabId,
+        layout_area_id: LayoutAreaId,
         layout_mode: LayoutMode,
     ) -> Option<Cow<'_, LayoutSolve>> {
-        let tab = self.tabs.get(&tab_id)?;
-        let zoomed_tab_solve = match layout_mode {
-            LayoutMode::Fullscreen { focused_pane_id } => tab
-                .layout_area
-                .build_zoomed_solve(focused_pane_id, self.pane_sizing),
+        let layout_area = match layout_area_id {
+            LayoutAreaId::Tab(tab_id) => &self.tabs.get(&tab_id)?.layout_area,
+            LayoutAreaId::FloatingPane(floating_pane_id) => {
+                let (_, floating_pane) = self
+                    .floating_set
+                    .find_floating_pane_by_id(floating_pane_id)?;
+                &floating_pane.layout_area
+            }
+        };
+        let zoomed_solve = match layout_mode {
+            LayoutMode::Fullscreen { focused_pane_id } => {
+                layout_area.build_zoomed_solve(focused_pane_id, self.pane_sizing)
+            }
             LayoutMode::Tiled => None,
         };
-        Some(zoomed_tab_solve.map_or(Cow::Borrowed(&tab.layout_area.layout_solve), Cow::Owned))
+        Some(zoomed_solve.map_or(Cow::Borrowed(&layout_area.layout_solve), Cow::Owned))
     }
 
     /// The solve `client` draws the floating pane `floating_pane_id` with, at

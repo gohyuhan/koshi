@@ -6,6 +6,7 @@
 //! wide (CJK), emoji, and combining-mark titles.
 
 use super::*;
+use koshi_core::ids::FloatingPaneId;
 use std::num::NonZeroUsize;
 
 use crate::render::tests::{compute_version_badge_column_count, format_rendered_cells};
@@ -1464,6 +1465,7 @@ fn both_buttons_show_with_no_floating_pane_and_no_notification_and_a_floating_pa
         .session_snapshot
         .floating_panes
         .push(FloatingPane::Minimized {
+            floating_pane_id: FloatingPaneId::new(),
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
@@ -1536,6 +1538,7 @@ fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there(
         .session_snapshot
         .floating_panes
         .push(FloatingPane::Minimized {
+            floating_pane_id: FloatingPaneId::new(),
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
@@ -1629,6 +1632,7 @@ fn the_tray_button_is_reversed_only_while_the_lock_mode_is_floating_pane_tray() 
         .session_snapshot
         .floating_panes
         .push(FloatingPane::Minimized {
+            floating_pane_id: FloatingPaneId::new(),
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,

@@ -638,6 +638,46 @@ fn removing_the_last_pane_is_rejected_then_it_can_still_be_split() {
 }
 
 #[test]
+fn remove_pane_and_normalize_collapses_the_split_the_removed_leaf_leaves_alone() {
+    // `H[left, V[top, removed]]` without `removed` gives `H[left, top]`.
+    let (left_pane_id, top_pane_id, removed_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            build_leaf_node(left_pane_id),
+            build_equal_split_node(SplitDirection::Vertical, top_pane_id, removed_pane_id),
+        ],
+    ));
+
+    assert_eq!(
+        remove_pane_and_normalize(&layout_tree, removed_pane_id),
+        Ok(build_equal_split_node(
+            SplitDirection::Horizontal,
+            left_pane_id,
+            top_pane_id
+        ))
+    );
+}
+
+#[test]
+fn remove_pane_and_normalize_refuses_the_last_pane_and_a_missing_pane() {
+    let (pane_id, missing_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_tree = LayoutNode::Pane(pane_id);
+
+    assert_eq!(
+        remove_pane_and_normalize(&layout_tree, pane_id),
+        Err(RemoveError::LastPane { pane_id })
+    );
+    assert_eq!(
+        remove_pane_and_normalize(&layout_tree, missing_pane_id),
+        Err(RemoveError::PaneNotFound {
+            pane_id: missing_pane_id
+        })
+    );
+}
+
+#[test]
 fn removing_stack_members_until_one_remains_then_normalizing_gives_a_leaf() {
     use std::collections::HashSet;
 

@@ -12,13 +12,14 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use koshi_core::event::{PaneFocused, QuitCause, TabClosed};
-use koshi_core::geometry::{FloatingPanePosition, Point, Size, SplitDirection};
+use koshi_core::geometry::{Direction, FloatingPanePosition, Point, Size, SplitDirection};
 use koshi_core::ids::{FloatingPaneId, SessionId};
+use koshi_layout::edit::split_leaf;
 use koshi_layout::solver::PaneSizing;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 
-use crate::client::{Client, ClientOrigin};
+use crate::client::{Client, ClientOrigin, FloatingPaneView};
 use crate::session::state::tests::{build_default_floating_pane, build_empty_session, build_tab};
 use crate::session::state::{FloatingPane, Tab};
 
@@ -1368,7 +1369,7 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
 }
 
 #[test]
-fn remove_floating_pane_drops_the_record_the_floating_pane_and_every_client_view() {
+fn removing_the_last_pane_of_a_floating_pane_drops_the_floating_pane_and_every_client_view() {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
     let htop_pane_id = PaneId::new();
@@ -1396,7 +1397,7 @@ fn remove_floating_pane_drops_the_record_the_floating_pane_and_every_client_view
     let pinning_client_id = pinning_client.get_client_id();
     session.attach_client(pinning_client);
 
-    let emitted_events = remove_floating_pane(&mut session, htop_pane_id);
+    let emitted_events = remove_pane_from_floating_pane(&mut session, htop_pane_id);
 
     assert_eq!(
         emitted_events,
@@ -1439,7 +1440,8 @@ fn remove_floating_pane_drops_the_record_the_floating_pane_and_every_client_view
 }
 
 #[test]
-fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float() {
+fn removing_the_last_pane_of_a_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float(
+) {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
     let (shown_pane_id, minimized_pane_id, removed_pane_id) =
@@ -1476,7 +1478,7 @@ fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float()
     let focusing_client_id = focusing_client.get_client_id();
     session.attach_client(focusing_client);
 
-    let emitted_events = remove_floating_pane(&mut session, removed_pane_id);
+    let emitted_events = remove_pane_from_floating_pane(&mut session, removed_pane_id);
 
     assert_eq!(
         emitted_events,
@@ -1512,7 +1514,8 @@ fn remove_floating_pane_moves_a_focusing_client_to_its_most_recent_shown_float()
 }
 
 #[test]
-fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_into() {
+fn removing_the_last_pane_of_a_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_into(
+) {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
     let htop_pane_id = PaneId::new();
@@ -1536,7 +1539,7 @@ fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_
     let unfocused_client_id = unfocused_client.get_client_id();
     session.attach_client(unfocused_client);
 
-    let emitted_events = remove_floating_pane(&mut session, htop_pane_id);
+    let emitted_events = remove_pane_from_floating_pane(&mut session, htop_pane_id);
 
     assert_eq!(
         emitted_events,
@@ -1561,7 +1564,7 @@ fn remove_floating_pane_reports_no_focus_for_a_client_left_with_no_pane_to_type_
 }
 
 #[test]
-fn remove_floating_pane_of_a_tiled_pane_changes_nothing() {
+fn removing_a_tiled_pane_from_a_floating_pane_changes_nothing() {
     let tab_id = TabId::new();
     let tiled_pane_id = PaneId::new();
     let mut session = build_session_with(
@@ -1569,7 +1572,10 @@ fn remove_floating_pane_of_a_tiled_pane_changes_nothing() {
         vec![PaneRecord::from_terminal_pane(tiled_pane_id)],
     );
 
-    assert_eq!(remove_floating_pane(&mut session, tiled_pane_id), vec![]);
+    assert_eq!(
+        remove_pane_from_floating_pane(&mut session, tiled_pane_id),
+        vec![]
+    );
 
     assert_eq!(
         session
@@ -1581,6 +1587,232 @@ fn remove_floating_pane_of_a_tiled_pane_changes_nothing() {
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Pane(tiled_pane_id)
+    );
+}
+
+/// A session with the tab `tab_id` holding `tiled_pane_id` alone, and one
+/// floating pane `[vim | htop]` solved to `48x13`. Returns the session and the
+/// floating pane's id.
+fn build_session_with_two_pane_floating_pane(
+    tab_id: TabId,
+    tiled_pane_id: PaneId,
+    vim_pane_id: PaneId,
+    htop_pane_id: PaneId,
+) -> (Session, FloatingPaneId) {
+    let mut session = build_session_with(
+        vec![build_single_pane_tab(tab_id, tiled_pane_id)],
+        vec![
+            PaneRecord::from_terminal_pane(tiled_pane_id),
+            PaneRecord::from_terminal_pane(vim_pane_id),
+            PaneRecord::from_terminal_pane(htop_pane_id),
+        ],
+    );
+    let floating_pane = build_default_floating_pane(vim_pane_id);
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    session
+        .floating_set
+        .add_floating_pane(floating_pane)
+        .expect("the floating set is empty");
+    let split_layout_tree = split_leaf(
+        &LayoutNode::Pane(vim_pane_id),
+        vim_pane_id,
+        htop_pane_id,
+        Direction::Right,
+    )
+    .expect("vim splits");
+    assert_eq!(
+        session.update_floating_pane_layout(floating_pane_id, split_layout_tree),
+        vec![]
+    );
+    (session, floating_pane_id)
+}
+
+/// A client attached to `tab_id` of `session` that shows the floating pane
+/// `floating_pane_id`, whose focus history inside it is `focus_history`
+/// (front first), and that zooms `zoomed_pane_id` inside it.
+fn attach_floating_pane_viewer(
+    session: &mut Session,
+    tab_id: TabId,
+    tiled_pane_id: PaneId,
+    floating_pane_id: FloatingPaneId,
+    focus_history: &[PaneId],
+    zoomed_pane_id: Option<PaneId>,
+) -> ClientId {
+    let floating_pane = session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+        .expect("the session holds the floating pane")
+        .1
+        .clone();
+    let mut client = build_focused_client(session.session_id, tab_id, tiled_pane_id);
+    client.add_floating_pane_view(&floating_pane, FloatingPanePosition::Default);
+    assert!(client.focus_floating_pane(floating_pane_id));
+    for &pane_id in focus_history.iter().rev() {
+        client.update_floating_pane_focused_pane(floating_pane_id, pane_id);
+    }
+    if let Some(zoomed_pane_id) = zoomed_pane_id {
+        client.zoom_pane_in_floating_pane(floating_pane_id, zoomed_pane_id);
+    }
+    let client_id = client.get_client_id();
+    session.attach_client(client);
+    client_id
+}
+
+#[test]
+fn removing_a_pane_from_a_floating_pane_of_two_collapses_its_leaf_and_repairs_the_clients_that_focused_it(
+) {
+    let tab_id = TabId::new();
+    let (tiled_pane_id, vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let (mut session, floating_pane_id) =
+        build_session_with_two_pane_floating_pane(tab_id, tiled_pane_id, vim_pane_id, htop_pane_id);
+    // alice types into `htop`. bob zooms `vim` and types into it.
+    let alice_client_id = attach_floating_pane_viewer(
+        &mut session,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        &[htop_pane_id, vim_pane_id],
+        None,
+    );
+    let bob_client_id = attach_floating_pane_viewer(
+        &mut session,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        &[vim_pane_id, htop_pane_id],
+        Some(vim_pane_id),
+    );
+
+    let emitted_events = remove_pane_from_floating_pane(&mut session, vim_pane_id);
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::PaneClosing(PaneClosing {
+                pane_id: vim_pane_id,
+            }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: vim_pane_id,
+                tab_id: None,
+            }),
+            Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
+                pane_ids: vec![htop_pane_id],
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id: None,
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(vim_pane_id),
+            }),
+        ]
+    );
+    let (_, floating_pane) = session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+        .expect("the floating pane stays");
+    assert_eq!(
+        floating_pane.get_layout_tree(),
+        &LayoutNode::Pane(htop_pane_id)
+    );
+    assert!(session.panes.get_pane_record_by_id(vim_pane_id).is_none());
+    for client_id in [alice_client_id, bob_client_id] {
+        let client = session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the client is attached");
+        assert_eq!(
+            client.get_floating_pane_view(floating_pane_id),
+            Some(&FloatingPaneView {
+                position: FloatingPanePosition::Default,
+                is_minimized: false,
+                focus_history: vec![htop_pane_id],
+                zoomed_pane_id: None,
+            })
+        );
+        assert_eq!(client.get_active_focused_pane_id(), Some(htop_pane_id));
+    }
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn a_floating_pane_shrunk_below_its_tree_hands_each_tiled_viewers_focus_to_a_shown_pane() {
+    let tab_id = TabId::new();
+    let (tiled_pane_id, vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let (mut session, floating_pane_id) =
+        build_session_with_two_pane_floating_pane(tab_id, tiled_pane_id, vim_pane_id, htop_pane_id);
+    // alice types into `htop`. bob zooms `htop` and types into it.
+    let alice_client_id = attach_floating_pane_viewer(
+        &mut session,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        &[htop_pane_id, vim_pane_id],
+        None,
+    );
+    let bob_client_id = attach_floating_pane_viewer(
+        &mut session,
+        tab_id,
+        tiled_pane_id,
+        floating_pane_id,
+        &[htop_pane_id, vim_pane_id],
+        Some(htop_pane_id),
+    );
+
+    // An `8x22` floating viewport caps the floating pane at `7` columns, under
+    // the `8` that `[vim | htop]` needs: the trailing `htop` is suppressed.
+    let emitted_events = session.update_floating_pane_sizes(Size {
+        column_count: 8,
+        row_count: 22,
+    });
+
+    assert_eq!(
+        emitted_events,
+        vec![Event::PaneFocused(PaneFocused {
+            client_id: alice_client_id,
+            tab_id: None,
+            pane_id: vim_pane_id,
+            previous_pane_id: Some(htop_pane_id),
+        })]
+    );
+    let (_, floating_pane) = session
+        .floating_set
+        .find_floating_pane_by_id(floating_pane_id)
+        .expect("the floating pane stays");
+    assert_eq!(
+        floating_pane.get_solved_size(),
+        Size {
+            column_count: 7,
+            row_count: 13,
+        }
+    );
+    assert_eq!(
+        floating_pane.get_layout_solve().suppressed_pane_ids,
+        vec![htop_pane_id]
+    );
+    let get_view = |client_id: ClientId| {
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .and_then(|client| client.get_floating_pane_view(floating_pane_id))
+            .cloned()
+    };
+    assert_eq!(
+        get_view(alice_client_id),
+        Some(FloatingPaneView {
+            position: FloatingPanePosition::Default,
+            is_minimized: false,
+            focus_history: vec![vim_pane_id, htop_pane_id],
+            zoomed_pane_id: None,
+        })
+    );
+    assert_eq!(
+        get_view(bob_client_id),
+        Some(FloatingPaneView {
+            position: FloatingPanePosition::Default,
+            is_minimized: false,
+            focus_history: vec![htop_pane_id, vim_pane_id],
+            zoomed_pane_id: Some(htop_pane_id),
+        })
     );
 }
 

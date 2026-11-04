@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::runtime::delivery_queue::DeliveryReceiver;
-use koshi_core::event::RejectReason;
+use koshi_core::event::{Event, PaneCreated, RejectReason};
 use koshi_test_support::fixtures::build_new_pane_args;
 
 use std::num::NonZeroU16;
@@ -3425,6 +3425,68 @@ fn a_floating_pane_right_border_drag_answers_the_cells_it_grew() {
             Point { column: 30, row: 4 },
             Size {
                 column_count: 50,
+                row_count: 12
+            }
+        )
+    );
+}
+
+#[test]
+fn an_inner_border_drag_inside_a_floating_pane_answers_the_cells_the_border_moved() {
+    let (mut server, _fake_pty_backend, client_id, mouse_event_queue) =
+        build_server_with_mouse_event_queue();
+    create_forty_by_twelve_floating_pane(
+        &mut server,
+        client_id,
+        Point { column: 10, row: 4 },
+        false,
+    );
+    // `htop` splits into `[htop | zsh]`, two `20`-column panes.
+    let split_command_result = server.dispatch(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(build_new_pane_args()),
+    ));
+    let CommandResult::Ok { emitted_events, .. } = &split_command_result else {
+        panic!("expected the floating pane to split, got {split_command_result:?}");
+    };
+    let Some(Event::PaneCreated(PaneCreated {
+        pane_id: zsh_pane_id,
+        tab_id: None,
+    })) = emitted_events.first().cloned()
+    else {
+        panic!("expected a floating PaneCreated first, got {emitted_events:?}");
+    };
+
+    server.run_client_mouse(
+        client_id,
+        7,
+        vec![WireMouseAction::Resize {
+            pane_id: zsh_pane_id,
+            border_side: Direction::Left,
+            resize_step: 1,
+            requested_cell_count: 5,
+        }],
+    );
+
+    assert_eq!(
+        list_mouse_answers(&mouse_event_queue),
+        vec![(
+            7,
+            vec![MouseAnswer::Resized {
+                pane_id: zsh_pane_id,
+                border_side: Direction::Left,
+                resize_step: 1,
+                applied_cell_count: 5,
+            }]
+        )]
+    );
+    assert_eq!(
+        get_floating_pane_outer_rect(&server, client_id, zsh_pane_id),
+        Rect::from_origin_and_size(
+            Point { column: 10, row: 4 },
+            Size {
+                column_count: 40,
                 row_count: 12
             }
         )

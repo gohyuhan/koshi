@@ -104,6 +104,7 @@ use koshi_input::host::{
     GraphicAttributeError, GraphicAttributeReply, KeyCode, KittyGraphicsReply,
 };
 use koshi_ipc::protocol::WireMouseAction;
+use koshi_layout::edit::split_leaf;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
@@ -127,7 +128,8 @@ use koshi_test_support::output_workloads::SeededSequence;
 use koshi_link::config::LoadedConfig;
 
 use crate::tests::{
-    build_one_pane_floating_pane_slot, create_session_with_attached_client, TEST_VIEWPORT_SIZE,
+    build_floating_pane_slot, build_one_pane_floating_pane_slot,
+    create_session_with_attached_client, TEST_VIEWPORT_SIZE,
 };
 
 fn build_committed_regions(viewport_size: Size) -> CommittedRegions {
@@ -5312,6 +5314,67 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
             PaneSnapshot::from_empty_pane(left_pane_id),
             PaneSnapshot::from_empty_pane(right_pane_id),
         ]
+    );
+}
+
+#[test]
+fn a_placement_preview_keeps_the_content_of_every_pane_of_a_floating_pane() {
+    let (session_server, client_id, source_pane_id) = build_test_server_with_pane();
+    let mut render_snapshot = build_render_snapshot(&session_server, client_id);
+    let tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
+    let floating_layout_tree = split_leaf(
+        &LayoutNode::Pane(vim_pane_id),
+        vim_pane_id,
+        htop_pane_id,
+        Direction::Right,
+    )
+    .expect("vim splits");
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(build_floating_pane_slot(
+            &floating_layout_tree,
+            vim_pane_id,
+            CoreRect::from_origin_and_size(
+                Point { column: 4, row: 2 },
+                Size {
+                    column_count: 30,
+                    row_count: 8,
+                },
+            ),
+            false,
+        ));
+    let floating_pane_snapshots =
+        [(vim_pane_id, "vim"), (htop_pane_id, "htop")].map(|(pane_id, pane_title)| PaneSnapshot {
+            pane_title: Some(pane_title.to_string()),
+            ..PaneSnapshot::from_empty_pane(pane_id)
+        });
+    render_snapshot
+        .pane_snapshots
+        .extend(floating_pane_snapshots.iter().cloned());
+    let target_pane_id = PaneId::new();
+    let placed_tab_snapshot =
+        build_same_tab_placement_snapshot(tab_id, source_pane_id, target_pane_id)
+            .build_placed_preview(&TiledPlacementTarget::Split {
+                destination_tab_id: tab_id,
+                anchor: PanePlacementAnchor::Pane(target_pane_id),
+                direction: Direction::Down,
+            })
+            .expect("the split fits the tab")
+            .placed_tab_snapshot;
+
+    let displayed_render_snapshot =
+        build_placement_render_snapshot(&render_snapshot, &placed_tab_snapshot, source_pane_id);
+
+    assert_eq!(
+        displayed_render_snapshot
+            .pane_snapshots
+            .iter()
+            .filter(|pane_snapshot| [vim_pane_id, htop_pane_id].contains(&pane_snapshot.pane_id))
+            .cloned()
+            .collect::<Vec<_>>(),
+        floating_pane_snapshots.to_vec()
     );
 }
 

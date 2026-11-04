@@ -188,7 +188,7 @@ use koshi_core::command::{
 use koshi_core::constant::{compute_frame_interval, compute_heartbeat_interval};
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PixelCellSize, Rect as CoreRect, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_core::key::{KeyInput, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput};
@@ -456,7 +456,7 @@ struct CommittedPlacementAnimation {
 #[derive(Debug)]
 struct FloatingPaneSlideAnimation {
     /// The sliding floating pane.
-    pane_id: PaneId,
+    floating_pane_id: FloatingPaneId,
     /// The box the slide starts from, counted from the pane-area origin.
     from_outer_rect: CoreRect,
     /// The monotonic time at which this slide began.
@@ -1475,18 +1475,18 @@ impl<B: Backend> Screen<B> {
         };
         let pane_area_size = self.committed_regions.solved_regions.pane_rect.size;
         for floating_pane_slot in &pending_snapshot.session_snapshot.floating_pane_slots {
-            let pane_id = floating_pane_slot.pane_id;
-            if self.is_floating_pane_sliding(pane_id) {
+            let floating_pane_id = floating_pane_slot.floating_pane_id;
+            if self.is_floating_pane_sliding(floating_pane_id) {
                 continue;
             }
             if let Some(from_outer_rect) = terminal::find_tiled_pane_rect_in_pane_area(
                 shown_tab_snapshot,
                 pane_area_size,
-                pane_id,
+                floating_pane_slot.pane_id,
             ) {
                 self.floating_pane_slide_animations
                     .push(FloatingPaneSlideAnimation {
-                        pane_id,
+                        floating_pane_id,
                         from_outer_rect,
                         started_at: current_time,
                     });
@@ -1494,11 +1494,14 @@ impl<B: Backend> Screen<B> {
         }
     }
 
-    /// Whether a slide after an undock or a restore runs for `pane_id`.
-    fn is_floating_pane_sliding(&self, pane_id: PaneId) -> bool {
+    /// Whether a slide after an undock or a restore runs for the floating pane
+    /// `floating_pane_id`.
+    fn is_floating_pane_sliding(&self, floating_pane_id: FloatingPaneId) -> bool {
         self.floating_pane_slide_animations
             .iter()
-            .any(|floating_pane_slide_animation| floating_pane_slide_animation.pane_id == pane_id)
+            .any(|floating_pane_slide_animation| {
+                floating_pane_slide_animation.floating_pane_id == floating_pane_id
+            })
     }
 
     /// Start one slide at `current_time` for each pane that the pending frame
@@ -1524,18 +1527,18 @@ impl<B: Backend> Screen<B> {
             return;
         };
         for floating_pane_slot in &pending_snapshot.session_snapshot.floating_pane_slots {
-            let pane_id = floating_pane_slot.pane_id;
+            let floating_pane_id = floating_pane_slot.floating_pane_id;
             let was_minimized = last_snapshot
                 .session_snapshot
-                .is_floating_pane_minimized(pane_id);
-            if !was_minimized || self.is_floating_pane_sliding(pane_id) {
+                .is_floating_pane_minimized(floating_pane_id);
+            if !was_minimized || self.is_floating_pane_sliding(floating_pane_id) {
                 continue;
             }
             let minimize_animation_index =
                 self.floating_pane_minimize_animations
                     .iter()
                     .position(|minimize_animation| {
-                        minimize_animation.floating_pane_slot.pane_id == pane_id
+                        minimize_animation.floating_pane_slot.floating_pane_id == floating_pane_id
                     });
             let from_outer_rect = match minimize_animation_index {
                 Some(minimize_animation_index) => self
@@ -1544,7 +1547,7 @@ impl<B: Backend> Screen<B> {
                     .compute_outer_rect(current_time),
                 None => match floating_pane_tray_anchor.and_then(|floating_pane_tray_anchor| {
                     floating_pane_tray_anchor
-                        .find_anchor_rect(&pending_snapshot.session_snapshot, pane_id)
+                        .find_anchor_rect(&pending_snapshot.session_snapshot, floating_pane_id)
                 }) {
                     Some(tray_anchor_rect) => tray_anchor_rect,
                     None => continue,
@@ -1552,7 +1555,7 @@ impl<B: Backend> Screen<B> {
             };
             self.floating_pane_slide_animations
                 .push(FloatingPaneSlideAnimation {
-                    pane_id,
+                    floating_pane_id,
                     from_outer_rect,
                     started_at: current_time,
                 });
@@ -1587,21 +1590,23 @@ impl<B: Backend> Screen<B> {
         let last_frame_layout = last_snapshot
             .build_painted_frame_layout(shown_viewer_paint.chrome, &self.committed_regions);
         for drawn_floating_pane_slot in last_frame_layout.list_drawn_floating_pane_slots() {
-            let pane_id = drawn_floating_pane_slot.floating_pane_slot.pane_id;
+            let floating_pane_id = drawn_floating_pane_slot.floating_pane_slot.floating_pane_id;
             let is_minimized = pending_snapshot
                 .session_snapshot
-                .is_floating_pane_minimized(pane_id);
-            let is_minimize_sliding = self
-                .floating_pane_minimize_animations
-                .iter()
-                .any(|minimize_animation| minimize_animation.floating_pane_slot.pane_id == pane_id);
+                .is_floating_pane_minimized(floating_pane_id);
+            let is_minimize_sliding =
+                self.floating_pane_minimize_animations
+                    .iter()
+                    .any(|minimize_animation| {
+                        minimize_animation.floating_pane_slot.floating_pane_id == floating_pane_id
+                    });
             if !is_minimized || is_minimize_sliding {
                 continue;
             }
             let Some(to_outer_rect) =
                 floating_pane_tray_anchor.and_then(|floating_pane_tray_anchor| {
                     floating_pane_tray_anchor
-                        .find_anchor_rect(&pending_snapshot.session_snapshot, pane_id)
+                        .find_anchor_rect(&pending_snapshot.session_snapshot, floating_pane_id)
                 })
             else {
                 continue;
@@ -1623,14 +1628,16 @@ impl<B: Backend> Screen<B> {
             let from_outer_rect = self
                 .shown_animated_floating_pane_slots
                 .iter()
-                .find(|animated_floating_pane_slot| animated_floating_pane_slot.pane_id == pane_id)
+                .find(|animated_floating_pane_slot| {
+                    animated_floating_pane_slot.floating_pane_id == floating_pane_id
+                })
                 .map_or(
                     drawn_floating_pane_slot.outer_rect,
                     |animated_floating_pane_slot| animated_floating_pane_slot.outer_rect,
                 );
             self.floating_pane_slide_animations
                 .retain(|floating_pane_slide_animation| {
-                    floating_pane_slide_animation.pane_id != pane_id
+                    floating_pane_slide_animation.floating_pane_id != floating_pane_id
                 });
             self.floating_pane_minimize_animations
                 .push(FloatingPaneMinimizeAnimation {
@@ -1692,7 +1699,8 @@ impl<B: Backend> Screen<B> {
                         .floating_pane_slots
                         .iter()
                         .find(|floating_pane_slot| {
-                            floating_pane_slot.pane_id == floating_pane_slide_animation.pane_id
+                            floating_pane_slot.floating_pane_id
+                                == floating_pane_slide_animation.floating_pane_id
                         });
                 let floating_pane_slot = match floating_pane_slot {
                     Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
@@ -1709,8 +1717,9 @@ impl<B: Backend> Screen<B> {
             });
         self.floating_pane_minimize_animations
             .retain(|minimize_animation| {
-                let pane_id = minimize_animation.floating_pane_slot.pane_id;
-                let is_minimized = session_snapshot.is_floating_pane_minimized(pane_id);
+                let is_minimized = session_snapshot.is_floating_pane_minimized(
+                    minimize_animation.floating_pane_slot.floating_pane_id,
+                );
                 let progress = compute_placement_animation_progress(
                     minimize_animation.started_at,
                     current_time,

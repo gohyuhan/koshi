@@ -8,11 +8,11 @@ use super::*;
 
 use koshi_core::command::{PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::event::{
-    ConfigReloaded, FloatingPaneMinimizedChanged, FloatingPaneMoved, FloatingPanePinChanged,
-    InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing, PaneCommandFinished,
-    PaneCommandStarted, PaneCreated, PaneFocused, PanePlacementCommitted, PaneProcessExited,
-    PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
-    TerminalTooSmallCause, TerminalTooSmallEntered,
+    ConfigReloaded, FloatingPaneLayoutChanged, FloatingPaneMinimizedChanged, FloatingPaneMoved,
+    FloatingPanePinChanged, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing,
+    PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PanePlacementCommitted,
+    PaneProcessExited, PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated,
+    TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -344,6 +344,10 @@ fn events_that_fire_faster_than_a_person_acts_write_nothing() {
         // Announces the close that `PaneRemoved` completes.
         Event::PaneClosing(PaneClosing {
             pane_id: PaneId::new(),
+        }),
+        // One per frame while a border inside a floating pane is dragged.
+        Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
+            pane_ids: vec![PaneId::new(), PaneId::new()],
         }),
     ]);
 

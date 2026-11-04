@@ -3216,3 +3216,68 @@ fn floating_view_updates_record_a_view_change_only_when_a_shown_pane_changes() {
         client.replace_floating_view(&HashMap::new(), &[], &one_floating_pane_set);
     }));
 }
+
+#[test]
+fn a_floating_pane_zoom_follows_the_focus_and_leaves_with_the_zoomed_pane() {
+    let mut client = build_test_client(TabId::new());
+    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
+    let floating_pane = build_multi_pane_floating_pane(&[vim_pane_id, htop_pane_id]);
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    client.add_floating_pane_view(&floating_pane, FloatingPanePosition::Default);
+    let build_view =
+        |focus_history: Vec<PaneId>, zoomed_pane_id: Option<PaneId>| FloatingPaneView {
+            position: FloatingPanePosition::Default,
+            is_minimized: true,
+            focus_history,
+            zoomed_pane_id,
+        };
+
+    client.zoom_pane_in_floating_pane(floating_pane_id, vim_pane_id);
+    assert_eq!(
+        client.get_floating_pane_view(floating_pane_id),
+        Some(&build_view(vec![vim_pane_id], Some(vim_pane_id)))
+    );
+
+    // A focus move inside the floating pane takes the zoom with it.
+    client.update_floating_pane_focused_pane(floating_pane_id, htop_pane_id);
+    assert_eq!(
+        client.get_floating_pane_view(floating_pane_id),
+        Some(&build_view(
+            vec![htop_pane_id, vim_pane_id],
+            Some(htop_pane_id)
+        ))
+    );
+
+    // The removal of a pane the client does not zoom keeps the zoom.
+    client.clear_zoom_of_pane(vim_pane_id);
+    client.remove_pane_from_floating_pane_focus_history(floating_pane_id, vim_pane_id);
+    assert_eq!(
+        client.get_floating_pane_view(floating_pane_id),
+        Some(&build_view(vec![htop_pane_id], Some(htop_pane_id)))
+    );
+
+    client.clear_zoom_of_pane(htop_pane_id);
+    assert_eq!(
+        client.get_floating_pane_view(floating_pane_id),
+        Some(&build_view(vec![htop_pane_id], None))
+    );
+
+    client.zoom_pane_in_floating_pane(floating_pane_id, htop_pane_id);
+    client.clear_floating_pane_zoom(floating_pane_id);
+    assert_eq!(
+        client.get_floating_pane_view(floating_pane_id),
+        Some(&build_view(vec![htop_pane_id], None))
+    );
+}
+
+#[test]
+fn a_floating_pane_zoom_of_a_floating_pane_the_client_holds_no_view_of_changes_nothing() {
+    let mut client = build_test_client(TabId::new());
+    let floating_pane_id = FloatingPaneId::new();
+
+    client.zoom_pane_in_floating_pane(floating_pane_id, PaneId::new());
+    client.update_floating_pane_focused_pane(floating_pane_id, PaneId::new());
+
+    assert_eq!(client.get_floating_pane_view(floating_pane_id), None);
+    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+}

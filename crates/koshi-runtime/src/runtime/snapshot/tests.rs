@@ -91,6 +91,20 @@ fn build_session_with_client_reporting(
     (session, session_id, tab_id, pane_id, client_id)
 }
 
+/// The id of the floating pane of `server`'s session `session_id` that holds
+/// `pane_id`.
+fn find_floating_pane_id(
+    server: &Server,
+    session_id: SessionId,
+    pane_id: PaneId,
+) -> FloatingPaneId {
+    let (_, floating_pane) = server.session_by_id[&session_id]
+        .floating_set
+        .find_floating_pane_by_pane_id(pane_id)
+        .expect("a floating pane holds the pane");
+    floating_pane.get_floating_pane_id()
+}
+
 #[test]
 fn build_snapshot_for_an_unknown_client_is_none() {
     let server = build_test_runtime();
@@ -1723,6 +1737,7 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_pane_slots,
         [FloatingPaneSlot {
+            floating_pane_id: find_floating_pane_id(&server, session_id, htop_pane_id),
             pane_id: htop_pane_id,
             outer_rect: Rect::from_origin_and_size(
                 Point { column: 24, row: 8 },
@@ -1752,6 +1767,7 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Shown {
+            floating_pane_id: find_floating_pane_id(&server, session_id, htop_pane_id),
             pane_id: htop_pane_id,
         }]
     );
@@ -1785,6 +1801,7 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
     assert_eq!(
         render_snapshot.session_snapshot.floating_pane_slots,
         [FloatingPaneSlot {
+            floating_pane_id: find_floating_pane_id(&server, session_id, logs_pane_id),
             pane_id: logs_pane_id,
             outer_rect: Rect::from_origin_and_size(
                 Point { column: 24, row: 8 },
@@ -1826,6 +1843,7 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Shown {
+            floating_pane_id: find_floating_pane_id(&server, session_id, logs_pane_id),
             pane_id: logs_pane_id,
         }]
     );
@@ -1848,6 +1866,7 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
+            floating_pane_id: find_floating_pane_id(&server, session_id, logs_pane_id),
             pane_id: logs_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::new(2).expect("2 is above 0"),
@@ -1884,14 +1903,17 @@ fn floating_panes_list_every_floating_pane_in_the_order_it_was_created() {
         render_snapshot.session_snapshot.floating_panes,
         [
             FloatingPane::Shown {
+                floating_pane_id: find_floating_pane_id(&server, session_id, first_pane_id),
                 pane_id: first_pane_id,
             },
             FloatingPane::Minimized {
+                floating_pane_id: find_floating_pane_id(&server, session_id, second_pane_id),
                 pane_id: second_pane_id,
                 pane_title: None,
                 pane_count: NonZeroUsize::MIN,
             },
             FloatingPane::Shown {
+                floating_pane_id: find_floating_pane_id(&server, session_id, third_pane_id),
                 pane_id: third_pane_id,
             },
         ]
@@ -1929,6 +1951,7 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
+            floating_pane_id: find_floating_pane_id(&server, session_id, htop_pane_id),
             pane_id: htop_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
@@ -1968,6 +1991,7 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
+            floating_pane_id: find_floating_pane_id(&server, session_id, htop_pane_id),
             pane_id: htop_pane_id,
             pane_title: Some("htop".to_string()),
             pane_count: NonZeroUsize::MIN,
@@ -1996,6 +2020,7 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
+            floating_pane_id: find_floating_pane_id(&server, session_id, htop_pane_id),
             pane_id: htop_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
@@ -2177,6 +2202,7 @@ fn a_pinned_floating_pane_is_marked_pinned_at_its_pinned_cell() {
     assert_eq!(
         render_snapshot.session_snapshot.floating_pane_slots,
         [FloatingPaneSlot {
+            floating_pane_id: find_floating_pane_id(&server, session_id, htop_pane_id),
             pane_id: htop_pane_id,
             outer_rect: Rect::from_origin_and_size(
                 Point { column: 10, row: 3 },

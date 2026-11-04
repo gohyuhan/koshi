@@ -1246,7 +1246,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `TogglePaneFloating`, `ScrollPane`, `MoveFloatingPane`, `SetFloatingPanePinned`, `ToggleFloatingPanePinned`, `SetFloatingPaneMinimized`, `ToggleFloatingPaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `TogglePaneFloating`, `ScrollPane`, `MoveFloatingPane`, `SetFloatingPanePinned`, `ToggleFloatingPanePinned`, `SetFloatingPaneMinimized`, `ToggleFloatingPaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `CloseFloatingPane`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

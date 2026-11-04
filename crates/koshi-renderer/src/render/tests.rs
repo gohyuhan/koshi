@@ -40,6 +40,8 @@
 //! each snapshot by pane id, and leaves out a hidden slot, a slot with no
 //! content rect and a slot with no snapshot.
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 
 use crate::floating_chrome::compute_floating_content_rect;
@@ -92,6 +94,7 @@ pub(crate) fn build_floating_pane_slot(
         PaneSizing::default(),
     );
     FloatingPaneSlot {
+        floating_pane_id: build_floating_pane_id(pane_id),
         pane_id,
         outer_rect,
         is_pinned,

@@ -517,8 +517,8 @@ impl Client {
         self.clear_own_active_tab_solve();
     }
 
-    /// Leave zoom in every tab where this client was zoomed on `pane_id`. The
-    /// client sees those tabs tiled again.
+    /// Leave zoom in every tab and every floating pane where this client was
+    /// zoomed on `pane_id`. The client sees those trees tiled again.
     ///
     /// Called when a pane is removed.
     pub fn clear_zoom_of_pane(&mut self, pane_id: PaneId) {
@@ -527,6 +527,15 @@ impl Client {
             .retain(|_, zoomed_pane_id| *zoomed_pane_id != pane_id);
         self.is_view_changed |= self.zoomed_pane_id_by_tab_id.len() != zoomed_tab_count;
         self.clear_own_active_tab_solve();
+        let floating_pane_ids: Vec<FloatingPaneId> = self
+            .floating_pane_view_by_floating_pane_id
+            .iter()
+            .filter(|(_, floating_pane_view)| floating_pane_view.zoomed_pane_id == Some(pane_id))
+            .map(|(&floating_pane_id, _)| floating_pane_id)
+            .collect();
+        for floating_pane_id in floating_pane_ids {
+            self.clear_floating_pane_zoom(floating_pane_id);
+        }
     }
 
     /// Returns how many lines `pane_id` is scrolled above the live bottom.
@@ -955,6 +964,10 @@ impl Client {
     /// takes this client's input while the floating pane is focused. The
     /// history `[a, b, c]` focusing `c` → `[c, a, b]`. A floating pane this
     /// client holds no view of changes nothing.
+    ///
+    /// **Zoom follows focus**, as [`update_focused_pane`](Self::update_focused_pane)
+    /// moves it in a tab: while this client zooms a pane inside the floating
+    /// pane, the zoom moves to `pane_id`.
     pub fn update_floating_pane_focused_pane(
         &mut self,
         floating_pane_id: FloatingPaneId,
@@ -973,6 +986,73 @@ impl Client {
             .focus_history
             .retain(|&history_pane_id| history_pane_id != pane_id);
         floating_pane_view.focus_history.insert(0, pane_id);
+        if floating_pane_view.zoomed_pane_id.is_some() {
+            floating_pane_view.zoomed_pane_id = Some(pane_id);
+        }
+        self.is_view_changed = true;
+        self.clear_own_floating_pane_solves();
+    }
+
+    /// Take `pane_id` out of this client's focus history inside the floating
+    /// pane `floating_pane_id`. The history `[a, b, c]` without `b` is
+    /// `[a, c]`. The caller keeps the history from emptying: it focuses
+    /// another pane inside the floating pane first when `pane_id` is the only
+    /// entry. A floating pane this client holds no view of changes nothing.
+    pub fn remove_pane_from_floating_pane_focus_history(
+        &mut self,
+        floating_pane_id: FloatingPaneId,
+        pane_id: PaneId,
+    ) {
+        let Some(floating_pane_view) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+        else {
+            return;
+        };
+        let focus_history_length = floating_pane_view.focus_history.len();
+        floating_pane_view
+            .focus_history
+            .retain(|&history_pane_id| history_pane_id != pane_id);
+        if floating_pane_view.focus_history.len() == focus_history_length {
+            return;
+        }
+        self.is_view_changed = true;
+        self.clear_own_floating_pane_solves();
+    }
+
+    /// Zoom `pane_id` for this client inside the floating pane
+    /// `floating_pane_id`: it fills the floating pane and the floating pane's
+    /// other panes are hidden, for this client's view alone. A floating pane
+    /// this client holds no view of changes nothing.
+    pub fn zoom_pane_in_floating_pane(
+        &mut self,
+        floating_pane_id: FloatingPaneId,
+        pane_id: PaneId,
+    ) {
+        let Some(floating_pane_view) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+        else {
+            return;
+        };
+        let previous_zoomed_pane_id = floating_pane_view.zoomed_pane_id.replace(pane_id);
+        self.is_view_changed |= previous_zoomed_pane_id != Some(pane_id);
+        self.clear_own_floating_pane_solves();
+    }
+
+    /// Leave zoom inside the floating pane `floating_pane_id`: this client
+    /// sees its tree tiled again. A floating pane this client holds no view
+    /// of, or does not zoom, changes nothing.
+    pub fn clear_floating_pane_zoom(&mut self, floating_pane_id: FloatingPaneId) {
+        let Some(floating_pane_view) = self
+            .floating_pane_view_by_floating_pane_id
+            .get_mut(&floating_pane_id)
+        else {
+            return;
+        };
+        if floating_pane_view.zoomed_pane_id.take().is_none() {
+            return;
+        }
         self.is_view_changed = true;
         self.clear_own_floating_pane_solves();
     }

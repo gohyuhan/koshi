@@ -19,6 +19,7 @@ use std::iter;
 use std::num::NonZeroU16;
 
 use koshi_core::command::TiledPlacementTarget;
+use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::event::{Event, LayoutChanged, PaneFocused, TabFocused};
 use koshi_core::geometry::{
     FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, Point, Rect, Size,
@@ -34,7 +35,9 @@ use thiserror::Error;
 use crate::client::Client;
 use crate::error::FloatingSetError;
 use crate::session::cascade::{
-    list_focused_client_rects, remove_pane_from_tab, repair_focus_after_pane_left,
+    list_floating_pane_focused_client_rects, list_focused_client_rects, remove_pane_from_tab,
+    remove_pane_leaf_from_floating_pane, repair_floating_pane_focus_after_pane_left,
+    repair_focus_after_pane_left,
 };
 use crate::session::focus::build_floating_pane_minimized_changed_events;
 use crate::session::pane_ops::show_new_floating_pane;
@@ -242,25 +245,33 @@ pub fn find_lifted_floating_pane_rect(
 
 /// Where `pane_id`, a pane of a floating pane, docks for `client`: an
 /// insertion into `client`'s active tab beside the smallest pane, group or tab
-/// span under the center cell of the rect `client` draws the floating pane
-/// that holds `pane_id` in
-/// ([`Session::find_client_floating_pane_rect`]), on that span's edge nearest
-/// the cell ([`find_insertion_at_point`]). The spans are those of the solve
+/// span under the dock cell, on that span's edge nearest the cell
+/// ([`find_insertion_at_point`]). The dock cell is the center cell of the box
+/// `client` draws `pane_id` in, grown up by the titlebar strip's row. The box
+/// is the pane's rect in `client`'s own view of the floating pane
+/// ([`Session::compute_client_floating_pane_solve`]), counted from the first
+/// cell below the titlebar strip of the rect `client` draws the floating pane
+/// in ([`Session::find_client_floating_pane_rect`]). A floating pane of one
+/// pane gives its own outer rect, and a collapsed stack member's box is its
+/// one-row header strip. The spans are those of the solve
 /// `client` draws the tab with ([`Session::compute_client_solve`]), centered
 /// in its pane area ([`Size::compute_centered_origin`]): each stack shows the
 /// member that `client`'s focus history gives, and a pane `client` zooms
-/// fills the tab while every other pane has no span. A center cell outside
+/// fills the tab while every other pane has no span. A dock cell outside
 /// the tab moves to the tab's nearest cell.
 ///
-/// A `16x10` pane drawn at `(62, 6)`, over the tab `A | B` that fills an
-/// `80x22` pane area with `B` at `(40, 0)`, has the center cell `(70, 11)`:
-/// the insertion right of `B`. With `A` zoomed, it is the insertion right of
-/// `A`.
+/// A `16x10` floating pane of one pane drawn at `(62, 6)`, over the tab
+/// `A | B` that fills an `80x22` pane area with `B` at `(40, 0)`, has the dock
+/// cell `(70, 11)`: the insertion right of `B`. With `A` zoomed, it is the
+/// insertion right of `A`. In the floating pane `[vim | htop]` drawn `48x13`
+/// at `(16, 4)`, `htop`'s box is `24x12` at `(40, 5)`, the grown box `24x13`
+/// at `(40, 4)`, and the dock cell `(52, 10)`.
 ///
 /// `None` when no floating pane holds `pane_id`, when `client` does not show
 /// the floating pane that holds it ([`Client::is_floating_pane_shown`]), such
 /// as one it minimized, draws no rect for it, such as with a pane area smaller
-/// than `5x5`, or views a tab with no cell.
+/// than `5x5`, draws `pane_id` at zero area, such as behind its own zoom on
+/// another pane of the floating pane, or views a tab with no cell.
 #[must_use]
 pub fn find_nearest_dock_target(
     session: &Session,
@@ -275,6 +286,31 @@ pub fn find_nearest_dock_target(
         return None;
     }
     let floating_pane_rect = session.find_client_floating_pane_rect(client, floating_pane_id)?;
+    let pane_rect = session
+        .compute_client_floating_pane_solve(client, floating_pane_id)?
+        .find_pane_rect(pane_id)?;
+    if pane_rect.is_empty() {
+        return None;
+    }
+    let dock_rect = Rect::from_origin_and_size(
+        Point {
+            column: floating_pane_rect
+                .origin
+                .column
+                .saturating_add(pane_rect.origin.column),
+            row: floating_pane_rect
+                .origin
+                .row
+                .saturating_add(pane_rect.origin.row),
+        },
+        Size {
+            column_count: pane_rect.size.column_count,
+            row_count: pane_rect
+                .size
+                .row_count
+                .saturating_add(FLOATING_TITLEBAR_STRIP_ROW_COUNT),
+        },
+    );
     let pane_area = client.get_pane_area()?;
     let destination_tab_id = client.get_active_tab_id();
     let tab = session.tabs.get(&destination_tab_id)?;
@@ -283,17 +319,17 @@ pub fn find_nearest_dock_target(
         return None;
     }
     let tab_origin = pane_area.compute_centered_origin(tab_size);
-    let center_cell = Point {
-        column: floating_pane_rect
+    let dock_cell = Point {
+        column: dock_rect
             .origin
             .column
-            .saturating_add(floating_pane_rect.size.column_count / 2)
+            .saturating_add(dock_rect.size.column_count / 2)
             .saturating_sub(tab_origin.column)
             .min(tab_size.column_count - 1),
-        row: floating_pane_rect
+        row: dock_rect
             .origin
             .row
-            .saturating_add(floating_pane_rect.size.row_count / 2)
+            .saturating_add(dock_rect.size.row_count / 2)
             .saturating_sub(tab_origin.row)
             .min(tab_size.row_count - 1),
     };
@@ -308,7 +344,7 @@ pub fn find_nearest_dock_target(
         .insertion_spans
         .iter()
         .map(|insertion_span| (&insertion_span.anchor, insertion_span.span_rect));
-    let (anchor, direction) = find_insertion_at_point(span_rects, center_cell)?;
+    let (anchor, direction) = find_insertion_at_point(span_rects, dock_cell)?;
     Some(TiledPlacementTarget::Split {
         destination_tab_id,
         anchor: anchor.clone(),
@@ -316,10 +352,10 @@ pub fn find_nearest_dock_target(
     })
 }
 
-/// Dock `source_pane_id`, the pane of a floating pane, into
-/// `destination_tab_id`: take the floating pane that holds it out of the
-/// session's floating panes and install `destination_tree`, the
-/// destination tab's tree with the pane placed in it
+/// Dock `source_pane_id`, a pane of a floating pane, into
+/// `destination_tab_id`: take the pane out of the floating pane that holds it
+/// and install `destination_tree`, the destination tab's tree with the pane
+/// placed in it
 /// ([`place_floating_pane_in_tab`](koshi_layout::placement::place_floating_pane_in_tab)).
 /// Returns the ordered events.
 ///
@@ -327,8 +363,13 @@ pub fn find_nearest_dock_target(
 /// its id. The pane is never closed: no [`Event::PaneClosing`] and no
 /// [`Event::PaneRemoved`] is emitted.
 ///
-/// 1. The floating pane that holds the pane leaves the floating set and every
-///    client's floating view ([`Session::remove_floating_pane`]).
+/// 1. The pane leaves its floating pane. A floating pane of one pane leaves
+///    the floating set and every client's floating view
+///    ([`Session::remove_floating_pane`]). A floating pane of 2 or more panes
+///    keeps its desired size and its other panes: the pane's leaf collapses
+///    out of its tree, the tree is solved again
+///    ([`Session::update_floating_pane_layout`]), and every client zoomed on
+///    the pane leaves that zoom.
 /// 2. `destination_tree` becomes the destination tab's tree, solved again
 ///    ([`Session::update_tab_layout`]).
 /// 3. The acting client, then each client whose input was on the pane, in
@@ -337,14 +378,24 @@ pub fn find_nearest_dock_target(
 ///    floating pane it shows is minimized.
 /// 4. The destination tab, then each tab a client of step 3 left, is solved
 ///    again at its tab size ([`Session::update_tab_solve`]).
+/// 5. Each client whose focused pane inside the floating pane of step 1 was
+///    the pane focuses the pane that inherits it there, ranked against the
+///    rect the pane held in that client's own view of the floating pane
+///    before the dock. Then the pane leaves every client's focus history
+///    inside that floating pane. No input moves in this step: a client whose
+///    input was on the pane follows it in step 3.
 ///
 /// No other client's input, active tab or shown floating panes change, and
 /// a stack's active member stays the same: a client focused on `vim` in the
 /// stack `[vim]` keeps `vim` open when `htop` is docked into that stack.
+/// Docking `htop` out of the floating pane `[vim | htop]` leaves the floating
+/// pane `[vim]` at its size.
 ///
-/// Events: [`Event::LayoutChanged`] for the destination tab and the events of
-/// its solve, then the events of each client of step 3, then the events of
-/// the solves of step 4.
+/// Events: for a floating pane of 2 or more panes,
+/// [`Event::FloatingPaneLayoutChanged`] with the panes left and the events of
+/// its solve; then [`Event::LayoutChanged`] for the destination tab and the
+/// events of its solve, then the events of each client of step 3, then the
+/// events of the solves of step 4.
 ///
 /// # Errors
 ///
@@ -391,6 +442,8 @@ pub fn commit_dock_placement(
     if session.clients.get_client_by_id(acting_client_id).is_none() {
         return Err(PlacementCommitError::ActingClientNotFound);
     }
+    let focused_client_rects =
+        list_floating_pane_focused_client_rects(session, source_floating_pane_id, source_pane_id);
     let moving_clients: Vec<(ClientId, TabId, Option<PaneId>)> =
         list_moving_client_ids(session, source_pane_id, acting_client_id)
             .into_iter()
@@ -404,10 +457,11 @@ pub fn commit_dock_placement(
             })
             .collect();
 
-    let _ = session.remove_floating_pane(source_floating_pane_id);
-    let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged {
+    let mut emitted_events =
+        remove_pane_leaf_from_floating_pane(session, source_floating_pane_id, source_pane_id);
+    emitted_events.push(Event::LayoutChanged(LayoutChanged {
         tab_id: destination_tab_id,
-    })];
+    }));
     emitted_events.extend(session.update_tab_layout(destination_tab_id, destination_tree));
     for &(client_id, _, previous_floating_focused_pane_id) in &moving_clients {
         emitted_events.extend(move_client_onto_tiled_pane(
@@ -424,6 +478,12 @@ pub fn commit_dock_placement(
     emitted_events.extend(update_tab_solves(
         session,
         iter::once(destination_tab_id).chain(left_tab_ids),
+    ));
+    emitted_events.extend(repair_floating_pane_focus_after_pane_left(
+        session,
+        source_floating_pane_id,
+        source_pane_id,
+        &focused_client_rects,
     ));
     Ok(emitted_events)
 }

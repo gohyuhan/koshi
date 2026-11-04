@@ -19,7 +19,7 @@ use koshi_core::event::{
     TabCreated, TabFocused, TabMoved,
 };
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
 use koshi_layout::tree::LayoutNode;
 
 use crate::client::Client;
@@ -27,7 +27,7 @@ use crate::session::cascade::remove_floating_pane;
 use crate::session::focus::{apply_tiled_pane_focus, update_client_tab_focus};
 use crate::session::lifecycle::SessionLifecycleEvent;
 use crate::session::pane_ops::{register_spawned_pane, NewPaneSpec};
-use crate::session::state::{Session, Tab};
+use crate::session::state::{FloatingPane, Session, Tab};
 
 /// Which tab a focus request names, resolved against the current display order
 /// by [`focus_tab`].
@@ -493,9 +493,14 @@ pub(crate) fn close_and_refocus_tab(
     reindex_tabs_by_display_index(session);
 
     if session.tabs.is_empty() {
-        let floating_set_pane_ids: Vec<PaneId> = session.floating_set.list_pane_ids();
-        for pane_id in floating_set_pane_ids {
-            emitted_events.extend(remove_floating_pane(session, pane_id));
+        let floating_pane_ids: Vec<FloatingPaneId> = session
+            .floating_set
+            .list_floating_panes()
+            .iter()
+            .map(FloatingPane::get_floating_pane_id)
+            .collect();
+        for floating_pane_id in floating_pane_ids {
+            emitted_events.extend(remove_floating_pane(session, floating_pane_id));
         }
         // An already `Stopping` or `Stopped` session keeps the state it has;
         // `Quit` is emitted either way.

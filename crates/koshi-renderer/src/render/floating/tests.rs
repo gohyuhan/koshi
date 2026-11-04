@@ -20,6 +20,8 @@
 //! draft names is placed at the draft's top-left cell, moved inside the pane
 //! area.
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 
 use ratatui::buffer::CellWidth;
@@ -400,7 +402,8 @@ fn a_move_draft_places_its_floating_pane_at_the_draft_cell() {
     push_floating_pane(&mut render_snapshot, build_cell_rect(4, 3, 20, 6), "top");
     let viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: moved_pane_id,
+            floating_pane_id: build_floating_pane_id(moved_pane_id),
+
             top_left_cell: Point { column: 15, row: 4 },
         }),
         ..ViewerChrome::default()
@@ -445,7 +448,8 @@ fn a_move_draft_leaves_a_pinned_floating_pane_at_its_frame_cell() {
     render_snapshot.session_snapshot.floating_pane_slots[0].is_pinned = true;
     let viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: pinned_pane_id,
+            floating_pane_id: build_floating_pane_id(pinned_pane_id),
+
             top_left_cell: Point { column: 15, row: 4 },
         }),
         ..ViewerChrome::default()
@@ -477,7 +481,8 @@ fn a_move_draft_past_the_pane_area_places_its_floating_pane_moved_inside_the_pan
         push_floating_pane(&mut render_snapshot, build_cell_rect(2, 1, 20, 6), "htop");
     let viewer_chrome = ViewerChrome {
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: moved_pane_id,
+            floating_pane_id: build_floating_pane_id(moved_pane_id),
+
             top_left_cell: Point { column: 35, row: 9 },
         }),
         ..ViewerChrome::default()
@@ -719,7 +724,8 @@ fn a_hovered_grab_handle_styles_every_pane_of_the_floating_pane_and_draws_no_pla
         &render_snapshot,
         ViewerChrome {
             placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
-                pane_id: vim_pane_id,
+                floating_pane_id: build_floating_pane_id(vim_pane_id),
+
                 is_pinned: false,
             }),
             ..ViewerChrome::default()
@@ -832,11 +838,13 @@ fn a_handle_hover_that_names_a_pane_of_the_other_kind_or_pin_state_changes_no_ce
 
     for placement_handle_hover in [
         PlacementHandleHover::FloatingHandle {
-            pane_id: tiled_pane_id,
+            floating_pane_id: build_floating_pane_id(tiled_pane_id),
+
             is_pinned: false,
         },
         PlacementHandleHover::FloatingHandle {
-            pane_id: floating_slot_pane_id,
+            floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+
             is_pinned: true,
         },
         PlacementHandleHover::TiledTopBorder {
@@ -1138,7 +1146,8 @@ fn a_floating_pane_takes_the_border_style_of_its_focus_and_the_pointer() {
         &render_snapshot,
         ViewerChrome {
             placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
-                pane_id: floating_slot_pane_id,
+                floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+
                 is_pinned: false,
             }),
             ..ViewerChrome::default()

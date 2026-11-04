@@ -44,8 +44,12 @@ pub enum Event {
     PaneFocused(PaneFocused),
     /// A pane's PTY was resized (emitted per affected pane after a layout solve).
     PtyResized(PtyResized),
-    /// A tab's layout tree changed.
+    /// A tab's layout tree, or one client's zoom or shown stack member in it,
+    /// changed.
     LayoutChanged(LayoutChanged),
+    /// A floating pane's layout tree, or one client's zoom or shown stack
+    /// member in it, changed.
+    FloatingPaneLayoutChanged(FloatingPaneLayoutChanged),
     /// A checked pane placement committed in the session.
     PanePlacementCommitted(PanePlacementCommitted),
     /// A tab was created.
@@ -114,6 +118,7 @@ impl Event {
             Event::PaneFocused(_) => "PaneFocused",
             Event::PtyResized(_) => "PtyResized",
             Event::LayoutChanged(_) => "LayoutChanged",
+            Event::FloatingPaneLayoutChanged(_) => "FloatingPaneLayoutChanged",
             Event::PanePlacementCommitted(_) => "PanePlacementCommitted",
             Event::TabCreated(_) => "TabCreated",
             Event::TabClosed(_) => "TabClosed",
@@ -251,8 +256,17 @@ pub struct PtyResized {
 /// Payload for [`Event::LayoutChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutChanged {
-    /// The tab whose layout tree changed.
+    /// The tab whose layout tree, or one client's view of it, changed.
     pub tab_id: TabId,
+}
+
+/// Payload for [`Event::FloatingPaneLayoutChanged`].
+///
+/// A split inside floating pane `[htop]` gives `pane_ids: [htop, zsh]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPaneLayoutChanged {
+    /// Every pane of the floating pane after the change, in layout order.
+    pub pane_ids: Vec<PaneId>,
 }
 
 /// Payload for [`Event::PanePlacementCommitted`].

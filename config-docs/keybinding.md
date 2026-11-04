@@ -358,8 +358,11 @@ size `40x19`.
 
 On a floating pane, the key docks the pane into this client's active tab:
 
+- Only the pane leaves its floating pane. A floating pane of 2 or more panes
+  keeps its size and its other panes, which take the room the pane leaves.
 - The session takes the center cell of the box where this client draws the
-  pane. The pane docks beside the smallest pane, group or tab span under that
+  pane, grown up by one row for the titlebar strip. For a floating pane of
+  one pane, that box is the whole floating pane. The pane docks beside the smallest pane, group or tab span under that
   cell, on the edge of that span nearest the cell. Over a stack, the span is
   the whole stack. Between spans of the same size, the span with fewer panes
   wins. A center cell outside the tab counts from the nearest cell of the
@@ -368,8 +371,8 @@ On a floating pane, the key docks the pane into this client's active tab:
   the other panes have no span. The pane docks beside the zoomed pane, or
   beside the whole stack that holds it, and this client leaves the zoom.
 - When this client draws the pane nowhere, such as when this client
-  minimized it or has a pane area smaller than `5x5`, the pane docks at the
-  right edge of the whole tab.
+  minimized it, has a pane area smaller than `5x5`, or zooms another pane of
+  the floating pane, the pane docks at the right edge of the whole tab.
 - The docked pane takes this client's input: every other floating pane this
   client shows is minimized. Every other client whose input is on the pane
   moves with it in the same way. Every other client keeps the stack member it
@@ -382,6 +385,11 @@ the size `40x22`. Floating pane `F` is drawn at `(62, 6)` with the size
 `16x10`. Its center cell `(70, 11)` is 9 cells from the right edge of `B` and
 10 cells from its bottom edge. `<C-p> u` docks `F` right of `B`. If this
 client zooms `A`, `A` fills the tab, and `<C-p> u` docks `F` right of `A`.
+
+Example: the floating pane `[vim | htop]` is drawn at `(16, 4)` with the size
+`48x13`, and `htop` at `(40, 5)` with the size `24x12`. The grown box is
+`24x13` at `(40, 4)`, and its center cell is `(52, 10)`. `<C-p> u` in `htop`
+docks `htop` alone, and the floating pane keeps `vim` at the size `48x13`.
 
 The session refuses a float, and changes nothing, when the pane is the only
 pane of the only tab, or when the session already holds 12 floating panes.
@@ -586,6 +594,10 @@ No default key runs these actions. Bind them in `normal` or `locked`:
 `a`. Bound in `normal` or `locked`, it runs with the tray closed: it minimizes
 every floating pane this client shows, or shows every one when this client
 shows none. With no floating pane in the session, it does nothing.
+
+`core:close-floating-pane` has no default key. It closes every pane of the
+floating pane that holds the focused pane, as the floating pane's `✕` does.
+A focused tiled pane is refused with `<pane-id> is not in a floating pane`.
 
 With no floating pane focused, `core:pin-pane`, `core:unpin-pane` and
 `core:minimize-pane` are refused with `no floating pane is focused`.

@@ -29,19 +29,19 @@ use koshi_core::notification::NotificationSeverity;
 use koshi_core::{
     action::ActionReference,
     command::{
-        ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
-        CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-        LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs,
-        NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
-        QuitArgs, ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
-        SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, VisualCommand,
-        WriteToPaneArgs,
+        ClearSelectionArgs, CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command,
+        CommandEnvelope, CommandResult, CommandSource, CopyArgs, DetachArgs, FocusPaneArgs,
+        FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs,
+        NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
+        PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind,
+        SetSelectionArgs, SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs,
+        VisualCommand, WriteToPaneArgs,
     },
     constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
-        Event, FloatingPaneMoved, FloatingPanePinChanged, InputModeChanged, LayoutChanged,
-        MouseSelectChanged, PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason,
-        SelectionChanged,
+        Event, FloatingPaneLayoutChanged, FloatingPaneMoved, FloatingPanePinChanged,
+        InputModeChanged, LayoutChanged, MouseSelectChanged, PanePlacementCommitted,
+        PaneProcessExited, PtyResized, RejectReason, SelectionChanged,
     },
     geometry::{
         Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea,
@@ -58,7 +58,7 @@ use koshi_layout::{
     mode::LayoutMode,
     neighbor::select_directional_neighbor,
     placement::{
-        place_floating_pane_in_tab, place_pane_within_tab, solve_placed_tab, PlacedTabLayout,
+        place_floating_pane_in_tab, place_pane_within_tree, solve_placed_tab, PlacedTabLayout,
         PlacementError, PlacementTabSizes, PlacementTarget,
     },
     resize::{resize_layout_with_sizing, ResizeError},
@@ -72,10 +72,13 @@ use koshi_session::client::{
 };
 use koshi_session::error::FloatingSetError;
 use koshi_session::session::{
-    cascade::{apply_child_exit, remove_floating_pane, remove_pane_cascade},
+    cascade::{
+        apply_child_exit, remove_floating_pane, remove_pane_cascade, remove_pane_from_floating_pane,
+    },
     focus::{
-        apply_tiled_pane_focus, build_floating_pane_minimized_changed_events,
-        build_pane_focused_event, update_client_tab_focus,
+        apply_floating_pane_focus, apply_tiled_pane_focus,
+        build_floating_pane_minimized_changed_events, build_pane_focused_event,
+        update_client_tab_focus,
     },
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
@@ -84,7 +87,7 @@ use koshi_session::session::{
         compute_placement_tab_sizes, find_lifted_floating_pane_rect, find_nearest_dock_target,
         PlacementCommitError,
     },
-    state::{compute_one_pane_floating_content_size, FloatingPane, Session},
+    state::{compute_one_pane_floating_content_size, FloatingPane, LayoutAreaId, Session},
     tab_ops,
 };
 
@@ -246,16 +249,17 @@ fn format_side_name(direction: Direction) -> &'static str {
     }
 }
 
-/// The resolved concrete target of a [`Command::NewPane`]: the session and tab
-/// the new pane joins, the command source pane it splits from, and the client to
-/// auto-focus it for: the client whose input the default source pane takes,
-/// else the client the command names, else its issuer while attached, else
-/// none. All fields are `Copy`: the target holds no borrow into the session
-/// map.
+/// The resolved concrete target of a [`Command::NewPane`] with a split or a
+/// stacked placement: the session and the layout tree the new pane joins (a
+/// tab's, or a floating pane's), the command source pane it splits from, and
+/// the client to auto-focus it for: the client whose input the default source
+/// pane takes, else the client the command names, else its issuer while
+/// attached, else none. All fields are `Copy`: the target holds no borrow into
+/// the session map.
 struct NewPaneTarget {
     session_id: SessionId,
     source_pane_id: PaneId,
-    tab_id: TabId,
+    layout_area_id: LayoutAreaId,
     focus_client_id: Option<ClientId>,
 }
 
@@ -281,6 +285,14 @@ struct NewFloatingPaneTarget {
     working_directory_pane_id: Option<PaneId>,
 }
 
+/// The resolved target of a [`Command::CloseFloatingPane`]: the session and
+/// the floating pane that closes. The `Ok` half of
+/// [`Server::resolve_close_floating_pane_target`].
+struct CloseFloatingPaneTarget {
+    session_id: SessionId,
+    floating_pane_id: FloatingPaneId,
+}
+
 /// The resolved resize of a floating pane. The `Ok` half of
 /// [`Server::resolve_floating_pane_resize`].
 struct FloatingPaneResize {
@@ -300,10 +312,12 @@ struct FloatingPaneResize {
 /// The resolved target of a command that changes one client's own view of a
 /// floating pane ([`Command::MoveFloatingPane`], [`Command::SetFloatingPanePinned`],
 /// [`Command::ToggleFloatingPanePinned`], [`Command::SetFloatingPaneMinimized`],
-/// [`Command::ToggleFloatingPaneMinimized`], and [`Command::FocusPane`] on a floating
-/// pane): the session that owns the floating pane, the client whose view
-/// changes, the floating pane, and the pane the command acts through. The
-/// `Ok` half of [`Server::resolve_floating_pane_view_target`].
+/// [`Command::ToggleFloatingPaneMinimized`], and [`Command::FocusPane`],
+/// [`Command::TogglePaneFullscreen`] and [`Command::MovePane`] on a pane inside
+/// a floating pane): the session that owns the floating pane, the client whose
+/// view changes, the floating pane, and the pane the command acts through. The
+/// `Ok` half of [`Server::resolve_floating_pane_view_target`], and the floating
+/// half of [`ClientViewPaneTarget`].
 struct FloatingPaneViewTarget {
     session_id: SessionId,
     client_id: ClientId,
@@ -356,13 +370,13 @@ enum PanePinChange {
 
 /// The resolved concrete target of a pane-addressed command
 /// ([`Command::ClosePane`], [`Command::ResizePane`]): the owning session, the
-/// tab whose layout holds the pane (`None` when the pane floats), the pane
+/// layout tree that holds the pane (a tab's, or a floating pane's), the pane
 /// itself, and the client whose input the pane takes when that client's focus
 /// picked it. All fields are `Copy`: the target holds no borrow into the
 /// session map.
 struct PaneTarget {
     session_id: SessionId,
-    tab_id: Option<TabId>,
+    layout_area_id: LayoutAreaId,
     pane_id: PaneId,
     /// The client whose focused pane `pane_id` is, when the command named no
     /// pane and came from outside an in-session CLI. `None` for a pane the
@@ -378,13 +392,12 @@ struct ScrollPaneTarget {
     pane_id: PaneId,
 }
 
-/// The resolved concrete target of a command that changes one client's own
-/// view of a tiled pane ([`Command::FocusPane`],
-/// [`Command::TogglePaneFullscreen`]): the owning session, the client whose
-/// view changes, that client's active tab, and the pane. The `Ok` half of
-/// [`Server::resolve_fullscreen_target`], and the tiled half of
-/// [`FocusPaneTarget`]. All fields are `Copy`: the target holds no borrow into
-/// the session map.
+/// The resolved concrete target of a command that reads or changes one
+/// client's own view of a tiled pane ([`Command::FocusPane`],
+/// [`Command::TogglePaneFullscreen`], [`Command::MovePane`]): the owning
+/// session, the client whose view it is, that client's active tab, and the
+/// pane. The tiled half of [`ClientViewPaneTarget`]. All fields are `Copy`:
+/// the target holds no borrow into the session map.
 struct ClientPaneTarget {
     session_id: SessionId,
     client_id: ClientId,
@@ -392,13 +405,15 @@ struct ClientPaneTarget {
     pane_id: PaneId,
 }
 
-/// The pane a [`Command::FocusPane`] focuses: a tiled pane in the client's
-/// active tab, or a floating pane. The `Ok` half of
-/// [`Server::resolve_focus_target`].
-enum FocusPaneTarget {
+/// The pane a command that reads or changes one client's own view acts on:
+/// a tiled pane in the client's active tab, or a pane inside a floating pane.
+/// The `Ok` half of [`Server::resolve_focus_target`] ([`Command::FocusPane`]),
+/// [`Server::resolve_fullscreen_target`] ([`Command::TogglePaneFullscreen`])
+/// and [`Server::resolve_move_pane_target`] ([`Command::MovePane`]).
+enum ClientViewPaneTarget {
     /// A tiled pane in the client's active tab.
     Tiled(ClientPaneTarget),
-    /// A floating pane the client has not minimized.
+    /// A pane inside a floating pane the client holds a view of.
     Floating(FloatingPaneViewTarget),
 }
 
@@ -550,6 +565,9 @@ impl Server {
                     &envelope.command_source,
                     ViewFlagChange::Toggle,
                 ),
+            Command::CloseFloatingPane(command_args) => {
+                self.handle_close_floating_pane(command_id, &envelope.command_source, &command_args)
+            }
             Command::FocusPane(command_args) => {
                 self.handle_focus_pane(command_id, &envelope.command_source, &command_args)
             }
@@ -1112,15 +1130,18 @@ impl Server {
 
     /// Solve every floating pane of `session_id` against the session's shared
     /// floating viewport, then resize each live PTY whose size changed,
-    /// appending one [`Event::PtyResized`] per resized pane: the floating panes
-    /// in the order they were created, and each one's panes in layout order.
+    /// appending the events of the solve, then one [`Event::PtyResized`] per
+    /// resized pane: the floating panes in the order they were created, and
+    /// each one's panes in layout order.
     ///
     /// First sets [`Session::get_floating_cell_size`] on each floating pane's
     /// terminal engine ([`Self::update_pane_cell_sizes`]); with no reported
     /// cell size, each engine keeps its own.
     /// With a [`Session::get_shared_floating_viewport`],
     /// [`Session::update_floating_pane_sizes`] solves each floating pane and
-    /// its tree with the session's pane sizing. With none — no client
+    /// its tree with the session's pane sizing, and returns the events of
+    /// each client focus that moves off a pane the new solve suppresses. With
+    /// none — no client
     /// attached, or no client with a floating viewport — every solved size
     /// stays as it is.
     ///
@@ -1153,7 +1174,7 @@ impl Server {
             return;
         };
         if let Some(shared_floating_viewport) = session.get_shared_floating_viewport() {
-            session.update_floating_pane_sizes(shared_floating_viewport);
+            emitted_events.extend(session.update_floating_pane_sizes(shared_floating_viewport));
         }
         let session = &*session;
         let content_rects: Vec<(PaneId, Option<Rect>)> = session

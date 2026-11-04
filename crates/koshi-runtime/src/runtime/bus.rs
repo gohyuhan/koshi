@@ -381,6 +381,7 @@ impl EventBus {
             | Event::PaneRemoved(_)
             | Event::PaneFocused(_)
             | Event::LayoutChanged(_)
+            | Event::FloatingPaneLayoutChanged(_)
             | Event::TabCreated(_)
             | Event::TabClosed(_)
             | Event::TabFocused(_)

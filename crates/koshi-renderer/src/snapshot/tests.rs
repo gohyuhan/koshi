@@ -8,7 +8,10 @@
 //! slide: each rect edge scaled per axis, a content rect only inside a box of
 //! 3x3 or more, and the pin state, layout mode and flags kept.
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
+use koshi_core::ids::FloatingPaneId;
 
 /// The mouse frame for `render_snapshot` under the compiled-in region solve for
 /// its client's viewport, at input revision `0`.
@@ -397,7 +400,8 @@ fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve_and_viewer_chrome()
     let viewer_chrome = ViewerChrome {
         tabline_offset: Some(2),
         floating_pane_move_draft: Some(FloatingPaneMoveDraft {
-            pane_id: PaneId::new(),
+            floating_pane_id: FloatingPaneId::new(),
+
             top_left_cell: Point { column: 7, row: 1 },
         }),
         ..ViewerChrome::default()
@@ -513,7 +517,10 @@ fn a_floating_hover_shows_only_in_a_mode_whose_grab_handle_press_starts_a_drag()
         (LockMode::NotificationCenter, false, true, false),
         (LockMode::PanePlacement, false, false, false),
     ] {
-        let floating_hover = PlacementHandleHover::FloatingHandle { pane_id, is_pinned };
+        let floating_hover = PlacementHandleHover::FloatingHandle {
+            floating_pane_id: build_floating_pane_id(pane_id),
+            is_pinned,
+        };
         assert_eq!(
             find_shown_placement_handle_hover(
                 Some(floating_hover),
@@ -543,7 +550,8 @@ fn no_hover_shows_while_pane_placement_shows_or_the_link_is_down() {
         PlacementHandleHover::TiledTopBorder { pane_id },
         PlacementHandleHover::TiledHandle { pane_id },
         PlacementHandleHover::FloatingHandle {
-            pane_id,
+            floating_pane_id: build_floating_pane_id(pane_id),
+
             is_pinned: false,
         },
     ] {
@@ -1064,12 +1072,14 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
     };
     let build_minimized_floating_pane =
         |pane_id: PaneId, pane_title: &str| FloatingPane::Minimized {
+            floating_pane_id: build_floating_pane_id(pane_id),
             pane_id,
             pane_title: Some(pane_title.to_string()),
             pane_count: NonZeroUsize::MIN,
         };
     let session_snapshot = build_session_snapshot(vec![
         FloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(first_pane_id),
             pane_id: first_pane_id,
         },
         build_minimized_floating_pane(second_pane_id, "htop"),
@@ -1078,6 +1088,7 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
     assert!(
         session_snapshot.has_same_floating_pane_visibility(&build_session_snapshot(vec![
             FloatingPane::Shown {
+                floating_pane_id: build_floating_pane_id(first_pane_id),
                 pane_id: first_pane_id,
             },
             build_minimized_floating_pane(second_pane_id, "logs"),
@@ -1088,9 +1099,11 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
             "the second pane restored",
             vec![
                 FloatingPane::Shown {
+                    floating_pane_id: build_floating_pane_id(first_pane_id),
                     pane_id: first_pane_id,
                 },
                 FloatingPane::Shown {
+                    floating_pane_id: build_floating_pane_id(second_pane_id),
                     pane_id: second_pane_id,
                 },
             ],
@@ -1105,6 +1118,7 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
         (
             "the second pane closed",
             vec![FloatingPane::Shown {
+                floating_pane_id: build_floating_pane_id(first_pane_id),
                 pane_id: first_pane_id,
             }],
         ),
@@ -1113,6 +1127,7 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
             vec![
                 build_minimized_floating_pane(second_pane_id, "htop"),
                 FloatingPane::Shown {
+                    floating_pane_id: build_floating_pane_id(first_pane_id),
                     pane_id: first_pane_id,
                 },
             ],
@@ -1121,10 +1136,12 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
             "a third pane added",
             vec![
                 FloatingPane::Shown {
+                    floating_pane_id: build_floating_pane_id(first_pane_id),
                     pane_id: first_pane_id,
                 },
                 build_minimized_floating_pane(second_pane_id, "htop"),
                 FloatingPane::Shown {
+                    floating_pane_id: FloatingPaneId::new(),
                     pane_id: PaneId::new(),
                 },
             ],
@@ -1149,6 +1166,7 @@ fn a_resized_one_pane_slot_scales_its_pane_box_and_keeps_a_content_rect_inside_i
     assert_eq!(
         resized_slot,
         FloatingPaneSlot {
+            floating_pane_id: build_floating_pane_id(pane_id),
             pane_id,
             outer_rect: build_cell_rect(5, 3, 20, 6),
             is_pinned: true,

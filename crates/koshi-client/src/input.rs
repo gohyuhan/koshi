@@ -45,7 +45,7 @@ use koshi_core::command::{
     TiledPlacementTarget,
 };
 use koshi_core::geometry::{Direction, Point, Rect};
-use koshi_core::ids::{CommandId, PaneId};
+use koshi_core::ids::{CommandId, FloatingPaneId, PaneId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey, PendingKeySequence,
 };
@@ -55,7 +55,9 @@ use koshi_layout::placement::{
     find_stack_target_pane_id, is_same_tab_placement_noop as is_layout_placement_noop,
     InsertionSpan, PlacementDestinations, PlacementTarget,
 };
-use koshi_renderer::snapshot::{FloatingPane, MouseFrame, PlacementSnapshot, TabSnapshot};
+use koshi_renderer::snapshot::{
+    FloatingPane, FloatingPaneSlot, MouseFrame, PlacementSnapshot, TabSnapshot,
+};
 
 use crate::{
     is_focused_pane_floating, Client, FloatingPaneMoveSelection, LinkStatus, PaneMoveMode,
@@ -651,7 +653,7 @@ impl Client {
         }
         let has_movable_floating_pane = mouse_frame.is_some_and(|mouse_frame| {
             !self
-                .list_movable_floating_slot_pane_ids(mouse_frame)
+                .list_movable_floating_pane_slots(mouse_frame)
                 .is_empty()
         });
         if has_movable_floating_pane {
@@ -699,25 +701,25 @@ impl Client {
             self.close_pane_move_mode();
             return PlacementInputAction::Consumed;
         };
-        let movable_pane_ids = self.list_movable_floating_slot_pane_ids(mouse_frame);
-        let selected_pane_id = match mouse_frame.client_snapshot.focused_pane_id {
-            Some(focused_pane_id) if movable_pane_ids.contains(&focused_pane_id) => {
-                Some(focused_pane_id)
-            }
-            _ => movable_pane_ids.last().copied(),
-        };
-        let Some(selected_pane_id) = selected_pane_id else {
+        let movable_floating_pane_slots = self.list_movable_floating_pane_slots(mouse_frame);
+        let focused_pane_id = mouse_frame.client_snapshot.focused_pane_id;
+        let selected_floating_pane_slot = movable_floating_pane_slots
+            .iter()
+            .find(|floating_pane_slot| Some(floating_pane_slot.pane_id) == focused_pane_id)
+            .or(movable_floating_pane_slots.last())
+            .copied();
+        let Some(selected_floating_pane_slot) = selected_floating_pane_slot else {
             self.close_pane_move_mode();
             return PlacementInputAction::Consumed;
         };
         self.end_held_mouse_gestures();
         self.pending_key_sequence = None;
         self.pane_move_mode = Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-            selected_pane_id,
+            selected_floating_pane_id: selected_floating_pane_slot.floating_pane_id,
             draft_top_left_cell: None,
             pending_move_command_id: None,
         }));
-        self.build_floating_pane_focus_input_action(selected_pane_id)
+        self.build_floating_pane_focus_input_action(selected_floating_pane_slot.pane_id)
     }
 
     /// Open floating pane move mode when `mouse_frame` focuses a floating
@@ -777,10 +779,10 @@ impl Client {
         {
             return PlacementInputAction::Consumed;
         }
-        let selected_pane_id = floating_pane_move_selection.selected_pane_id;
+        let selected_floating_pane_id = floating_pane_move_selection.selected_floating_pane_id;
         let Some(floating_pane_slot) = self
             .build_frame_layout_with_current_chrome(mouse_frame)
-            .find_drawn_floating_pane_slot(selected_pane_id)
+            .find_drawn_floating_pane_slot(selected_floating_pane_id)
         else {
             return PlacementInputAction::Consumed;
         };
@@ -809,7 +811,7 @@ impl Client {
         self.set_floating_pane_move_draft(Some(moved_top_left_cell));
         let clamped_top_left_cell = self
             .build_frame_layout_with_current_chrome(mouse_frame)
-            .find_drawn_floating_pane_slot(selected_pane_id)
+            .find_drawn_floating_pane_slot(selected_floating_pane_id)
             .map(|floating_pane_slot| floating_pane_slot.outer_rect.origin);
         self.set_floating_pane_move_draft(clamped_top_left_cell);
         PlacementInputAction::Consumed
@@ -847,42 +849,49 @@ impl Client {
         let Some(mouse_frame) = mouse_frame else {
             return PlacementInputAction::Consumed;
         };
-        let movable_slot_pane_ids: HashSet<PaneId> = self
-            .list_movable_floating_slot_pane_ids(mouse_frame)
-            .into_iter()
+        let movable_floating_pane_ids: HashSet<FloatingPaneId> = self
+            .list_movable_floating_pane_slots(mouse_frame)
+            .iter()
+            .map(|floating_pane_slot| floating_pane_slot.floating_pane_id)
             .collect();
-        let movable_pane_ids: Vec<PaneId> = mouse_frame
+        let movable_floating_panes: Vec<&FloatingPane> = mouse_frame
             .session_snapshot
             .floating_panes
             .iter()
-            .map(FloatingPane::get_pane_id)
-            .filter(|pane_id| movable_slot_pane_ids.contains(pane_id))
+            .filter(|floating_pane| {
+                movable_floating_pane_ids.contains(&floating_pane.get_floating_pane_id())
+            })
             .collect();
-        let movable_pane_count = movable_pane_ids.len();
-        if movable_pane_count == 0 {
+        let movable_floating_pane_count = movable_floating_panes.len();
+        if movable_floating_pane_count == 0 {
             return PlacementInputAction::Consumed;
         }
-        let selected_pane_index = movable_pane_ids
-            .iter()
-            .position(|&pane_id| pane_id == floating_pane_move_selection.selected_pane_id);
-        let next_pane_index = match selected_pane_index {
-            Some(selected_pane_index) => (selected_pane_index as isize + pane_index_offset)
-                .rem_euclid(movable_pane_count as isize)
-                as usize,
+        let selected_floating_pane_index =
+            movable_floating_panes.iter().position(|floating_pane| {
+                floating_pane.get_floating_pane_id()
+                    == floating_pane_move_selection.selected_floating_pane_id
+            });
+        let next_floating_pane_index = match selected_floating_pane_index {
+            Some(selected_floating_pane_index) => {
+                (selected_floating_pane_index as isize + pane_index_offset)
+                    .rem_euclid(movable_floating_pane_count as isize) as usize
+            }
             None if pane_index_offset > 0 => 0,
-            None => movable_pane_count - 1,
+            None => movable_floating_pane_count - 1,
         };
-        let next_pane_id = movable_pane_ids[next_pane_index];
-        if next_pane_id == floating_pane_move_selection.selected_pane_id {
+        let next_floating_pane = movable_floating_panes[next_floating_pane_index];
+        if next_floating_pane.get_floating_pane_id()
+            == floating_pane_move_selection.selected_floating_pane_id
+        {
             return PlacementInputAction::Consumed;
         }
         self.cancel_floating_pane_move_drag();
         self.pane_move_mode = Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-            selected_pane_id: next_pane_id,
+            selected_floating_pane_id: next_floating_pane.get_floating_pane_id(),
             draft_top_left_cell: None,
             pending_move_command_id: None,
         }));
-        self.build_floating_pane_focus_input_action(next_pane_id)
+        self.build_floating_pane_focus_input_action(next_floating_pane.get_pane_id())
     }
 
     /// Send the cell the arrow keys moved the selected floating pane to as
@@ -913,15 +922,15 @@ impl Client {
         let Some(mouse_frame) = mouse_frame else {
             return PlacementInputAction::Consumed;
         };
-        let pane_id = floating_pane_move_selection.selected_pane_id;
+        let floating_pane_id = floating_pane_move_selection.selected_floating_pane_id;
         let drawn_floating_pane_slot = self
             .build_frame_layout_with_current_chrome(mouse_frame)
-            .find_drawn_floating_pane_slot(pane_id);
+            .find_drawn_floating_pane_slot(floating_pane_id);
         let session_floating_pane_slot = mouse_frame
             .session_snapshot
             .floating_pane_slots
             .iter()
-            .find(|floating_pane_slot| floating_pane_slot.pane_id == pane_id);
+            .find(|floating_pane_slot| floating_pane_slot.floating_pane_id == floating_pane_id);
         self.set_floating_pane_move_draft(None);
         let (Some(drawn_floating_pane_slot), Some(session_floating_pane_slot)) =
             (drawn_floating_pane_slot, session_floating_pane_slot)
@@ -934,11 +943,11 @@ impl Client {
         {
             return PlacementInputAction::Consumed;
         }
-        let command_id = self.record_sent_floating_pane_move(pane_id, top_left_cell);
+        let command_id = self.record_sent_floating_pane_move(floating_pane_id, top_left_cell);
         PlacementInputAction::SubmitCommand {
             command_id,
             command: Command::MoveFloatingPane(MoveFloatingPaneArgs {
-                pane_id,
+                pane_id: drawn_floating_pane_slot.floating_pane_slot.pane_id,
                 top_left_cell,
             }),
         }
@@ -957,11 +966,16 @@ impl Client {
 
     /// The floating panes that `mouse_frame` draws unpinned with this viewer's
     /// current chrome, back to front.
-    fn list_movable_floating_slot_pane_ids(&self, mouse_frame: &MouseFrame) -> Vec<PaneId> {
+    fn list_movable_floating_pane_slots<'a>(
+        &self,
+        mouse_frame: &'a MouseFrame,
+    ) -> Vec<&'a FloatingPaneSlot> {
         self.build_frame_layout_with_current_chrome(mouse_frame)
             .list_drawn_floating_pane_slots()
-            .filter(|floating_pane_slot| !floating_pane_slot.floating_pane_slot.is_pinned)
-            .map(|floating_pane_slot| floating_pane_slot.floating_pane_slot.pane_id)
+            .filter(|drawn_floating_pane_slot| {
+                !drawn_floating_pane_slot.floating_pane_slot.is_pinned
+            })
+            .map(|drawn_floating_pane_slot| drawn_floating_pane_slot.floating_pane_slot)
             .collect()
     }
 

@@ -114,9 +114,13 @@ impl Server {
                     let floating_pane_id = floating_pane.get_floating_pane_id();
                     let pane_id = client.find_floating_pane_input_pane_id(floating_pane_id)?;
                     if client.is_floating_pane_shown(floating_pane_id) {
-                        return Some(FloatingPane::Shown { pane_id });
+                        return Some(FloatingPane::Shown {
+                            floating_pane_id,
+                            pane_id,
+                        });
                     }
                     Some(FloatingPane::Minimized {
+                        floating_pane_id,
                         pane_id,
                         pane_title: self.terminal_engine_by_pane_id.get(&pane_id).and_then(
                             |terminal_engine| {
@@ -291,6 +295,7 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
             let layout_solve =
                 session.compute_client_floating_pane_solve(client, floating_pane_id)?;
             Some(FloatingPaneSlot {
+                floating_pane_id,
                 pane_id,
                 outer_rect,
                 is_pinned: matches!(floating_pane_view.position, FloatingPanePosition::Pinned(_)),

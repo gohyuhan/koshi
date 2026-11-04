@@ -59,7 +59,7 @@ use koshi_core::notification::{NotificationSeverity, MAX_QUEUED_NOTIFICATION_COU
 use koshi_core::registry::ActionRegistry;
 use koshi_core::{
     geometry::{PaneArea, Point, Size},
-    ids::{ClientId, CommandId, PaneId, SessionId, TabId},
+    ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId},
 };
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_layout::placement::PlacedTabLayout;
@@ -214,7 +214,7 @@ pub(crate) enum PaneMoveMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FloatingPaneMoveSelection {
     /// The floating pane that the arrow keys, Enter, and a mouse drag move.
-    pub(crate) selected_pane_id: PaneId,
+    pub(crate) selected_floating_pane_id: FloatingPaneId,
     /// The top-left cell the arrow keys moved the selected pane to, counted
     /// from the pane-area origin, which this viewer draws until Enter sends
     /// it. `None` before an arrow key moves the pane, after Enter, and after a

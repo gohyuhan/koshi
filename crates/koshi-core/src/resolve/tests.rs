@@ -331,6 +331,10 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
             "toggle-minimize-all-floating-panes",
             Command::ToggleAllFloatingPanesMinimized,
         ),
+        (
+            "close-floating-pane",
+            Command::CloseFloatingPane(CloseFloatingPaneArgs::default()),
+        ),
         ("new-tab", Command::NewTab(NewTabArgs::default())),
         ("close-tab", Command::CloseTab(CloseTabArgs::default())),
         (
@@ -489,6 +493,7 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::ToggleAllFloatingPanesMinimized => {
             Some(CommandKind::ToggleAllFloatingPanesMinimized)
         }
+        Command::CloseFloatingPane(_) => Some(CommandKind::CloseFloatingPane),
         Command::Quit(_) => Some(CommandKind::Quit),
         Command::ToggleFloatingPaneMinimized(_)
         | Command::KillSession

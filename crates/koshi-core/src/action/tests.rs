@@ -583,6 +583,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
         (
+            "core:close-floating-pane",
+            CommandKind::CloseFloatingPane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
             "core:focus-pane",
             CommandKind::FocusPane,
             Client,
@@ -1269,6 +1275,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:cancel-pane-move-choice",
         "core:cancel-pane-placement",
         "core:clear-notifications",
+        "core:close-floating-pane",
         "core:close-floating-pane-tray",
         "core:close-notification-center",
         "core:close-pane",

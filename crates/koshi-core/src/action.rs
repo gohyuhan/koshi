@@ -472,7 +472,8 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `minimize-pane` builds `SetFloatingPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
 /// `toggle-minimize-all-floating-panes` builds
-/// `ToggleAllFloatingPanesMinimized`.
+/// `ToggleAllFloatingPanesMinimized`; `close-floating-pane` builds
+/// `CloseFloatingPane`.
 ///
 /// The `resize-pane-*` and `focus-pane-*` direction families,
 /// `focus-next-floating-pane`, `focus-previous-floating-pane`, and
@@ -1047,6 +1048,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::ToggleAllFloatingPanesMinimized),
+        ),
+        build_core_action_seed(
+            "close-floating-pane",
+            "Close Floating Pane",
+            "Close every pane of the floating pane that holds the focused pane",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::CloseFloatingPane),
         ),
         build_core_action_seed(
             "focus-pane",

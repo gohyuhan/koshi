@@ -29,8 +29,10 @@ pub enum Command {
     ClosePane(ClosePaneArgs),
     /// Move one of a pane's borders by whole cells: a positive size moves
     /// it outward (the pane grows), a negative size moves it inward (the
-    /// pane shrinks and the neighbor gains the cells). A floating pane has no
-    /// neighbor; its own size changes ([`ResizePaneArgs::resize_amount_cells`]).
+    /// pane shrinks and the neighbor gains the cells). A pane inside a
+    /// floating pane moves its border inside the floating pane's tree; at the
+    /// floating pane's edge, the floating pane's own size changes
+    /// ([`ResizePaneArgs::resize_amount_cells`]).
     ResizePane(ResizePaneArgs),
     /// Move focus to a pane.
     FocusPane(FocusPaneArgs),
@@ -56,8 +58,8 @@ pub enum Command {
     TogglePaneFullscreen,
     /// Move a tab to a new index.
     MoveTab(MoveTabArgs),
-    /// Swap a tiled pane with its visible neighbor in one direction, in one
-    /// step.
+    /// Swap a pane with its visible neighbor in one direction, in one step:
+    /// in a tab, or inside the floating pane that holds it.
     ///
     /// - `koshi move-pane --direction <direction>` sends it. A key bound to
     ///   `core:move-pane` resolves to `ResolveError::ArgumentsRequired` and sends
@@ -136,6 +138,11 @@ pub enum Command {
     /// client's view when it runs the command.
     /// `core:toggle-minimize-all-floating-panes` sends it.
     ToggleAllFloatingPanesMinimized,
+    /// Close every pane of the floating pane that holds a pane, as
+    /// [`Command::ClosePane`] closes one pane. The ✕ button of a floating
+    /// pane's titlebar strip, `core:close-floating-pane` and
+    /// `koshi close-pane --all` send it.
+    CloseFloatingPane(CloseFloatingPaneArgs),
     /// Remove one client from the session, as [`Command::Detach`] does. The
     /// session's `auto-close-session` setting then decides whether a session
     /// left with no client ends. `core:quit` sends it.
@@ -206,6 +213,8 @@ pub enum CommandKind {
     SetAllFloatingPanesMinimized,
     /// Names [`Command::ToggleAllFloatingPanesMinimized`].
     ToggleAllFloatingPanesMinimized,
+    /// Names [`Command::CloseFloatingPane`].
+    CloseFloatingPane,
     /// Names [`Command::Quit`].
     Quit,
 }
@@ -298,6 +307,19 @@ pub struct ClosePaneArgs {
     pub should_force_close: bool,
     /// Kill the child's whole process group: every descendant it spawned
     /// stops with it. Changes kill scope only.
+    pub should_kill_process_tree: bool,
+}
+
+/// Arguments for [`Command::CloseFloatingPane`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CloseFloatingPaneArgs {
+    /// A pane of the floating pane to close; `None` names the focused pane.
+    pub pane_id: Option<PaneId>,
+    /// Kill each pane's child immediately, as
+    /// [`ClosePaneArgs::should_force_close`] does.
+    pub should_force_close: bool,
+    /// Kill each child's whole process group, as
+    /// [`ClosePaneArgs::should_kill_process_tree`] does.
     pub should_kill_process_tree: bool,
 }
 

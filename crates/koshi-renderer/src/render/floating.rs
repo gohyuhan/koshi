@@ -176,7 +176,7 @@ pub(super) fn draw_floating_pane(
     clear_overlay_area(outer_area, drawn_rows, screen_buffer);
     let is_grab_handle_hovered = viewer_chrome.placement_handle_hover
         == Some(PlacementHandleHover::FloatingHandle {
-            pane_id: floating_pane_slot.pane_id,
+            floating_pane_id: floating_pane_slot.floating_pane_id,
             is_pinned: floating_pane_slot.is_pinned,
         });
     if drawn_rows.is_row_drawn(outer_area.y) {

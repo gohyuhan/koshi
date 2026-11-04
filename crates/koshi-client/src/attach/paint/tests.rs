@@ -33,8 +33,11 @@ use koshi_terminal::state::CursorShape;
 use koshi_terminal::style::{Color, Style, UnderlineStyle};
 use koshi_test_support::fixtures::build_image_chunk_frame;
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 use crate::tests::build_one_pane_floating_pane_slot;
+use koshi_core::ids::FloatingPaneId;
 
 fn build_image_placement_snapshot() -> ImagePlacementSnapshot {
     ImagePlacementSnapshot::with_content_id(
@@ -499,14 +502,17 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
     ];
     expected_render_snapshot.session_snapshot.floating_panes = vec![
         FloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(upper_floating_slot_pane_id),
             pane_id: upper_floating_slot_pane_id,
         },
         FloatingPane::Minimized {
+            floating_pane_id: FloatingPaneId::new(),
             pane_id: PaneId::new(),
             pane_title: Some("htop".to_string()),
             pane_count: NonZeroUsize::MIN,
         },
         FloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(lower_floating_slot_pane_id),
             pane_id: lower_floating_slot_pane_id,
         },
     ];
@@ -1859,6 +1865,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         Some(String::from("~/work\u{7}\u{1b}]0;owned\u{7}"));
     let minimized_floating_slot_pane_id = PaneId::new();
     expected_render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
+        floating_pane_id: build_floating_pane_id(minimized_floating_slot_pane_id),
         pane_id: minimized_floating_slot_pane_id,
         pane_title: Some(String::from("htop\u{1b}[2J")),
         pane_count: NonZeroUsize::MIN,
@@ -1910,6 +1917,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
     assert_eq!(
         received_snapshot.session_snapshot.floating_panes,
         [FloatingPane::Minimized {
+            floating_pane_id: build_floating_pane_id(minimized_floating_slot_pane_id),
             pane_id: minimized_floating_slot_pane_id,
             pane_title: Some(String::from("htop[2J")),
             pane_count: NonZeroUsize::MIN,

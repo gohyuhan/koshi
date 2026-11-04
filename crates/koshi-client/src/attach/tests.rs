@@ -93,6 +93,8 @@ use koshi_terminal::graphics::{
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::style::Style;
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 use crate::attach::paint::build_render_snapshot;
 use crate::floating_pane_tray::tests::{build_client_with_open_tray, build_tray_mouse_frame};
@@ -104,6 +106,7 @@ use crate::tests::{
     NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime};
+use koshi_core::ids::FloatingPaneId;
 use koshi_runtime::runtime::painted_update::{PaintedUpdateSender, ReceivedPaintedFrame};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
@@ -3644,6 +3647,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
             .session_snapshot
             .floating_panes
             .push(FloatingPane::Shown {
+                floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
                 pane_id: floating_slot_pane_id,
             });
         mouse_frame
@@ -3668,7 +3672,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     client.pane_move_mode = Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-        selected_pane_id: front_floating_slot_pane_id,
+        selected_floating_pane_id: build_floating_pane_id(front_floating_slot_pane_id),
         draft_top_left_cell: None,
         pending_move_command_id: None,
     }));
@@ -3755,7 +3759,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
     assert_eq!(
         client.pane_move_mode,
         Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-            selected_pane_id: front_floating_slot_pane_id,
+            selected_floating_pane_id: build_floating_pane_id(front_floating_slot_pane_id),
             draft_top_left_cell: None,
             pending_move_command_id: None,
         }))
@@ -9140,7 +9144,7 @@ fn list_local_mode_entries() -> [fn(&mut Client); 2] {
         |client| {
             client.pane_move_mode =
                 Some(PaneMoveMode::FloatingPaneMove(FloatingPaneMoveSelection {
-                    selected_pane_id: PaneId::new(),
+                    selected_floating_pane_id: FloatingPaneId::new(),
                     draft_top_left_cell: None,
                     pending_move_command_id: None,
                 }));
@@ -12920,7 +12924,8 @@ fn a_late_painted_frame_that_names_no_floating_pane_move_keeps_the_move_drawn() 
         panic!("expected one floating pane move, got {release_actions:?}");
     };
     let moved_draft = Some(FloatingPaneMoveDraft {
-        pane_id: floating_slot_pane_id,
+        floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+
         top_left_cell: Point { column: 15, row: 5 },
     });
     let mut screen = build_failing_screen();
@@ -13847,6 +13852,7 @@ fn build_undocked_pane_frames(
             false,
         )];
     undocked_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
+        floating_pane_id: build_floating_pane_id(undocked_pane_id),
         pane_id: undocked_pane_id,
     }];
     (initial_frame, undocked_frame)
@@ -14081,6 +14087,7 @@ fn a_frame_that_floats_two_panes_slides_both_from_their_tiled_boxes() {
     undocked_frame.session_snapshot.floating_panes.insert(
         0,
         FrameFloatingPane::Shown {
+            floating_pane_id: build_floating_pane_id(left_pane_id),
             pane_id: left_pane_id,
         },
     );
@@ -14729,6 +14736,7 @@ fn build_minimized_pane_snapshots(
 ) -> (RenderSnapshot, RenderSnapshot) {
     let mut minimized_frame = build_test_painted_frame();
     minimized_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Minimized {
+        floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
         pane_id: floating_slot_pane_id,
         pane_title: Some(String::from("htop")),
         pane_count: NonZeroUsize::MIN,
@@ -14741,6 +14749,7 @@ fn build_minimized_pane_snapshots(
             false,
         )];
     shown_frame.session_snapshot.floating_panes = vec![FrameFloatingPane::Shown {
+        floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
         pane_id: floating_slot_pane_id,
     }];
     let mut shown_snapshot = build_render_snapshot(&build_received_painted_frame(shown_frame));
@@ -14778,6 +14787,7 @@ fn build_one_pane_frame_floating_pane_slot(
 ) -> FrameFloatingPaneSlot {
     let layout_area = build_one_pane_floating_pane_slot(pane_id, outer_rect, is_pinned).layout_area;
     FrameFloatingPaneSlot {
+        floating_pane_id: build_floating_pane_id(pane_id),
         pane_id,
         outer_rect,
         is_pinned,
@@ -14997,6 +15007,31 @@ fn a_restored_pane_slides_out_of_the_cell_under_the_closed_trays_button() {
             42,
             12
         )]
+    );
+}
+
+#[test]
+fn a_restored_floating_pane_slides_when_another_of_its_panes_takes_the_input() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let htop_pane_id = PaneId::new();
+    let (shown_snapshot, mut minimized_snapshot) = build_minimized_pane_snapshots(htop_pane_id);
+    // The minimized floating pane listed `vim` as the pane that takes the
+    // input; the frame that restores it names `htop`.
+    minimized_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
+        floating_pane_id: build_floating_pane_id(htop_pane_id),
+        pane_id: PaneId::new(),
+        pane_title: Some(String::from("vim")),
+        pane_count: NonZeroUsize::new(2).expect("two panes"),
+    }];
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+
+    assert_eq!(
+        screen.shown_animated_floating_pane_slots,
+        vec![build_sliding_floating_pane_slot(htop_pane_id, 72, 0, 1, 1)]
     );
 }
 

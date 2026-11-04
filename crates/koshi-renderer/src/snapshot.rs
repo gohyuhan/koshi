@@ -39,7 +39,7 @@ use koshi_core::event::{
     HeldCommandRejection, PanePlacementCommitted, RejectReason, SubscriberLagged,
 };
 use koshi_core::geometry::{Point, Rect, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_core::notification::{NotificationEntry, NotificationId, NotificationQueue};
@@ -623,7 +623,7 @@ pub enum PlacementHandleHover {
     /// The pointer rests on a floating pane's grab handle `⣿⣿`.
     FloatingHandle {
         /// The floating pane whose grab handle the pointer rests on.
-        pane_id: PaneId,
+        floating_pane_id: FloatingPaneId,
         /// Whether the frame the pointer moved over drew the pane pinned.
         is_pinned: bool,
     },
@@ -647,7 +647,7 @@ pub enum LinkStatus {
 /// A floating pane this viewer draws at a cell of its own choosing, before the
 /// session places it there.
 ///
-/// The frame's slot for `pane_id` keeps its size and pin state; only its
+/// The frame's slot for `floating_pane_id` keeps its size and pin state; only its
 /// top-left cell becomes `top_left_cell`, moved left and up until the slot lies
 /// inside the pane area ([`FrameLayout::list_drawn_floating_pane_slots`]). In
 /// a `120x38` pane area, a slot at `(24, 8)` `72x22` with a draft at `(29, 8)`
@@ -656,7 +656,7 @@ pub enum LinkStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloatingPaneMoveDraft {
     /// The floating pane being moved.
-    pub pane_id: PaneId,
+    pub floating_pane_id: FloatingPaneId,
     /// The pane's top-left cell that the viewer asks for, counted from the
     /// viewer's pane-area origin. It may lie past the pane area.
     pub top_left_cell: Point,
@@ -743,13 +743,14 @@ impl<'a> FrameLayout<'a> {
     /// The floating panes this viewer draws in this frame, back to front:
     /// every slot in the session's
     /// [`floating_pane_slots`](SessionSnapshot::floating_pane_slots), each at
-    /// its own outer rect. The unpinned slot whose input pane
+    /// its own outer rect. The unpinned slot of the floating pane
     /// `viewer_chrome.floating_pane_move_draft` names is drawn at the draft's
     /// top-left cell, moved left and up until it lies inside this frame's pane
     /// area ([`Rect::compute_moved_inside`]). While
     /// `viewer_chrome.is_pane_placement_visible` is `true`, the only slot is
-    /// that of `viewer_chrome.placement_source_pane_id`, and only while the
-    /// active tab holds no slot of that pane. None while the active tab's
+    /// the one whose tree holds `viewer_chrome.placement_source_pane_id`, and
+    /// only while the active tab holds no slot of that pane. None while the
+    /// active tab's
     /// `is_every_pane_suppressed` is `true`: the frame shows
     /// `Terminal too small — enlarge window` instead.
     ///
@@ -771,16 +772,22 @@ impl<'a> FrameLayout<'a> {
         };
         let frame_layout = *self;
         let is_drawn_floating_pane_slot = move |floating_pane_slot: &&FloatingPaneSlot| {
-            !frame_layout.viewer_chrome.is_pane_placement_visible
-                || (frame_layout.viewer_chrome.placement_source_pane_id
-                    == Some(floating_pane_slot.pane_id)
-                    && !frame_layout
-                        .session_snapshot
-                        .active_tab_snapshot
+            if !frame_layout.viewer_chrome.is_pane_placement_visible {
+                return true;
+            }
+            frame_layout
+                .viewer_chrome
+                .placement_source_pane_id
+                .is_some_and(|placement_source_pane_id| {
+                    floating_pane_slot
                         .layout_area
-                        .pane_slots
-                        .iter()
-                        .any(|pane_slot| pane_slot.pane_id == floating_pane_slot.pane_id))
+                        .has_pane(placement_source_pane_id)
+                        && !frame_layout
+                            .session_snapshot
+                            .active_tab_snapshot
+                            .layout_area
+                            .has_pane(placement_source_pane_id)
+                })
         };
         floating_pane_slots
             .iter()
@@ -788,7 +795,8 @@ impl<'a> FrameLayout<'a> {
             .map(move |floating_pane_slot| {
                 let outer_rect = match frame_layout.viewer_chrome.floating_pane_move_draft {
                     Some(floating_pane_move_draft)
-                        if floating_pane_move_draft.pane_id == floating_pane_slot.pane_id
+                        if floating_pane_move_draft.floating_pane_id
+                            == floating_pane_slot.floating_pane_id
                             && !floating_pane_slot.is_pinned =>
                     {
                         let frame_pane_area = compute_frame_pane_area(
@@ -813,18 +821,37 @@ impl<'a> FrameLayout<'a> {
             })
     }
 
-    /// The floating pane whose input pane is `pane_id`, as this frame draws
-    /// it ([`list_drawn_floating_pane_slots`](Self::list_drawn_floating_pane_slots)),
+    /// The floating pane `floating_pane_id`, as this frame draws it
+    /// ([`list_drawn_floating_pane_slots`](Self::list_drawn_floating_pane_slots)),
     /// at its move draft's cell while one names it, or `None` when the frame
     /// draws no such floating pane.
     #[must_use]
     pub fn find_drawn_floating_pane_slot(
         &self,
+        floating_pane_id: FloatingPaneId,
+    ) -> Option<DrawnFloatingPaneSlot<'a>> {
+        self.list_drawn_floating_pane_slots()
+            .find(|drawn_floating_pane_slot| {
+                drawn_floating_pane_slot.floating_pane_slot.floating_pane_id == floating_pane_id
+            })
+    }
+
+    /// The floating pane whose tree holds `pane_id`, as
+    /// [`find_drawn_floating_pane_slot`](Self::find_drawn_floating_pane_slot)
+    /// draws it, or `None` when the frame draws no such floating pane. In
+    /// `[vim | htop]`, `htop` gives the slot whether `vim` or `htop` takes the
+    /// client's input.
+    #[must_use]
+    pub fn find_drawn_floating_pane_slot_by_pane_id(
+        &self,
         pane_id: PaneId,
     ) -> Option<DrawnFloatingPaneSlot<'a>> {
         self.list_drawn_floating_pane_slots()
             .find(|drawn_floating_pane_slot| {
-                drawn_floating_pane_slot.floating_pane_slot.pane_id == pane_id
+                drawn_floating_pane_slot
+                    .floating_pane_slot
+                    .layout_area
+                    .has_pane(pane_id)
             })
     }
 }
@@ -976,10 +1003,11 @@ pub struct SessionSnapshot {
 }
 
 impl SessionSnapshot {
-    /// The index of `pane_id` in the session's
-    /// [`floating_panes`](Self::floating_panes), or `None` when it is no
-    /// floating pane. With floating panes `htop` and `logs`, `logs` gives
-    /// `Some(1)`.
+    /// The index of the floating pane that `pane_id` takes the viewing
+    /// client's input in, in the session's
+    /// [`floating_panes`](Self::floating_panes), or `None` when `pane_id`
+    /// takes the input of no floating pane. With floating panes `htop` and
+    /// `logs`, `logs` gives `Some(1)`.
     #[must_use]
     pub fn find_floating_pane_index(&self, pane_id: PaneId) -> Option<usize> {
         self.floating_panes
@@ -987,20 +1015,20 @@ impl SessionSnapshot {
             .position(|floating_pane| floating_pane.get_pane_id() == pane_id)
     }
 
-    /// Whether `pane_id` is one of the session's
-    /// [`floating_panes`](Self::floating_panes), shown or minimized.
+    /// Whether `pane_id` takes the viewing client's input in one of the
+    /// session's [`floating_panes`](Self::floating_panes), shown or minimized.
     #[must_use]
     pub fn is_floating_pane(&self, pane_id: PaneId) -> bool {
         self.find_floating_pane_index(pane_id).is_some()
     }
 
-    /// Whether `pane_id` is one of the session's
+    /// Whether the floating pane `floating_pane_id` is one of the session's
     /// [`floating_panes`](Self::floating_panes) and the viewing client
     /// minimized it.
     #[must_use]
-    pub fn is_floating_pane_minimized(&self, pane_id: PaneId) -> bool {
+    pub fn is_floating_pane_minimized(&self, floating_pane_id: FloatingPaneId) -> bool {
         self.floating_panes.iter().any(|floating_pane| {
-            floating_pane.get_pane_id() == pane_id && floating_pane.is_minimized()
+            floating_pane.get_floating_pane_id() == floating_pane_id && floating_pane.is_minimized()
         })
     }
 
@@ -1028,14 +1056,16 @@ impl SessionSnapshot {
                 .iter()
                 .zip(&other_session_snapshot.floating_panes)
                 .all(|(floating_pane, other_floating_pane)| {
-                    floating_pane.get_pane_id() == other_floating_pane.get_pane_id()
+                    floating_pane.get_floating_pane_id()
+                        == other_floating_pane.get_floating_pane_id()
                         && floating_pane.is_minimized() == other_floating_pane.is_minimized()
                 })
     }
 }
 
 /// One floating pane of the session, shown or minimized for the viewing
-/// client, named by the pane that takes the client's input inside it. The
+/// client, named by its id and by the pane that takes the client's input
+/// inside it. The
 /// frame carries the input pane's title and the floating pane's pane count
 /// once each: in the input pane's [`PaneSnapshot`] and the floating pane's
 /// [`FloatingPaneSlot`] while the client shows it, and here while the client
@@ -1048,13 +1078,19 @@ pub enum FloatingPane {
     /// floating viewport has every pane it shows minimized by the session in
     /// the same change.
     Shown {
-        /// The floating pane.
+        /// The floating pane's id inside its session.
+        floating_pane_id: FloatingPaneId,
+        /// The pane that takes the viewing client's input inside the floating
+        /// pane.
         pane_id: PaneId,
     },
     /// The viewing client minimized the pane. The frame holds no slot and no
     /// snapshot of it.
     Minimized {
-        /// The floating pane.
+        /// The floating pane's id inside its session.
+        floating_pane_id: FloatingPaneId,
+        /// The pane that takes the viewing client's input inside the floating
+        /// pane.
         pane_id: PaneId,
         /// The pane's resolved display title, by the rule of
         /// [`PaneSnapshot::pane_title`]. `None` when the pane has reported
@@ -1066,11 +1102,27 @@ pub enum FloatingPane {
 }
 
 impl FloatingPane {
-    /// The id of the floating pane, shown or minimized.
+    /// The floating pane's id inside its session, shown or minimized.
+    #[must_use]
+    pub fn get_floating_pane_id(&self) -> FloatingPaneId {
+        match self {
+            FloatingPane::Shown {
+                floating_pane_id, ..
+            }
+            | FloatingPane::Minimized {
+                floating_pane_id, ..
+            } => *floating_pane_id,
+        }
+    }
+
+    /// The pane that takes the viewing client's input inside the floating
+    /// pane, shown or minimized.
     #[must_use]
     pub fn get_pane_id(&self) -> PaneId {
         match self {
-            FloatingPane::Shown { pane_id } | FloatingPane::Minimized { pane_id, .. } => *pane_id,
+            FloatingPane::Shown { pane_id, .. } | FloatingPane::Minimized { pane_id, .. } => {
+                *pane_id
+            }
         }
     }
 
@@ -1184,6 +1236,14 @@ impl LayoutAreaSnapshot {
         }
     }
 
+    /// Whether the tree holds a slot for `pane_id`, visible or hidden.
+    #[must_use]
+    pub fn has_pane(&self, pane_id: PaneId) -> bool {
+        self.pane_slots
+            .iter()
+            .any(|pane_slot| pane_slot.pane_id == pane_id)
+    }
+
     /// The slot of `pane_id` when its [`is_visible`](PaneSlot::is_visible) is
     /// `true`. `None` when the tree has no slot for `pane_id`, or the slot is
     /// hidden.
@@ -1241,6 +1301,9 @@ pub struct PaneSlot {
 /// `150`, also when the client's tiled layout starts at column `60`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatingPaneSlot {
+    /// The floating pane's id inside its session. It stays the same while the
+    /// pane that takes the client's input inside the floating pane changes.
+    pub floating_pane_id: FloatingPaneId,
     /// The pane that takes the viewing client's input inside the floating
     /// pane: the first pane of its focus history there. One of the panes of
     /// [`layout_area`](Self::layout_area).
@@ -1258,8 +1321,8 @@ pub struct FloatingPaneSlot {
 }
 
 impl FloatingPaneSlot {
-    /// This slot drawn at `outer_rect` by a slide: the same pane and pin
-    /// state, and the layout area scaled to the rows of `outer_rect` below the
+    /// This slot drawn at `outer_rect` by a slide: the same floating pane, input
+    /// pane and pin state, and the layout area scaled to the rows of `outer_rect` below the
     /// strip. Each rect of a pane slot and of a stack header has each of its
     /// edges moved to `edge * scaled / solved` cells, rounded down, per axis.
     /// A scaled pane box of 3x3 cells or more has the content rect inside its
@@ -1367,6 +1430,7 @@ impl FloatingPaneSlot {
             })
             .collect();
         FloatingPaneSlot {
+            floating_pane_id: self.floating_pane_id,
             pane_id: self.pane_id,
             outer_rect,
             is_pinned: self.is_pinned,

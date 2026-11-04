@@ -5,6 +5,8 @@
 //! titlebar's tile title, label and close button and their room, and every
 //! frame that has no room for the tray.
 
+use koshi_test_support::fixtures::build_floating_pane_id;
+
 use super::*;
 use crate::render::tests::build_one_pane_floating_pane_slot;
 use std::num::NonZeroUsize;
@@ -65,10 +67,14 @@ pub(crate) fn build_tray_test_render_snapshot(
             floating_pane_slots: Vec::new(),
             floating_panes: floating_pane_titles
                 .iter()
-                .map(|floating_pane_title| FloatingPane::Minimized {
-                    pane_id: PaneId::new(),
-                    pane_title: Some(floating_pane_title.to_string()),
-                    pane_count: NonZeroUsize::MIN,
+                .map(|floating_pane_title| {
+                    let pane_id = PaneId::new();
+                    FloatingPane::Minimized {
+                        floating_pane_id: build_floating_pane_id(pane_id),
+                        pane_id,
+                        pane_title: Some(floating_pane_title.to_string()),
+                        pane_count: NonZeroUsize::MIN,
+                    }
                 })
                 .collect(),
         },
@@ -100,6 +106,7 @@ pub(crate) fn show_tray_test_floating_pane(
 ) -> PaneId {
     let floating_pane = &mut render_snapshot.session_snapshot.floating_panes[tile_index];
     let FloatingPane::Minimized {
+        floating_pane_id,
         pane_id,
         pane_title,
         ..
@@ -107,7 +114,10 @@ pub(crate) fn show_tray_test_floating_pane(
     else {
         panic!("tile {tile_index} shows a minimized pane before it is shown");
     };
-    *floating_pane = FloatingPane::Shown { pane_id };
+    *floating_pane = FloatingPane::Shown {
+        floating_pane_id,
+        pane_id,
+    };
     render_snapshot
         .session_snapshot
         .floating_pane_slots

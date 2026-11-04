@@ -81,6 +81,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
                 .floating_pane_slots
                 .iter()
                 .map(|floating_pane_slot| FrameFloatingPaneSlot {
+                    floating_pane_id: floating_pane_slot.floating_pane_id,
                     pane_id: floating_pane_slot.pane_id,
                     outer_rect: floating_pane_slot.outer_rect,
                     is_pinned: floating_pane_slot.is_pinned,
@@ -91,14 +92,20 @@ pub(crate) fn build_wire_frame_with_content_ids(
                 .floating_panes
                 .iter()
                 .map(|floating_pane| match floating_pane {
-                    FloatingPane::Shown { pane_id } => {
-                        FrameFloatingPane::Shown { pane_id: *pane_id }
-                    }
+                    FloatingPane::Shown {
+                        floating_pane_id,
+                        pane_id,
+                    } => FrameFloatingPane::Shown {
+                        floating_pane_id: *floating_pane_id,
+                        pane_id: *pane_id,
+                    },
                     FloatingPane::Minimized {
+                        floating_pane_id,
                         pane_id,
                         pane_title,
                         pane_count,
                     } => FrameFloatingPane::Minimized {
+                        floating_pane_id: *floating_pane_id,
                         pane_id: *pane_id,
                         pane_title: pane_title.clone(),
                         pane_count: *pane_count,

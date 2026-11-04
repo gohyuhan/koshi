@@ -5,10 +5,13 @@
 //! leaving the input untouched. A failed edit returns an error and changes
 //! nothing; there is no half-edited tree.
 
+use std::collections::HashSet;
+
 use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
 
+use crate::normalize::normalize_layout_tree;
 use crate::size::SizeWeight;
 use crate::tree::{compute_split_direction, LayoutNode, SplitNode};
 
@@ -158,6 +161,25 @@ pub fn remove_pane(layout_tree: &LayoutNode, pane_id: PaneId) -> Result<LayoutNo
         return Err(RemoveError::LastPane { pane_id });
     }
     Ok(edited_layout_tree)
+}
+
+/// [`remove_pane`], then [`normalize_layout_tree`] of the tree it leaves with
+/// every leaf live: a split or a stack left with one child becomes that
+/// child. `H[A, V[B, C]]` without `C` gives `H[A, B]`.
+///
+/// # Errors
+///
+/// Those of [`remove_pane`]. The caller's layout tree is unchanged.
+pub fn remove_pane_and_normalize(
+    layout_tree: &LayoutNode,
+    pane_id: PaneId,
+) -> Result<LayoutNode, RemoveError> {
+    let edited_layout_tree = remove_pane(layout_tree, pane_id)?;
+    let live_pane_ids: HashSet<PaneId> = edited_layout_tree
+        .list_leaf_pane_ids()
+        .into_iter()
+        .collect();
+    Ok(normalize_layout_tree(&edited_layout_tree, &live_pane_ids).unwrap_or(edited_layout_tree))
 }
 
 /// What happened below while looking for the leaf to remove.

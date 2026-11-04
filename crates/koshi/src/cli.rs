@@ -25,12 +25,12 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    ClosePaneArgs, CloseTabArgs, Command, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-    LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
-    NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs,
-    ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs,
-    SetFloatingPanePinnedArgs, SwitchSessionArgs, TabTarget, TiledPlacementTarget,
-    ToggleLockModeArgs, WriteToPaneArgs,
+    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, DetachArgs, FocusPaneArgs,
+    FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs,
+    NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
+    PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs,
+    SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs, SwitchSessionArgs, TabTarget,
+    TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, Point,
@@ -495,6 +495,10 @@ pub enum CliCommand {
         /// Kill the pane's child immediately instead of asking it to stop first.
         #[arg(long = "force")]
         should_force_close: bool,
+        /// Close every pane of the floating pane that holds the pane; a tiled
+        /// pane is refused.
+        #[arg(long = "all")]
+        should_close_floating_pane: bool,
     },
     /// Move one of a pane's borders: a positive size grows the pane toward
     /// the direction, a negative size shrinks it.
@@ -1493,7 +1497,8 @@ impl CliCommand {
     /// [`ResolvedTargets::pane_id`]: `resize-pane`, `scroll-pane`,
     /// `move-pane --direction`, `place-pane`, `undock-pane`, `dock-pane`,
     /// `pin-pane`, `unpin-pane`, `minimize-pane` and `restore-pane` given no
-    /// `--pane` act on that pane. `--all` names no pane.
+    /// `--pane` act on that pane. `minimize-pane --all` and
+    /// `restore-pane --all` name no pane.
     ///
     /// `new_pane_direction` is this CLI's own `layout.new-pane-direction`
     /// setting, read from `koshi.kdl` by
@@ -1527,9 +1532,22 @@ impl CliCommand {
             CliCommand::ClosePane {
                 pane_id,
                 should_force_close,
+                should_close_floating_pane: false,
             } => (
                 "close-pane",
                 Command::ClosePane(ClosePaneArgs {
+                    pane_id: *pane_id,
+                    should_force_close: *should_force_close,
+                    should_kill_process_tree: false,
+                }),
+            ),
+            CliCommand::ClosePane {
+                pane_id,
+                should_force_close,
+                should_close_floating_pane: true,
+            } => (
+                "close-pane",
+                Command::CloseFloatingPane(CloseFloatingPaneArgs {
                     pane_id: *pane_id,
                     should_force_close: *should_force_close,
                     should_kill_process_tree: false,
@@ -2294,6 +2312,7 @@ pub fn build_actions_run_request(
         | Command::Detach(DetachArgs { client_id })
         | Command::SwitchSession(SwitchSessionArgs { client_id, .. }) => client_id,
         Command::ClosePane(_)
+        | Command::CloseFloatingPane(_)
         | Command::ResizePane(_)
         | Command::CloseTab(_)
         | Command::WriteToPane(_)
