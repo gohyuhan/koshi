@@ -197,11 +197,7 @@ fn a_half_hidden_center_draws_its_left_columns_moved_right_and_keeps_its_parts_a
     assert_eq!(center_layout.center_rect, build_test_rect(56, 1, 24, 22));
     assert_eq!(center_layout.drawn_rect, build_test_rect(68, 1, 12, 22));
     assert_eq!(
-        compute_floating_titlebar(
-            center_layout.center_rect,
-            FloatingTitlebarControls::CLOSE_BUTTON_ONLY
-        )
-        .close_button_rect,
+        compute_floating_titlebar(center_layout.center_rect).close_button_rect,
         Some(build_test_row_rect(76, 2, 1))
     );
     assert_eq!(
@@ -266,6 +262,7 @@ fn an_open_center_has_no_layout_while_every_pane_is_suppressed() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
 
     assert_eq!(
@@ -517,6 +514,7 @@ fn no_toast_has_no_layout_and_a_suppressed_frame_draws_none() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);

@@ -198,6 +198,7 @@ fn list_frame_pane_ids(received_painted_frame: &ReceivedPaintedFrame) -> Vec<Pan
         .painted_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -1252,7 +1253,8 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                 resized_painted_frame
                     .session_snapshot
                     .active_tab_snapshot
-                    .tab_size,
+                    .layout_area
+                    .solved_size,
                 compute_default_pane_area_size(RESIZED_VIEWPORT_SIZE),
             );
 
@@ -1395,10 +1397,12 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
                     .painted_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .pane_slots,
                 initial_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .pane_slots,
                 "the observer starts from the same committed layout"
             );
@@ -1494,6 +1498,7 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                         .painted_frame
                         .session_snapshot
                         .active_tab_snapshot
+                        .layout_area
                         .pane_slots
                         .len()
                         == 3
@@ -1700,6 +1705,7 @@ fn find_pane_outer_rect(painted_frame: &PaintedFrame, pane_id: PaneId) -> Rect {
     painted_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .find(|pane_slot| pane_slot.pane_id == pane_id)
@@ -1713,6 +1719,7 @@ fn list_pane_outer_rects(painted_frame: &PaintedFrame) -> Vec<(PaneId, Rect)> {
     painted_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| (pane_slot.pane_id, pane_slot.outer_rect))
@@ -1815,6 +1822,7 @@ fn read_session_frames_until_two_panes_show(
             && painted_frame
                 .session_snapshot
                 .active_tab_snapshot
+                .layout_area
                 .pane_slots
                 .len()
                 == 2

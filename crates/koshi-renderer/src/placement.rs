@@ -27,7 +27,7 @@ use koshi_layout::solver::is_layout_within_rect;
 use koshi_layout::tree::LayoutNode;
 
 use crate::snapshot::{
-    list_pane_slots, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, TabSnapshot,
+    LayoutAreaSnapshot, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, TabSnapshot,
 };
 
 /// The four sides a split may put the source pane on, in the order
@@ -86,7 +86,7 @@ impl PlacementSnapshot {
         Some(list_shown_placement_destinations(
             &displayed_tab_snapshot.layout_tree,
             &displayed_tab_snapshot.focus_history,
-            displayed_tab_snapshot.tab_snapshot.tab_size,
+            displayed_tab_snapshot.tab_snapshot.layout_area.solved_size,
             self.pane_sizing,
             self.source_pane_id,
         ))
@@ -278,6 +278,7 @@ impl PlacementSnapshot {
         };
         let mut drawable_pane_ids: Vec<PaneId> = displayed_tab_snapshot
             .tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .filter(|pane_slot| pane_slot.is_visible)
@@ -317,7 +318,12 @@ impl PlacementSnapshot {
             let Ok(placed_preview) = self.build_placed_preview(&placement_target) else {
                 continue;
             };
-            for pane_slot in &placed_preview.placed_tab_snapshot.tab_snapshot.pane_slots {
+            for pane_slot in &placed_preview
+                .placed_tab_snapshot
+                .tab_snapshot
+                .layout_area
+                .pane_slots
+            {
                 if pane_slot.is_visible && hidden_pane_ids.remove(&pane_slot.pane_id) {
                     drawable_pane_ids.push(pane_slot.pane_id);
                 }
@@ -353,12 +359,12 @@ impl PlacementSnapshot {
             tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: displayed_tab_snapshot.tab_snapshot.tab_name.clone(),
-                pane_slots: list_pane_slots(&layout_solve),
-                tab_size: placed_tab_size,
-                stack_headers: layout_solve.stack_headers.clone(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-                gap_cell_count: self.pane_sizing.gap_cell_count,
+                layout_area: LayoutAreaSnapshot::from_layout_solve(
+                    &layout_solve,
+                    placed_tab_size,
+                    LayoutMode::Tiled,
+                    self.pane_sizing.gap_cell_count,
+                ),
             },
         };
         PlacedPreview {

@@ -57,9 +57,7 @@ use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-use crate::floating_chrome::{
-    compute_floating_content_rect, compute_floating_titlebar, FloatingTitlebarControls,
-};
+use crate::floating_chrome::{compute_floating_content_rect, compute_floating_titlebar};
 use crate::hit_test::{compute_frame_pane_area, compute_viewport_area};
 use crate::render::{compute_symbol_display_width, get_text_width};
 use crate::snapshot::{FrameLayout, NotificationButton};
@@ -234,8 +232,7 @@ pub fn find_drawn_notification_center_layout(
             row_count: center_rect.size.row_count,
         },
     );
-    let titlebar =
-        compute_floating_titlebar(center_rect, FloatingTitlebarControls::CLOSE_BUTTON_ONLY);
+    let titlebar = compute_floating_titlebar(center_rect);
     let content_rect = compute_floating_content_rect(center_rect);
     let clear_all_row = content_rect.origin.row + content_rect.size.row_count - 1;
     let clear_all_column_count =
@@ -1420,6 +1417,7 @@ fn find_notification_pane_area(frame_layout: FrameLayout<'_>) -> Option<RatatuiR
         || frame_layout
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     {
         return None;

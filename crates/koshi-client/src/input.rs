@@ -784,7 +784,7 @@ impl Client {
         else {
             return PlacementInputAction::Consumed;
         };
-        if floating_pane_slot.is_pinned {
+        if floating_pane_slot.floating_pane_slot.is_pinned {
             return PlacementInputAction::Consumed;
         }
         let drawn_top_left_cell = floating_pane_slot.outer_rect.origin;
@@ -929,7 +929,7 @@ impl Client {
             return PlacementInputAction::Consumed;
         };
         let top_left_cell = drawn_floating_pane_slot.outer_rect.origin;
-        if drawn_floating_pane_slot.is_pinned
+        if drawn_floating_pane_slot.floating_pane_slot.is_pinned
             || top_left_cell == session_floating_pane_slot.outer_rect.origin
         {
             return PlacementInputAction::Consumed;
@@ -960,8 +960,8 @@ impl Client {
     fn list_movable_floating_slot_pane_ids(&self, mouse_frame: &MouseFrame) -> Vec<PaneId> {
         self.build_frame_layout_with_current_chrome(mouse_frame)
             .list_drawn_floating_pane_slots()
-            .filter(|floating_pane_slot| !floating_pane_slot.is_pinned)
-            .map(|floating_pane_slot| floating_pane_slot.pane_id)
+            .filter(|floating_pane_slot| !floating_pane_slot.floating_pane_slot.is_pinned)
+            .map(|floating_pane_slot| floating_pane_slot.floating_pane_slot.pane_id)
             .collect()
     }
 
@@ -1561,7 +1561,8 @@ pub(crate) fn is_same_tab_placement_noop(
         }
     }
     let layout_target = PlacementTarget::from_tiled_placement_target(placement_target);
-    let tab_rect = Rect::from_size_at_origin(source_tab_snapshot.tab_snapshot.tab_size);
+    let tab_rect =
+        Rect::from_size_at_origin(source_tab_snapshot.tab_snapshot.layout_area.solved_size);
     is_layout_placement_noop(
         &source_tab_snapshot.layout_tree,
         placement_snapshot.source_pane_id,
@@ -1630,15 +1631,17 @@ fn find_directional_target_pane_id(
         .iter()
         .map(|target_pane_slot| (target_pane_slot.pane_id, target_pane_slot.slot_rect))
         .collect();
-    let source_pane_slot = destination_tab_snapshot
-        .pane_slots
-        .iter()
-        .find(|pane_slot| {
-            pane_slot.pane_id == source_pane_id
-                && pane_slot.is_visible
-                && !pane_slot.is_suppressed
-                && !pane_slot.outer_rect.is_empty()
-        });
+    let source_pane_slot =
+        destination_tab_snapshot
+            .layout_area
+            .pane_slots
+            .iter()
+            .find(|pane_slot| {
+                pane_slot.pane_id == source_pane_id
+                    && pane_slot.is_visible
+                    && !pane_slot.is_suppressed
+                    && !pane_slot.outer_rect.is_empty()
+            });
     if let Some(source_pane_slot) = source_pane_slot {
         candidate_pane_rects.push((source_pane_id, source_pane_slot.outer_rect));
     }

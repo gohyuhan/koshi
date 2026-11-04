@@ -111,8 +111,8 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::notification::NotificationCenterEntries;
 use koshi_renderer::snapshot::{
-    list_pane_slots, CommittedRegions, FloatingPaneSlot, GridView, PaneSlot, PlacementSnapshot,
-    PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabSnapshot, ViewerChrome,
+    CommittedRegions, GridView, LayoutAreaSnapshot, PaneSlot, PlacementSnapshot, PlacementSource,
+    PlacementTabSnapshot, RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{build_image_cell_snapshot, build_image_paints};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
@@ -126,7 +126,9 @@ use koshi_test_support::output_workloads::SeededSequence;
 
 use koshi_link::config::LoadedConfig;
 
-use crate::tests::{create_session_with_attached_client, TEST_VIEWPORT_SIZE};
+use crate::tests::{
+    build_one_pane_floating_pane_slot, create_session_with_attached_client, TEST_VIEWPORT_SIZE,
+};
 
 fn build_committed_regions(viewport_size: Size) -> CommittedRegions {
     CommittedRegions::build_core(viewport_size, 0)
@@ -2375,11 +2377,11 @@ fn window_title_reads_a_focused_floating_panes_title() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: floating_outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            floating_outer_rect,
+            false,
+        ));
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
@@ -3813,6 +3815,7 @@ fn placement_interpolation_returns_both_ends_and_the_exact_midpoint() {
     let halfway_outer_rects =
         interpolate_placement_tab_snapshot(from_tab_snapshot, &to_tab_snapshot, 0.5)
             .tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .map(|pane_slot| (pane_slot.pane_id, pane_slot.outer_rect))
@@ -4036,10 +4039,11 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
         .active_tab_snapshot;
     let layout_rect = koshi_renderer::compute_content_rect(
         koshi_renderer::compute_pane_area(&committed_regions, viewport_area),
-        displayed_tab_snapshot.tab_size,
+        displayed_tab_snapshot.layout_area.solved_size,
     );
     let [source_pane_slot, target_pane_slot] = [source_pane_id, target_pane_id].map(|pane_id| {
         displayed_tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .find(|pane_slot| pane_slot.pane_id == pane_id)
@@ -4202,11 +4206,11 @@ fn placement_render_snapshot_keeps_the_floating_panes_and_their_content() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: floating_outer_rect,
-            is_pinned: true,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            floating_outer_rect,
+            true,
+        ));
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
@@ -4254,6 +4258,7 @@ fn target_outline_skips_a_group_member_with_an_empty_rect() {
     // The second leaf of a collapsed stack member solves to an empty rect.
     placement_tab_snapshot
         .tab_snapshot
+        .layout_area
         .pane_slots
         .push(PaneSlot {
             pane_id: collapsed_pane_id,
@@ -4265,7 +4270,7 @@ fn target_outline_skips_a_group_member_with_an_empty_rect() {
             is_visible: false,
             is_suppressed: false,
         });
-    let tab_size = placement_tab_snapshot.tab_snapshot.tab_size;
+    let tab_size = placement_tab_snapshot.tab_snapshot.layout_area.solved_size;
     let layout_rect = Rect::new(0, 0, tab_size.column_count, tab_size.row_count);
     let placement_target = TiledPlacementTarget::Split {
         destination_tab_id: tab_id,
@@ -4291,22 +4296,26 @@ fn placement_tab_interpolation_switches_headers_and_layout_mode_at_halfway() {
     let from_tab_snapshot =
         build_test_placement_tab_snapshot(tab_id, "work", [left_pane_id, right_pane_id]);
     let mut to_tab_snapshot = from_tab_snapshot.clone();
-    to_tab_snapshot.tab_snapshot.stack_headers = vec![koshi_layout::solver::StackHeader {
-        pane_id: left_pane_id,
-        header_rect: CoreRect::from_origin_and_size(
-            Point { column: 0, row: 0 },
-            Size {
-                column_count: 24,
-                row_count: 1,
-            },
-        ),
-        member_index: 0,
-        member_count: 2,
-    }];
-    to_tab_snapshot.tab_snapshot.layout_mode = LayoutMode::Fullscreen {
+    to_tab_snapshot.tab_snapshot.layout_area.stack_headers =
+        vec![koshi_layout::solver::StackHeader {
+            pane_id: left_pane_id,
+            header_rect: CoreRect::from_origin_and_size(
+                Point { column: 0, row: 0 },
+                Size {
+                    column_count: 24,
+                    row_count: 1,
+                },
+            ),
+            member_index: 0,
+            member_count: 2,
+        }];
+    to_tab_snapshot.tab_snapshot.layout_area.layout_mode = LayoutMode::Fullscreen {
         focused_pane_id: right_pane_id,
     };
-    to_tab_snapshot.tab_snapshot.is_every_pane_suppressed = true;
+    to_tab_snapshot
+        .tab_snapshot
+        .layout_area
+        .is_every_pane_suppressed = true;
 
     let before_halfway_tab_snapshot =
         interpolate_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.25);
@@ -4314,24 +4323,37 @@ fn placement_tab_interpolation_switches_headers_and_layout_mode_at_halfway() {
         interpolate_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.75);
 
     assert_eq!(
-        before_halfway_tab_snapshot.tab_snapshot.stack_headers,
-        from_tab_snapshot.tab_snapshot.stack_headers
+        before_halfway_tab_snapshot
+            .tab_snapshot
+            .layout_area
+            .stack_headers,
+        from_tab_snapshot.tab_snapshot.layout_area.stack_headers
     );
     assert_eq!(
-        before_halfway_tab_snapshot.tab_snapshot.layout_mode,
+        before_halfway_tab_snapshot
+            .tab_snapshot
+            .layout_area
+            .layout_mode,
         LayoutMode::Tiled
     );
     assert!(
         !before_halfway_tab_snapshot
             .tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
     assert_eq!(
-        after_halfway_tab_snapshot.tab_snapshot.stack_headers,
-        to_tab_snapshot.tab_snapshot.stack_headers
+        after_halfway_tab_snapshot
+            .tab_snapshot
+            .layout_area
+            .stack_headers,
+        to_tab_snapshot.tab_snapshot.layout_area.stack_headers
     );
     assert_eq!(
-        after_halfway_tab_snapshot.tab_snapshot.layout_mode,
+        after_halfway_tab_snapshot
+            .tab_snapshot
+            .layout_area
+            .layout_mode,
         LayoutMode::Fullscreen {
             focused_pane_id: right_pane_id,
         }
@@ -4339,6 +4361,7 @@ fn placement_tab_interpolation_switches_headers_and_layout_mode_at_halfway() {
     assert!(
         after_halfway_tab_snapshot
             .tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
 }
@@ -4488,12 +4511,12 @@ fn build_test_placement_tab_snapshot(
         tab_snapshot: TabSnapshot {
             tab_id,
             tab_name: tab_name.to_owned(),
-            pane_slots: list_pane_slots(&layout_solve),
-            tab_size,
-            stack_headers: layout_solve.stack_headers,
-            layout_mode: LayoutMode::Tiled,
-            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-            gap_cell_count: pane_sizing.gap_cell_count,
+            layout_area: LayoutAreaSnapshot::from_layout_solve(
+                &layout_solve,
+                tab_size,
+                LayoutMode::Tiled,
+                pane_sizing.gap_cell_count,
+            ),
         },
     }
 }
@@ -4531,31 +4554,33 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     let from_tab_snapshot = TabSnapshot {
         tab_id,
         tab_name: String::from("work"),
-        pane_slots: vec![
-            build_committed_test_pane_slot(
-                moved_pane_id,
-                build_rect(0, 0, half_width_size),
-                Some(build_rect(0, 0, half_width_size).compute_inner_with_border()),
-            ),
-            build_committed_test_pane_slot(
-                leaving_pane_id,
-                build_rect(40, 0, half_width_size),
-                Some(build_rect(40, 0, half_width_size).compute_inner_with_border()),
-            ),
-            build_committed_test_pane_slot(
-                collapsing_pane_id,
-                build_rect(40, 12, half_width_size),
-                Some(build_rect(40, 12, half_width_size).compute_inner_with_border()),
-            ),
-        ],
-        tab_size: Size {
-            column_count: 80,
-            row_count: 24,
+        layout_area: LayoutAreaSnapshot {
+            solved_size: Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            pane_slots: vec![
+                build_committed_test_pane_slot(
+                    moved_pane_id,
+                    build_rect(0, 0, half_width_size),
+                    Some(build_rect(0, 0, half_width_size).compute_inner_with_border()),
+                ),
+                build_committed_test_pane_slot(
+                    leaving_pane_id,
+                    build_rect(40, 0, half_width_size),
+                    Some(build_rect(40, 0, half_width_size).compute_inner_with_border()),
+                ),
+                build_committed_test_pane_slot(
+                    collapsing_pane_id,
+                    build_rect(40, 12, half_width_size),
+                    Some(build_rect(40, 12, half_width_size).compute_inner_with_border()),
+                ),
+            ],
+            stack_headers: Vec::new(),
+            layout_mode: LayoutMode::Tiled,
+            is_every_pane_suppressed: false,
+            gap_cell_count: 0,
         },
-        stack_headers: Vec::new(),
-        layout_mode: LayoutMode::Tiled,
-        is_every_pane_suppressed: false,
-        gap_cell_count: 0,
     };
     let collapsed_header_rect = build_rect(
         40,
@@ -4566,7 +4591,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         },
     );
     let mut to_tab_snapshot = from_tab_snapshot.clone();
-    to_tab_snapshot.pane_slots = vec![
+    to_tab_snapshot.layout_area.pane_slots = vec![
         build_committed_test_pane_slot(
             moved_pane_id,
             build_rect(40, 0, half_width_size),
@@ -4579,7 +4604,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         ),
         build_committed_test_pane_slot(collapsing_pane_id, collapsed_header_rect, None),
     ];
-    to_tab_snapshot.stack_headers = vec![koshi_layout::solver::StackHeader {
+    to_tab_snapshot.layout_area.stack_headers = vec![koshi_layout::solver::StackHeader {
         pane_id: collapsing_pane_id,
         header_rect: collapsed_header_rect,
         member_index: 1,
@@ -4589,7 +4614,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     let halfway_tab_snapshot =
         interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.5);
     let mut expected_halfway_tab_snapshot = to_tab_snapshot.clone();
-    expected_halfway_tab_snapshot.pane_slots[0] = build_committed_test_pane_slot(
+    expected_halfway_tab_snapshot.layout_area.pane_slots[0] = build_committed_test_pane_slot(
         moved_pane_id,
         build_rect(20, 0, half_width_size),
         Some(build_rect(20, 0, half_width_size).compute_inner_with_border()),
@@ -4603,12 +4628,12 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     let early_tab_snapshot =
         interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.25);
     assert_eq!(
-        early_tab_snapshot.stack_headers,
+        early_tab_snapshot.layout_area.stack_headers,
         Vec::new(),
         "the headers on screen stay until the slide is halfway"
     );
     assert_eq!(
-        early_tab_snapshot.pane_slots[0].outer_rect,
+        early_tab_snapshot.layout_area.pane_slots[0].outer_rect,
         build_rect(10, 0, half_width_size)
     );
     assert_eq!(
@@ -4616,8 +4641,9 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         to_tab_snapshot
     );
     let mut expected_start_tab_snapshot = to_tab_snapshot.clone();
-    expected_start_tab_snapshot.pane_slots[0] = from_tab_snapshot.pane_slots[0].clone();
-    expected_start_tab_snapshot.stack_headers = Vec::new();
+    expected_start_tab_snapshot.layout_area.pane_slots[0] =
+        from_tab_snapshot.layout_area.pane_slots[0].clone();
+    expected_start_tab_snapshot.layout_area.stack_headers = Vec::new();
     assert_eq!(
         interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, -1.0),
         expected_start_tab_snapshot,
@@ -5223,17 +5249,17 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: CoreRect::from_origin_and_size(
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            CoreRect::from_origin_and_size(
                 Point { column: 4, row: 2 },
                 Size {
                     column_count: 30,
                     row_count: 8,
                 },
             ),
-            is_pinned: true,
-        });
+            true,
+        ));
     let mut floating_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     floating_pane_snapshot.pane_id = floating_slot_pane_id;
     floating_pane_snapshot.pane_title = Some("htop".to_string());
@@ -5268,6 +5294,7 @@ fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_fram
         displayed_render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .map(|pane_slot| pane_slot.pane_id)

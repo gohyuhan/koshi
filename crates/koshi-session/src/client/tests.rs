@@ -2050,6 +2050,56 @@ fn showing_a_minimized_floating_pane_again_keeps_its_pinned_cell() {
     );
 }
 
+/// A client with a view of `floating_pane` that keeps one floating pane
+/// solve: a solve of no pane for `floating_pane`.
+fn build_client_keeping_a_floating_pane_solve(floating_pane: &FloatingPane) -> Client {
+    let mut client = build_test_client(TabId::new());
+    client.add_floating_pane_view(floating_pane, FloatingPanePosition::Default);
+    let _ = client.get_own_floating_pane_solves(|| {
+        HashMap::from([(floating_pane.get_floating_pane_id(), LayoutSolve::default())])
+    });
+    client
+}
+
+/// Whether `client` keeps the floating pane solves of its last read: a read
+/// that would build none gives a kept solve.
+fn has_kept_floating_pane_solves(client: &Client) -> bool {
+    !client.get_own_floating_pane_solves(HashMap::new).is_empty()
+}
+
+#[test]
+fn each_change_to_a_clients_floating_pane_views_empties_its_kept_floating_pane_solves() {
+    let floating_pane = build_multi_pane_floating_pane(&[PaneId::new(), PaneId::new()]);
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    let second_pane_id = floating_pane.list_pane_ids()[1];
+    assert!(has_kept_floating_pane_solves(
+        &build_client_keeping_a_floating_pane_solve(&floating_pane)
+    ));
+
+    let mut client = build_client_keeping_a_floating_pane_solve(&floating_pane);
+    client.add_floating_pane_view(
+        &build_single_pane_floating_pane(PaneId::new()),
+        FloatingPanePosition::Default,
+    );
+    assert!(!has_kept_floating_pane_solves(&client), "a new view");
+
+    let mut client = build_client_keeping_a_floating_pane_solve(&floating_pane);
+    client.update_floating_pane_focused_pane(floating_pane_id, second_pane_id);
+    assert!(!has_kept_floating_pane_solves(&client), "a focus change");
+
+    let mut client = build_client_keeping_a_floating_pane_solve(&floating_pane);
+    client.remove_floating_pane_view(floating_pane_id);
+    assert!(!has_kept_floating_pane_solves(&client), "a removed view");
+
+    let mut client = build_client_keeping_a_floating_pane_solve(&floating_pane);
+    client.replace_floating_view(
+        &HashMap::new(),
+        &[],
+        &build_floating_set(std::slice::from_ref(&floating_pane)),
+    );
+    assert!(!has_kept_floating_pane_solves(&client), "replaced views");
+}
+
 #[test]
 fn remove_floating_pane_view_drops_the_view_the_shown_entry_and_a_matching_focus() {
     let mut client = build_test_client(TabId::new());
@@ -2533,17 +2583,17 @@ fn the_floating_pane_size_cap_is_ninety_percent_of_each_axis_rounded_down() {
 }
 
 #[test]
-fn a_floating_viewport_needs_a_pane_area_whose_ninety_percent_holds_four_by_five() {
+fn a_floating_viewport_needs_a_pane_area_whose_ninety_percent_holds_four_by_four() {
     assert_eq!(
         MIN_FLOATING_PANE_SIZE,
         Size {
             column_count: 4,
-            row_count: 5,
+            row_count: 4,
         }
     );
-    let five_by_six = Size {
+    let five_by_five = Size {
         column_count: 5,
-        row_count: 6,
+        row_count: 5,
     };
     for (pane_area, expected_floating_viewport) in [
         (
@@ -2556,18 +2606,18 @@ fn a_floating_viewport_needs_a_pane_area_whose_ninety_percent_holds_four_by_five
                 row_count: 22,
             }),
         ),
-        (Some(PaneArea::Reported(five_by_six)), Some(five_by_six)),
+        (Some(PaneArea::Reported(five_by_five)), Some(five_by_five)),
         (
             Some(PaneArea::Reported(Size {
                 column_count: 4,
-                row_count: 6,
+                row_count: 5,
             })),
             None,
         ),
         (
             Some(PaneArea::Reported(Size {
                 column_count: 5,
-                row_count: 5,
+                row_count: 4,
             })),
             None,
         ),

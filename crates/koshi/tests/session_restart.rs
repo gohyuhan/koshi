@@ -1301,6 +1301,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
                 .painted_frame
                 .session_snapshot
                 .active_tab_snapshot
+                .layout_area
                 .layout_mode
                 == LayoutMode::Fullscreen { focused_pane_id }
     });
@@ -1352,6 +1353,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
             .painted_frame
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .layout_mode,
         LayoutMode::Fullscreen { focused_pane_id }
     );

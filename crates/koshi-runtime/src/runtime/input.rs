@@ -124,20 +124,18 @@ impl Server {
     /// Yields `None` for an unknown client, a client with no such pane, and a
     /// pane the session no longer holds.
     ///
-    /// A focused floating pane takes the keystroke: a client focuses only a
-    /// floating pane it shows, and it shows none while it cannot draw them
-    /// ([`Session::can_client_draw_floating_panes`]).
-    ///
-    /// A focused tiled pane takes the keystroke when it has a content rect
-    /// ([`find_content_rect`], the rect the renderer fills) in the solve the
-    /// session holds for this client's layout mode
+    /// The pane takes the keystroke when it has a content rect
+    /// ([`find_content_rect`], the rect the renderer fills) in the solve this
+    /// client draws it with: the client's solve of the floating pane it
+    /// focuses ([`Session::compute_client_floating_pane_solve`]), or else the
+    /// tab's solve for this client's layout mode
     /// ([`Session::compute_client_solve`]). A pane suppressed for want of
     /// space, or hidden behind a pane this client has zoomed, yields `None`:
     /// shrink the terminal until the focused pane is suppressed, type `l`, and
     /// the shell inside it stays untouched.
     /// Another client's zoom never silences this client's keys.
     ///
-    /// [`Session::can_client_draw_floating_panes`]: koshi_session::session::state::Session::can_client_draw_floating_panes
+    /// [`Session::compute_client_floating_pane_solve`]: koshi_session::session::state::Session::compute_client_floating_pane_solve
     /// [`Session::compute_client_solve`]: koshi_session::session::state::Session::compute_client_solve
     /// [`Client::get_active_focused_pane_id`]: koshi_session::client::Client::get_active_focused_pane_id
     pub(crate) fn find_typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
@@ -145,8 +143,10 @@ impl Server {
         let attached_client = session.clients.get_client_by_id(client_id)?;
         let pane_id = attached_client.get_active_focused_pane_id()?;
         session.panes.get_pane_record_by_id(pane_id)?;
-        if attached_client.get_focused_floating_pane_id().is_some() {
-            return Some(pane_id);
+        if let Some(floating_pane_id) = attached_client.get_focused_floating_pane_id() {
+            let floating_pane_solve =
+                session.compute_client_floating_pane_solve(attached_client, floating_pane_id)?;
+            return find_content_rect(floating_pane_solve, pane_id).map(|_| pane_id);
         }
 
         let tab_id = attached_client.get_active_tab_id();

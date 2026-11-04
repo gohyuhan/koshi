@@ -14,7 +14,7 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
-    constant::FLOATING_CHROME_SIZE,
+    constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT,
     geometry::{
         compute_percent_cell_count, FloatingPanePosition, PaneArea, PixelCellSize, Point, Rect,
         Size,
@@ -24,19 +24,23 @@ use koshi_core::{
 };
 use koshi_layout::{
     mode::LayoutMode,
-    solver::{LayoutSolve, MIN_PANE_SIZE},
+    solver::{LayoutSolve, MIN_PANE_SIZE, PANE_BORDER_SIZE},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::session::state::{FloatingPane, FloatingSet};
 
-/// The smallest outer size of a floating pane: [`MIN_PANE_SIZE`] of content
-/// plus [`FLOATING_CHROME_SIZE`], `4x5`. A client whose
-/// [`compute_floating_pane_size_cap`] of its pane area is smaller on either
-/// axis has no floating viewport ([`Client::get_floating_viewport`]).
+/// The smallest outer size of a floating pane: one pane box of
+/// [`MIN_PANE_SIZE`] content with its border ([`PANE_BORDER_SIZE`]), under
+/// the [`FLOATING_TITLEBAR_STRIP_ROW_COUNT`] row of the titlebar strip, `4x4`.
+/// A client whose [`compute_floating_pane_size_cap`] of its pane area is
+/// smaller on either axis has no floating viewport
+/// ([`Client::get_floating_viewport`]).
 pub const MIN_FLOATING_PANE_SIZE: Size = Size {
-    column_count: MIN_PANE_SIZE.column_count + FLOATING_CHROME_SIZE.column_count,
-    row_count: MIN_PANE_SIZE.row_count + FLOATING_CHROME_SIZE.row_count,
+    column_count: MIN_PANE_SIZE.column_count + PANE_BORDER_SIZE.column_count,
+    row_count: MIN_PANE_SIZE.row_count
+        + PANE_BORDER_SIZE.row_count
+        + FLOATING_TITLEBAR_STRIP_ROW_COUNT,
 };
 
 /// The percent of a floating viewport's axis that a floating pane spans at
@@ -45,7 +49,7 @@ pub const MAX_FLOATING_PANE_AXIS_PERCENT: u8 = 90;
 
 /// The largest outer size a floating pane takes in `floating_viewport`:
 /// [`MAX_FLOATING_PANE_AXIS_PERCENT`] of each axis, rounded down. `80x22` →
-/// `72x19`; `5x6` → `4x5`.
+/// `72x19`; `5x5` → `4x4`.
 #[must_use]
 pub fn compute_floating_pane_size_cap(floating_viewport: Size) -> Size {
     Size {
@@ -94,6 +98,21 @@ pub struct FloatingPaneView {
     /// The pane this client zoomed inside the floating pane, or `None` when it
     /// sees the floating pane's tree.
     pub zoomed_pane_id: Option<PaneId>,
+}
+
+impl FloatingPaneView {
+    /// How this client solves the floating pane's tree:
+    /// [`LayoutMode::Fullscreen`] on `zoomed_pane_id` while it is set, else
+    /// [`LayoutMode::Tiled`].
+    #[must_use]
+    pub fn get_layout_mode(&self) -> LayoutMode {
+        match self.zoomed_pane_id {
+            Some(zoomed_pane_id) => LayoutMode::Fullscreen {
+                focused_pane_id: zoomed_pane_id,
+            },
+            None => LayoutMode::Tiled,
+        }
+    }
 }
 
 /// What [`Client::focus_tiled_pane`] changed for one client.
@@ -248,6 +267,17 @@ pub struct Client {
     /// not carry it.
     #[serde(skip)]
     own_active_tab_solve: OnceCell<Option<LayoutSolve>>,
+    /// The solve this client draws each floating pane with when that solve is
+    /// its own, for a zoom or for a stack that shows this client another
+    /// member than its active one, keyed by floating pane id, kept from the
+    /// first read ([`Client::get_own_floating_pane_solves`]). A floating pane
+    /// this client draws with the floating pane's own solve has no entry.
+    /// Every change to this client's floating pane views empties it, and so
+    /// does every solve of a floating pane's tree
+    /// ([`ClientRegistry::clear_own_floating_pane_solves`]). The resume file
+    /// does not carry it.
+    #[serde(skip)]
+    own_floating_pane_solve_by_floating_pane_id: OnceCell<HashMap<FloatingPaneId, LayoutSolve>>,
     /// This client's view of each floating pane of its session, keyed by
     /// floating pane id: one entry per floating pane.
     floating_pane_view_by_floating_pane_id: HashMap<FloatingPaneId, FloatingPaneView>,
@@ -314,6 +344,7 @@ impl Client {
             selection_by_pane_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             own_active_tab_solve: OnceCell::new(),
+            own_floating_pane_solve_by_floating_pane_id: OnceCell::new(),
             floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
             focused_floating_pane_id: None,
@@ -749,6 +780,24 @@ impl Client {
         self.own_active_tab_solve = OnceCell::new();
     }
 
+    /// The solves this client draws floating panes with when they are its
+    /// own, keyed by floating pane id. The first call after the kept solves
+    /// were emptied runs `build_own_solves` and keeps its result; each call
+    /// after it returns the kept result and runs nothing.
+    pub(crate) fn get_own_floating_pane_solves(
+        &self,
+        build_own_solves: impl FnOnce() -> HashMap<FloatingPaneId, LayoutSolve>,
+    ) -> &HashMap<FloatingPaneId, LayoutSolve> {
+        self.own_floating_pane_solve_by_floating_pane_id
+            .get_or_init(build_own_solves)
+    }
+
+    /// Empty the kept floating pane solves of this client
+    /// ([`Client::get_own_floating_pane_solves`]).
+    fn clear_own_floating_pane_solves(&mut self) {
+        self.own_floating_pane_solve_by_floating_pane_id = OnceCell::new();
+    }
+
     /// Set this client's viewport size to `viewport_size`.
     pub fn update_viewport_size(&mut self, viewport_size: Size) {
         self.is_view_changed |= self.viewport_size != viewport_size;
@@ -782,8 +831,8 @@ impl Client {
     /// [`get_pane_area`](Self::get_pane_area) when
     /// [`compute_floating_pane_size_cap`] of it holds
     /// [`MIN_FLOATING_PANE_SIZE`] on both axes, a pane area of at least
-    /// `5x6`. `None` when this client reported [`PaneArea::Starving`], or a
-    /// smaller pane area. `80x22` → `Some(80x22)`; `5x6` → `Some(5x6)`; `4x6`
+    /// `5x5`. `None` when this client reported [`PaneArea::Starving`], or a
+    /// smaller pane area. `80x22` → `Some(80x22)`; `5x5` → `Some(5x5)`; `4x6`
     /// → `None`.
     #[must_use]
     pub fn get_floating_viewport(&self) -> Option<Size> {
@@ -854,14 +903,23 @@ impl Client {
         floating_pane: &FloatingPane,
         position: FloatingPanePosition,
     ) {
-        self.floating_pane_view_by_floating_pane_id
-            .entry(floating_pane.get_floating_pane_id())
-            .or_insert_with(|| FloatingPaneView {
+        let floating_pane_id = floating_pane.get_floating_pane_id();
+        if self
+            .floating_pane_view_by_floating_pane_id
+            .contains_key(&floating_pane_id)
+        {
+            return;
+        }
+        self.floating_pane_view_by_floating_pane_id.insert(
+            floating_pane_id,
+            FloatingPaneView {
                 position,
                 is_minimized: true,
                 focus_history: floating_pane.list_pane_ids().into_iter().take(1).collect(),
                 zoomed_pane_id: None,
-            });
+            },
+        );
+        self.clear_own_floating_pane_solves();
     }
 
     /// Show `floating_pane_id` for this client, draw it above its other
@@ -908,12 +966,15 @@ impl Client {
         else {
             return;
         };
-        let previous_pane_id = floating_pane_view.focus_history.first().copied();
+        if floating_pane_view.focus_history.first() == Some(&pane_id) {
+            return;
+        }
         floating_pane_view
             .focus_history
             .retain(|&history_pane_id| history_pane_id != pane_id);
         floating_pane_view.focus_history.insert(0, pane_id);
-        self.is_view_changed |= previous_pane_id != Some(pane_id);
+        self.is_view_changed = true;
+        self.clear_own_floating_pane_solves();
     }
 
     /// Minimize `floating_pane_id` for this client when this client shows it:
@@ -1042,6 +1103,7 @@ impl Client {
     pub(crate) fn remove_floating_pane_view(&mut self, floating_pane_id: FloatingPaneId) {
         self.floating_pane_view_by_floating_pane_id
             .remove(&floating_pane_id);
+        self.clear_own_floating_pane_solves();
         self.remove_shown_floating_pane(floating_pane_id);
     }
 
@@ -1139,6 +1201,7 @@ impl Client {
             });
         self.is_view_changed |= has_shown_floating_view_changed;
         self.floating_pane_view_by_floating_pane_id = floating_pane_view_by_floating_pane_id;
+        self.clear_own_floating_pane_solves();
         self.shown_floating_pane_ids = shown_floating_pane_ids;
         self.focused_floating_pane_id = focused_floating_pane_id;
     }
@@ -1235,6 +1298,14 @@ impl ClientRegistry {
             if client.active_tab_id == tab_id {
                 client.clear_own_active_tab_solve();
             }
+        }
+    }
+
+    /// Empty the kept floating pane solves
+    /// ([`Client::get_own_floating_pane_solves`]) of every attached client.
+    pub(crate) fn clear_own_floating_pane_solves(&mut self) {
+        for client in self.client_by_id.values_mut() {
+            client.clear_own_floating_pane_solves();
         }
     }
 

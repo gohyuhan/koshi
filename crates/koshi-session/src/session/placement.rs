@@ -260,7 +260,7 @@ pub fn find_lifted_floating_pane_rect(
 /// `None` when no floating pane holds `pane_id`, when `client` does not show
 /// the floating pane that holds it ([`Client::is_floating_pane_shown`]), such
 /// as one it minimized, draws no rect for it, such as with a pane area smaller
-/// than `5x6`, or views a tab with no cell.
+/// than `5x5`, or views a tab with no cell.
 #[must_use]
 pub fn find_nearest_dock_target(
     session: &Session,

@@ -261,7 +261,7 @@ pub enum SessionConsistencyError {
     },
 
     /// A client that cannot draw floating panes shows one: it reports a
-    /// `Starving` pane area or one smaller than `5x6` on either axis, or its
+    /// `Starving` pane area or one smaller than `5x5` on either axis, or its
     /// own view of its active tab has every pane suppressed.
     #[error("client {client_id:?} cannot draw floating panes and shows floating pane {floating_pane_id:?}")]
     UndrawableFloatingPaneShown {

@@ -7,13 +7,13 @@ use std::time::SystemTime;
 
 use koshi_core::{
     constant::{
-        FLOATING_CHROME_SIZE, FLOATING_TITLEBAR_STRIP_ROW_COUNT, MAX_FLOATING_PANES_PER_SESSION,
+        FLOATING_TITLEBAR_STRIP_ROW_COUNT, MAX_FLOATING_PANES_PER_SESSION,
         MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
     },
     event::Event,
     geometry::{
         compute_percent_cell_count, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize,
-        PixelCellSize, Rect, Size,
+        PixelCellSize, Rect, RequiredSize, Size,
     },
     ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId},
     notification::{NotificationQueue, NotificationQueueOwner},
@@ -22,8 +22,10 @@ use koshi_core::{
 use koshi_layout::{
     mode::LayoutMode,
     solver::{
+        compute_border_inclusive_minimum, compute_minimum_size,
         resize_delta_conversion::convert_resize_deltas_to_apply_after_preferred,
         solve_layout_with_mode, solve_layout_with_sizing, LayoutSolve, PaneSizing,
+        PANE_BORDER_SIZE,
     },
     tree::LayoutNode,
 };
@@ -88,6 +90,58 @@ impl LayoutArea {
     fn update_layout_solve(&mut self, pane_sizing: PaneSizing) -> LayoutSolve {
         let layout_solve = self.compute_layout_solve(pane_sizing);
         std::mem::replace(&mut self.layout_solve, layout_solve)
+    }
+
+    /// The solve a client draws this area with when it is not the area's own
+    /// solve, at `solved_size` with `pane_sizing`: the zoom's solve
+    /// ([`LayoutArea::build_zoomed_solve`]) in `Fullscreen`, else the solve of
+    /// the tree with each stack showing the member
+    /// [`LayoutNode::build_shown_layout_tree`] gives for `focus_history`.
+    /// `None` when the client draws the area's own solve: `Tiled` with every
+    /// stack showing its active member, or `Fullscreen` on a pane the tree
+    /// does not hold.
+    fn build_client_solve(
+        &self,
+        layout_mode: LayoutMode,
+        focus_history: &[PaneId],
+        pane_sizing: PaneSizing,
+    ) -> Option<LayoutSolve> {
+        match layout_mode {
+            LayoutMode::Fullscreen { focused_pane_id } => {
+                self.build_zoomed_solve(focused_pane_id, pane_sizing)
+            }
+            LayoutMode::Tiled => {
+                let shown_layout_tree = self.layout.build_shown_layout_tree(focus_history)?;
+                Some(solve_layout_with_sizing(
+                    &shown_layout_tree,
+                    Rect::from_size_at_origin(self.solved_size),
+                    pane_sizing,
+                ))
+            }
+        }
+    }
+
+    /// The solve of this area zoomed on `zoomed_pane_id` at `solved_size`
+    /// with `pane_sizing`: that pane takes the whole area and every other
+    /// pane zero area, and the pane is suppressed when the area is below its
+    /// border-inclusive floor ([`solve_layout_with_mode`]). `None` when the
+    /// tree does not hold `zoomed_pane_id`.
+    fn build_zoomed_solve(
+        &self,
+        zoomed_pane_id: PaneId,
+        pane_sizing: PaneSizing,
+    ) -> Option<LayoutSolve> {
+        if !self.layout.has_pane(zoomed_pane_id) {
+            return None;
+        }
+        Some(solve_layout_with_mode(
+            &self.layout,
+            LayoutMode::Fullscreen {
+                focused_pane_id: zoomed_pane_id,
+            },
+            Rect::from_size_at_origin(self.solved_size),
+            pane_sizing,
+        ))
     }
 }
 
@@ -219,9 +273,8 @@ pub struct FloatingPane {
     layout_area: LayoutArea,
     /// The size the floating pane asks for, per axis.
     desired_size: FloatingPaneSize,
-    /// The floating pane's outer size in cells from its last size solve,
-    /// chrome included. Each of its panes' PTY is this size less
-    /// [`FLOATING_CHROME_SIZE`].
+    /// The floating pane's outer size in cells from its last size solve: the
+    /// titlebar strip row above the box its tree is solved in.
     solved_size: Size,
 }
 
@@ -266,6 +319,33 @@ impl FloatingPane {
     #[must_use]
     pub fn get_solved_size(&self) -> Size {
         self.solved_size
+    }
+
+    /// The size this floating pane's tree is solved at:
+    /// [`compute_floating_layout_size`] of its solved size.
+    #[must_use]
+    pub fn get_solved_layout_size(&self) -> Size {
+        self.layout_area.solved_size
+    }
+
+    /// The tiled solve of this floating pane's tree at
+    /// [`FloatingPane::get_solved_layout_size`], each stack showing its active
+    /// member.
+    #[must_use]
+    pub fn get_layout_solve(&self) -> &LayoutSolve {
+        &self.layout_area.layout_solve
+    }
+
+    /// The smallest outer size this floating pane's tree fits in with
+    /// `pane_sizing`: [`compute_floating_pane_minimum_size`] of the tree's
+    /// minimum ([`compute_minimum_size`]). One pane with a `20x6` pane
+    /// minimum → `22x9`.
+    #[must_use]
+    pub fn compute_minimum_size(&self, pane_sizing: PaneSizing) -> Size {
+        compute_floating_pane_minimum_size(compute_minimum_size(
+            &self.layout_area.layout,
+            pane_sizing,
+        ))
     }
 
     /// Every pane of this floating pane, in layout order.
@@ -392,14 +472,14 @@ impl FloatingSet {
     }
 
     /// Solve every floating pane's outer size against
-    /// `shared_floating_viewport` with [`solve_floating_pane_size`], then
-    /// solve the tree of each floating pane whose outer size changed with
+    /// `shared_floating_viewport` with [`solve_floating_pane_size`] and the
+    /// floating pane's own minimum ([`FloatingPane::compute_minimum_size`]),
+    /// then solve the tree of each floating pane whose outer size changed with
     /// `pane_sizing` over [`compute_floating_layout_size`] of it. Returns
     /// whether a floating pane's solved size changed.
     fn update_floating_pane_sizes(
         &mut self,
         shared_floating_viewport: Size,
-        pane_minimum_size: Size,
         pane_sizing: PaneSizing,
     ) -> bool {
         let mut has_solved_size_changed = false;
@@ -407,7 +487,7 @@ impl FloatingSet {
             let solved_size = solve_floating_pane_size(
                 floating_pane.desired_size,
                 shared_floating_viewport,
-                pane_minimum_size,
+                floating_pane.compute_minimum_size(pane_sizing),
             );
             if floating_pane.solved_size == solved_size {
                 continue;
@@ -441,40 +521,61 @@ impl FloatingSet {
     }
 }
 
-/// The floating minimum: `pane_minimum_size` plus
-/// [`FLOATING_CHROME_SIZE`], each axis capped at `u16::MAX`. `20x6` →
-/// `22x10`; `65534x6` → `65535x10`.
+/// The floating minimum of a floating pane whose tree needs
+/// `layout_minimum_size` ([`compute_minimum_size`]): that size plus the
+/// [`FLOATING_TITLEBAR_STRIP_ROW_COUNT`] row of the titlebar strip, each axis
+/// capped at `u16::MAX`. One pane at the `2x1` default minimum needs `4x3`,
+/// and its floating minimum is `4x4`; with a `20x6` pane minimum, `22x8` gives
+/// `22x9`; `65536x8` gives `65535x9`.
 #[must_use]
-pub fn compute_floating_pane_minimum_size(pane_minimum_size: Size) -> Size {
+pub fn compute_floating_pane_minimum_size(layout_minimum_size: RequiredSize) -> Size {
     Size {
-        column_count: pane_minimum_size
+        column_count: u16::try_from(layout_minimum_size.column_count).unwrap_or(u16::MAX),
+        row_count: u16::try_from(
+            layout_minimum_size
+                .row_count
+                .saturating_add(u32::from(FLOATING_TITLEBAR_STRIP_ROW_COUNT)),
+        )
+        .unwrap_or(u16::MAX),
+    }
+}
+
+/// The content size of the one pane a floating pane holds alone at outer size
+/// `solved_size`: the outer size less the titlebar strip row and the pane's
+/// border ([`PANE_BORDER_SIZE`]), never below `0`. `40x12` → `38x9`; `4x4` →
+/// `2x1`.
+#[must_use]
+pub fn compute_one_pane_floating_content_size(solved_size: Size) -> Size {
+    Size {
+        column_count: solved_size
             .column_count
-            .saturating_add(FLOATING_CHROME_SIZE.column_count),
-        row_count: pane_minimum_size
+            .saturating_sub(PANE_BORDER_SIZE.column_count),
+        row_count: solved_size
             .row_count
-            .saturating_add(FLOATING_CHROME_SIZE.row_count),
+            .saturating_sub(FLOATING_TITLEBAR_STRIP_ROW_COUNT)
+            .saturating_sub(PANE_BORDER_SIZE.row_count),
     }
 }
 
 /// Solve one floating pane's outer size: `desired_size` against
-/// `shared_floating_viewport`, with `pane_minimum_size` as the smallest content
-/// size the pane asks for.
+/// `shared_floating_viewport`, with `floating_pane_minimum_size`
+/// ([`compute_floating_pane_minimum_size`]) as the smallest outer size its
+/// tree fits in.
 ///
 /// Each axis of `desired_size` resolves to cells against the same axis of
-/// `shared_floating_viewport`, a percent rounding down, then is raised to the
-/// floating minimum ([`compute_floating_pane_minimum_size`]) and cut to the
-/// floating cap of that axis ([`compute_floating_pane_size_cap`], 90% rounded
-/// down). On an axis whose cap is shorter than the floating minimum, the pane
-/// takes the cap. `Percent(60)` by `Percent(60)` on `80x22` → `48x13`;
-/// `Percent(100)` by `Percent(100)` on `80x22` → `72x19`; with a `20x6` pane
-/// minimum on `40x9` → `24x8`.
+/// `shared_floating_viewport`, a percent rounding down, then is raised to
+/// `floating_pane_minimum_size` and cut to the floating cap of that axis
+/// ([`compute_floating_pane_size_cap`], 90% rounded down). On an axis whose
+/// cap is shorter than the floating minimum, the pane takes the cap.
+/// `Percent(60)` by `Percent(60)` on `80x22` → `48x13`; `Percent(100)` by
+/// `Percent(100)` on `80x22` → `72x19`; `Percent(60)` by `Percent(60)` with a
+/// `22x9` floating minimum on `40x9` → `24x8`.
 #[must_use]
 pub fn solve_floating_pane_size(
     desired_size: FloatingPaneSize,
     shared_floating_viewport: Size,
-    pane_minimum_size: Size,
+    floating_pane_minimum_size: Size,
 ) -> Size {
-    let floating_pane_minimum_size = compute_floating_pane_minimum_size(pane_minimum_size);
     let floating_pane_size_cap = compute_floating_pane_size_cap(shared_floating_viewport);
     Size {
         column_count: solve_floating_pane_axis(
@@ -673,20 +774,20 @@ impl Session {
     }
 
     /// Solve every floating pane's outer size against
-    /// `shared_floating_viewport` ([`solve_floating_pane_size`]), solve the
-    /// tree of each floating pane whose outer size changed with
-    /// [`Session::get_pane_sizing`], and record a floating set change when a
-    /// solved size changed.
-    pub fn update_floating_pane_sizes(
-        &mut self,
-        shared_floating_viewport: Size,
-        pane_minimum_size: Size,
-    ) {
-        self.view_changes.is_floating_set_changed |= self.floating_set.update_floating_pane_sizes(
-            shared_floating_viewport,
-            pane_minimum_size,
-            self.pane_sizing,
-        );
+    /// `shared_floating_viewport` ([`solve_floating_pane_size`]) with its own
+    /// minimum under [`Session::get_pane_sizing`]
+    /// ([`FloatingPane::compute_minimum_size`]), and solve the tree of each
+    /// floating pane whose outer size changed with that pane sizing. When a
+    /// solved size changed, record a floating set change and empty every
+    /// attached client's kept floating pane solves.
+    pub fn update_floating_pane_sizes(&mut self, shared_floating_viewport: Size) {
+        let has_solved_size_changed = self
+            .floating_set
+            .update_floating_pane_sizes(shared_floating_viewport, self.pane_sizing);
+        if has_solved_size_changed {
+            self.view_changes.is_floating_set_changed = true;
+            self.clients.clear_own_floating_pane_solves();
+        }
     }
 
     /// Everything frames and placement previews read that changed since the
@@ -837,7 +938,8 @@ impl Session {
     /// it at its solve size ([`Session::resolve_tab_solve_size`]), in tab id
     /// order, each followed by step 1 of [`Session::update_tab_layout`]. After
     /// the last tab, every floating pane's tree is solved again with
-    /// `pane_sizing` at the size it is solved at, then step 2 runs once. Every
+    /// `pane_sizing` at the size it is solved at, every attached client's kept
+    /// floating pane solves are emptied, then step 2 runs once. Every
     /// tab and every floating pane is solved, whether or not `pane_sizing` or
     /// its solve size changed.
     ///
@@ -871,6 +973,7 @@ impl Session {
         for floating_pane in &mut self.floating_set.floating_panes {
             let _ = floating_pane.layout_area.update_layout_solve(pane_sizing);
         }
+        self.clients.clear_own_floating_pane_solves();
         emitted_events.extend(self.minimize_undrawable_floating_panes());
         emitted_events
     }
@@ -1016,22 +1119,11 @@ impl Session {
     /// a tiled client whose every stack shows its active member, or a zoom on
     /// a pane the tab's tree does not hold.
     fn build_own_client_solve(&self, client: &Client, tab: &Tab) -> Option<LayoutSolve> {
-        match client.get_layout_mode(tab.tab_id) {
-            LayoutMode::Fullscreen { focused_pane_id } => {
-                self.build_zoomed_tab_solve(tab, focused_pane_id)
-            }
-            LayoutMode::Tiled => {
-                let shown_layout_tree = tab
-                    .layout_area
-                    .layout
-                    .build_shown_layout_tree(client.list_focus_history(tab.tab_id))?;
-                Some(solve_layout_with_sizing(
-                    &shown_layout_tree,
-                    Rect::from_size_at_origin(tab.layout_area.solved_size),
-                    self.pane_sizing,
-                ))
-            }
-        }
+        tab.layout_area.build_client_solve(
+            client.get_layout_mode(tab.tab_id),
+            client.list_focus_history(tab.tab_id),
+            self.pane_sizing,
+        )
     }
 
     /// The solve of `tab_id` in `layout_mode`, with each stack showing its
@@ -1052,33 +1144,73 @@ impl Session {
     ) -> Option<Cow<'_, LayoutSolve>> {
         let tab = self.tabs.get(&tab_id)?;
         let zoomed_tab_solve = match layout_mode {
-            LayoutMode::Fullscreen { focused_pane_id } => {
-                self.build_zoomed_tab_solve(tab, focused_pane_id)
-            }
+            LayoutMode::Fullscreen { focused_pane_id } => tab
+                .layout_area
+                .build_zoomed_solve(focused_pane_id, self.pane_sizing),
             LayoutMode::Tiled => None,
         };
         Some(zoomed_tab_solve.map_or(Cow::Borrowed(&tab.layout_area.layout_solve), Cow::Owned))
     }
 
-    /// The solve of `tab` zoomed on `zoomed_pane_id` at the tab's solved size,
-    /// as [`Session::compute_layout_mode_solve`] states it for `Fullscreen`.
-    /// `None` when the tab's tree does not hold `zoomed_pane_id`.
-    fn build_zoomed_tab_solve(&self, tab: &Tab, zoomed_pane_id: PaneId) -> Option<LayoutSolve> {
-        if !tab.layout_area.layout.has_pane(zoomed_pane_id) {
-            return None;
-        }
-        Some(solve_layout_with_mode(
-            &tab.layout_area.layout,
-            LayoutMode::Fullscreen {
-                focused_pane_id: zoomed_pane_id,
-            },
-            Rect::from_size_at_origin(tab.layout_area.solved_size),
-            self.pane_sizing,
-        ))
+    /// The solve `client` draws the floating pane `floating_pane_id` with, at
+    /// the size its tree is solved at ([`FloatingPane::get_solved_layout_size`]),
+    /// by the rules [`Session::compute_client_solve`] applies to a tab: the
+    /// zoom's solve while the client's view zooms a pane inside it, else each
+    /// stack shows the member holding the client's newest pane of that stack
+    /// in its focus history inside the floating pane, else the stack's active
+    /// member. `None` when the session holds no `floating_pane_id` or the
+    /// client holds no view of it.
+    ///
+    /// The client's own solves are built on the first call after a change and
+    /// kept; a floating pane the
+    /// client draws with its own solve gives the floating pane's solve with no
+    /// copy.
+    #[must_use]
+    pub fn compute_client_floating_pane_solve<'a>(
+        &'a self,
+        client: &'a Client,
+        floating_pane_id: FloatingPaneId,
+    ) -> Option<&'a LayoutSolve> {
+        let (_, floating_pane) = self
+            .floating_set
+            .find_floating_pane_by_id(floating_pane_id)?;
+        client.get_floating_pane_view(floating_pane_id)?;
+        let own_floating_pane_solves =
+            client.get_own_floating_pane_solves(|| self.build_own_floating_pane_solves(client));
+        Some(
+            own_floating_pane_solves
+                .get(&floating_pane_id)
+                .unwrap_or(&floating_pane.layout_area.layout_solve),
+        )
+    }
+
+    /// The solve `client` draws each floating pane with when it is not that
+    /// floating pane's own solve ([`LayoutArea::build_client_solve`] with the
+    /// zoom and focus history of the client's view of it), keyed by floating
+    /// pane id. A floating pane the client holds no view of, or draws with its
+    /// own solve, has no entry.
+    fn build_own_floating_pane_solves(
+        &self,
+        client: &Client,
+    ) -> HashMap<FloatingPaneId, LayoutSolve> {
+        self.floating_set
+            .floating_panes
+            .iter()
+            .filter_map(|floating_pane| {
+                let floating_pane_view =
+                    client.get_floating_pane_view(floating_pane.floating_pane_id)?;
+                let own_solve = floating_pane.layout_area.build_client_solve(
+                    floating_pane_view.get_layout_mode(),
+                    &floating_pane_view.focus_history,
+                    self.pane_sizing,
+                )?;
+                Some((floating_pane.floating_pane_id, own_solve))
+            })
+            .collect()
     }
 
     /// Whether `client` can draw floating panes: it has a floating viewport
-    /// ([`Client::get_floating_viewport`], a pane area of at least `5x6`), and
+    /// ([`Client::get_floating_viewport`], a pane area of at least `5x5`), and
     /// its own view of its active tab ([`Session::compute_client_solve`])
     /// has a pane that is not suppressed. A client whose active tab the
     /// session does not hold can draw floating panes while it has a floating
@@ -1152,7 +1284,7 @@ impl Session {
     /// Each attached client contributes its [`Client::get_floating_viewport`];
     /// a client that reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving), or a
-    /// pane area smaller than `5x6` on either axis, contributes nothing.
+    /// pane area smaller than `5x5` on either axis, contributes nothing.
     /// Returns `None` when no attached client contributes a size. A `120x40`
     /// client viewing tab `db` and an `80x22` client viewing tab `web` →
     /// `80x22`; a third client with a `4x40` pane area keeps `80x22`.
@@ -1164,24 +1296,26 @@ impl Session {
             .reduce(Size::compute_minimum_axes)
     }
 
-    /// The outer size a new floating pane that asks for `desired_size` takes
-    /// in this session: [`solve_floating_pane_size`] against
-    /// [`Session::get_shared_floating_viewport`], or the floating minimum
-    /// ([`compute_floating_pane_minimum_size`]) of `pane_minimum_size` while no
-    /// attached client has a floating viewport. `Percent(60)` by
+    /// The outer size a new floating pane that holds one pane and asks for
+    /// `desired_size` takes in this session: [`solve_floating_pane_size`]
+    /// against [`Session::get_shared_floating_viewport`], or the floating
+    /// minimum while no attached client has a floating viewport. The floating
+    /// minimum is that of one pane under [`Session::get_pane_sizing`]
+    /// ([`compute_floating_pane_minimum_size`]). `Percent(60)` by
     /// `Percent(60)` with an `80x22` shared viewport → `48x13`; with no client
-    /// attached and a `2x1` pane minimum → `4x5`.
+    /// attached and a `2x1` pane minimum → `4x4`.
     #[must_use]
-    pub fn compute_new_floating_pane_size(
-        &self,
-        desired_size: FloatingPaneSize,
-        pane_minimum_size: Size,
-    ) -> Size {
+    pub fn compute_new_floating_pane_size(&self, desired_size: FloatingPaneSize) -> Size {
+        let floating_pane_minimum_size = compute_floating_pane_minimum_size(
+            compute_border_inclusive_minimum(self.pane_sizing.minimum_size),
+        );
         match self.get_shared_floating_viewport() {
-            Some(shared_floating_viewport) => {
-                solve_floating_pane_size(desired_size, shared_floating_viewport, pane_minimum_size)
-            }
-            None => compute_floating_pane_minimum_size(pane_minimum_size),
+            Some(shared_floating_viewport) => solve_floating_pane_size(
+                desired_size,
+                shared_floating_viewport,
+                floating_pane_minimum_size,
+            ),
+            None => floating_pane_minimum_size,
         }
     }
 

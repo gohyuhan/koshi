@@ -338,7 +338,11 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 });
             let painted_frame = &get_last_painted_frame(&session_frames).painted_frame;
             assert_eq!(
-                painted_frame.session_snapshot.active_tab_snapshot.tab_size,
+                painted_frame
+                    .session_snapshot
+                    .active_tab_snapshot
+                    .layout_area
+                    .solved_size,
                 Size {
                     column_count: 0,
                     row_count: 0
@@ -348,12 +352,14 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 painted_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .is_every_pane_suppressed
             );
             assert_eq!(
                 painted_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .pane_slots,
                 vec![FrameSlot {
                     pane_id,
@@ -687,7 +693,11 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                 tab_id
             );
             assert_eq!(
-                painted_frame.session_snapshot.active_tab_snapshot.tab_size,
+                painted_frame
+                    .session_snapshot
+                    .active_tab_snapshot
+                    .layout_area
+                    .solved_size,
                 SHARED_PANE_VIEWPORT_SIZE
             );
 
@@ -697,6 +707,7 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                 painted_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .pane_slots,
                 vec![FrameSlot {
                     pane_id,
@@ -719,6 +730,7 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                 !painted_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .is_every_pane_suppressed
             );
 
@@ -887,7 +899,8 @@ fn read_session_frames_until_tab_size(
             .painted_frame
             .session_snapshot
             .active_tab_snapshot
-            .tab_size
+            .layout_area
+            .solved_size
             == tab_size
     })
 }
@@ -1178,6 +1191,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                     .painted_frame
                     .session_snapshot
                     .active_tab_snapshot
+                    .layout_area
                     .pane_slots,
                 vec![FrameSlot {
                     pane_id: source_pane_id,

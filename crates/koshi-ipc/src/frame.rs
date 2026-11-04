@@ -17,6 +17,8 @@
 //! as `Display`, and an unknown optional image dimension or Sixel background
 //! reads as absent.
 
+use std::num::NonZeroUsize;
+
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -57,16 +59,17 @@ where
 /// of every pane in it, and the viewing client's own state.
 ///
 /// A reader joins [`pane_snapshots`](Self::pane_snapshots) to the
-/// [`FrameSlot`]s in [`session_snapshot`](Self::session_snapshot)'s active tab
-/// and to its [`FrameFloatingPaneSlot`]s by [`PaneId`]: a slot says *where* a
-/// pane sits, its [`FramePane`] says *what* is inside it.
+/// [`FrameSlot`]s of [`session_snapshot`](Self::session_snapshot)'s active tab
+/// and of each of its [`FrameFloatingPaneSlot`]s by [`PaneId`]: a slot says
+/// *where* a pane sits, its [`FramePane`] says *what* is inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaintedFrame {
     /// The session being viewed: its identity, its solved active tab, its tab
     /// list, and the floating panes the viewing client shows.
     pub session_snapshot: FrameSession,
     /// Per-pane content: one entry per pane slot in the active tab and one per
-    /// floating pane slot, matched to its slot by [`PaneId`].
+    /// pane slot of each floating pane slot, matched to its slot by
+    /// [`PaneId`].
     pub pane_snapshots: Vec<FramePane>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: FrameClient,
@@ -97,12 +100,15 @@ pub struct FrameSession {
 }
 
 /// One floating pane of the session, shown or minimized for the viewing
-/// client. The frame carries each pane's title once: in the pane's
-/// [`FramePane`] while the client shows the pane, and here while the client
-/// minimized it.
+/// client, named by the pane that takes the client's input inside it. The
+/// frame carries the input pane's title and the floating pane's pane count
+/// once each: in the input pane's [`FramePane`] and the floating pane's
+/// [`FrameFloatingPaneSlot`] while the client shows it, and here while the
+/// client minimized it.
 ///
-/// A shown pane travels as `{"Shown": {"pane_id": …}}`, and a minimized pane
-/// titled `htop` as `{"Minimized": {"pane_id": …, "pane_title": "htop"}}`.
+/// A shown floating pane travels as `{"Shown": {"pane_id": …}}`, and a
+/// minimized one of 3 panes whose input pane is titled `htop` as
+/// `{"Minimized": {"pane_id": …, "pane_title": "htop", "pane_count": 3}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameFloatingPane {
     /// The viewing client shows the pane. The frame holds the pane's slot in
@@ -123,6 +129,9 @@ pub enum FrameFloatingPane {
         /// [`FramePane::pane_title`]. `None` when the pane has reported
         /// neither a working directory nor a title.
         pane_title: Option<String>,
+        /// The panes the floating pane holds. A frame with `0` fails to
+        /// decode.
+        pane_count: NonZeroUsize,
     },
 }
 
@@ -133,29 +142,37 @@ pub struct FrameTab {
     pub tab_id: TabId,
     /// The tab's display name.
     pub tab_name: String,
+    /// The tab's solved layout. Its size is the per-axis minimum pane area
+    /// across the clients viewing this tab. A client whose own
+    /// [`viewport_size`](FrameClient::viewport_size) is larger draws this
+    /// layout centered and letterboxes the surrounding margin.
+    pub layout_area: FrameLayoutArea,
+}
+
+/// One layout tree solved for the viewing client into placed pane slots: a
+/// tab's, or a floating pane's below its titlebar strip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameLayoutArea {
+    /// The size the tree was solved for. The
+    /// [`pane_slots`](Self::pane_slots) rects live in this space with origin
+    /// `(0, 0)`.
+    pub solved_size: Size,
     /// The solved layout: one [`FrameSlot`] per pane, giving outer and content
     /// rects and coarse status.
     pub pane_slots: Vec<FrameSlot>,
-    /// The size the tab's layout was solved for: the per-axis minimum pane
-    /// area across the clients viewing this tab. The
-    /// [`pane_slots`](Self::pane_slots) rects live in this space with origin `(0, 0)`. A
-    /// client whose own [`viewport_size`](FrameClient::viewport_size) is larger draws
-    /// this layout centered and letterboxes the surrounding margin.
-    pub tab_size: Size,
     /// Header strips for stacked panes: the one-row title bar each collapsed
     /// stack member shows in place of its content.
     pub stack_headers: Vec<StackHeader>,
-    /// Whether this client sees the tab tiled, or sees a single pane zoomed to
-    /// fill it. Zoom is per client: another client viewing the same tab in
+    /// Whether this client sees the tree tiled, or sees a single pane zoomed to
+    /// fill it. Zoom is per client: another client viewing the same tree in
     /// the same instant can carry a different value here.
     pub layout_mode: LayoutMode,
-    /// True when the tab has no room to draw and every pane is suppressed;
-    /// the client fills the whole frame with the "terminal too small" overlay.
+    /// True when the tree has no room to draw and every pane is suppressed.
+    /// For a tab, the client fills the whole frame with the "terminal too
+    /// small" overlay.
     pub is_every_pane_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
-    /// vertical split, in the [`pane_slots`](Self::pane_slots) space. A frame with
-    /// no field, and a value that is not a cell count, read as `0`.
-    #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
+    /// vertical split, in the [`pane_slots`](Self::pane_slots) space.
     pub gap_cell_count: u16,
 }
 
@@ -204,20 +221,59 @@ pub struct FrameSlot {
 /// The outer rect counts cells from the client's pane-area origin, with no
 /// letterbox offset: an outer rect at column `150` draws at pane-area column
 /// `150`, also when the client's tiled layout starts at column `60`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// A slot whose layout area holds no pane slot, or whose `pane_id` names no
+/// pane slot of its layout area, fails to decode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameFloatingPaneSlot {
-    /// The floating pane this slot places.
+    /// The pane that takes the viewing client's input inside the floating
+    /// pane: the first pane of its focus history there.
     pub pane_id: PaneId,
-    /// The pane's box with its chrome: the border ring, the titlebar row and
-    /// the separator row. The pane's cells and cursor are drawn inside the
-    /// chrome, in a rect the size of the pane's PTY: the box less
-    /// [`FLOATING_CHROME_SIZE`](koshi_core::constant::FLOATING_CHROME_SIZE),
-    /// with its top-left cell one column right of and three rows below the
-    /// box's top-left cell. Outer `(24, 8)` `72x22` → content `(25, 11)`
-    /// `70x18`.
+    /// The floating pane's whole box: the titlebar strip on its first row, and
+    /// the layout area on the rows below it. Outer `(24, 8)` `72x22` → layout
+    /// area at `(24, 9)`, `72x21`.
     pub outer_rect: Rect,
-    /// Whether the viewing client pinned the pane at its cell.
+    /// Whether the viewing client pinned the floating pane at its cell.
     pub is_pinned: bool,
+    /// The floating pane's tree, solved for the viewing client, with rects
+    /// counted from the first cell below the strip.
+    pub layout_area: FrameLayoutArea,
+}
+
+impl<'de> Deserialize<'de> for FrameFloatingPaneSlot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct FrameFloatingPaneSlotFields {
+            pane_id: PaneId,
+            outer_rect: Rect,
+            is_pinned: bool,
+            layout_area: FrameLayoutArea,
+        }
+
+        let slot_fields = FrameFloatingPaneSlotFields::deserialize(deserializer)?;
+        if slot_fields.layout_area.pane_slots.is_empty() {
+            return Err(D::Error::custom("floating pane slot holds no pane slot"));
+        }
+        if !slot_fields
+            .layout_area
+            .pane_slots
+            .iter()
+            .any(|pane_slot| pane_slot.pane_id == slot_fields.pane_id)
+        {
+            return Err(D::Error::custom(
+                "floating pane slot names a pane its layout area does not hold",
+            ));
+        }
+        Ok(Self {
+            pane_id: slot_fields.pane_id,
+            outer_rect: slot_fields.outer_rect,
+            is_pinned: slot_fields.is_pinned,
+            layout_area: slot_fields.layout_area,
+        })
+    }
 }
 
 /// One image placement carried with a pane's visible cells.

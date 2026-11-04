@@ -7,6 +7,7 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 
 use koshi_config::conflict::{KeymapLayer, KeymapVerdict, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
@@ -2295,7 +2296,7 @@ fn the_move_choosers_tiled_key_places_the_tiled_pane_while_a_floating_pane_is_fo
         client
             .build_frame_layout_with_current_chrome(&mouse_frame)
             .list_drawn_floating_pane_slots()
-            .map(|floating_pane_slot| floating_pane_slot.pane_id)
+            .map(|floating_pane_slot| floating_pane_slot.floating_pane_slot.pane_id)
             .collect::<Vec<PaneId>>(),
         [floating_slot_pane_id]
     );
@@ -2762,12 +2763,12 @@ fn an_arrow_moves_nothing_while_a_handle_drag_is_held_or_a_sent_move_waits() {
     let current_time = Instant::now();
     client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame));
     client.handle_mouse(
-        build_left_mouse_press(Point { column: 12, row: 6 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
     );
     client.handle_mouse(
-        build_left_mouse_drag(Point { column: 17, row: 7 }),
+        build_left_mouse_drag(Point { column: 17, row: 6 }),
         &mouse_frame,
         current_time,
     );
@@ -2795,7 +2796,7 @@ fn an_arrow_moves_nothing_while_a_handle_drag_is_held_or_a_sent_move_waits() {
     );
 
     let release_actions = client.handle_mouse(
-        build_left_mouse_release(Point { column: 17, row: 7 }),
+        build_left_mouse_release(Point { column: 17, row: 6 }),
         &mouse_frame,
         current_time,
     );
@@ -3376,6 +3377,7 @@ fn the_selection_passes_over_pinned_and_hidden_floating_panes() {
         .push(FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         });
     let mut client = build_client_viewing(&mouse_frame);
     client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame));

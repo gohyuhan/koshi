@@ -1242,6 +1242,7 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
             .expect("snapshot")
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed,
         "test setup: the panes must be suppressed at this size"
     );
@@ -1308,6 +1309,271 @@ fn keys_reach_a_pane_when_the_tab_grows_after_the_focused_pane_closed_with_no_ro
     runtime.handle_client_resize(client_id, large_viewport_size, None, None);
 
     assert_eq!(runtime.find_typed_pane(client_id), Some(root_pane_id));
+}
+
+#[test]
+fn keys_skip_a_focused_floating_pane_whose_pane_is_suppressed_and_reach_it_once_it_has_room() {
+    let FloatingPaneFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        htop_pane_id,
+        ..
+    } = build_floating_pane_fixture();
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    assert!(runtime
+        .get_client_mut(alice_client_id)
+        .expect("alice is attached")
+        .focus_floating_pane(htop_floating_pane_id));
+    assert_eq!(runtime.find_typed_pane(alice_client_id), Some(htop_pane_id));
+
+    // `pane { min-cols 20 min-rows 6 }` and a 24-column pane area cap the
+    // floating pane at 21 columns: its tree has no room for the 22-column
+    // pane box `htop` needs, and the 24-column tab still holds its tiled
+    // pane.
+    set_pane_minimum(&mut runtime, session_id, 20, 6);
+    let _ = runtime.handle_client_resize(
+        alice_client_id,
+        Size {
+            column_count: 24,
+            row_count: 32,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 24,
+            row_count: 30,
+        })),
+        None,
+    );
+    assert_eq!(runtime.find_typed_pane(alice_client_id), None);
+
+    let _ = runtime.handle_client_resize(
+        alice_client_id,
+        Size {
+            column_count: 120,
+            row_count: 42,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 120,
+            row_count: 40,
+        })),
+        None,
+    );
+    assert_eq!(runtime.find_typed_pane(alice_client_id), Some(htop_pane_id));
+}
+
+#[test]
+fn merged_content_rects_keep_the_first_viewers_order_and_each_panes_smallest_axes() {
+    let [vim_pane_id, htop_pane_id] = [PaneId::new(), PaneId::new()];
+    let build_rect = |column: u16, row: u16, column_count: u16, row_count: u16| {
+        Rect::from_origin_and_size(
+            Point { column, row },
+            Size {
+                column_count,
+                row_count,
+            },
+        )
+    };
+
+    assert_eq!(
+        Server::merge_smallest_content_rects(&[
+            vec![
+                (vim_pane_id, Some(build_rect(1, 1, 80, 20))),
+                (htop_pane_id, None)
+            ],
+            vec![
+                (htop_pane_id, Some(build_rect(41, 1, 30, 10))),
+                (vim_pane_id, Some(build_rect(1, 1, 60, 24)))
+            ],
+        ]),
+        [
+            (vim_pane_id, Some(build_rect(1, 1, 60, 20))),
+            (htop_pane_id, Some(build_rect(41, 1, 30, 10))),
+        ]
+    );
+    assert_eq!(
+        Server::merge_smallest_content_rects(&[
+            vec![(vim_pane_id, None)],
+            vec![(vim_pane_id, None)]
+        ]),
+        [(vim_pane_id, None)]
+    );
+    assert_eq!(Server::merge_smallest_content_rects(&[]), []);
+}
+
+/// Replace every floating pane of `session_id` with one `48x13` floating pane
+/// `stack(vim active, logs)` of the panes `[vim, logs]`, solved with the
+/// session's pane sizing, and show it for every client of `client_ids`. Each
+/// `48x11` expanded member box has `46x9` content above the one-row header of
+/// the collapsed member. Returns the new floating pane's id.
+fn replace_floating_panes_with_stack(
+    runtime: &mut Server,
+    session_id: SessionId,
+    [vim_pane_id, logs_pane_id]: [PaneId; 2],
+    client_ids: &[ClientId],
+) -> FloatingPaneId {
+    let stack_floating_pane_id = FloatingPaneId::new();
+    let stack_floating_pane: FloatingPane = serde_json::from_value(serde_json::json!({
+        "floating_pane_id": stack_floating_pane_id,
+        "layout_area": {
+            "layout": LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                vec![vim_pane_id, logs_pane_id],
+                0,
+            )),
+            "solved_size": Size {
+                column_count: 48,
+                row_count: 12,
+            },
+        },
+        "desired_size": build_cells_floating_pane_size(48, 13),
+        "solved_size": Size {
+            column_count: 48,
+            row_count: 13,
+        },
+    }))
+    .expect("the floating pane decodes");
+    let session = runtime
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the session");
+    let replaced_floating_pane_ids: Vec<FloatingPaneId> = session
+        .floating_set
+        .list_floating_panes()
+        .iter()
+        .map(FloatingPane::get_floating_pane_id)
+        .collect();
+    for floating_pane_id in replaced_floating_pane_ids {
+        session.remove_floating_pane(floating_pane_id);
+    }
+    session
+        .add_floating_pane(stack_floating_pane, &[])
+        .expect("the floating set has room");
+    let pane_sizing = session.get_pane_sizing();
+    let _ = session.update_pane_sizing(pane_sizing);
+    for &client_id in client_ids {
+        let _ = runtime
+            .get_client_mut(client_id)
+            .expect("the client is attached")
+            .focus_floating_pane(stack_floating_pane_id);
+    }
+    stack_floating_pane_id
+}
+
+/// The last PTY size `fake_pty_backend` gave `pane_id`.
+fn get_last_pty_size(fake_pty_backend: &FakePtyBackend, pane_id: PaneId) -> Option<PtySize> {
+    fake_pty_backend
+        .list_pane_sizes(pane_id)
+        .expect("the pane spawned")
+        .last()
+        .copied()
+}
+
+#[test]
+fn each_pane_of_a_floating_stack_takes_the_content_rect_of_the_client_that_expands_it() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let pane_ids = [
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+    ];
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    let stack_floating_pane_id = replace_floating_panes_with_stack(
+        &mut runtime,
+        session_id,
+        pane_ids,
+        &[alice_client_id, bob_client_id],
+    );
+    runtime
+        .get_client_mut(bob_client_id)
+        .expect("bob is attached")
+        .update_floating_pane_focused_pane(stack_floating_pane_id, pane_ids[1]);
+
+    runtime.reflow_floating_panes(fake_pty_backend.as_ref(), session_id, &mut Vec::new());
+
+    // alice expands `vim` and bob expands `logs`.
+    for pane_id in pane_ids {
+        assert_eq!(
+            get_last_pty_size(&fake_pty_backend, pane_id),
+            Some(PtySize {
+                column_count: 46,
+                row_count: 9
+            }),
+            "{pane_id:?}"
+        );
+    }
+}
+
+#[test]
+fn a_client_with_no_floating_viewport_sizes_no_pane_of_a_floating_stack() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let [vim_pane_id, logs_pane_id] = [
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+    ];
+    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x4 floating
+    // minimum.
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 3,
+            row_count: 3,
+        },
+    );
+    let stack_floating_pane_id = replace_floating_panes_with_stack(
+        &mut runtime,
+        session_id,
+        [vim_pane_id, logs_pane_id],
+        &[alice_client_id],
+    );
+    runtime
+        .get_client_mut(bob_client_id)
+        .expect("bob is attached")
+        .update_floating_pane_focused_pane(stack_floating_pane_id, logs_pane_id);
+    let logs_pty_size_before = get_last_pty_size(&fake_pty_backend, logs_pane_id);
+
+    runtime.reflow_floating_panes(fake_pty_backend.as_ref(), session_id, &mut Vec::new());
+
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, vim_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 9
+        })
+    );
+    assert_eq!(
+        logs_pty_size_before,
+        Some(PtySize {
+            column_count: 46,
+            row_count: 10
+        })
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, logs_pane_id),
+        logs_pty_size_before,
+        "only bob expands logs"
+    );
 }
 
 /// The client's scroll offset for the pane — `0` follows live output.
@@ -9694,7 +9960,8 @@ fn a_cross_tab_split_commits_at_the_destination_tab_size_its_preview_shows() {
             .as_ref()
             .expect("cross-tab destination")
             .tab_snapshot
-            .tab_size,
+            .layout_area
+            .solved_size,
         previewed_destination_tab_size
     );
 
@@ -15556,7 +15823,7 @@ fn build_sixty_percent_floating_pane_size() -> FloatingPaneSize {
 /// A session seeded by [`create_session_with_attached_client`] for alice,
 /// attached at `UNIX_EPOCH` with a `120x42` viewport: pane area `120x40`, tiled pane PTY
 /// `118x38`. It also holds one live floating pane asking for 60% by 60%,
-/// solved for alice alone: outer `72x24`, PTY `70x20`.
+/// solved for alice alone: outer `72x24`, PTY `70x21`.
 fn build_floating_pane_fixture() -> FloatingPaneFixture {
     let FloatingCommandFixture {
         mut runtime,
@@ -15588,7 +15855,7 @@ fn build_floating_pane_fixture() -> FloatingPaneFixture {
     .expect("the floating set is empty");
     let floating_pty_size = PtySize {
         column_count: 70,
-        row_count: 20,
+        row_count: 21,
     };
     fake_pty_backend
         .spawn_pane(htop_pane_id, build_spawn_spec(), floating_pty_size)
@@ -15660,7 +15927,7 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
                 previous_pane_id: None,
             }),
             build_pty_resized(tiled_pane_id, 78, 20),
-            build_pty_resized(htop_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 10),
         ]
     );
     assert_eq!(
@@ -15677,7 +15944,7 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
         detach_events,
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(htop_pane_id, 70, 20),
+            build_pty_resized(htop_pane_id, 70, 21),
         ]
     );
     assert_eq!(
@@ -15722,7 +15989,7 @@ fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
         emitted_events,
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(htop_pane_id, 70, 20),
+            build_pty_resized(htop_pane_id, 70, 21),
         ]
     );
     assert_eq!(
@@ -15765,7 +16032,7 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         htop_pane_id,
         ..
     } = build_floating_pane_fixture();
-    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10.
+    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x9.
     set_pane_minimum(&mut runtime, session_id, 20, 6);
     let bob_client_id = ClientId::new();
     runtime.handle_client_attach(
@@ -15783,9 +16050,9 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
     );
 
     // A 21-column pane area caps a floating pane at 18 columns, below the
-    // 22-column floating minimum: outer 18x18, PTY 16x14. The tiled pane's
-    // 22-column outer minimum does not fit either, so the tiled pane keeps
-    // its PTY.
+    // 22-column floating minimum: outer 18x18. Its 18x17 tree does not fit
+    // the 22-column pane box minimum, so `htop` is suppressed and keeps its
+    // PTY, as the tiled pane does under its own 22-column outer minimum.
     let shrink_events = runtime.handle_client_resize(
         bob_client_id,
         Size {
@@ -15799,7 +16066,7 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         None,
     );
 
-    assert_eq!(shrink_events, vec![build_pty_resized(htop_pane_id, 16, 14)]);
+    assert_eq!(shrink_events, Vec::new());
     assert_eq!(
         get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
@@ -15807,14 +16074,15 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
             row_count: 18,
         }
     );
+    // The last PTY size is the one bob's attach gave: 48x13 outer, PTY 46x10.
     assert_eq!(
         fake_pty_backend
             .list_pane_sizes(htop_pane_id)
             .expect("the floating pane spawned")
             .last(),
         Some(&PtySize {
-            column_count: 16,
-            row_count: 14,
+            column_count: 46,
+            row_count: 10,
         })
     );
     assert_eq!(
@@ -15843,7 +16111,7 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         regrow_events,
         vec![
             build_pty_resized(tiled_pane_id, 98, 28),
-            build_pty_resized(htop_pane_id, 58, 14),
+            build_pty_resized(htop_pane_id, 58, 15),
         ]
     );
     assert_eq!(
@@ -15948,7 +16216,7 @@ fn every_client_starving_freezes_every_floating_pane_until_one_reports_room() {
         roomy_events,
         vec![
             build_pty_resized(tiled_pane_id, 78, 20),
-            build_pty_resized(htop_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 10),
         ]
     );
 }
@@ -16001,7 +16269,7 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
                 previous_pane_id: None,
             }),
             build_pty_resized(tiled_pane_id, 78, 20),
-            build_pty_resized(htop_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 10),
         ]
     );
 }
@@ -16048,7 +16316,7 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
                 pane_id: other_pane_id,
                 previous_pane_id: None,
             }),
-            build_pty_resized(htop_pane_id, 46, 9),
+            build_pty_resized(htop_pane_id, 46, 10),
         ]
     );
 }
@@ -16152,7 +16420,7 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         move_events,
         vec![
             build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(htop_pane_id, 70, 20),
+            build_pty_resized(htop_pane_id, 70, 21),
             Event::PaneFocused(PaneFocused {
                 client_id: bob_client_id,
                 tab_id: Some(other_tab_id),
@@ -18165,12 +18433,14 @@ fn the_snapshot_carries_the_gap_and_leaves_it_between_two_side_by_side_panes() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .gap_cell_count,
         2
     );
     let pane_slots = &render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots;
     assert_eq!(pane_slots.len(), 2);
     assert_eq!(
@@ -21000,6 +21270,7 @@ fn a_resize_reporting_a_zero_pane_area_resizes_no_pty() {
         snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
 }
@@ -21540,7 +21811,7 @@ fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() 
                     pane_id: htop_pane_id,
                     previous_pane_id: Some(tiled_pane_id),
                 }),
-                build_pty_resized(htop_pane_id, 46, 9),
+                build_pty_resized(htop_pane_id, 46, 10),
             ],
         }
     );
@@ -21594,14 +21865,14 @@ fn a_floating_new_pane_spawns_at_the_default_size_and_takes_the_issuers_input() 
             .expect("the floating pane spawned"),
         vec![PtySize {
             column_count: 46,
-            row_count: 9,
+            row_count: 10,
         }]
     );
     assert_eq!(
         runtime.pty_size_by_pane_id[&htop_pane_id],
         PtySize {
             column_count: 46,
-            row_count: 9,
+            row_count: 10,
         }
     );
     assert!(runtime.live_pane_ids.contains(&htop_pane_id));
@@ -21883,7 +22154,7 @@ fn a_floating_new_pane_with_no_client_attached_takes_the_floating_minimum_and_ca
         get_floating_pane_holding(&runtime, session_id, htop_pane_id).get_solved_size(),
         Size {
             column_count: 4,
-            row_count: 5,
+            row_count: 4,
         }
     );
 }
@@ -22435,7 +22706,7 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
             Point { column: 20, row: 5 },
             PtySize {
                 column_count: 41,
-                row_count: 8,
+                row_count: 9,
             },
         ),
         (
@@ -22445,7 +22716,7 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
             Point { column: 17, row: 5 },
             PtySize {
                 column_count: 41,
-                row_count: 8,
+                row_count: 9,
             },
         ),
         (
@@ -22455,7 +22726,7 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
             Point { column: 20, row: 3 },
             PtySize {
                 column_count: 38,
-                row_count: 10,
+                row_count: 11,
             },
         ),
         (
@@ -22465,7 +22736,7 @@ fn resizing_a_floating_pane_keeps_the_edge_opposite_the_moved_one_where_the_issu
             Point { column: 20, row: 5 },
             PtySize {
                 column_count: 38,
-                row_count: 6,
+                row_count: 7,
             },
         ),
     ];
@@ -22650,7 +22921,7 @@ fn a_pinned_floating_pane_refuses_its_left_and_top_edges_and_stays_pinned_on_the
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 41, 8)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 41, 9)],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
@@ -22704,7 +22975,7 @@ fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinn
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 58, 8)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 58, 9)],
         }
     );
     assert_eq!(
@@ -22723,7 +22994,7 @@ fn growing_a_pinned_floating_pane_stops_at_the_pane_area_edge_and_keeps_its_pinn
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 58, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 58, 10)],
         }
     );
     assert_eq!(
@@ -22793,7 +23064,7 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 38, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 38, 10)],
         }
     );
     let alice_client = get_attached_client(&runtime, session_id, alice_client_id);
@@ -22821,7 +23092,7 @@ fn resizing_a_pinned_floating_pane_in_a_narrower_pane_area_keeps_its_pinned_cell
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 35, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 35, 10)],
         }
     );
     assert_eq!(
@@ -22884,7 +23155,7 @@ fn a_floating_pane_growth_stops_at_the_pane_area_edge_on_the_moved_side() {
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(left_pane_id, 40, 8)],
+            emitted_events: vec![build_pty_resized(left_pane_id, 40, 9)],
         }
     );
     assert_eq!(
@@ -22939,8 +23210,8 @@ fn a_floating_pane_resize_past_the_minimum_or_the_cap_is_refused() {
         alice_client_id,
         ..
     } = build_floating_command_fixture();
-    // The default pane minimum of 2x1 plus the chrome gives a floating
-    // minimum of 4x5.
+    // The default pane minimum of 2x1, its border and the strip row give a
+    // floating minimum of 4x4.
     let smallest_pane_id = create_floating_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
@@ -23016,7 +23287,7 @@ fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    // bob's 3x3 terminal gives a 3x1 pane area, below 5x6: bob has no
+    // bob's 3x3 terminal gives a 3x1 pane area, below 5x5: bob has no
     // floating viewport.
     attach_bob(
         &mut runtime,
@@ -23029,7 +23300,7 @@ fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
     );
 
     // 48x13 on alice's 80x22 pane area, grown right by 1: outer 49x13, PTY
-    // 47x9.
+    // 47x10.
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         CommandSource::from_key_binding(alice_client_id),
@@ -23042,7 +23313,7 @@ fn a_client_below_the_floating_minimum_does_not_limit_a_floating_resize() {
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 47, 9)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 47, 10)],
         }
     );
     assert_eq!(
@@ -23127,7 +23398,7 @@ fn an_external_floating_pane_resize_acts_for_the_named_client() {
         command_result,
         CommandResult::Ok {
             command_id,
-            emitted_events: vec![build_pty_resized(htop_pane_id, 39, 8)],
+            emitted_events: vec![build_pty_resized(htop_pane_id, 39, 9)],
         }
     );
     assert_eq!(
@@ -23419,7 +23690,7 @@ fn a_pinned_floating_new_pane_the_issuer_does_not_draw_is_refused_and_spawns_not
         tab_id,
         ..
     } = build_floating_command_fixture();
-    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x5 floating
+    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x4 floating
     // minimum: the new floating pane is not drawn on bob's screen.
     let bob_client_id = attach_bob(
         &mut runtime,
@@ -23551,7 +23822,7 @@ fn a_floating_pane_resize_for_a_client_with_no_pane_area_changes_no_view() {
                 pane_id: htop_pane_id,
                 pty_size: PtySize {
                     column_count: 41,
-                    row_count: 8,
+                    row_count: 9,
                 },
             })],
         }
@@ -24245,7 +24516,7 @@ fn a_client_below_the_floating_minimum_cannot_pin_and_does_not_stop_another_clie
         CommandSource::from_key_binding(alice_client_id),
         build_floating_new_pane_args(None, None, false),
     );
-    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x5 floating
+    // bob's 3x3 terminal gives a 3x1 pane area, below the 4x4 floating
     // minimum: bob has no floating viewport, and alice's 80x22 pane area alone
     // sizes the pane.
     let bob_client_id = attach_bob(
@@ -26501,8 +26772,9 @@ fn every_floating_pane_command_naming_a_pane_acts_on_the_floating_pane_that_hold
         FloatingPanePosition::Moved(Point { column: 4, row: 2 })
     );
 
-    // Each pane's PTY is the floating pane's content size: 51x13 outer gives
-    // 49x9.
+    // Each pane's PTY is its own content rect in the floating pane's tree:
+    // the 51x12 rows below the strip of a 51x13 box split into a 25-column
+    // and a 26-column box, with content 23x10 and 24x10.
     let (command_id, command_result) = dispatch_resize_pane(
         &mut runtime,
         alice_source.clone(),
@@ -26515,8 +26787,8 @@ fn every_floating_pane_command_naming_a_pane_acts_on_the_floating_pane_that_hold
         CommandResult::Ok {
             command_id,
             emitted_events: vec![
-                build_pty_resized(htop_pane_id, 49, 9),
-                build_pty_resized(logs_pane_id, 49, 9),
+                build_pty_resized(htop_pane_id, 23, 10),
+                build_pty_resized(logs_pane_id, 24, 10),
             ],
         }
     );
@@ -27044,7 +27316,7 @@ fn undocking_a_split_pane_floats_it_with_its_pty_and_gives_the_issuer_its_input(
     };
 
     // The pane floats up where alice draws it: 40x22 at (40, 0), cut to the
-    // 72x19 floating cap of alice's 80x22 pane area: 40x19, PTY 38x15.
+    // 72x19 floating cap of alice's 80x22 pane area: 40x19, PTY 38x16.
     assert_eq!(
         emitted_events,
         vec![
@@ -27078,7 +27350,7 @@ fn undocking_a_split_pane_floats_it_with_its_pty_and_gives_the_issuer_its_input(
                 pane_id: undocked_pane_id,
                 pty_size: PtySize {
                     column_count: 38,
-                    row_count: 15,
+                    row_count: 16,
                 },
             }),
         ]
@@ -27396,7 +27668,7 @@ fn undocking_while_no_client_has_a_floating_viewport_sizes_the_pty_to_the_floati
     } = build_floating_command_fixture();
     let undocked_pane_id =
         split_alice_tiled_pane(&mut runtime, session_id, alice_client_id, tiled_pane_id);
-    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x10, PTY 20x6.
+    // `pane { min-cols 20 min-rows 6 }`: the floating minimum is 22x9, PTY 20x6.
     set_pane_minimum(&mut runtime, session_id, 20, 6);
     runtime.handle_client_resize(
         alice_client_id,
@@ -27468,7 +27740,7 @@ fn undocking_while_no_client_has_a_floating_viewport_sizes_the_pty_to_the_floati
         get_floating_pane_holding(&runtime, session_id, undocked_pane_id).get_solved_size(),
         Size {
             column_count: 22,
-            row_count: 10,
+            row_count: 9,
         }
     );
 }
@@ -28593,7 +28865,7 @@ fn a_client_that_cannot_draw_floating_panes_is_refused_every_command_that_shows_
     } = build_floating_command_fixture();
     let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
     // A 4x8 viewport gives a 4x6 pane area, whose 90% cap of 3x5 holds no
-    // 4x5 floating pane.
+    // 4x4 floating pane.
     let bob_client_id = attach_bob(
         &mut runtime,
         session_id,

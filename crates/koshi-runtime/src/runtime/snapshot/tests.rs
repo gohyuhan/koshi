@@ -16,11 +16,14 @@ use koshi_core::geometry::{
 use koshi_core::ids::{CommandId, FloatingPaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
+use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
+use koshi_renderer::snapshot::PaneSlot;
 use koshi_session::client::{ClientOrigin, ClientRegistry};
 use koshi_session::session::pane_ops::{commit_new_floating_pane, NewPaneSpec};
+use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::runtime::command::tests::{
     attach_client_record, build_tab, put_pane_beside_in_floating_pane,
@@ -154,7 +157,8 @@ fn build_snapshot_maps_session_tab_and_client() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .tab_size,
+            .layout_area
+            .solved_size,
         Size {
             column_count: 80,
             row_count: 22
@@ -164,6 +168,7 @@ fn build_snapshot_maps_session_tab_and_client() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .pane_slots
             .len(),
         1
@@ -171,6 +176,7 @@ fn build_snapshot_maps_session_tab_and_client() {
     let pane_slot = &render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots[0];
     assert_eq!(pane_slot.pane_id, pane_id);
     assert!(pane_slot.is_visible);
@@ -658,7 +664,8 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .tab_size,
+            .layout_area
+            .solved_size,
         Size {
             column_count: 40,
             row_count: 8
@@ -718,7 +725,8 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .tab_size,
+            .layout_area
+            .solved_size,
         Size {
             column_count: 0,
             row_count: 0
@@ -728,11 +736,13 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed
     );
     let pane_slot_rows: Vec<(PaneId, bool, bool, Option<Rect>)> = render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| {
@@ -800,7 +810,8 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .tab_size,
+            .layout_area
+            .solved_size,
         Size {
             column_count: 40,
             row_count: 8
@@ -1634,6 +1645,32 @@ fn list_floating_slot_pane_ids(render_snapshot: &RenderSnapshot) -> Vec<PaneId> 
         .collect()
 }
 
+/// The layout area a viewer sees in a floating pane of outer size
+/// `outer_size` that holds `pane_id` alone, tiled with no gap: one pane box
+/// over the rows below the strip, its content inside the border. `72x22` →
+/// box `(0, 0)` `72x21`, content `(1, 1)` `70x19`.
+fn build_one_pane_layout_area(pane_id: PaneId, outer_size: Size) -> LayoutAreaSnapshot {
+    let solved_size = Size {
+        column_count: outer_size.column_count,
+        row_count: outer_size.row_count - 1,
+    };
+    let pane_rect = Rect::from_size_at_origin(solved_size);
+    LayoutAreaSnapshot {
+        solved_size,
+        pane_slots: vec![PaneSlot {
+            pane_id,
+            outer_rect: pane_rect,
+            content_rect: Some(pane_rect.compute_inner_with_border()),
+            is_visible: true,
+            is_suppressed: false,
+        }],
+        stack_headers: Vec::new(),
+        layout_mode: LayoutMode::Tiled,
+        is_every_pane_suppressed: false,
+        gap_cell_count: 0,
+    }
+}
+
 /// A session whose one client has a `120x40` viewport and reports a `120x38`
 /// pane area, holding one floating pane of `solved_size` that holds `pane_id`
 /// alone. Returns the session, its id, the tab id, the tiled pane id, the
@@ -1695,6 +1732,13 @@ fn a_focused_floating_pane_gets_a_slot_placed_for_its_client() {
                 },
             ),
             is_pinned: false,
+            layout_area: build_one_pane_layout_area(
+                htop_pane_id,
+                Size {
+                    column_count: 72,
+                    row_count: 22,
+                },
+            ),
         }]
     );
     assert_eq!(
@@ -1750,6 +1794,33 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
                 },
             ),
             is_pinned: false,
+            // `htop` beside `logs` over the `72x21` rows below the strip.
+            layout_area: LayoutAreaSnapshot {
+                solved_size: Size {
+                    column_count: 72,
+                    row_count: 21,
+                },
+                pane_slots: vec![
+                    PaneSlot {
+                        pane_id: htop_pane_id,
+                        outer_rect: build_cell_rect(0, 0, 36, 21),
+                        content_rect: Some(build_cell_rect(1, 1, 34, 19)),
+                        is_visible: true,
+                        is_suppressed: false,
+                    },
+                    PaneSlot {
+                        pane_id: logs_pane_id,
+                        outer_rect: build_cell_rect(36, 0, 36, 21),
+                        content_rect: Some(build_cell_rect(37, 1, 34, 19)),
+                        is_visible: true,
+                        is_suppressed: false,
+                    },
+                ],
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                is_every_pane_suppressed: false,
+                gap_cell_count: 0,
+            },
         }]
     );
     assert_eq!(
@@ -1764,7 +1835,7 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
     );
     assert_eq!(
         list_snapshot_pane_ids(&render_snapshot),
-        [tiled_pane_id, logs_pane_id]
+        [tiled_pane_id, htop_pane_id, logs_pane_id]
     );
 
     assert!(server
@@ -1779,6 +1850,7 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
         [FloatingPane::Minimized {
             pane_id: logs_pane_id,
             pane_title: None,
+            pane_count: NonZeroUsize::new(2).expect("2 is above 0"),
         }]
     );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
@@ -1817,6 +1889,7 @@ fn floating_panes_list_every_floating_pane_in_the_order_it_was_created() {
             FloatingPane::Minimized {
                 pane_id: second_pane_id,
                 pane_title: None,
+                pane_count: NonZeroUsize::MIN,
             },
             FloatingPane::Shown {
                 pane_id: third_pane_id,
@@ -1858,6 +1931,7 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
         [FloatingPane::Minimized {
             pane_id: htop_pane_id,
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         }]
     );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
@@ -1896,6 +1970,7 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
         [FloatingPane::Minimized {
             pane_id: htop_pane_id,
             pane_title: Some("htop".to_string()),
+            pane_count: NonZeroUsize::MIN,
         }]
     );
 }
@@ -1923,6 +1998,7 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
         [FloatingPane::Minimized {
             pane_id: htop_pane_id,
             pane_title: None,
+            pane_count: NonZeroUsize::MIN,
         }]
     );
 }
@@ -2110,6 +2186,13 @@ fn a_pinned_floating_pane_is_marked_pinned_at_its_pinned_cell() {
                 },
             ),
             is_pinned: true,
+            layout_area: build_one_pane_layout_area(
+                htop_pane_id,
+                Size {
+                    column_count: 20,
+                    row_count: 6,
+                },
+            ),
         }]
     );
 }

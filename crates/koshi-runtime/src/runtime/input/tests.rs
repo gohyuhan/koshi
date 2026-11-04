@@ -1052,6 +1052,7 @@ fn fullscreen_binding_toggles_the_layout_mode() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .layout_mode,
         koshi_layout::mode::LayoutMode::Fullscreen {
             focused_pane_id: get_focused_pane_id(&server, client_id)
@@ -1069,6 +1070,7 @@ fn fullscreen_binding_toggles_the_layout_mode() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .layout_mode,
         koshi_layout::mode::LayoutMode::Tiled
     );
@@ -1589,6 +1591,7 @@ fn a_key_writes_nothing_when_the_focused_pane_is_suppressed() {
             .expect("snapshot")
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed,
         "test setup: the sole pane must be suppressed at this size"
     );
@@ -1696,7 +1699,7 @@ fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_dra
 
     // A second 80x24 terminal keeps an 80x22 floating viewport for the
     // session. The first client's 3x3 terminal gives a 3x1 pane area, below
-    // the 4x5 floating minimum.
+    // the 4x4 floating minimum.
     attach_second_client(&mut server, client_id, Some(tiled_pane_id));
     server.handle_client_resize(
         client_id,
@@ -2664,6 +2667,7 @@ fn a_host_paste_writes_nothing_when_the_focused_pane_is_suppressed() {
             .expect("snapshot")
             .session_snapshot
             .active_tab_snapshot
+            .layout_area
             .is_every_pane_suppressed,
         "test setup: the sole pane must be suppressed at this size"
     );

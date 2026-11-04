@@ -25,18 +25,20 @@ fn build_test_tab_snapshot(tab_id: TabId, pane_id: PaneId) -> PanePlacementTabSn
         tab_snapshot: FrameTab {
             tab_id,
             tab_name: "main".to_string(),
-            pane_slots: vec![FrameSlot {
-                pane_id,
-                outer_rect: Rect::from_size_at_origin(TEST_TAB_SIZE),
-                content_rect: Some(Rect::from_size_at_origin(TEST_TAB_SIZE)),
-                is_visible: true,
-                is_suppressed: false,
-            }],
-            tab_size: TEST_TAB_SIZE,
-            stack_headers: Vec::new(),
-            layout_mode: LayoutMode::Tiled,
-            is_every_pane_suppressed: false,
-            gap_cell_count: 0,
+            layout_area: FrameLayoutArea {
+                solved_size: TEST_TAB_SIZE,
+                pane_slots: vec![FrameSlot {
+                    pane_id,
+                    outer_rect: Rect::from_size_at_origin(TEST_TAB_SIZE),
+                    content_rect: Some(Rect::from_size_at_origin(TEST_TAB_SIZE)),
+                    is_visible: true,
+                    is_suppressed: false,
+                }],
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                is_every_pane_suppressed: false,
+                gap_cell_count: 0,
+            },
         },
     }
 }
@@ -134,9 +136,10 @@ fn snapshot_rejects_a_destination_snapshot_that_names_another_tab() {
 fn snapshot_rejects_duplicate_pane_slots() {
     let mut placement_snapshot = build_test_snapshot();
     let source_tab_snapshot = get_source_tab_snapshot_mut(&mut placement_snapshot);
-    let duplicate_pane_slot = source_tab_snapshot.tab_snapshot.pane_slots[0].clone();
+    let duplicate_pane_slot = source_tab_snapshot.tab_snapshot.layout_area.pane_slots[0].clone();
     source_tab_snapshot
         .tab_snapshot
+        .layout_area
         .pane_slots
         .push(duplicate_pane_slot);
 
@@ -175,12 +178,14 @@ fn snapshot_rejects_a_zoomed_tab_or_a_gap_other_than_the_sizing_gap() {
     let source_pane_id = zoomed_snapshot.source_pane_id;
     get_source_tab_snapshot_mut(&mut zoomed_snapshot)
         .tab_snapshot
+        .layout_area
         .layout_mode = LayoutMode::Fullscreen {
         focused_pane_id: source_pane_id,
     };
     let mut gap_snapshot = build_test_snapshot();
     get_source_tab_snapshot_mut(&mut gap_snapshot)
         .tab_snapshot
+        .layout_area
         .gap_cell_count = 1;
 
     assert_eq!(
@@ -221,6 +226,7 @@ fn snapshot_rejects_a_slot_outside_the_tab_or_with_flags_that_disagree() {
     let mut outside_snapshot = build_test_snapshot();
     get_source_tab_snapshot_mut(&mut outside_snapshot)
         .tab_snapshot
+        .layout_area
         .pane_slots[0]
         .outer_rect = Rect::from_size_at_origin(Size {
         column_count: 81,
@@ -229,11 +235,13 @@ fn snapshot_rejects_a_slot_outside_the_tab_or_with_flags_that_disagree() {
     let mut hidden_content_snapshot = build_test_snapshot();
     get_source_tab_snapshot_mut(&mut hidden_content_snapshot)
         .tab_snapshot
+        .layout_area
         .pane_slots[0]
         .is_visible = false;
     let mut suppressed_snapshot = build_test_snapshot();
     get_source_tab_snapshot_mut(&mut suppressed_snapshot)
         .tab_snapshot
+        .layout_area
         .pane_slots[0]
         .is_suppressed = true;
 
@@ -252,6 +260,7 @@ fn snapshot_rejects_a_stack_header_for_a_pane_outside_the_tree() {
     let mut placement_snapshot = build_test_snapshot();
     get_source_tab_snapshot_mut(&mut placement_snapshot)
         .tab_snapshot
+        .layout_area
         .stack_headers
         .push(StackHeader {
             pane_id: PaneId::new(),
@@ -309,6 +318,7 @@ fn snapshot_rejects_swap_tab_sizes_within_one_tab_or_for_a_floating_source() {
         .as_ref()
         .expect("the floating source previews a destination tab")
         .tab_snapshot
+        .layout_area
         .pane_slots[0]
         .pane_id;
     floating_source_snapshot.swap_tab_sizes = vec![SwapTabSizes {
@@ -354,6 +364,7 @@ fn a_floating_source_that_the_destination_tab_holds_is_refused() {
         .as_ref()
         .expect("the destination tab is carried")
         .tab_snapshot
+        .layout_area
         .pane_slots[0]
         .pane_id;
 

@@ -38,17 +38,19 @@ use std::sync::Arc;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::frame::{
     FrameFloatingPane, FrameGraphicsProtocol, FrameImageAction, FrameImageDimension,
-    FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane,
-    FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
-    MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
+    FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer,
+    FrameLayoutArea, FramePane, FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata,
+    MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT,
+    MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::placement::{PanePlacementPreview, PanePlacementSource, PanePlacementTabSnapshot};
 use koshi_layout::solver::PaneSizing;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, FloatingPane, FloatingPaneSlot, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
-    PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, FloatingPane, FloatingPaneSlot, ImagePlacementSnapshot, LayoutAreaSnapshot,
+    PaneSlot, PaneSnapshot, PlacementPreview, PlacementSnapshot, PlacementSource,
+    PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_runtime::runtime::painted_update::{ReceivedPaintedFrame, ReceivedPaneView};
 use koshi_terminal::graphics::{
@@ -106,6 +108,7 @@ fn build_render_snapshot_with_images(
                     pane_id: frame_floating_pane_slot.pane_id,
                     outer_rect: frame_floating_pane_slot.outer_rect,
                     is_pinned: frame_floating_pane_slot.is_pinned,
+                    layout_area: build_layout_area_snapshot(&frame_floating_pane_slot.layout_area),
                 })
                 .collect(),
             floating_panes: painted_frame
@@ -119,9 +122,11 @@ fn build_render_snapshot_with_images(
                     FrameFloatingPane::Minimized {
                         pane_id,
                         pane_title,
+                        pane_count,
                     } => FloatingPane::Minimized {
                         pane_id: *pane_id,
                         pane_title: pane_title.as_deref().map(sanitize_reported_text),
+                        pane_count: *pane_count,
                     },
                 })
                 .collect(),
@@ -162,12 +167,23 @@ fn build_tab_snapshot(frame_tab: &FrameTab) -> TabSnapshot {
     TabSnapshot {
         tab_id: frame_tab.tab_id,
         tab_name: sanitize_reported_text(&frame_tab.tab_name),
-        pane_slots: frame_tab.pane_slots.iter().map(build_pane_slot).collect(),
-        tab_size: frame_tab.tab_size,
-        stack_headers: frame_tab.stack_headers.clone(),
-        layout_mode: frame_tab.layout_mode,
-        is_every_pane_suppressed: frame_tab.is_every_pane_suppressed,
-        gap_cell_count: frame_tab.gap_cell_count,
+        layout_area: build_layout_area_snapshot(&frame_tab.layout_area),
+    }
+}
+
+/// One solved tree of a tab or of a floating pane, as the renderer reads it.
+fn build_layout_area_snapshot(frame_layout_area: &FrameLayoutArea) -> LayoutAreaSnapshot {
+    LayoutAreaSnapshot {
+        solved_size: frame_layout_area.solved_size,
+        pane_slots: frame_layout_area
+            .pane_slots
+            .iter()
+            .map(build_pane_slot)
+            .collect(),
+        stack_headers: frame_layout_area.stack_headers.clone(),
+        layout_mode: frame_layout_area.layout_mode,
+        is_every_pane_suppressed: frame_layout_area.is_every_pane_suppressed,
+        gap_cell_count: frame_layout_area.gap_cell_count,
     }
 }
 

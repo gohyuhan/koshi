@@ -465,13 +465,16 @@ struct FloatingPaneSlideAnimation {
 
 /// The viewer-owned slide of a floating pane that this viewer minimized, from
 /// the box it was last drawn in to its tray tile or the cell under the tray
-/// button. The slide draws the pane's last drawn content without its images.
+/// button. The slide draws the last drawn content of the floating pane's
+/// panes without their images.
 #[derive(Debug)]
 struct FloatingPaneMinimizeAnimation {
-    /// The pane's content as last drawn, with no image placement.
-    pane_snapshot: PaneSnapshot,
-    /// Whether this viewer pinned the pane.
-    is_pinned: bool,
+    /// The content of each pane of the floating pane that the last frame
+    /// carried, as last drawn, with no image placement.
+    pane_snapshots: Vec<PaneSnapshot>,
+    /// The floating pane's slot as last drawn: its input pane, its pin state
+    /// and its layout area.
+    floating_pane_slot: FloatingPaneSlot,
     /// The box the pane was last drawn in, counted from the pane-area origin.
     from_outer_rect: CoreRect,
     /// The pane's tray tile or the cell under the tray button, counted from
@@ -515,10 +518,10 @@ fn can_slide_between_tab_snapshots(
     to_tab_snapshot: &TabSnapshot,
 ) -> bool {
     from_tab_snapshot.tab_id == to_tab_snapshot.tab_id
-        && from_tab_snapshot.tab_size == to_tab_snapshot.tab_size
-        && from_tab_snapshot.layout_mode == to_tab_snapshot.layout_mode
-        && !from_tab_snapshot.is_every_pane_suppressed
-        && !to_tab_snapshot.is_every_pane_suppressed
+        && from_tab_snapshot.layout_area.solved_size == to_tab_snapshot.layout_area.solved_size
+        && from_tab_snapshot.layout_area.layout_mode == to_tab_snapshot.layout_area.layout_mode
+        && !from_tab_snapshot.layout_area.is_every_pane_suppressed
+        && !to_tab_snapshot.layout_area.is_every_pane_suppressed
 }
 
 impl ViewerPaint {
@@ -631,6 +634,7 @@ fn build_pane_placement_presentation(
                                 .map(|destination_tab_snapshot| {
                                     destination_tab_snapshot
                                         .tab_snapshot
+                                        .layout_area
                                         .pane_slots
                                         .iter()
                                         .map(|pane_slot| pane_slot.pane_id)
@@ -1423,7 +1427,8 @@ impl<B: Backend> Screen<B> {
             .filter(|shown_tab_snapshot| {
                 committed_placement_tab_ids.contains(&committed_tab_snapshot.tab_id)
                     && can_slide_between_tab_snapshots(shown_tab_snapshot, committed_tab_snapshot)
-                    && shown_tab_snapshot.pane_slots != committed_tab_snapshot.pane_slots
+                    && shown_tab_snapshot.layout_area.pane_slots
+                        != committed_tab_snapshot.layout_area.pane_slots
             });
         if let Some(shown_tab_snapshot) = shown_tab_snapshot {
             self.committed_placement_animation = Some(CommittedPlacementAnimation {
@@ -1526,10 +1531,12 @@ impl<B: Backend> Screen<B> {
             if !was_minimized || self.is_floating_pane_sliding(pane_id) {
                 continue;
             }
-            let minimize_animation_index = self
-                .floating_pane_minimize_animations
-                .iter()
-                .position(|minimize_animation| minimize_animation.pane_snapshot.pane_id == pane_id);
+            let minimize_animation_index =
+                self.floating_pane_minimize_animations
+                    .iter()
+                    .position(|minimize_animation| {
+                        minimize_animation.floating_pane_slot.pane_id == pane_id
+                    });
             let from_outer_rect = match minimize_animation_index {
                 Some(minimize_animation_index) => self
                     .floating_pane_minimize_animations
@@ -1554,13 +1561,14 @@ impl<B: Backend> Screen<B> {
 
     /// Start one minimize slide at `current_time` for each floating pane that
     /// the frame this screen drew last drew, and the pending frame names
-    /// minimized. The slide runs from the box the last paint drew the pane in
-    /// to its box in `floating_pane_tray_anchor`
+    /// minimized. The slide runs from the box the last paint drew the floating
+    /// pane in to its box in `floating_pane_tray_anchor`
     /// ([`FloatingPaneTrayAnchor::find_anchor_rect`]), and draws the last
-    /// frame's content of the pane with no image placement. The pane's slide
-    /// after an undock or a restore ends. A pane with no such box or no
-    /// content in the last frame starts no slide, and a pane whose minimize
-    /// slide runs keeps it.
+    /// frame's slot and the last frame's content of its panes with no image
+    /// placement. The floating pane's slide after an undock or a restore ends.
+    /// A floating pane with no such box, or with no content of any of its
+    /// panes in the last frame, starts no slide, and one whose minimize slide
+    /// runs keeps it.
     ///
     /// With the tray closed and its glyph `⧉` at `(72, 0)` over a pane area at
     /// `(0, 1)`, a pane drawn at `(16, 4)` `48x13` slides to `(72, 0)` `1x1`.
@@ -1579,26 +1587,39 @@ impl<B: Backend> Screen<B> {
         let last_frame_layout = last_snapshot
             .build_painted_frame_layout(shown_viewer_paint.chrome, &self.committed_regions);
         for drawn_floating_pane_slot in last_frame_layout.list_drawn_floating_pane_slots() {
-            let pane_id = drawn_floating_pane_slot.pane_id;
+            let pane_id = drawn_floating_pane_slot.floating_pane_slot.pane_id;
             let is_minimized = pending_snapshot
                 .session_snapshot
                 .is_floating_pane_minimized(pane_id);
             let is_minimize_sliding = self
                 .floating_pane_minimize_animations
                 .iter()
-                .any(|minimize_animation| minimize_animation.pane_snapshot.pane_id == pane_id);
+                .any(|minimize_animation| minimize_animation.floating_pane_slot.pane_id == pane_id);
             if !is_minimized || is_minimize_sliding {
                 continue;
             }
-            let (Some(pane_snapshot), Some(to_outer_rect)) = (
-                last_snapshot.find_pane_snapshot(pane_id),
+            let Some(to_outer_rect) =
                 floating_pane_tray_anchor.and_then(|floating_pane_tray_anchor| {
                     floating_pane_tray_anchor
                         .find_anchor_rect(&pending_snapshot.session_snapshot, pane_id)
-                }),
-            ) else {
+                })
+            else {
                 continue;
             };
+            let floating_pane_slot = drawn_floating_pane_slot.floating_pane_slot;
+            let pane_snapshots: Vec<PaneSnapshot> = floating_pane_slot
+                .layout_area
+                .pane_slots
+                .iter()
+                .filter_map(|pane_slot| last_snapshot.find_pane_snapshot(pane_slot.pane_id))
+                .map(|pane_snapshot| PaneSnapshot {
+                    image_placement_snapshots: Vec::new(),
+                    ..pane_snapshot.clone()
+                })
+                .collect();
+            if pane_snapshots.is_empty() {
+                continue;
+            }
             let from_outer_rect = self
                 .shown_animated_floating_pane_slots
                 .iter()
@@ -1613,11 +1634,8 @@ impl<B: Backend> Screen<B> {
                 });
             self.floating_pane_minimize_animations
                 .push(FloatingPaneMinimizeAnimation {
-                    pane_snapshot: PaneSnapshot {
-                        image_placement_snapshots: Vec::new(),
-                        ..pane_snapshot.clone()
-                    },
-                    is_pinned: drawn_floating_pane_slot.is_pinned,
+                    pane_snapshots,
+                    floating_pane_slot: floating_pane_slot.clone(),
                     from_outer_rect,
                     to_outer_rect,
                     started_at: current_time,
@@ -1637,7 +1655,9 @@ impl<B: Backend> Screen<B> {
     /// its start box and the frame's floating box. A minimize slide also ends
     /// when the frame names its pane as no minimized floating pane, and draws
     /// its pane between the box it was drawn in and its tray anchor
-    /// ([`FloatingPaneMinimizeAnimation::compute_outer_rect`]).
+    /// ([`FloatingPaneMinimizeAnimation::compute_outer_rect`]). Each slide
+    /// draws its floating pane's layout area scaled to the box it draws at
+    /// ([`FloatingPaneSlot::build_resized_slot`]).
     ///
     /// A pane drawn at `(0, 0)` `40x22` that floats to `(16, 4)` `48x13` draws
     /// at `(8, 2)` `44x17` at progress `0.5`.
@@ -1678,19 +1698,18 @@ impl<B: Backend> Screen<B> {
                     Some(floating_pane_slot) if progress < 1.0 => floating_pane_slot,
                     _ => return false,
                 };
-                animated_floating_pane_slots.push(FloatingPaneSlot {
-                    outer_rect: terminal::interpolate_rect(
+                animated_floating_pane_slots.push(floating_pane_slot.build_resized_slot(
+                    terminal::interpolate_rect(
                         floating_pane_slide_animation.from_outer_rect,
                         floating_pane_slot.outer_rect,
                         progress,
                     ),
-                    ..*floating_pane_slot
-                });
+                ));
                 true
             });
         self.floating_pane_minimize_animations
             .retain(|minimize_animation| {
-                let pane_id = minimize_animation.pane_snapshot.pane_id;
+                let pane_id = minimize_animation.floating_pane_slot.pane_id;
                 let is_minimized = session_snapshot.is_floating_pane_minimized(pane_id);
                 let progress = compute_placement_animation_progress(
                     minimize_animation.started_at,
@@ -1699,11 +1718,11 @@ impl<B: Backend> Screen<B> {
                 if !is_minimized || progress >= 1.0 {
                     return false;
                 }
-                animated_floating_pane_slots.push(FloatingPaneSlot {
-                    pane_id,
-                    outer_rect: minimize_animation.compute_outer_rect(current_time),
-                    is_pinned: minimize_animation.is_pinned,
-                });
+                animated_floating_pane_slots.push(
+                    minimize_animation
+                        .floating_pane_slot
+                        .build_resized_slot(minimize_animation.compute_outer_rect(current_time)),
+                );
                 true
             });
         animated_floating_pane_slots
@@ -1844,8 +1863,8 @@ impl<B: Backend> Screen<B> {
 ///   `animated_floating_pane_slots`, `snapshot` with that slide frame, if any,
 ///   as its active tab, and with `animated_floating_pane_slots`
 ///   ([`terminal::build_committed_placement_render_snapshot`]). The content
-///   of each pane that `floating_pane_minimize_animations` slides joins its
-///   pane snapshots;
+///   of each pane of each floating pane that `floating_pane_minimize_animations`
+///   slides joins its pane snapshots;
 /// - else `None`, and `snapshot` is painted as it is.
 fn build_displayed_render_snapshot(
     snapshot: &RenderSnapshot,
@@ -1874,7 +1893,7 @@ fn build_displayed_render_snapshot(
     committed_placement_render_snapshot.pane_snapshots.extend(
         floating_pane_minimize_animations
             .iter()
-            .map(|minimize_animation| minimize_animation.pane_snapshot.clone()),
+            .flat_map(|minimize_animation| minimize_animation.pane_snapshots.iter().cloned()),
     );
     Some(committed_placement_render_snapshot)
 }

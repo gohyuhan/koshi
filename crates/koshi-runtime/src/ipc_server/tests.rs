@@ -30,8 +30,8 @@ use koshi_ipc::protocol::{
 use koshi_ipc::transport::ReceivedFrame;
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SessionSnapshot, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, LayoutAreaSnapshot,
+    PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedAnimation, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
@@ -202,12 +202,14 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: String::from("tab"),
-                pane_slots: Vec::new(),
-                tab_size: CLIENT_VIEWPORT_SIZE,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: CLIENT_VIEWPORT_SIZE,
+                    pane_slots: Vec::new(),
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),

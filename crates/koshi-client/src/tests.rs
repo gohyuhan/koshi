@@ -8,6 +8,7 @@
 //! frame carries.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use koshi_config::types::{
 };
 use koshi_core::action::ActionReference;
 use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
+use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
@@ -29,9 +31,9 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    list_pane_slots, ClientSnapshot, CommittedRegions, FloatingPane, PaneSlot, PlacementPreview,
-    PlacementSnapshot, PlacementSource, PlacementTabSnapshot, Reconnecting, RenderSnapshot,
-    SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, FloatingPane, FloatingPaneSlot, LayoutAreaSnapshot, PaneSlot,
+    PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot, Reconnecting,
+    RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 
 use super::*;
@@ -82,6 +84,41 @@ pub(crate) fn create_session_with_attached_client(
     client_id
 }
 
+/// The slot of a floating pane at `outer_rect` that holds `pane_id` alone,
+/// with `is_pinned`: the pane solved tiled over the rows below the strip, with
+/// the default pane sizing and no gap. A `40x12` outer rect gives one pane box
+/// `(0, 0)` `40x11` with content `(1, 1)` `38x9`.
+pub(crate) fn build_one_pane_floating_pane_slot(
+    pane_id: PaneId,
+    outer_rect: Rect,
+    is_pinned: bool,
+) -> FloatingPaneSlot {
+    let layout_size = Size {
+        column_count: outer_rect.size.column_count,
+        row_count: outer_rect
+            .size
+            .row_count
+            .saturating_sub(FLOATING_TITLEBAR_STRIP_ROW_COUNT),
+    };
+    let layout_solve = solve_layout_with_mode(
+        &LayoutNode::Pane(pane_id),
+        LayoutMode::Tiled,
+        Rect::from_size_at_origin(layout_size),
+        PaneSizing::default(),
+    );
+    FloatingPaneSlot {
+        pane_id,
+        outer_rect,
+        is_pinned,
+        layout_area: LayoutAreaSnapshot::from_layout_solve(
+            &layout_solve,
+            layout_size,
+            LayoutMode::Tiled,
+            0,
+        ),
+    }
+}
+
 /// A destination tab size that no placement into a tab of two panes fits:
 /// `4x2`.
 pub(crate) const NO_ROOM_TAB_SIZE: Size = Size {
@@ -122,18 +159,20 @@ fn build_one_pane_placement_tab_snapshot(
         tab_snapshot: TabSnapshot {
             tab_id,
             tab_name: tab_name.to_owned(),
-            pane_slots: vec![PaneSlot {
-                pane_id,
-                outer_rect: tab_rect,
-                content_rect: Some(tab_rect),
-                is_visible: true,
-                is_suppressed: false,
-            }],
-            tab_size: TEST_VIEWPORT_SIZE,
-            stack_headers: Vec::new(),
-            layout_mode: LayoutMode::Tiled,
-            is_every_pane_suppressed: false,
-            gap_cell_count: 0,
+            layout_area: LayoutAreaSnapshot {
+                solved_size: TEST_VIEWPORT_SIZE,
+                pane_slots: vec![PaneSlot {
+                    pane_id,
+                    outer_rect: tab_rect,
+                    content_rect: Some(tab_rect),
+                    is_visible: true,
+                    is_suppressed: false,
+                }],
+                stack_headers: Vec::new(),
+                layout_mode: LayoutMode::Tiled,
+                is_every_pane_suppressed: false,
+                gap_cell_count: 0,
+            },
         },
     }
 }
@@ -185,7 +224,7 @@ pub(crate) fn build_test_placement_snapshot(
 
 /// A same-tab placement preview of `layout_tree` for moving `source_pane_id`,
 /// with every slot and stack header where the tiled solve over the test
-/// viewport puts it ([`list_pane_slots`]). A collapsed stack member's slot is
+/// viewport puts it ([`LayoutAreaSnapshot::from_layout_solve`]). A collapsed stack member's slot is
 /// its header strip and is not visible.
 pub(crate) fn build_solved_placement_snapshot(
     source_pane_id: PaneId,
@@ -201,9 +240,15 @@ pub(crate) fn build_solved_placement_snapshot(
         Rect::from_size_at_origin(TEST_VIEWPORT_SIZE),
         placement_snapshot.pane_sizing,
     );
+    let layout_area = LayoutAreaSnapshot::from_layout_solve(
+        &layout_solve,
+        TEST_VIEWPORT_SIZE,
+        LayoutMode::Tiled,
+        0,
+    );
     let source_tab_snapshot = get_source_tab_snapshot_mut(&mut placement_snapshot);
-    source_tab_snapshot.tab_snapshot.pane_slots = list_pane_slots(&layout_solve);
-    source_tab_snapshot.tab_snapshot.stack_headers = layout_solve.stack_headers;
+    source_tab_snapshot.tab_snapshot.layout_area.pane_slots = layout_area.pane_slots;
+    source_tab_snapshot.tab_snapshot.layout_area.stack_headers = layout_area.stack_headers;
     source_tab_snapshot.layout_tree = layout_tree;
     placement_snapshot
 }
@@ -1468,12 +1513,14 @@ fn build_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id: active_tab_id,
                 tab_name: String::from("tab"),
-                pane_slots: Vec::new(),
-                tab_size: TEST_VIEWPORT_SIZE,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: TEST_VIEWPORT_SIZE,
+                    pane_slots: Vec::new(),
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),
@@ -2284,6 +2331,7 @@ fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
     render_snapshot.session_snapshot.floating_panes = vec![FloatingPane::Minimized {
         pane_id: floating_slot_pane_id,
         pane_title: None,
+        pane_count: NonZeroUsize::MIN,
     }];
     for (focused_pane_id, expected_is_focused_pane_floating) in [
         (Some(floating_slot_pane_id), true),

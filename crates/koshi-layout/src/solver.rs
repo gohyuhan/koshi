@@ -250,16 +250,19 @@ pub fn is_layout_within_rect(
     compute_minimum_size(layout_tree, pane_sizing).can_fit_inside(layout_rect.size)
 }
 
-/// `content_minimum_size` plus one border cell per side on each axis. A 2 by
-/// 1 content minimum is 4 by 3, and a 65534 by 1 one is 65536 by 3.
-fn compute_border_inclusive_minimum(content_minimum_size: Size) -> RequiredSize {
-    RequiredSize::from_size_sum(
-        content_minimum_size,
-        Size {
-            column_count: 2,
-            row_count: 2,
-        },
-    )
+/// The cells a pane's border takes from its box: one column on each side and
+/// one row on each side. A `20x6` box holds `18x4` cells of content.
+pub const PANE_BORDER_SIZE: Size = Size {
+    column_count: 2,
+    row_count: 2,
+};
+
+/// `content_minimum_size` plus [`PANE_BORDER_SIZE`]: the smallest box of one
+/// leaf pane whose content is `content_minimum_size`. A 2 by 1 content
+/// minimum is 4 by 3, and a 65534 by 1 one is 65536 by 3.
+#[must_use]
+pub fn compute_border_inclusive_minimum(content_minimum_size: Size) -> RequiredSize {
+    RequiredSize::from_size_sum(content_minimum_size, PANE_BORDER_SIZE)
 }
 
 /// The smallest rectangle this subtree can be solved into.

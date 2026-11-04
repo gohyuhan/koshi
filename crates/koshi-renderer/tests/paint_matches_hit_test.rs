@@ -12,6 +12,7 @@
 //! unclassified cell carries the letterbox backdrop.
 
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::time::SystemTime;
 
 use ratatui::buffer::Buffer;
@@ -28,17 +29,18 @@ use koshi_core::notification::{
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
-use koshi_layout::solver::StackHeader;
+use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing, StackHeader};
+use koshi_layout::tree::LayoutNode;
 use koshi_renderer::notification::{
     NotificationCenterEntries, NotificationCenterEntry, NotificationToastContent,
     NotificationToastView, NotificationView, ToastTextRowCache,
 };
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, DrawnNotifications, FloatingPane,
-    FloatingPaneMoveDraft, FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints, MouseFrame,
-    NotificationButton, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot,
-    PlacementHandleHover, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
-    TabSnapshot, ViewerChrome,
+    FloatingPaneMoveDraft, FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints,
+    LayoutAreaSnapshot, MouseFrame, NotificationButton, NotificationCenter, NotificationToast,
+    PaneSlot, PaneSnapshot, PlacementHandleHover, RenderSnapshot, ScrollbackMetadata,
+    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
@@ -77,6 +79,33 @@ fn build_pane_slot(pane_id: PaneId, outer_rect: Rect) -> PaneSlot {
         content_rect: Some(outer_rect.compute_inner_with_border()),
         is_visible: true,
         is_suppressed: false,
+    }
+}
+
+/// The slot of a floating pane at `outer_rect`, unpinned, that holds
+/// `pane_id` alone: its tree solved by the tiled solver over the rows below
+/// the strip, with the default pane sizing. A `24x8` outer rect gives one pane
+/// box `(0, 0)` `24x7` with content `(1, 1)` `22x5`.
+fn build_one_pane_floating_pane_slot(pane_id: PaneId, outer_rect: Rect) -> FloatingPaneSlot {
+    let layout_size = Size {
+        column_count: outer_rect.size.column_count,
+        row_count: outer_rect.size.row_count - 1,
+    };
+    let layout_solve = solve_layout_with_sizing(
+        &LayoutNode::Pane(pane_id),
+        Rect::from_size_at_origin(layout_size),
+        PaneSizing::default(),
+    );
+    FloatingPaneSlot {
+        pane_id,
+        outer_rect,
+        is_pinned: false,
+        layout_area: LayoutAreaSnapshot::from_layout_solve(
+            &layout_solve,
+            layout_size,
+            LayoutMode::Tiled,
+            0,
+        ),
     }
 }
 
@@ -154,12 +183,14 @@ fn build_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: TAB_NAMES[0].to_string(),
-                pane_slots,
-                tab_size: effective_layout_size,
-                stack_headers,
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: effective_layout_size,
+                    pane_slots,
+                    stack_headers,
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata,
             floating_pane_slots: Vec::new(),
@@ -539,14 +570,13 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: floating_outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            floating_outer_rect,
+        ));
     let mut floating_pane_snapshot = build_pane_snapshot(
         floating_slot_pane_id,
-        Some(build_filled_grid(22, 4, 'f')),
+        Some(build_filled_grid(22, 5, 'f')),
         0,
         0,
     );
@@ -567,7 +597,7 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
     let frame_layout = mouse_frame.build_frame_layout();
     let floating_content_rect = find_pane_content_rect(frame_layout, floating_slot_pane_id)
         .unwrap_or_else(|| panic!("the floating pane has no content rect"));
-    assert_eq!(floating_content_rect, build_cell_rect(2, 4, 22, 4));
+    assert_eq!(floating_content_rect, build_cell_rect(2, 3, 22, 5));
 
     let mut region_cell_counts = [0_u32; 7];
     for row_index in 1..9 {
@@ -586,13 +616,14 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
                         );
                         (0, pane_id, &["f"])
                     }
-                    HitRegion::PaneBorder { pane_id, .. } => {
-                        (1, pane_id, &["┌", "┐", "└", "┘", "─", "│", "├", "┤"])
-                    }
+                    HitRegion::PaneBorder {
+                        pane_id,
+                        side: Direction::Up,
+                        ..
+                    } => (1, pane_id, &["┌", "┐", "─", " ", "h", "t", "o", "p"]),
+                    HitRegion::PaneBorder { pane_id, .. } => (1, pane_id, &BORDER_GLYPHS),
                     HitRegion::PlacementHandle { pane_id } => (2, pane_id, &["⣿"]),
-                    HitRegion::PaneTitlebar { pane_id } => {
-                        (3, pane_id, &[" ", "h", "t", "o", "p", "─"])
-                    }
+                    HitRegion::PaneTitlebar { pane_id } => (3, pane_id, &[" "]),
                     HitRegion::PanePinToggle { pane_id } => (4, pane_id, &["[", " ", "]"]),
                     HitRegion::PaneMinimizeButton { pane_id } => (5, pane_id, &["–"]),
                     HitRegion::PaneCloseButton { pane_id } => (6, pane_id, &["✕"]),
@@ -614,9 +645,10 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
         }
     }
 
-    // Content 22x4; ring 2x24 + 2x6; handle 2; titlebar 14 + separator 22;
-    // pin 4; minimize 1; close 1. 24x8 = 192 cells.
-    assert_eq!(region_cell_counts, [88, 60, 2, 36, 4, 1, 1]);
+    // Content 22x5; ring 2x24 + 2x5 with the label ` htop ` on the top
+    // border; handle 2; strip cells with no control 16; pin 4; minimize 1;
+    // close 1. 24x8 = 192 cells.
+    assert_eq!(region_cell_counts, [110, 58, 2, 16, 4, 1, 1]);
     // The cell right of the float is the left tiled pane again.
     assert_eq!(
         resolve_hit_region(frame_layout, Point { column: 25, row: 5 }),
@@ -635,13 +667,12 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: htop_pane_id,
-            outer_rect: build_cell_rect(1, 0, 24, 8),
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            htop_pane_id,
+            build_cell_rect(1, 0, 24, 8),
+        ));
     let mut htop_pane_snapshot =
-        build_pane_snapshot(htop_pane_id, Some(build_filled_grid(22, 4, 'f')), 0, 0);
+        build_pane_snapshot(htop_pane_id, Some(build_filled_grid(22, 5, 'f')), 0, 0);
     htop_pane_snapshot.pane_title = Some("htop".to_string());
     render_snapshot.pane_snapshots.push(htop_pane_snapshot);
     render_snapshot.session_snapshot.floating_panes = vec![
@@ -651,6 +682,7 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
         FloatingPane::Minimized {
             pane_id: PaneId::new(),
             pane_title: Some("logs".to_string()),
+            pane_count: NonZeroUsize::MIN,
         },
     ];
     let viewer_chrome = ViewerChrome {
@@ -931,14 +963,13 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id: floating_slot_pane_id,
-            outer_rect: build_cell_rect(1, 0, 24, 8),
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            floating_slot_pane_id,
+            build_cell_rect(1, 0, 24, 8),
+        ));
     render_snapshot.pane_snapshots.push(build_pane_snapshot(
         floating_slot_pane_id,
-        Some(build_filled_grid(22, 4, 'f')),
+        Some(build_filled_grid(22, 5, 'f')),
         0,
         0,
     ));
@@ -960,11 +991,12 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
     let frame_layout = mouse_frame.build_frame_layout();
 
     // The 24x8 pane in the 60x12 pane area, which starts at screen row 1,
-    // draws with its top-left cell at pane-area (36, 4).
+    // draws with its top-left cell at pane-area (36, 4), its strip on screen
+    // row 5 and its pane box below it.
     let floating_content_rect = find_pane_content_rect(frame_layout, floating_slot_pane_id)
         .unwrap_or_else(|| panic!("the floating pane has no content rect"));
-    assert_eq!(floating_content_rect, build_cell_rect(37, 8, 22, 4));
-    for row_index in 8..12 {
+    assert_eq!(floating_content_rect, build_cell_rect(37, 7, 22, 5));
+    for row_index in 7..12 {
         for column_index in 37..59 {
             let screen_point = Point {
                 column: column_index,

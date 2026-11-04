@@ -6,6 +6,8 @@
 //! frame that has no room for the tray.
 
 use super::*;
+use crate::render::tests::build_one_pane_floating_pane_slot;
+use std::num::NonZeroUsize;
 
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -13,7 +15,7 @@ use koshi_layout::mode::LayoutMode;
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, FloatingPane, FloatingPaneSlot, FloatingPaneTray, PaneSlot,
+    ClientSnapshot, CommittedRegions, FloatingPane, FloatingPaneTray, LayoutAreaSnapshot, PaneSlot,
     PaneSnapshot, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 
@@ -39,18 +41,20 @@ pub(crate) fn build_tray_test_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: "t".to_string(),
-                pane_slots: vec![PaneSlot {
-                    pane_id: tiled_pane_id,
-                    outer_rect: tiled_outer_rect,
-                    content_rect: Some(tiled_outer_rect.compute_inner_with_border()),
-                    is_visible: true,
-                    is_suppressed: false,
-                }],
-                tab_size,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed: false,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: tab_size,
+                    pane_slots: vec![PaneSlot {
+                        pane_id: tiled_pane_id,
+                        outer_rect: tiled_outer_rect,
+                        content_rect: Some(tiled_outer_rect.compute_inner_with_border()),
+                        is_visible: true,
+                        is_suppressed: false,
+                    }],
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed: false,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata: vec![TabMetadata {
                 tab_id,
@@ -64,6 +68,7 @@ pub(crate) fn build_tray_test_render_snapshot(
                 .map(|floating_pane_title| FloatingPane::Minimized {
                     pane_id: PaneId::new(),
                     pane_title: Some(floating_pane_title.to_string()),
+                    pane_count: NonZeroUsize::MIN,
                 })
                 .collect(),
         },
@@ -97,6 +102,7 @@ pub(crate) fn show_tray_test_floating_pane(
     let FloatingPane::Minimized {
         pane_id,
         pane_title,
+        ..
     } = floating_pane.clone()
     else {
         panic!("tile {tile_index} shows a minimized pane before it is shown");
@@ -105,11 +111,9 @@ pub(crate) fn show_tray_test_floating_pane(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id,
-            outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            pane_id, outer_rect, false,
+        ));
     render_snapshot.pane_snapshots.push(PaneSnapshot {
         pane_title,
         ..PaneSnapshot::from_empty_pane(pane_id)
@@ -197,6 +201,7 @@ fn a_frame_with_every_pane_suppressed_draws_no_button_and_no_tray() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .is_every_pane_suppressed = true;
 
     assert_eq!(find_core_button_rect(&render_snapshot), None);
@@ -253,11 +258,7 @@ fn an_eighty_column_tray_holds_six_slots_per_row_under_the_button() {
         Some(build_cell_rect(56, 2, 12, 1))
     );
     assert_eq!(
-        compute_floating_titlebar(
-            tray_layout.tray_rect,
-            FloatingTitlebarControls::CLOSE_BUTTON_ONLY
-        )
-        .close_button_rect,
+        compute_floating_titlebar(tray_layout.tray_rect).close_button_rect,
         Some(build_cell_rect(70, 2, 1, 1))
     );
 }
@@ -350,11 +351,7 @@ fn a_forty_column_tray_holds_two_slots_per_row_and_still_twelve_slots() {
         Some(build_cell_rect(17, 2, 11, 1))
     );
     assert_eq!(
-        compute_floating_titlebar(
-            tray_layout.tray_rect,
-            FloatingTitlebarControls::CLOSE_BUTTON_ONLY
-        )
-        .close_button_rect,
+        compute_floating_titlebar(tray_layout.tray_rect).close_button_rect,
         Some(build_cell_rect(30, 2, 1, 1))
     );
 }
@@ -383,11 +380,7 @@ fn a_one_slot_tray_fits_a_pane_area_of_exactly_its_height_and_drops_the_label() 
     );
     assert_eq!(tray_layout.toggle_minimize_all_rect, None);
     assert_eq!(
-        compute_floating_titlebar(
-            tray_layout.tray_rect,
-            FloatingTitlebarControls::CLOSE_BUTTON_ONLY
-        )
-        .close_button_rect,
+        compute_floating_titlebar(tray_layout.tray_rect).close_button_rect,
         Some(build_cell_rect(10, 2, 1, 1))
     );
 }

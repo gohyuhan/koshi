@@ -76,6 +76,17 @@ pub struct Surface {
 ///   `PaneMinimizedChanged`.
 /// - A floating pane of a `Layout` answer carries `pane_ids`: every pane of the
 ///   floating pane, in layout order. 5 carried one `pane_id`.
+/// - A tab of a painted frame carries its solved tree in `layout_area`:
+///   `solved_size`, `pane_slots`, `stack_headers`, `layout_mode`,
+///   `is_every_pane_suppressed` and `gap_cell_count`. 5 carried these fields
+///   on the tab, with `tab_size` in place of `solved_size`, and read a missing
+///   `gap_cell_count` as `0`. 6 refuses a frame with no `gap_cell_count`.
+/// - A floating pane slot of a painted frame carries `layout_area`: the
+///   floating pane's tree as the viewing client draws it. A slot whose
+///   `layout_area` holds no pane slot, or no slot of the slot's `pane_id`,
+///   fails to decode.
+/// - A minimized floating pane of a painted frame carries `pane_count`: the
+///   panes the floating pane holds. A frame with `0` fails to decode.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

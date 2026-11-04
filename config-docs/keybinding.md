@@ -335,7 +335,7 @@ it:
 
 - The pane keeps its id, its program and its scrollback. It keeps its top-left
   cell and its size. Each axis is cut to 90% of the smallest pane area of the
-  attached clients, rounded down. A client with a pane area smaller than `5x6`
+  attached clients, rounded down. A client with a pane area smaller than `5x5`
   does not count. A collapsed stack member keeps the top-left cell and the
   size it opens into in its stack: in an `80x22` tab that holds only the
   stack `[vim, htop]` with `vim` open, `htop` floats at `(0, 1)` with the size
@@ -346,7 +346,7 @@ it:
 - The pane takes this client's input. Every other client whose input is on
   the pane also shows it, at the top-left cell where that client draws the
   pane, and keeps typing in it. Every other client holds it minimized. A
-  client cannot draw floating panes when its pane area is smaller than `5x6`,
+  client cannot draw floating panes when its pane area is smaller than `5x5`,
   or when its tab shows `Terminal too small — enlarge window` in place of
   every pane. That client also holds the pane minimized, and its input moves
   to the pane that inherits its focus in the tab. With motion on, the pane
@@ -368,7 +368,7 @@ On a floating pane, the key docks the pane into this client's active tab:
   the other panes have no span. The pane docks beside the zoomed pane, or
   beside the whole stack that holds it, and this client leaves the zoom.
 - When this client draws the pane nowhere, such as when this client
-  minimized it or has a pane area smaller than `5x6`, the pane docks at the
+  minimized it or has a pane area smaller than `5x5`, the pane docks at the
   right edge of the whole tab.
 - The docked pane takes this client's input: every other floating pane this
   client shows is minimized. Every other client whose input is on the pane
@@ -398,6 +398,10 @@ order the floating panes were created, then the `+ new` tile:
   title under it. A tile is 10 cells wide. A title of 8 cells or more shows
   the characters that fit in its first 6 cells, then `…`: `logserver` reads
   `logser…`. A pane with no title shows its number alone.
+- A floating pane that holds 2 panes or more shows its pane count at the
+  right end of the title row, and the title takes the cells before it, less
+  one: with 3 panes, `htop` reads `htop [3]`, and `logserver` reads
+  `log… [3]`.
 - A lit tile is a pane that this client shows. A gray tile is a pane that
   this client minimized.
 - The `+ new` tile sits in the slot right after the last floating pane. With
@@ -611,7 +615,7 @@ and focuses `htop`. `<Tab>` again shows `logs` on top, and `htop` stays shown.
 With no floating pane in the session, both are refused with `the session holds
 no floating pane`. A client that cannot draw floating panes refuses both with
 `no floating pane can be drawn on this client`: its pane area is smaller than
-`5x6`, or its tab shows `Terminal too small — enlarge window` in place of every
+`5x5`, or its tab shows `Terminal too small — enlarge window` in place of every
 pane.
 
 ## The pane move chooser

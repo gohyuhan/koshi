@@ -199,6 +199,7 @@ pub(crate) fn build_placement_render_snapshot(
     placement_render_snapshot.client_snapshot.active_tab_id = displayed_tab_id;
     placement_render_snapshot.client_snapshot.focused_pane_id = displayed_tab_snapshot
         .tab_snapshot
+        .layout_area
         .find_visible_pane_slot(source_pane_id)
         .map(|_| source_pane_id);
     for tab_metadata in &mut placement_render_snapshot.session_snapshot.tabs_metadata {
@@ -206,6 +207,7 @@ pub(crate) fn build_placement_render_snapshot(
     }
     let displayed_pane_ids = displayed_tab_snapshot
         .tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -225,7 +227,7 @@ pub(crate) fn build_placement_render_snapshot(
         .iter()
         .map(|pane_snapshot| pane_snapshot.pane_id)
         .collect::<HashSet<_>>();
-    for pane_slot in &displayed_tab_snapshot.tab_snapshot.pane_slots {
+    for pane_slot in &displayed_tab_snapshot.tab_snapshot.layout_area.pane_slots {
         if !content_pane_ids.contains(&pane_slot.pane_id) {
             placement_render_snapshot
                 .pane_snapshots
@@ -258,8 +260,8 @@ pub(crate) fn build_committed_placement_render_snapshot(
         match floating_pane_slots.iter_mut().find(|floating_pane_slot| {
             floating_pane_slot.pane_id == animated_floating_pane_slot.pane_id
         }) {
-            Some(floating_pane_slot) => *floating_pane_slot = *animated_floating_pane_slot,
-            None => floating_pane_slots.push(*animated_floating_pane_slot),
+            Some(floating_pane_slot) => *floating_pane_slot = animated_floating_pane_slot.clone(),
+            None => floating_pane_slots.push(animated_floating_pane_slot.clone()),
         }
     }
     committed_placement_render_snapshot
@@ -277,7 +279,7 @@ pub(crate) fn find_tiled_pane_rect_in_pane_area(
     pane_area_size: Size,
     pane_id: PaneId,
 ) -> Option<CoreRect> {
-    let pane_slot = tab_snapshot.find_visible_pane_slot(pane_id)?;
+    let pane_slot = tab_snapshot.layout_area.find_visible_pane_slot(pane_id)?;
     let tab_area = koshi_renderer::compute_content_rect(
         Rect {
             x: 0,
@@ -285,7 +287,7 @@ pub(crate) fn find_tiled_pane_rect_in_pane_area(
             width: pane_area_size.column_count,
             height: pane_area_size.row_count,
         },
-        tab_snapshot.tab_size,
+        tab_snapshot.layout_area.solved_size,
     );
     Some(CoreRect::from_origin_and_size(
         Point {
@@ -326,10 +328,13 @@ fn draw_placement_target_outline(
     let Some(base_tab_snapshot) = placement_snapshot.find_displayed_tab_snapshot() else {
         return;
     };
-    let tab_size = placement_display_tab_snapshot.tab_snapshot.tab_size;
+    let tab_size = placement_display_tab_snapshot
+        .tab_snapshot
+        .layout_area
+        .solved_size;
     let pane_area = koshi_renderer::compute_pane_area(committed_regions, render_area);
     let layout_rect = koshi_renderer::compute_content_rect(pane_area, tab_size);
-    let base_tab_size = base_tab_snapshot.tab_snapshot.tab_size;
+    let base_tab_size = base_tab_snapshot.tab_snapshot.layout_area.solved_size;
     let base_layout_rect = koshi_renderer::compute_content_rect(pane_area, base_tab_size);
     let Some(target_outline) = build_target_outline_rect(
         base_tab_snapshot,
@@ -342,6 +347,7 @@ fn draw_placement_target_outline(
     let source_pane_rect = displayed_render_snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .find_visible_pane_slot(placement_snapshot.source_pane_id)
         .and_then(|pane_slot| project_core_rect(pane_slot.outer_rect, tab_size, layout_rect));
     apply_placement_target_outline_style(target_outline, source_pane_rect, theme, render_buffer);
@@ -406,18 +412,21 @@ pub(crate) fn interpolate_placement_tab_snapshot(
         return from_tab_snapshot.clone();
     }
     if progress == 1.0
-        || from_tab_snapshot.tab_snapshot.tab_size != to_tab_snapshot.tab_snapshot.tab_size
+        || from_tab_snapshot.tab_snapshot.layout_area.solved_size
+            != to_tab_snapshot.tab_snapshot.layout_area.solved_size
     {
         return to_tab_snapshot.clone();
     }
     let to_pane_ids = to_tab_snapshot
         .tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
         .collect::<Vec<_>>();
     let from_only_pane_ids = from_tab_snapshot
         .tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .map(|pane_slot| pane_slot.pane_id)
@@ -429,11 +438,13 @@ pub(crate) fn interpolate_placement_tab_snapshot(
         .filter_map(|pane_id| {
             let from_pane_slot = from_tab_snapshot
                 .tab_snapshot
+                .layout_area
                 .pane_slots
                 .iter()
                 .find(|pane_slot| pane_slot.pane_id == pane_id);
             let to_pane_slot = to_tab_snapshot
                 .tab_snapshot
+                .layout_area
                 .pane_slots
                 .iter()
                 .find(|pane_slot| pane_slot.pane_id == pane_id);
@@ -466,14 +477,18 @@ pub(crate) fn interpolate_placement_tab_snapshot(
         &to_tab_snapshot.tab_snapshot
     };
     let mut animated_tab_snapshot = to_tab_snapshot.clone();
-    animated_tab_snapshot.tab_snapshot.pane_slots = pane_slots;
+    animated_tab_snapshot.tab_snapshot.layout_area.pane_slots = pane_slots;
     animated_tab_snapshot
         .tab_snapshot
+        .layout_area
         .stack_headers
-        .clone_from(&nearer_tab_snapshot.stack_headers);
-    animated_tab_snapshot.tab_snapshot.layout_mode = nearer_tab_snapshot.layout_mode;
-    animated_tab_snapshot.tab_snapshot.is_every_pane_suppressed =
-        nearer_tab_snapshot.is_every_pane_suppressed;
+        .clone_from(&nearer_tab_snapshot.layout_area.stack_headers);
+    animated_tab_snapshot.tab_snapshot.layout_area.layout_mode =
+        nearer_tab_snapshot.layout_area.layout_mode;
+    animated_tab_snapshot
+        .tab_snapshot
+        .layout_area
+        .is_every_pane_suppressed = nearer_tab_snapshot.layout_area.is_every_pane_suppressed;
     animated_tab_snapshot
 }
 
@@ -494,11 +509,12 @@ pub(crate) fn interpolate_committed_placement_tab_snapshot(
 ) -> TabSnapshot {
     let progress = progress.clamp(0.0, 1.0);
     let mut animated_tab_snapshot = to_tab_snapshot.clone();
-    for pane_slot in &mut animated_tab_snapshot.pane_slots {
+    for pane_slot in &mut animated_tab_snapshot.layout_area.pane_slots {
         let Some(to_content_rect) = pane_slot.content_rect else {
             continue;
         };
         let Some(from_pane_slot) = from_tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .find(|from_pane_slot| from_pane_slot.pane_id == pane_slot.pane_id)
@@ -518,8 +534,9 @@ pub(crate) fn interpolate_committed_placement_tab_snapshot(
     }
     if progress < 0.5 {
         animated_tab_snapshot
+            .layout_area
             .stack_headers
-            .clone_from(&from_tab_snapshot.stack_headers);
+            .clone_from(&from_tab_snapshot.layout_area.stack_headers);
     }
     animated_tab_snapshot
 }
@@ -680,6 +697,7 @@ fn build_target_outline_rect(
     }
     base_tab_snapshot
         .tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .filter(|pane_slot| {

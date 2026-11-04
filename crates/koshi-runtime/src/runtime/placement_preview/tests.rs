@@ -199,7 +199,10 @@ fn a_named_target_builds_the_preview_of_both_tabs_and_marks_the_clients_frame() 
             .as_ref()
             .map(|destination_tab_snapshot| (
                 destination_tab_snapshot.tab_snapshot.tab_id,
-                destination_tab_snapshot.tab_snapshot.tab_size
+                destination_tab_snapshot
+                    .tab_snapshot
+                    .layout_area
+                    .solved_size
             )),
         Some((
             preview_fixture.destination_tab_id,
@@ -674,7 +677,10 @@ fn a_destination_tab_is_sized_by_the_acting_client_and_the_clients_that_view_it(
         placement_snapshot
             .destination_tab_snapshot
             .as_ref()
-            .map(|destination_tab_snapshot| destination_tab_snapshot.tab_snapshot.tab_size),
+            .map(|destination_tab_snapshot| destination_tab_snapshot
+                .tab_snapshot
+                .layout_area
+                .solved_size),
         Some(Size {
             column_count: 80,
             row_count: 20,
@@ -732,7 +738,10 @@ fn a_starving_sole_viewers_preview_draws_no_pane() {
             .get_placement_preview()
             .find_placement_snapshot()
             .and_then(PlacementSnapshot::find_source_tab_snapshot)
-            .map(|source_tab_snapshot| source_tab_snapshot.tab_snapshot.is_every_pane_suppressed),
+            .map(|source_tab_snapshot| source_tab_snapshot
+                .tab_snapshot
+                .layout_area
+                .is_every_pane_suppressed),
         Some(true)
     );
     assert_eq!(

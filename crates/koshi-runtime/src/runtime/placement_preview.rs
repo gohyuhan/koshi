@@ -24,7 +24,7 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::SwapTabSizes;
 use koshi_layout::solver::{solve_layout_with_sizing, PaneSizing};
 use koshi_renderer::snapshot::{
-    list_pane_slots, PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot,
+    LayoutAreaSnapshot, PlacementPreview, PlacementSnapshot, PlacementSource, PlacementTabSnapshot,
     TabSnapshot,
 };
 use koshi_session::client::Client;
@@ -479,12 +479,12 @@ fn build_placement_tab_snapshot(
         tab_snapshot: TabSnapshot {
             tab_id: tab.get_tab_id(),
             tab_name: tab.get_tab_name().to_owned(),
-            pane_slots: list_pane_slots(&layout_solve),
-            tab_size,
-            stack_headers: layout_solve.stack_headers,
-            layout_mode: LayoutMode::Tiled,
-            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
-            gap_cell_count: pane_sizing.gap_cell_count,
+            layout_area: LayoutAreaSnapshot::from_layout_solve(
+                &layout_solve,
+                tab_size,
+                LayoutMode::Tiled,
+                pane_sizing.gap_cell_count,
+            ),
         },
     }
 }

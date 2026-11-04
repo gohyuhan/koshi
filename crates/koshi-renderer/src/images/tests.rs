@@ -7,6 +7,7 @@
 //! to the pane area.
 
 use super::*;
+use crate::render::tests::build_one_pane_floating_pane_slot;
 
 use std::sync::Arc;
 
@@ -31,9 +32,9 @@ use crate::notification::NotificationCenterEntries;
 use crate::render::tests::{build_core_regions, format_rendered_cells, get_pane_snapshot_mut};
 use crate::render::{build_frame_geometry, list_placed_floating_panes, DrawnRows};
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, KeymapHints, PaneSlot, PaneSnapshot, RenderSnapshot,
-    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot,
+    KeymapHints, LayoutAreaSnapshot, PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
+    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use crate::theme::Theme;
 
@@ -103,21 +104,23 @@ fn build_render_snapshot(
             active_tab_snapshot: TabSnapshot {
                 tab_id,
                 tab_name: String::from("tab"),
-                pane_slots: vec![PaneSlot {
-                    pane_id,
-                    outer_rect: Rect {
-                        origin: Point { column: 0, row: 0 },
-                        size: viewport_size,
-                    },
-                    content_rect: Some(content_rect),
-                    is_visible,
-                    is_suppressed: is_every_pane_suppressed,
-                }],
-                tab_size: viewport_size,
-                stack_headers: Vec::new(),
-                layout_mode: LayoutMode::Tiled,
-                is_every_pane_suppressed,
-                gap_cell_count: 0,
+                layout_area: LayoutAreaSnapshot {
+                    solved_size: viewport_size,
+                    pane_slots: vec![PaneSlot {
+                        pane_id,
+                        outer_rect: Rect {
+                            origin: Point { column: 0, row: 0 },
+                            size: viewport_size,
+                        },
+                        content_rect: Some(content_rect),
+                        is_visible,
+                        is_suppressed: is_every_pane_suppressed,
+                    }],
+                    stack_headers: Vec::new(),
+                    layout_mode: LayoutMode::Tiled,
+                    is_every_pane_suppressed,
+                    gap_cell_count: 0,
+                },
             },
             tabs_metadata: vec![TabMetadata {
                 tab_id,
@@ -411,7 +414,12 @@ fn image_order_is_one_global_sequence_across_panes() {
     );
     let mut second_pane_snapshot = snapshot.pane_snapshots[0].clone();
     second_pane_snapshot.pane_id = PaneId::new();
-    let mut second_pane_slot = snapshot.session_snapshot.active_tab_snapshot.pane_slots[0].clone();
+    let mut second_pane_slot = snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .clone();
     second_pane_slot.pane_id = second_pane_snapshot.pane_id;
     second_pane_slot
         .content_rect
@@ -423,6 +431,7 @@ fn image_order_is_one_global_sequence_across_panes() {
     snapshot
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .push(second_pane_slot);
     let image_paints = build_image_paints(&build_frame_geometry(
@@ -1197,11 +1206,9 @@ fn push_floating_pane(
     render_snapshot
         .session_snapshot
         .floating_pane_slots
-        .push(FloatingPaneSlot {
-            pane_id,
-            outer_rect,
-            is_pinned: false,
-        });
+        .push(build_one_pane_floating_pane_slot(
+            pane_id, outer_rect, false,
+        ));
     let mut pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     pane_snapshot.pane_id = pane_id;
     pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
@@ -1304,13 +1311,13 @@ fn a_floating_panes_image_paint_targets_its_content_cells_from_the_pane_area_ori
         build_screen_area(),
     ));
 
-    // Content `(9, 3)` in the pane area starting at `(0, 1)` is screen
-    // `(9, 4)`; anchor row `1`, column `2` from there is `(11, 5)`.
+    // Content `(9, 2)` in the pane area starting at `(0, 1)` is screen
+    // `(9, 3)`; anchor row `1`, column `2` from there is `(11, 4)`.
     assert_eq!(
         list_paint_targets(&image_paints),
         [(
             floating_slot_pane_id,
-            RatatuiRect::new(11, 5, 4, 2),
+            RatatuiRect::new(11, 4, 4, 2),
             build_whole_source_rect(8, 4)
         )]
     );
@@ -1369,14 +1376,14 @@ fn a_later_floating_pane_hides_an_earlier_ones_image_and_an_earlier_one_hides_no
         build_screen_area(),
     ));
 
-    // The lower pane's image at `(1, 3)` `4x2` meets the upper pane's outer
-    // area `(3, 2)` `20x6`. The upper pane's image at `(4, 5)` lies over the
+    // The lower pane's image at `(1, 2)` `4x2` meets the upper pane's outer
+    // area `(3, 2)` `20x6`. The upper pane's image at `(4, 4)` lies over the
     // lower pane, which is drawn before it.
     assert_eq!(
         list_paint_targets(&image_paints),
         [(
             upper_floating_slot_pane_id,
-            RatatuiRect::new(4, 5, 4, 1),
+            RatatuiRect::new(4, 4, 4, 1),
             build_whole_source_rect(8, 2)
         )]
     );
@@ -1427,7 +1434,7 @@ fn a_floating_panes_image_is_cut_where_its_content_passes_the_pane_area() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
     let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
-        build_cell_rect(30, 2, 20, 6),
+        build_cell_rect(30, 3, 20, 6),
         vec![build_image_placement(1, 24, 4, (0, 0), 12, 2)],
     );
 
@@ -1457,7 +1464,7 @@ fn the_image_cell_snapshot_writes_no_floating_pane_cell_past_the_pane_area() {
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
     let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
-        build_cell_rect(4, 2, 6, 6),
+        build_cell_rect(4, 3, 6, 6),
         Vec::new(),
     );
     let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
@@ -1498,7 +1505,7 @@ fn a_snapshot_of_part_of_the_viewport_places_each_floating_pane_as_the_whole_vie
     let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
     let floating_slot_pane_id = push_floating_pane(
         &mut render_snapshot,
-        build_cell_rect(4, 2, 6, 6),
+        build_cell_rect(4, 3, 6, 6),
         Vec::new(),
     );
     let floating_pane_snapshot = get_pane_snapshot_mut(&mut render_snapshot, floating_slot_pane_id);
@@ -1586,17 +1593,17 @@ fn the_image_cell_snapshot_writes_each_floating_pane_over_the_tiled_cells() {
         .character
     };
 
-    // `(4, 1)` is on the floating pane's left border, `(5, 3)` its first
-    // content cell, and `(10, 1)` a tiled cell beside it.
+    // `(4, 1)` is the top-left corner of the floating pane's box, `(5, 2)`
+    // its first content cell, and `(10, 1)` a tiled cell beside it.
     assert_eq!(read_character(ViewerChrome::default(), 4, 1), ' ');
-    assert_eq!(read_character(ViewerChrome::default(), 5, 3), 'y');
+    assert_eq!(read_character(ViewerChrome::default(), 5, 2), 'y');
     assert_eq!(read_character(ViewerChrome::default(), 10, 1), 'x');
     let placement_viewer_chrome = ViewerChrome {
         is_pane_placement_visible: true,
         ..ViewerChrome::default()
     };
     assert_eq!(read_character(placement_viewer_chrome, 4, 1), 'x');
-    assert_eq!(read_character(placement_viewer_chrome, 5, 3), 'x');
+    assert_eq!(read_character(placement_viewer_chrome, 5, 2), 'x');
 }
 
 #[test]
@@ -1661,9 +1668,10 @@ fn a_floating_panes_unavailable_image_shows_text_unless_a_later_floating_pane_co
         build_cell_rect(3, 2, 20, 6),
         Vec::new(),
     );
+    let committed_regions = build_regions();
     let placed_floating_panes = list_placed_floating_panes(
         &render_snapshot,
-        &build_regions(),
+        &committed_regions,
         ViewerChrome::default(),
         build_screen_area(),
     );
@@ -1685,11 +1693,11 @@ fn a_floating_panes_unavailable_image_shows_text_unless_a_later_floating_pane_co
     );
     assert_eq!(
         list_lower_placeholder_rects(&placed_floating_panes[1..], ImageRenderMode::Placeholder),
-        [RatatuiRect::new(1, 3, 4, 2)]
+        [RatatuiRect::new(1, 2, 4, 2)]
     );
     assert_eq!(
         list_lower_placeholder_rects(&[], ImageRenderMode::Native),
-        [RatatuiRect::new(1, 3, 4, 2)]
+        [RatatuiRect::new(1, 2, 4, 2)]
     );
 }
 

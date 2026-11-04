@@ -674,17 +674,19 @@ impl Client {
         let tab_snapshot = &placement_snapshot
             .find_displayed_tab_snapshot()?
             .tab_snapshot;
-        if tab_snapshot.is_every_pane_suppressed {
+        if tab_snapshot.layout_area.is_every_pane_suppressed {
             return None;
         }
         let destination_layout_rect = compute_content_rect(
             compute_mouse_frame_pane_area(mouse_frame),
-            tab_snapshot.tab_size,
+            tab_snapshot.layout_area.solved_size,
         );
         if !destination_layout_rect.contains(Position::new(screen_point.column, screen_point.row)) {
             return None;
         }
-        if tab_snapshot.tab_size.column_count == 0 || tab_snapshot.tab_size.row_count == 0 {
+        if tab_snapshot.layout_area.solved_size.column_count == 0
+            || tab_snapshot.layout_area.solved_size.row_count == 0
+        {
             return None;
         }
         let hovered_pane_id =
@@ -708,19 +710,20 @@ impl Client {
                 return find_mouse_insertion_target(
                     screen_point,
                     destination_layout_rect,
-                    tab_snapshot.tab_size,
+                    tab_snapshot.layout_area.solved_size,
                     destination_tab_id,
                     &placement_destinations,
                 );
             };
             let target_rect = tab_snapshot
+                .layout_area
                 .pane_slots
                 .iter()
                 .find(|pane_slot| pane_slot.pane_id == target_pane_id)
                 .and_then(|pane_slot| {
                     project_core_rect(
                         pane_slot.outer_rect,
-                        tab_snapshot.tab_size,
+                        tab_snapshot.layout_area.solved_size,
                         destination_layout_rect,
                     )
                 })?;
@@ -756,12 +759,13 @@ impl Client {
             column: screen_point.column.saturating_sub(placement_layout_rect.x),
             row: screen_point.row.saturating_sub(placement_layout_rect.y),
         };
-        for stack_header in &placement_tab_snapshot.stack_headers {
+        for stack_header in &placement_tab_snapshot.layout_area.stack_headers {
             if stack_header.header_rect.is_point_inside(layout_point) {
                 return Some(stack_header.pane_id);
             }
         }
         placement_tab_snapshot
+            .layout_area
             .pane_slots
             .iter()
             .filter(|pane_slot| pane_slot.is_visible)
@@ -827,7 +831,7 @@ impl Client {
                 .find_drawn_floating_pane_slot(pane_id)
                 .map(|floating_pane_slot| PlacementHandleHover::FloatingHandle {
                     pane_id,
-                    is_pinned: floating_pane_slot.is_pinned,
+                    is_pinned: floating_pane_slot.floating_pane_slot.is_pinned,
                 }),
             _ => None,
         };
@@ -930,7 +934,7 @@ impl Client {
                 else {
                     return Vec::new();
                 };
-                if floating_pane_slot.is_pinned
+                if floating_pane_slot.floating_pane_slot.is_pinned
                     || self.sent_floating_pane_move.is_some()
                     || self.is_floating_pane_move_pending()
                 {
@@ -1334,7 +1338,7 @@ impl Client {
                 let can_border_move = |border_side: Direction| match floating_pane_slot {
                     // A pinned float keeps its left and top edges.
                     Some(floating_pane_slot) => {
-                        !floating_pane_slot.is_pinned
+                        !floating_pane_slot.floating_pane_slot.is_pinned
                             || matches!(border_side, Direction::Right | Direction::Down)
                     }
                     // Only a real divider — one with a pane drawn beside it to
@@ -1364,7 +1368,9 @@ impl Client {
                 else {
                     return Vec::new();
                 };
-                if !floating_pane_slot.is_pinned && self.sent_floating_pane_move.is_none() {
+                if !floating_pane_slot.floating_pane_slot.is_pinned
+                    && self.sent_floating_pane_move.is_none()
+                {
                     self.begin_floating_pane_handle_drag(
                         pane_id,
                         floating_pane_slot.outer_rect.origin,
@@ -1984,7 +1990,7 @@ impl Client {
             let is_selected_pane_movable = mouse_frame
                 .build_frame_layout()
                 .find_drawn_floating_pane_slot(floating_pane_move_selection.selected_pane_id)
-                .is_some_and(|floating_pane_slot| !floating_pane_slot.is_pinned);
+                .is_some_and(|floating_pane_slot| !floating_pane_slot.floating_pane_slot.is_pinned);
             if !is_selected_pane_movable {
                 floating_pane_move_selection.draft_top_left_cell = None;
             }
@@ -2047,8 +2053,8 @@ impl Client {
         };
         self.placement_handle_hover = match (hit_region, drawn_floating_pane_slot) {
             (_, Some(floating_pane_slot)) => Some(PlacementHandleHover::FloatingHandle {
-                pane_id: floating_pane_slot.pane_id,
-                is_pinned: floating_pane_slot.is_pinned,
+                pane_id: floating_pane_slot.floating_pane_slot.pane_id,
+                is_pinned: floating_pane_slot.floating_pane_slot.is_pinned,
             }),
             (
                 HitRegion::PlacementHandle { pane_id }
@@ -2153,7 +2159,7 @@ impl Client {
         let floating_pane_slot = drawn_floating_pane_slot?;
         let top_left_cell = floating_pane_slot.outer_rect.origin;
         if release_position == press_position
-            || floating_pane_slot.is_pinned
+            || floating_pane_slot.floating_pane_slot.is_pinned
             || top_left_cell == press_top_left_cell
         {
             return None;
@@ -2510,6 +2516,7 @@ fn find_tiled_placement_handle_hover(
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .find_visible_pane_slot(pane_id)?;
     let content_rect = find_pane_content_rect(mouse_frame.build_frame_layout(), pane_id)?;
     let pane_outer_rect = Rect::from_origin_and_size(
@@ -2547,6 +2554,7 @@ fn has_border_neighbor(mouse_frame: &MouseFrame, pane_id: PaneId, border_side: D
     let Some(pane_outer_rect) = mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .find_visible_pane_slot(pane_id)
         .map(|pane_slot| pane_slot.outer_rect)
     else {
@@ -2555,10 +2563,12 @@ fn has_border_neighbor(mouse_frame: &MouseFrame, pane_id: PaneId, border_side: D
     let gap_cell_count = mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .gap_cell_count;
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .filter(|pane_slot| pane_slot.is_visible && pane_slot.pane_id != pane_id)
@@ -2599,6 +2609,7 @@ fn is_pane_drawn(mouse_frame: &MouseFrame, pane_id: PaneId) -> bool {
     mouse_frame
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .find_visible_pane_slot(pane_id)
         .is_some()
         || mouse_frame
@@ -2639,6 +2650,7 @@ fn find_focused_pane(frame_layout: FrameLayout<'_>) -> Option<PaneId> {
     let is_focused_pane_placed = frame_layout
         .session_snapshot
         .active_tab_snapshot
+        .layout_area
         .pane_slots
         .iter()
         .any(|pane_slot| pane_slot.pane_id == focused_pane_id)
