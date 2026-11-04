@@ -359,7 +359,11 @@ size `40x19`.
 On a floating pane, the key docks the pane into this client's active tab:
 
 - Only the pane leaves its floating pane. A floating pane of 2 or more panes
-  keeps its size and its other panes, which take the room the pane leaves.
+  keeps its other panes, which take the room the pane leaves. It keeps the
+  size it asks for. If its panes held it larger than that size, it shrinks to
+  the larger of that size and the room its other panes need. Example: with
+  `60%` of a 10-column pane area, `[A | B]` asks for 6 columns, needs 8 and
+  holds 8. After `B` docks, `[A]` holds 6.
 - The session takes the center cell of the box where this client draws the
   pane, grown up by one row for the titlebar strip. For a floating pane of
   one pane, that box is the whole floating pane. The pane docks beside the smallest pane, group or tab span under that

@@ -797,7 +797,9 @@ the size `72x19`.
 
 `koshi dock-pane` puts a pane of a floating pane into a tab's tiled layout.
 Only that pane leaves its floating pane: a floating pane of 2 or more panes
-keeps its size and its other panes. `--tab` names the tab, and `--direction` the side of the whole tab where the pane
+keeps its other panes and the size it asks for. If its panes held it larger
+than that size, it shrinks to the larger of that size and the room its other
+panes need. `--tab` names the tab, and `--direction` the side of the whole tab where the pane
 lands, `right` when omitted. Without `--tab`, the pane docks into the first
 tab of this list:
 

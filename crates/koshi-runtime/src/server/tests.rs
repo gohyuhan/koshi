@@ -2126,7 +2126,7 @@ fn a_token_takes_back_the_floating_view_and_the_floating_pane_that_takes_the_inp
         .expect("the client the token attached");
     assert_eq!(
         client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 pinned_floating_pane_id,
                 FloatingPaneView {
@@ -2210,7 +2210,7 @@ fn a_token_drops_a_floating_pane_closed_since_the_detach_and_moves_its_input() {
         .expect("the client the token attached");
     assert_eq!(
         client.list_floating_pane_views(),
-        &HashMap::from([(
+        HashMap::from([(
             staying_floating_pane_id,
             FloatingPaneView {
                 position: FloatingPanePosition::Default,

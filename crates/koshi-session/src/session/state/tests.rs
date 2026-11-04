@@ -3156,7 +3156,7 @@ fn remove_floating_pane_keeps_the_order_of_the_rest_and_clears_every_client_view
     assert_eq!(pinning_client.get_focused_floating_pane_id(), None);
     assert_eq!(
         pinning_client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 middle_floating_pane_id,
                 build_default_floating_pane_view(true, middle_pane_id),
@@ -3287,7 +3287,7 @@ fn attach_client_gives_the_attaching_client_a_minimized_view_of_every_floating_p
     let client = get_attached_client_mut(&mut session, client_id);
     assert_eq!(
         client.list_floating_pane_views(),
-        &HashMap::from([
+        HashMap::from([
             (
                 first_floating_pane_id,
                 build_default_floating_pane_view(true, first_pane_id),
@@ -3904,6 +3904,54 @@ fn build_cells_size(column_count: u16, row_count: u16) -> FloatingPaneSize {
         width: build_cells_dimension(column_count),
         height: build_cells_dimension(row_count),
     }
+}
+
+#[test]
+fn a_floating_pane_its_panes_held_above_the_size_it_asks_for_shrinks_when_a_pane_leaves() {
+    let mut session = build_empty_session();
+    let [a_pane_id, b_pane_id] = [PaneId::new(), PaneId::new()];
+    let mut floating_pane = build_multi_pane_floating_pane(&[a_pane_id, b_pane_id]);
+    floating_pane.desired_size = FloatingPaneSize {
+        width: build_percent_dimension(60),
+        height: build_percent_dimension(60),
+    };
+    let floating_pane_id = floating_pane.get_floating_pane_id();
+    let a_layout_tree = build_floating_pane(a_pane_id).layout_area.layout;
+    session
+        .add_floating_pane(floating_pane, &[])
+        .expect("the floating set has room");
+    let shared_floating_viewport = Size {
+        column_count: 10,
+        row_count: 10,
+    };
+    let read_solved_size = |session: &Session| {
+        let (_, floating_pane) = session
+            .floating_set
+            .find_floating_pane_by_id(floating_pane_id)
+            .expect("the floating pane");
+        floating_pane.get_solved_size()
+    };
+
+    // `60%` of 10 columns asks for 6; `[A | B]` needs 8.
+    let _ = session.update_floating_pane_sizes(shared_floating_viewport);
+    assert_eq!(
+        read_solved_size(&session),
+        Size {
+            column_count: 8,
+            row_count: 6,
+        }
+    );
+
+    let _ = session.update_floating_pane_layout(floating_pane_id, a_layout_tree);
+    let _ = session.update_floating_pane_sizes(shared_floating_viewport);
+
+    assert_eq!(
+        read_solved_size(&session),
+        Size {
+            column_count: 6,
+            row_count: 6,
+        }
+    );
 }
 
 #[test]
@@ -5365,6 +5413,57 @@ fn a_client_with_the_default_view_draws_the_floating_panes_own_solve_with_no_cop
             .expect("alice views the floating pane"),
         floating_pane.get_layout_solve()
     ));
+}
+
+#[test]
+fn a_tree_edit_of_one_floating_pane_keeps_each_clients_kept_solve_of_another_floating_pane() {
+    let (mut session, stack_floating_pane_id, [alice_client_id, _], pane_ids) =
+        build_two_client_floating_stack_session();
+    let [_, second_stack_pane_id, _] = pane_ids;
+    let logs_floating_pane = build_floating_pane(PaneId::new());
+    let logs_floating_pane_id = logs_floating_pane.get_floating_pane_id();
+    let logs_layout_tree = logs_floating_pane.layout_area.layout.clone();
+    session
+        .add_floating_pane(logs_floating_pane, &[])
+        .expect("the floating set has room");
+    get_attached_client_mut(&mut session, alice_client_id)
+        .update_floating_pane_focused_pane(stack_floating_pane_id, second_stack_pane_id);
+    let alice_stack_solve = solve_tree_at(
+        &build_stack_beside_pane_tree(pane_ids, 1),
+        TEST_FLOATING_LAYOUT_SIZE,
+        PaneSizing::default(),
+    );
+    assert_eq!(
+        read_client_floating_pane_solve(&session, alice_client_id, stack_floating_pane_id),
+        Some(&alice_stack_solve)
+    );
+
+    let _ = session.update_floating_pane_layout(logs_floating_pane_id, logs_layout_tree);
+
+    let alice_client = session
+        .clients
+        .get_client_by_id(alice_client_id)
+        .expect("alice is attached");
+    assert_eq!(
+        alice_client.get_own_floating_pane_solve(stack_floating_pane_id, || None),
+        Some(&alice_stack_solve),
+        "an edit of another floating pane keeps alice's solve"
+    );
+
+    let _ = session.update_floating_pane_layout(
+        stack_floating_pane_id,
+        build_stack_beside_pane_tree(pane_ids, 0),
+    );
+
+    let alice_client = session
+        .clients
+        .get_client_by_id(alice_client_id)
+        .expect("alice is attached");
+    assert_eq!(
+        alice_client.get_own_floating_pane_solve(stack_floating_pane_id, || None),
+        None,
+        "an edit of the floating pane empties alice's solve of it"
+    );
 }
 
 #[test]

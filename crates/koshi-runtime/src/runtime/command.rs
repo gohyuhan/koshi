@@ -1140,8 +1140,8 @@ impl Server {
     /// With a [`Session::get_shared_floating_viewport`],
     /// [`Session::update_floating_pane_sizes`] solves each floating pane and
     /// its tree with the session's pane sizing, and returns the events of
-    /// each client focus that moves off a pane the new solve suppresses. With
-    /// none — no client
+    /// each client focus that moves off a pane the solve of its floating pane
+    /// suppresses, whether or not that solve changed. With none — no client
     /// attached, or no client with a floating viewport — every solved size
     /// stays as it is.
     ///

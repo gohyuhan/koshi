@@ -23276,6 +23276,77 @@ fn fullscreen_inside_a_floating_pane_gives_the_zoomed_pane_the_whole_tree_area()
 }
 
 #[test]
+fn leaving_a_zoom_on_a_pane_the_floating_panes_tree_suppresses_focuses_a_pane_it_shows() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let (htop_pane_id, zsh_pane_id) =
+        create_alice_split_floating_pane(&mut runtime, alice_client_id);
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    let _ =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, Command::TogglePaneFullscreen);
+    // bob's `8x6` pane area cuts the floating pane to `7x4`: its `7x3` tree
+    // has no room for `zsh` beside `htop`, and alice's zoom of `zsh` still
+    // fits.
+    attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 8,
+            row_count: 8,
+        },
+    );
+    let htop_floating_pane = get_floating_pane_holding(&runtime, session_id, htop_pane_id);
+    assert_eq!(
+        htop_floating_pane.get_solved_size(),
+        Size {
+            column_count: 7,
+            row_count: 4,
+        }
+    );
+    assert_eq!(
+        htop_floating_pane.get_layout_solve().suppressed_pane_ids,
+        vec![zsh_pane_id]
+    );
+    assert_eq!(runtime.find_typed_pane(alice_client_id), Some(zsh_pane_id));
+
+    let (command_id, command_result) =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, Command::TogglePaneFullscreen);
+
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
+                    pane_ids: vec![htop_pane_id, zsh_pane_id],
+                }),
+                Event::PaneFocused(PaneFocused {
+                    client_id: alice_client_id,
+                    tab_id: None,
+                    pane_id: htop_pane_id,
+                    previous_pane_id: Some(zsh_pane_id),
+                }),
+            ],
+        }
+    );
+    let alice_floating_pane_view = get_attached_client(&runtime, session_id, alice_client_id)
+        .get_floating_pane_view(htop_floating_pane_id)
+        .expect("alice views the floating pane");
+    assert_eq!(alice_floating_pane_view.zoomed_pane_id, None);
+    assert_eq!(
+        alice_floating_pane_view.focus_history,
+        vec![htop_pane_id, zsh_pane_id]
+    );
+    assert_eq!(runtime.find_typed_pane(alice_client_id), Some(htop_pane_id));
+}
+
+#[test]
 fn two_clients_keep_their_own_focus_and_zoom_inside_one_floating_pane() {
     let FloatingCommandFixture {
         mut runtime,

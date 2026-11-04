@@ -798,28 +798,44 @@ impl Session {
     /// ([`FloatingPane::compute_minimum_size`]), and solve the tree of each
     /// floating pane whose outer size changed with that pane sizing. When a
     /// solved size changed, record a floating set change and empty every
-    /// attached client's kept floating pane solves. Then each client whose
-    /// focused pane inside such a floating pane the new solve suppresses
-    /// focuses a pane the solve shows. A client zoomed inside the floating
+    /// attached client's kept solve of that floating pane. Then, in every
+    /// floating pane, whether or not its size changed, each client whose
+    /// focused pane inside it the solve suppresses focuses a pane the solve
+    /// shows, ranked against that pane's rect in the solve before a size
+    /// change, else in the current solve. A client zoomed inside the floating
     /// pane keeps its focus.
     ///
-    /// Returns the events of those focus moves.
+    /// Returns the events of those focus moves. A client that leaves its zoom
+    /// on `htop` in `[vim | htop]`, solved so narrow that `htop` is
+    /// suppressed, focuses `vim` here.
     #[must_use]
     pub fn update_floating_pane_sizes(&mut self, shared_floating_viewport: Size) -> Vec<Event> {
-        let previous_layout_solves = self
-            .floating_set
-            .update_floating_pane_sizes(shared_floating_viewport, self.pane_sizing);
-        if previous_layout_solves.is_empty() {
-            return Vec::new();
+        let mut previous_layout_solve_by_floating_pane_id: HashMap<FloatingPaneId, LayoutSolve> =
+            self.floating_set
+                .update_floating_pane_sizes(shared_floating_viewport, self.pane_sizing)
+                .into_iter()
+                .collect();
+        if !previous_layout_solve_by_floating_pane_id.is_empty() {
+            self.view_changes.is_floating_set_changed = true;
         }
-        self.view_changes.is_floating_set_changed = true;
-        self.clients.clear_own_floating_pane_solves();
+        for &floating_pane_id in previous_layout_solve_by_floating_pane_id.keys() {
+            self.clients
+                .clear_own_floating_pane_solves(floating_pane_id);
+        }
+        let floating_pane_ids: Vec<FloatingPaneId> = self
+            .floating_set
+            .floating_panes
+            .iter()
+            .map(|floating_pane| floating_pane.floating_pane_id)
+            .collect();
         let mut emitted_events = Vec::new();
-        for (floating_pane_id, previous_layout_solve) in previous_layout_solves {
+        for floating_pane_id in floating_pane_ids {
+            let previous_layout_solve =
+                previous_layout_solve_by_floating_pane_id.remove(&floating_pane_id);
             emitted_events.extend(hand_off_suppressed_floating_focus(
                 self,
                 floating_pane_id,
-                Some(&previous_layout_solve),
+                previous_layout_solve.as_ref(),
             ));
         }
         emitted_events
@@ -828,10 +844,10 @@ impl Session {
     /// Replace the tree of the floating pane `floating_pane_id` with
     /// `layout_tree`, solve it again at the size it is solved at with
     /// [`Session::get_pane_sizing`], record a floating set change and empty
-    /// every attached client's kept floating pane solves. Then each client
-    /// whose focused pane inside the floating pane the new solve suppresses
-    /// focuses a pane the solve shows. A client zoomed inside the floating
-    /// pane keeps its focus.
+    /// every attached client's kept solve of that floating pane. Then each
+    /// client whose focused pane inside the floating pane the new solve
+    /// suppresses focuses a pane the solve shows. A client zoomed inside the
+    /// floating pane keeps its focus.
     /// The floating pane's outer size stays as it is: the next
     /// [`Session::update_floating_pane_sizes`] solves it against the new
     /// tree's minimum.
@@ -856,7 +872,8 @@ impl Session {
         floating_pane.layout_area.layout = layout_tree;
         let previous_layout_solve = floating_pane.layout_area.update_layout_solve(pane_sizing);
         self.view_changes.is_floating_set_changed = true;
-        self.clients.clear_own_floating_pane_solves();
+        self.clients
+            .clear_own_floating_pane_solves(floating_pane_id);
         hand_off_suppressed_floating_focus(self, floating_pane_id, Some(&previous_layout_solve))
     }
 
@@ -1021,9 +1038,9 @@ impl Session {
     /// it at its solve size ([`Session::resolve_tab_solve_size`]), in tab id
     /// order, each followed by step 1 of [`Session::update_tab_layout`]. After
     /// the last tab, every floating pane's tree is solved again with
-    /// `pane_sizing` at the size it is solved at, every attached client's kept
-    /// floating pane solves are emptied, and, floating pane by floating pane
-    /// in the order they were created, each client whose focused pane inside
+    /// `pane_sizing` at the size it is solved at. Then, floating pane by
+    /// floating pane in the order they were created, every attached client's
+    /// kept solve of it is emptied, and each client whose focused pane inside
     /// it the new solve suppresses focuses a pane the solve shows. A client
     /// zoomed inside the floating pane keeps its focus. Then step 2 runs
     /// once. Every
@@ -1068,8 +1085,9 @@ impl Session {
                 )
             })
             .collect();
-        self.clients.clear_own_floating_pane_solves();
         for (floating_pane_id, previous_layout_solve) in previous_floating_layout_solves {
+            self.clients
+                .clear_own_floating_pane_solves(floating_pane_id);
             emitted_events.extend(hand_off_suppressed_floating_focus(
                 self,
                 floating_pane_id,
@@ -1214,7 +1232,7 @@ impl Session {
 
     /// The solve `client` draws `tab` with when it is not the tab's own solve
     /// ([`Tab::get_layout_solve`]): the zoom's solve
-    /// ([`Session::build_zoomed_tab_solve`]) for a client zoomed in the tab,
+    /// ([`LayoutArea::build_zoomed_solve`]) for a client zoomed in the tab,
     /// else the solve of the tree with each stack showing the member
     /// [`LayoutNode::build_shown_layout_tree`] gives for the client's focus
     /// history in the tab. `None` when the client draws the tab's own solve:
@@ -1272,10 +1290,12 @@ impl Session {
     /// member. `None` when the session holds no `floating_pane_id` or the
     /// client holds no view of it.
     ///
-    /// The client's own solves are built on the first call after a change and
-    /// kept; a floating pane the
-    /// client draws with its own solve gives the floating pane's solve with no
-    /// copy.
+    /// The client's own solve of the floating pane, from the floating pane's
+    /// tree with the zoom and focus history of the client's view of it, is
+    /// built on the first call after a change to that floating pane or to the
+    /// client's view of it, and kept. A floating
+    /// pane the client draws with its own solve gives the floating pane's
+    /// solve with no copy.
     #[must_use]
     pub fn compute_client_floating_pane_solve<'a>(
         &'a self,
@@ -1285,39 +1305,15 @@ impl Session {
         let (_, floating_pane) = self
             .floating_set
             .find_floating_pane_by_id(floating_pane_id)?;
-        client.get_floating_pane_view(floating_pane_id)?;
-        let own_floating_pane_solves =
-            client.get_own_floating_pane_solves(|| self.build_own_floating_pane_solves(client));
-        Some(
-            own_floating_pane_solves
-                .get(&floating_pane_id)
-                .unwrap_or(&floating_pane.layout_area.layout_solve),
-        )
-    }
-
-    /// The solve `client` draws each floating pane with when it is not that
-    /// floating pane's own solve ([`LayoutArea::build_client_solve`] with the
-    /// zoom and focus history of the client's view of it), keyed by floating
-    /// pane id. A floating pane the client holds no view of, or draws with its
-    /// own solve, has no entry.
-    fn build_own_floating_pane_solves(
-        &self,
-        client: &Client,
-    ) -> HashMap<FloatingPaneId, LayoutSolve> {
-        self.floating_set
-            .floating_panes
-            .iter()
-            .filter_map(|floating_pane| {
-                let floating_pane_view =
-                    client.get_floating_pane_view(floating_pane.floating_pane_id)?;
-                let own_solve = floating_pane.layout_area.build_client_solve(
-                    floating_pane_view.get_layout_mode(),
-                    &floating_pane_view.focus_history,
-                    self.pane_sizing,
-                )?;
-                Some((floating_pane.floating_pane_id, own_solve))
-            })
-            .collect()
+        let floating_pane_view = client.get_floating_pane_view(floating_pane_id)?;
+        let own_floating_pane_solve = client.get_own_floating_pane_solve(floating_pane_id, || {
+            floating_pane.layout_area.build_client_solve(
+                floating_pane_view.get_layout_mode(),
+                &floating_pane_view.focus_history,
+                self.pane_sizing,
+            )
+        });
+        Some(own_floating_pane_solve.unwrap_or(&floating_pane.layout_area.layout_solve))
     }
 
     /// Whether `client` can draw floating panes: it has a floating viewport
@@ -1802,9 +1798,9 @@ impl Session {
             // nothing else. A view says minimized exactly when the shown
             // floating panes do not list its floating pane, and its focus
             // history and zoom name panes of that floating pane's tree.
-            for &viewed_floating_pane_id in client
+            for viewed_floating_pane_id in client
                 .list_floating_pane_views()
-                .keys()
+                .into_keys()
                 .collect::<BTreeSet<_>>()
             {
                 if !floating_pane_count_by_id.contains_key(&viewed_floating_pane_id) {

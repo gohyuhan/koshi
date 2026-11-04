@@ -1424,7 +1424,7 @@ fn removing_the_last_pane_of_a_floating_pane_drops_the_floating_pane_and_every_c
             .clients
             .get_client_by_id(client_id)
             .expect("the client is attached");
-        assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+        assert_eq!(client.list_floating_pane_views(), HashMap::new());
         assert_eq!(
             client.list_shown_floating_pane_ids(),
             &[] as &[FloatingPaneId]

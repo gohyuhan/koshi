@@ -1764,7 +1764,11 @@ impl Server {
     /// then [`commit_dock_placement`] takes the pane out of its floating pane
     /// and installs the tree. The pane keeps its id, its PTY and its terminal
     /// state. A floating pane of one pane leaves with the pane; a floating
-    /// pane of 2 or more panes keeps its size and its other panes.
+    /// pane of 2 or more panes keeps its other panes and its desired size,
+    /// and [`Self::reflow_floating_panes`] solves its outer size again against
+    /// the minimum of its smaller tree. `60%` of a 10-column pane area gives
+    /// `[A | B]`, which needs 8 columns, an outer width of 8; after `B` docks,
+    /// `[A]` has an outer width of 6.
     ///
     /// A tree that does not fit the destination is refused with
     /// [`RejectReason::InvalidState`] `tab <name> has no room for another
@@ -2551,7 +2555,10 @@ impl Server {
     /// and the floating pane's outer size does not change.
     ///
     /// - A client zoomed inside the floating pane returns to tiled
-    ///   ([`Client::clear_floating_pane_zoom`]).
+    ///   ([`Client::clear_floating_pane_zoom`]). When the floating pane's tree
+    ///   suppresses the pane the client focused, the client focuses a pane
+    ///   the tree shows: in `[vim | htop]` solved so narrow that `htop` is
+    ///   suppressed, leaving the zoom on `htop` focuses `vim`.
     /// - A tiled client zooms the pane ([`Client::zoom_pane_in_floating_pane`]),
     ///   and the pane takes the client's input
     ///   ([`apply_floating_pane_focus`]). A floating pane too small to show

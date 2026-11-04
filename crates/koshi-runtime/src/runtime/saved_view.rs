@@ -132,7 +132,7 @@ impl SavedViewStore {
                 focus_history_by_tab_id: client.list_focus_histories().clone(),
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
-                floating_pane_view_by_floating_pane_id: client.list_floating_pane_views().clone(),
+                floating_pane_view_by_floating_pane_id: client.list_floating_pane_views(),
                 shown_floating_pane_ids: client.list_shown_floating_pane_ids().to_vec(),
             },
         });
