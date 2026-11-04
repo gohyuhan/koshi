@@ -1659,7 +1659,7 @@ fn an_alt_unlock_alternative_keeps_the_pinned_unlock_first_at_40_and_80_columns(
 fn a_partly_rebound_direction_family_folds_only_the_keys_that_keep_its_label() {
     // `<C-p> <Left>` rebound to `core:resize-pane-left` reads `Resize Pane`;
     // the other three arrows keep `Focus Pane` and fold without it. The user
-    // binding under `<C-p>` turns its `PANE` label into the `+18` count.
+    // binding under `<C-p>` turns its `PANE` label into the `+20` count.
     let keymap_hints = build_user_keymap_hints(
         &KeybindingsConfig::default(),
         LockMode::Normal,
@@ -1679,7 +1679,7 @@ fn a_partly_rebound_direction_family_folds_only_the_keys_that_keep_its_label() {
             120,
         )),
         concat!(
-            " Ctrl +  p  +18  ▶  n  New Pane  x  Close Pane Tree  ←  Resize Pane ",
+            " Ctrl +  p  +20  ▶  n  New Pane  x  Close Pane Tree  ←  Resize Pane ",
             " ↓↑→  Focus Pane  Tab  Focus Next Floating Pane …"
         )
     );

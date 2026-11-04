@@ -882,7 +882,7 @@ fn undock_floats_the_pane_and_hands_its_tab_focus_to_the_survivor() {
 
     let emitted_events = commit_undock_placement(
         &mut session,
-        tab_id,
+        LayoutAreaId::Tab(tab_id),
         undocked_pane_id,
         DEFAULT_UNDOCK_SIZES,
         (client_id, FloatingPanePosition::Moved(top_left_cell)),
@@ -965,7 +965,7 @@ fn undock_moves_a_background_clients_tab_focus_and_gives_it_a_minimized_view() {
 
     let emitted_events = commit_undock_placement(
         &mut session,
-        tab_id,
+        LayoutAreaId::Tab(tab_id),
         undocked_pane_id,
         DEFAULT_UNDOCK_SIZES,
         (acting_client_id, FloatingPanePosition::Default),
@@ -1029,13 +1029,17 @@ fn undock_shows_the_pane_for_a_client_whose_input_is_on_it_at_the_spot_it_held_t
     let mut session =
         build_undock_session(tab_id, staying_pane_id, undocked_pane_id, acting_client_id);
     attach_client(&mut session, following_client_id, tab_id, undocked_pane_id);
-    let (_, following_top_left_cell) =
-        find_lifted_floating_pane_rect(&session, following_client_id, tab_id, undocked_pane_id)
-            .expect("the following client draws the pane");
+    let (_, following_top_left_cell) = find_lifted_floating_pane_rect(
+        &session,
+        following_client_id,
+        LayoutAreaId::Tab(tab_id),
+        undocked_pane_id,
+    )
+    .expect("the following client draws the pane");
 
     let emitted_events = commit_undock_placement(
         &mut session,
-        tab_id,
+        LayoutAreaId::Tab(tab_id),
         undocked_pane_id,
         DEFAULT_UNDOCK_SIZES,
         (acting_client_id, FloatingPanePosition::Default),
@@ -1116,11 +1120,21 @@ fn a_stack_member_drawn_on_its_header_lifts_at_the_rect_it_opens_into() {
 
     // Opened, `collapsed` takes rows 1 to 21, below the header of `open`.
     assert_eq!(
-        find_lifted_floating_pane_rect(&session, client_id, tab_id, collapsed_member_pane_id),
+        find_lifted_floating_pane_rect(
+            &session,
+            client_id,
+            LayoutAreaId::Tab(tab_id),
+            collapsed_member_pane_id
+        ),
         Some((build_cells_size(80, 21), Point { column: 0, row: 1 }))
     );
     assert_eq!(
-        find_lifted_floating_pane_rect(&session, client_id, tab_id, open_member_pane_id),
+        find_lifted_floating_pane_rect(
+            &session,
+            client_id,
+            LayoutAreaId::Tab(tab_id),
+            open_member_pane_id
+        ),
         Some((build_cells_size(80, 21), Point { column: 0, row: 0 }))
     );
 }
@@ -1139,7 +1153,7 @@ fn undocking_the_only_pane_of_a_tab_closes_the_tab_and_moves_its_viewer() {
 
     let emitted_events = commit_undock_placement(
         &mut session,
-        undock_tab_id,
+        LayoutAreaId::Tab(undock_tab_id),
         undocked_pane_id,
         DEFAULT_UNDOCK_SIZES,
         (client_id, FloatingPanePosition::Default),
@@ -1204,44 +1218,94 @@ fn undock_refusals_change_nothing() {
             .expect("the floating set has room");
     }
 
+    let (vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new());
+    let alone_floating_session =
+        build_dock_session(tab_id, staying_pane_id, htop_pane_id, client_id);
+    let alone_floating_pane_id =
+        get_floating_pane_id_holding(&alone_floating_session, htop_pane_id);
+    let (mut full_split_floating_session, split_floating_pane_id) =
+        build_split_floating_dock_session(
+            tab_id,
+            staying_pane_id,
+            vim_pane_id,
+            htop_pane_id,
+            client_id,
+        );
+    for _ in 1..MAX_FLOATING_PANES_PER_SESSION {
+        full_split_floating_session
+            .floating_set
+            .add_floating_pane(build_default_floating_pane(PaneId::new()))
+            .expect("the floating set has room");
+    }
+
     let refusal_cases = [
         (
             build_undock_session(tab_id, staying_pane_id, undocked_pane_id, client_id),
-            TabId::new(),
+            LayoutAreaId::Tab(TabId::new()),
             undocked_pane_id,
             client_id,
             PlacementCommitError::SourceTabNotFound,
         ),
         (
             build_undock_session(tab_id, staying_pane_id, undocked_pane_id, client_id),
-            tab_id,
+            LayoutAreaId::Tab(tab_id),
             PaneId::new(),
             client_id,
             PlacementCommitError::SourcePaneNotFound,
         ),
         (
             last_pane_session,
-            tab_id,
+            LayoutAreaId::Tab(tab_id),
             undocked_pane_id,
             client_id,
             PlacementCommitError::LastTiledPane,
         ),
         (
             build_undock_session(tab_id, staying_pane_id, undocked_pane_id, client_id),
-            tab_id,
+            LayoutAreaId::Tab(tab_id),
             undocked_pane_id,
             ClientId::new(),
             PlacementCommitError::ActingClientNotFound,
         ),
         (
             full_floating_set_session,
-            tab_id,
+            LayoutAreaId::Tab(tab_id),
             undocked_pane_id,
             client_id,
             PlacementCommitError::FloatingPaneRefused(FloatingSetError::TooManyPanes),
         ),
+        (
+            build_dock_session(tab_id, staying_pane_id, htop_pane_id, client_id),
+            LayoutAreaId::FloatingPane(FloatingPaneId::new()),
+            htop_pane_id,
+            client_id,
+            PlacementCommitError::FloatingSourceNotFound,
+        ),
+        (
+            build_dock_session(tab_id, staying_pane_id, htop_pane_id, client_id),
+            LayoutAreaId::FloatingPane(alone_floating_pane_id),
+            staying_pane_id,
+            client_id,
+            PlacementCommitError::FloatingSourceNotFound,
+        ),
+        (
+            alone_floating_session,
+            LayoutAreaId::FloatingPane(alone_floating_pane_id),
+            htop_pane_id,
+            client_id,
+            PlacementCommitError::AloneInFloatingPane {
+                pane_id: htop_pane_id,
+            },
+        ),
+        (
+            full_split_floating_session,
+            LayoutAreaId::FloatingPane(split_floating_pane_id),
+            htop_pane_id,
+            client_id,
+            PlacementCommitError::FloatingPaneRefused(FloatingSetError::TooManyPanes),
+        ),
     ];
-    for (mut session, source_tab_id, source_pane_id, acting_client_id, expected_error) in
+    for (mut session, source_layout_area_id, source_pane_id, acting_client_id, expected_error) in
         refusal_cases
     {
         let serialized_session_before =
@@ -1250,7 +1314,7 @@ fn undock_refusals_change_nothing() {
         assert_eq!(
             commit_undock_placement(
                 &mut session,
-                source_tab_id,
+                source_layout_area_id,
                 source_pane_id,
                 DEFAULT_UNDOCK_SIZES,
                 (acting_client_id, FloatingPanePosition::Default),
@@ -1281,6 +1345,289 @@ fn build_dock_session(
     add_default_floating_pane(&mut session, htop_pane_id);
     focus_floating_pane_holding(&mut session, client_id, htop_pane_id);
     session
+}
+
+/// [`build_dock_session`] with the floating pane `[vim | htop]`: `client_id`
+/// shows and focuses it, and types in `htop`. Returns the session and the
+/// floating pane's id.
+fn build_split_floating_dock_session(
+    tab_id: TabId,
+    tiled_pane_id: PaneId,
+    vim_pane_id: PaneId,
+    htop_pane_id: PaneId,
+    client_id: ClientId,
+) -> (Session, FloatingPaneId) {
+    let mut session = build_dock_session(tab_id, tiled_pane_id, vim_pane_id, client_id);
+    register_pane(&mut session, htop_pane_id);
+    let floating_pane_id = get_floating_pane_id_holding(&session, vim_pane_id);
+    assert_eq!(
+        session.update_floating_pane_layout(
+            floating_pane_id,
+            build_horizontal_split(vim_pane_id, htop_pane_id)
+        ),
+        vec![]
+    );
+    session
+        .clients
+        .get_client_mut_by_id(client_id)
+        .expect("the client is attached")
+        .update_floating_pane_focused_pane(floating_pane_id, htop_pane_id);
+    (session, floating_pane_id)
+}
+
+/// The tree `V[tiled, H[vim, htop]]`: `[vim | htop]` docked below the tiled
+/// pane.
+fn build_docked_below_tree(
+    tiled_pane_id: PaneId,
+    vim_pane_id: PaneId,
+    htop_pane_id: PaneId,
+) -> LayoutNode {
+    LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![
+            LayoutNode::Pane(tiled_pane_id),
+            build_horizontal_split(vim_pane_id, htop_pane_id),
+        ],
+    ))
+}
+
+#[test]
+fn docking_a_whole_floating_pane_removes_it_and_moves_each_client_typing_in_it_onto_its_own_pane() {
+    // alice types in `htop` and bob in `vim`, both inside `[vim | htop]`;
+    // carol types in the tiled pane. alice docks the whole floating pane.
+    let tab_id = TabId::new();
+    let (tiled_pane_id, vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let (alice_client_id, bob_client_id, carol_client_id) =
+        (ClientId::new(), ClientId::new(), ClientId::new());
+    let (mut session, floating_pane_id) = build_split_floating_dock_session(
+        tab_id,
+        tiled_pane_id,
+        vim_pane_id,
+        htop_pane_id,
+        alice_client_id,
+    );
+    attach_client(&mut session, bob_client_id, tab_id, tiled_pane_id);
+    attach_client(&mut session, carol_client_id, tab_id, tiled_pane_id);
+    focus_floating_pane_holding(&mut session, bob_client_id, vim_pane_id);
+    let docked_tree = build_docked_below_tree(tiled_pane_id, vim_pane_id, htop_pane_id);
+
+    let emitted_events = commit_dock_placement(
+        &mut session,
+        DockSource::WholeFloatingPane(floating_pane_id),
+        tab_id,
+        docked_tree.clone(),
+        alice_client_id,
+    )
+    .expect("dock commits");
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id: alice_client_id,
+                tab_id: Some(tab_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(htop_pane_id),
+            }),
+            Event::PaneFocused(PaneFocused {
+                client_id: bob_client_id,
+                tab_id: Some(tab_id),
+                pane_id: vim_pane_id,
+                previous_pane_id: Some(vim_pane_id),
+            }),
+        ]
+    );
+    assert_eq!(session.tabs[&tab_id].get_layout_tree(), &docked_tree);
+    assert_eq!(list_floating_pane_shapes(&session), vec![]);
+    for (client_id, expected_input_pane_id) in [
+        (alice_client_id, htop_pane_id),
+        (bob_client_id, vim_pane_id),
+        (carol_client_id, tiled_pane_id),
+    ] {
+        let client = session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the client is attached");
+        assert_eq!(
+            client.get_active_focused_pane_id(),
+            Some(expected_input_pane_id)
+        );
+        assert_eq!(client.get_floating_pane_view(floating_pane_id), None);
+        assert_eq!(
+            client.list_shown_floating_pane_ids(),
+            &[] as &[FloatingPaneId]
+        );
+    }
+    assert!(session.panes.get_pane_record_by_id(vim_pane_id).is_some());
+    assert!(session.panes.get_pane_record_by_id(htop_pane_id).is_some());
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn docking_a_whole_floating_pane_for_a_client_typing_in_the_tab_focuses_its_last_pane_there() {
+    // alice minimized `[vim | htop]` after typing in `htop` there, and types
+    // in the tiled pane.
+    let tab_id = TabId::new();
+    let (tiled_pane_id, vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let alice_client_id = ClientId::new();
+    let (mut session, floating_pane_id) = build_split_floating_dock_session(
+        tab_id,
+        tiled_pane_id,
+        vim_pane_id,
+        htop_pane_id,
+        alice_client_id,
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_mut_by_id(alice_client_id)
+            .expect("alice is attached")
+            .minimize_shown_floating_panes(),
+        vec![floating_pane_id]
+    );
+
+    let emitted_events = commit_dock_placement(
+        &mut session,
+        DockSource::WholeFloatingPane(floating_pane_id),
+        tab_id,
+        build_docked_below_tree(tiled_pane_id, vim_pane_id, htop_pane_id),
+        alice_client_id,
+    )
+    .expect("dock commits");
+
+    assert_eq!(
+        emitted_events,
+        vec![
+            Event::LayoutChanged(LayoutChanged { tab_id }),
+            Event::PaneFocused(PaneFocused {
+                client_id: alice_client_id,
+                tab_id: Some(tab_id),
+                pane_id: htop_pane_id,
+                previous_pane_id: Some(tiled_pane_id),
+            }),
+        ]
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(alice_client_id)
+            .expect("alice is attached")
+            .get_active_focused_pane_id(),
+        Some(htop_pane_id)
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+}
+
+#[test]
+fn undocking_a_pane_out_of_a_floating_pane_of_two_floats_it_alone_and_repairs_each_focus_there() {
+    // alice types in `htop` inside `[vim | htop]`. bob types in the tiled
+    // pane, and bob's minimized view there last focused `htop`.
+    let tab_id = TabId::new();
+    let (tiled_pane_id, vim_pane_id, htop_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
+    let (alice_client_id, bob_client_id) = (ClientId::new(), ClientId::new());
+    let (mut session, floating_pane_id) = build_split_floating_dock_session(
+        tab_id,
+        tiled_pane_id,
+        vim_pane_id,
+        htop_pane_id,
+        alice_client_id,
+    );
+    attach_client(&mut session, bob_client_id, tab_id, tiled_pane_id);
+    session
+        .clients
+        .get_client_mut_by_id(bob_client_id)
+        .expect("bob is attached")
+        .update_floating_pane_focused_pane(floating_pane_id, htop_pane_id);
+
+    let emitted_events = commit_undock_placement(
+        &mut session,
+        LayoutAreaId::FloatingPane(floating_pane_id),
+        htop_pane_id,
+        DEFAULT_UNDOCK_SIZES,
+        (alice_client_id, FloatingPanePosition::Default),
+    )
+    .expect("undock commits");
+
+    // alice's input stays on `htop`, so no `PaneFocused` is emitted.
+    assert_eq!(
+        emitted_events,
+        vec![Event::FloatingPaneLayoutChanged(
+            FloatingPaneLayoutChanged {
+                pane_ids: vec![vim_pane_id],
+            }
+        )]
+    );
+    assert_eq!(
+        list_floating_pane_shapes(&session),
+        vec![
+            (
+                vec![vim_pane_id],
+                DEFAULT_FLOATING_PANE_SIZE,
+                DEFAULT_FLOATING_SOLVED_SIZE
+            ),
+            (
+                vec![htop_pane_id],
+                DEFAULT_FLOATING_PANE_SIZE,
+                DEFAULT_FLOATING_SOLVED_SIZE
+            ),
+        ]
+    );
+    let undocked_floating_pane_id = get_floating_pane_id_holding(&session, htop_pane_id);
+    let alice_client = session
+        .clients
+        .get_client_by_id(alice_client_id)
+        .expect("alice is attached");
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(htop_pane_id)
+    );
+    assert_eq!(
+        alice_client.get_focused_floating_pane_id(),
+        Some(undocked_floating_pane_id)
+    );
+    assert_eq!(
+        alice_client.list_shown_floating_pane_ids(),
+        &[floating_pane_id, undocked_floating_pane_id]
+    );
+    assert_eq!(
+        alice_client.get_floating_pane_view(floating_pane_id),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Default,
+            false,
+            vim_pane_id
+        ))
+    );
+    assert_eq!(
+        alice_client.get_floating_pane_view(undocked_floating_pane_id),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Default,
+            false,
+            htop_pane_id
+        ))
+    );
+    let bob_client = session
+        .clients
+        .get_client_by_id(bob_client_id)
+        .expect("bob is attached");
+    assert_eq!(bob_client.get_active_focused_pane_id(), Some(tiled_pane_id));
+    assert_eq!(
+        bob_client.get_floating_pane_view(floating_pane_id),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Default,
+            true,
+            vim_pane_id
+        ))
+    );
+    assert_eq!(
+        bob_client.get_floating_pane_view(undocked_floating_pane_id),
+        Some(&build_floating_pane_view(
+            FloatingPanePosition::Default,
+            true,
+            htop_pane_id
+        ))
+    );
+    assert_eq!(session.validate_session_consistency(), Ok(()));
 }
 
 #[test]
@@ -1350,7 +1697,7 @@ fn dock_refusals_change_nothing() {
         assert_eq!(
             commit_dock_placement(
                 &mut session,
-                source_pane_id,
+                DockSource::Pane(source_pane_id),
                 destination_tab_id,
                 destination_tree,
                 acting_client_id,
@@ -1417,7 +1764,7 @@ fn docking_into_another_tab_solves_the_tab_the_acting_client_left_at_its_other_v
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        htop_pane_id,
+        DockSource::Pane(htop_pane_id),
         destination_tab_id,
         build_horizontal_split(destination_tab_pane_id, htop_pane_id),
         acting_client_id,
@@ -1500,7 +1847,7 @@ fn undocking_a_stack_member_collapses_the_stack_to_its_survivor() {
 
     let emitted_events = commit_undock_placement(
         &mut session,
-        tab_id,
+        LayoutAreaId::Tab(tab_id),
         undocked_member_pane_id,
         DEFAULT_UNDOCK_SIZES,
         (client_id, FloatingPanePosition::Default),
@@ -1609,7 +1956,7 @@ fn transfer_gives_a_background_clients_source_focus_to_the_spatial_neighbor() {
 }
 
 /// The stack `[target_pane_id, docked_pane_id]` with `target_pane_id` active:
-/// the tree [`place_floating_pane_in_tab`](koshi_layout::placement::place_floating_pane_in_tab)
+/// the tree [`place_docking_tree_in_tab`](koshi_layout::placement::place_docking_tree_in_tab)
 /// builds for a dock onto a plain pane.
 fn build_stack_dock_tree(target_pane_id: PaneId, docked_pane_id: PaneId) -> LayoutNode {
     LayoutNode::Split(SplitNode::from_stacked_pane_ids(
@@ -1634,7 +1981,7 @@ fn docking_onto_the_stack_of_the_focused_pane_gives_the_docked_pane_its_focus_an
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        htop_pane_id,
+        DockSource::Pane(htop_pane_id),
         tab_id,
         build_stack_dock_tree(tiled_pane_id, htop_pane_id),
         acting_client_id,
@@ -1697,7 +2044,7 @@ fn docking_onto_the_stack_of_the_typed_in_pane_reports_the_focus_once() {
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        htop_pane_id,
+        DockSource::Pane(htop_pane_id),
         tab_id,
         build_stack_dock_tree(tiled_pane_id, htop_pane_id),
         client_id,
@@ -1746,7 +2093,7 @@ fn docking_minimizes_the_acting_clients_shown_floating_panes_and_gives_it_the_do
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        docked_pane_id,
+        DockSource::Pane(docked_pane_id),
         tab_id,
         build_stack_dock_tree(tiled_pane_id, docked_pane_id),
         client_id,
@@ -1806,7 +2153,7 @@ fn docking_into_another_tab_onto_the_stack_of_its_remembered_focus_focuses_the_d
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        htop_pane_id,
+        DockSource::Pane(htop_pane_id),
         destination_tab_id,
         build_stack_dock_tree(destination_tab_pane_id, htop_pane_id),
         client_id,
@@ -1887,7 +2234,7 @@ fn docking_moves_a_client_whose_input_is_on_the_pane_to_its_tab_and_leaves_other
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        htop_pane_id,
+        DockSource::Pane(htop_pane_id),
         destination_tab_id,
         build_horizontal_split(vim_pane_id, htop_pane_id),
         acting_client_id,
@@ -1998,7 +2345,7 @@ fn docking_one_pane_of_a_floating_pane_of_two_leaves_the_other_in_it_and_moves_e
 
     let emitted_events = commit_dock_placement(
         &mut session,
-        htop_pane_id,
+        DockSource::Pane(htop_pane_id),
         tab_id,
         docked_tree.clone(),
         alice_client_id,
@@ -2119,7 +2466,7 @@ fn docking_a_pane_out_of_a_floating_pane_too_narrow_for_its_tree_moves_the_focus
 
     commit_dock_placement(
         &mut session,
-        vim_pane_id,
+        DockSource::Pane(vim_pane_id),
         tab_id,
         build_horizontal_split(tiled_pane_id, vim_pane_id),
         alice_client_id,
@@ -2300,11 +2647,11 @@ fn list_following_client_ids_lists_every_other_client_whose_input_is_on_the_pane
     let _ = focus_new_floating_pane(&mut session, floating_client_id);
 
     assert_eq!(
-        list_following_client_ids(&session, vim_pane_id, acting_client_id),
+        list_following_client_ids(&session, &[vim_pane_id], acting_client_id),
         vec![typing_client_id]
     );
     assert_eq!(
-        list_moving_client_ids(&session, vim_pane_id, acting_client_id),
+        list_moving_client_ids(&session, &[vim_pane_id], acting_client_id),
         vec![acting_client_id, typing_client_id]
     );
     let mut following_client_ids = vec![acting_client_id, typing_client_id];
@@ -2312,7 +2659,7 @@ fn list_following_client_ids_lists_every_other_client_whose_input_is_on_the_pane
     let mut moving_client_ids = vec![shell_client_id];
     moving_client_ids.extend(following_client_ids);
     assert_eq!(
-        list_moving_client_ids(&session, vim_pane_id, shell_client_id),
+        list_moving_client_ids(&session, &[vim_pane_id], shell_client_id),
         moving_client_ids,
         "the acting client comes first, then the followers in client id order"
     );
@@ -3054,6 +3401,69 @@ fn a_pane_of_a_floating_pane_of_two_docks_under_the_center_of_its_own_box() {
             anchor: PanePlacementAnchor::Pane(right_pane_id),
             direction: Direction::Up,
         })
+    );
+}
+
+#[test]
+fn a_whole_floating_pane_docks_under_the_center_of_its_rect_and_has_no_dock_target_once_minimized()
+{
+    // Tab `A | B` fills an `80x22` pane area, with `B` at `(40, 0)`.
+    // `[vim | htop]` drawn `16x10` at `(62, 6)` has the center cell `(70, 11)`,
+    // 9 cells from the right edge of `B`. `vim`'s own box grown up by the
+    // strip row, `8x10` at `(62, 6)`, has the center cell `(66, 11)`, 10 cells
+    // from the bottom edge of `B`.
+    let tab_id = TabId::new();
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let client_id = ClientId::new();
+    let (mut session, vim_pane_id, _) = build_split_nearest_dock_session(
+        tab_id,
+        &[left_pane_id, right_pane_id],
+        build_horizontal_split(left_pane_id, right_pane_id),
+        client_id,
+        build_rect_at(62, 6, 16, 10),
+    );
+    let floating_pane_id = get_floating_pane_id_holding(&session, vim_pane_id);
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+
+    assert_eq!(
+        find_nearest_floating_pane_dock_target(&session, client, floating_pane_id),
+        Some(TiledPlacementTarget::Split {
+            destination_tab_id: tab_id,
+            anchor: PanePlacementAnchor::Pane(right_pane_id),
+            direction: Direction::Right,
+        })
+    );
+    assert_eq!(
+        find_nearest_dock_target(&session, client, vim_pane_id),
+        Some(TiledPlacementTarget::Split {
+            destination_tab_id: tab_id,
+            anchor: PanePlacementAnchor::Pane(right_pane_id),
+            direction: Direction::Down,
+        })
+    );
+
+    assert_eq!(
+        session
+            .clients
+            .get_client_mut_by_id(client_id)
+            .expect("the client is attached")
+            .minimize_shown_floating_panes(),
+        vec![floating_pane_id]
+    );
+    let client = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("the client is attached");
+    assert_eq!(
+        find_nearest_floating_pane_dock_target(&session, client, floating_pane_id),
+        None
+    );
+    assert_eq!(
+        find_nearest_floating_pane_dock_target(&session, client, FloatingPaneId::new()),
+        None
     );
 }
 

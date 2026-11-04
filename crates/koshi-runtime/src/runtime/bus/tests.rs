@@ -133,7 +133,7 @@ pub(crate) fn build_test_pane_placement_committed(
 ) -> PanePlacementCommitted {
     PanePlacementCommitted {
         command_id: CommandId::from_uuid(build_test_uuid_with_suffix(2)),
-        source_pane_id: PaneId::from_uuid(build_test_uuid_with_suffix(3)),
+        source_pane_ids: vec![PaneId::from_uuid(build_test_uuid_with_suffix(3))],
         source_tab_id: Some(destination_tab_id),
         destination_tab_id: Some(destination_tab_id),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -2016,7 +2016,7 @@ fn each_session_event_delivery_converts_to_its_wire_frame() {
         )),
         Some(SessionEvent::PanePlacementCommitted {
             command_id: pane_placement_committed.command_id,
-            source_pane_id: pane_placement_committed.source_pane_id,
+            source_pane_ids: pane_placement_committed.source_pane_ids.clone(),
             source_tab_id: Some(tab_id),
             destination_tab_id: Some(tab_id),
             placement_target: pane_placement_committed.placement_target,
@@ -2055,14 +2055,14 @@ fn a_placement_of_a_floating_pane_writes_no_source_tab() {
     assert_eq!(
         build_wire_event(&Delivery::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: pane_id,
+            source_pane_ids: vec![pane_id],
             source_tab_id: None,
             destination_tab_id: Some(tab_id),
             placement_target: placement_target.clone(),
         })),
         Some(SessionEvent::PanePlacementCommitted {
             command_id,
-            source_pane_id: pane_id,
+            source_pane_ids: vec![pane_id],
             source_tab_id: None,
             destination_tab_id: Some(tab_id),
             placement_target,

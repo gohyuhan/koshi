@@ -117,7 +117,7 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
         },
         Event::PanePlacementCommitted(pane_placement_committed) => RecentEvent {
             tab_id: pane_placement_committed.destination_tab_id,
-            pane_id: Some(pane_placement_committed.source_pane_id),
+            pane_id: pane_placement_committed.source_pane_ids.first().copied(),
             command_id: Some(pane_placement_committed.command_id),
             ..recent_event_without_entity_ids
         },

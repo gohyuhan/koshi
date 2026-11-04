@@ -31,11 +31,11 @@ use std::fmt;
 
 use crate::action::{ActionHandlerReference, ActionReference, ClientActionKind};
 use crate::command::{
-    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, LockModeArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementTarget,
-    PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs,
-    SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs, TabTarget,
-    ToggleFloatingPanePinnedArgs, ToggleLockModeArgs,
+    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, DockFloatingPaneArgs,
+    FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, NewPaneArgs, NewPanePlacement,
+    NewTabArgs, PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs,
+    SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs,
+    TabTarget, ToggleFloatingPanePinnedArgs, ToggleLockModeArgs,
 };
 use crate::geometry::Direction;
 use crate::registry::ActionRegistry;
@@ -193,6 +193,7 @@ fn resolve_core_action(
             },
         }),
         "toggle-pane-floating" => Command::TogglePaneFloating,
+        "dock-floating-pane" => Command::DockFloatingPane(DockFloatingPaneArgs::default()),
         "pin-pane" => Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
             pane_id: None,
             is_pinned: true,

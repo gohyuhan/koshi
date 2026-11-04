@@ -1616,6 +1616,7 @@ fn build_bare_dock_pane_command() -> CliCommand {
         tab_reference: None,
         direction: None,
         stack_onto_pane_id: None,
+        should_dock_floating_pane: false,
         client_id: None,
     }
 }
@@ -1717,6 +1718,7 @@ fn a_bare_dock_pane_with_a_client_flag_docks_into_the_tab_that_client_views() {
         tab_reference: None,
         direction: None,
         stack_onto_pane_id: None,
+        should_dock_floating_pane: false,
         client_id: Some(second_client_id),
     };
     // `--client` wins over the tiled pane the CLI runs in and over its own
@@ -1834,6 +1836,7 @@ fn a_dock_pane_with_a_stack_target_resolves_no_tab() {
         tab_reference: None,
         direction: None,
         stack_onto_pane_id: Some(stack_pane_id),
+        should_dock_floating_pane: false,
         client_id: None,
     };
     assert_eq!(

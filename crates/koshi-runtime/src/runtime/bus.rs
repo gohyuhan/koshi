@@ -1033,7 +1033,7 @@ fn hold_command_rejection(
 ///
 /// A [`Delivery::PanePlacementCommitted`] becomes
 /// [`SessionEvent::PanePlacementCommitted`] carrying the same command id,
-/// source pane, source and destination tabs, and placement target. A
+/// source panes, source and destination tabs, and placement target. A
 /// [`Delivery::Quit`] becomes [`SessionEvent::Quit`], and a
 /// [`Delivery::Restarting`] becomes [`SessionEvent::Restarting`].
 ///
@@ -1048,7 +1048,7 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
         Delivery::PanePlacementCommitted(pane_placement_committed) => {
             Some(SessionEvent::PanePlacementCommitted {
                 command_id: pane_placement_committed.command_id,
-                source_pane_id: pane_placement_committed.source_pane_id,
+                source_pane_ids: pane_placement_committed.source_pane_ids.clone(),
                 source_tab_id: pane_placement_committed.source_tab_id,
                 destination_tab_id: pane_placement_committed.destination_tab_id,
                 placement_target: pane_placement_committed.placement_target.clone(),

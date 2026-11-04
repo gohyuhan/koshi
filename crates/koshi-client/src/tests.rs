@@ -2398,6 +2398,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Begin Pane Placement",
             "Close Pane Tree",
             "Close Tab",
+            "Dock Floating Pane",
             "Focus Next Floating Pane",
             "Focus Pane",
             "Focus Pane",
@@ -2426,6 +2427,7 @@ fn frame_hints_follow_the_viewers_own_mode() {
             "Toggle Pane Floating",
             "Toggle Pane Fullscreen",
             "Toggle Pane Pinned",
+            "Undock Pane",
         ]
         .map(|hint_label| (hint_label.to_string(), false))
     );

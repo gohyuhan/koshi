@@ -157,7 +157,7 @@ fn build_test_placement_frame(tab_id: TabId) -> SessionEvent {
     let pane_placement_committed = build_test_pane_placement_committed(tab_id);
     SessionEvent::PanePlacementCommitted {
         command_id: pane_placement_committed.command_id,
-        source_pane_id: pane_placement_committed.source_pane_id,
+        source_pane_ids: pane_placement_committed.source_pane_ids,
         source_tab_id: pane_placement_committed.source_tab_id,
         destination_tab_id: pane_placement_committed.destination_tab_id,
         placement_target: pane_placement_committed.placement_target,

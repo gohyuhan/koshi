@@ -141,6 +141,8 @@ mode "normal" {
     bind "<leader>p f" "core:new-pane-floating"
     bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>p u" "core:toggle-pane-floating"
+    bind "<leader>p <S-u>" "core:dock-floating-pane"             // <C-p> U docks every pane of the floating pane
+    bind "<leader>p o" "core:undock-pane"                        // <C-p> o moves one pane out of its floating pane
     bind "<leader>p <Tab>" "core:focus-next-floating-pane"       // repeats: the prefix stays open
     bind "<leader>p <S-Tab>" "core:focus-previous-floating-pane"
     bind "<leader>p w" "core:toggle-floating-pane-tray"
@@ -398,6 +400,45 @@ docks `htop` alone, and the floating pane keeps `vim` at the size `48x13`.
 The session refuses a float, and changes nothing, when the pane is the only
 pane of the only tab, or when the session already holds 12 floating panes.
 
+`<leader>p U` (`core:dock-floating-pane`) docks every pane of the floating pane
+that holds this client's input into this client's active tab, as one subtree:
+
+- The subtree keeps its splits and its split weights. A subtree split in the
+  direction of the dock joins that row or column of the tab, and every pane
+  keeps its exact share.
+- The session takes the center cell of the rect where this client draws the
+  floating pane, and docks the subtree beside the span under that cell, as
+  `<leader>p u` docks one pane. When this client draws the floating pane
+  nowhere, the subtree docks at the right edge of the whole tab.
+- The floating pane leaves the session. This client, and every other client
+  whose input is on one of its panes, moves to the tab. A client whose input
+  was on a docked pane keeps that pane. This client, when its input was on no
+  docked pane, takes the pane it focused last in the floating pane.
+- If the tab has no room for the subtree, the session refuses the dock with
+  `tab <name> has no room for <n> more panes`, and nothing changes. A focused
+  tiled pane is refused with `<pane-id> is not in a floating pane`.
+
+Example: tab `A | B` fills an `80x22` pane area, and `B` is at `(40, 0)` with
+the size `40x22`. The floating pane `[vim | htop]` is drawn at `(62, 6)` with
+the size `16x10`, and its center cell is `(70, 11)`. `<C-p> U` docks both
+panes right of `B`: `A` keeps 40 columns, `B` takes 20, and `vim` and `htop`
+take 10 each.
+
+`<leader>p o` (`core:undock-pane`) floats the pane that holds this client's
+input on its own:
+
+- On a tiled or stacked pane, the key floats the pane as `<leader>p u` does.
+- On a pane of a floating pane of 2 or more panes, the pane moves into a new
+  floating pane, at the box where this client draws it, grown up by one row
+  for the titlebar strip. The floating pane it leaves keeps its other panes
+  and the size it asks for.
+- A pane alone in its floating pane is refused with `<pane-id> is already
+  alone in its floating pane`.
+
+Example: the floating pane `[vim | htop]` is drawn at `(16, 4)` with the size
+`48x13`. `<C-p> o` in `htop` floats `htop` at `(40, 4)` with the size `24x13`,
+and `[vim]` stays at the size `48x13`.
+
 ## Floating pane tray
 
 The tabline shows the tray button `⧉` left of the mode tag, also while the
@@ -583,9 +624,6 @@ floating pane focused, the key is refused with `no floating pane is focused`.
 
 No default key runs these actions. Bind them in `normal` or `locked`:
 
-- `core:undock-pane` floats the pane that holds this client's input up where
-  this client draws it, as `<leader>p u` does on a tiled pane. A floating
-  pane is refused with `<pane-id> is already floating`.
 - `core:pin-pane` and `core:unpin-pane` pin and unpin the focused floating
   pane for this client.
 - `core:minimize-pane` minimizes the focused floating pane for this client.

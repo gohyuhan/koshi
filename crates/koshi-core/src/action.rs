@@ -467,7 +467,8 @@ pub const MOVE_FOCUSED_PANE_HINT: &str = "Move Focused Pane";
 /// `FocusPane` with the floating pane target they name;
 /// `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`; `undock-pane`
 /// builds `PlacePane` with a floating target; `toggle-pane-floating` builds
-/// `TogglePaneFloating`; `pin-pane`/`unpin-pane` both
+/// `TogglePaneFloating`; `dock-floating-pane` builds `DockFloatingPane` with
+/// no pane and no target; `pin-pane`/`unpin-pane` both
 /// build `SetFloatingPanePinned`; `toggle-pane-pinned` builds `ToggleFloatingPanePinned`;
 /// `minimize-pane` builds `SetFloatingPaneMinimized`; `minimize-all-floating-panes` and
 /// `restore-all-floating-panes` both build `SetAllFloatingPanesMinimized`;
@@ -956,7 +957,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "undock-pane",
             "Undock Pane",
-            "Float the focused tiled pane above the tiled panes, at the top-left cell and the size where it is drawn, each axis cut to 90% of the smallest pane area",
+            "Float the focused tiled pane, or move the focused pane out of a floating pane of 2 or more panes into a new floating pane, at the top-left cell and the size where it is drawn, each axis cut to 90% of the smallest pane area",
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::PlacePane),
@@ -976,6 +977,14 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::TogglePaneFloating),
+        ),
+        build_core_action_seed(
+            "dock-floating-pane",
+            "Dock Floating Pane",
+            "Dock every pane of the floating pane that holds the focused pane, with its split weights, beside the tiled pane under its center",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::DockFloatingPane),
         ),
         build_core_action_seed(
             "move-floating-pane",

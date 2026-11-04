@@ -235,7 +235,7 @@ fn a_successful_stack_addition_leaves_the_input_unchanged() {
         build_equal_split_node(SplitDirection::Horizontal, left_pane_id, right_pane_id);
     let original_tree = layout_tree.clone();
 
-    let stack_result = add_pane_to_stack(&layout_tree, left_pane_id, new_pane_id).unwrap();
+    let stack_result = add_panes_to_stack(&layout_tree, left_pane_id, &[new_pane_id]).unwrap();
 
     assert_eq!(layout_tree, original_tree);
     assert_eq!(
@@ -749,7 +749,7 @@ fn stacking_onto_a_plain_pane_creates_a_stack_with_the_target_active() {
     let layout_tree =
         build_equal_split_node(SplitDirection::Horizontal, left_pane_id, target_pane_id);
 
-    let stacked_tree = add_pane_to_stack(&layout_tree, target_pane_id, new_pane_id).unwrap();
+    let stacked_tree = add_panes_to_stack(&layout_tree, target_pane_id, &[new_pane_id]).unwrap();
     assert_eq!(
         stacked_tree.list_leaf_pane_ids(),
         [left_pane_id, target_pane_id, new_pane_id]
@@ -777,7 +777,7 @@ fn stacking_onto_a_stack_member_appends_to_that_stack_and_keeps_its_active_membe
         1,
     ));
 
-    let stacked_tree = add_pane_to_stack(&layout_tree, first_pane_id, new_pane_id).unwrap();
+    let stacked_tree = add_panes_to_stack(&layout_tree, first_pane_id, &[new_pane_id]).unwrap();
     let LayoutNode::Split(stack_split_node) = &stacked_tree else {
         panic!("stack must survive");
     };
@@ -792,6 +792,50 @@ fn stacking_onto_a_stack_member_appends_to_that_stack_and_keeps_its_active_membe
         .map(|child_index| stack_split_node.is_child_collapsed(child_index))
         .collect();
     assert_eq!(collapsed_child_flags, [true, false, true]);
+}
+
+#[test]
+fn stacking_several_panes_keeps_their_order_and_never_makes_one_the_active_member() {
+    let (first_pane_id, second_pane_id, vim_pane_id, htop_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+
+    assert_eq!(
+        add_panes_to_stack(
+            &LayoutNode::Pane(first_pane_id),
+            first_pane_id,
+            &[vim_pane_id, htop_pane_id]
+        ),
+        Ok(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![first_pane_id, vim_pane_id, htop_pane_id],
+            0,
+        )))
+    );
+    assert_eq!(
+        add_panes_to_stack(
+            &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                vec![first_pane_id, second_pane_id],
+                1,
+            )),
+            first_pane_id,
+            &[vim_pane_id, htop_pane_id]
+        ),
+        Ok(LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+            vec![first_pane_id, second_pane_id, vim_pane_id, htop_pane_id],
+            1,
+        )))
+    );
+}
+
+#[test]
+fn stacking_no_pane_gives_the_tree_unchanged() {
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let layout_tree =
+        build_equal_split_node(SplitDirection::Horizontal, left_pane_id, right_pane_id);
+
+    assert_eq!(
+        add_panes_to_stack(&layout_tree, right_pane_id, &[]),
+        Ok(layout_tree)
+    );
 }
 
 #[test]
@@ -814,7 +858,8 @@ fn stacking_onto_a_pane_inside_a_split_member_appends_to_that_stack() {
 
     // The right nested pane is a leaf of the second member; the new pane becomes a third
     // member of the stack, beside that split, and the first member stays active.
-    let stacked_tree = add_pane_to_stack(&layout_tree, right_nested_pane_id, new_pane_id).unwrap();
+    let stacked_tree =
+        add_panes_to_stack(&layout_tree, right_nested_pane_id, &[new_pane_id]).unwrap();
     let LayoutNode::Split(stack_split_node) = &stacked_tree else {
         panic!("stack must survive");
     };
@@ -860,7 +905,8 @@ fn stacking_onto_a_member_of_a_nested_stack_joins_the_innermost_stack() {
         active_child_index: 1,
     });
 
-    let stacked_tree = add_pane_to_stack(&layout_tree, second_inner_pane_id, new_pane_id).unwrap();
+    let stacked_tree =
+        add_panes_to_stack(&layout_tree, second_inner_pane_id, &[new_pane_id]).unwrap();
     let LayoutNode::Split(outer_split_node) = &stacked_tree else {
         panic!("the outer stack must survive");
     };
@@ -893,7 +939,7 @@ fn stacked_layout_still_tiles_after_the_edit() {
     let (left_pane_id, target_pane_id, new_pane_id) = (PaneId::new(), PaneId::new(), PaneId::new());
     let layout_tree =
         build_equal_split_node(SplitDirection::Horizontal, left_pane_id, target_pane_id);
-    let stacked_tree = add_pane_to_stack(&layout_tree, target_pane_id, new_pane_id).unwrap();
+    let stacked_tree = add_panes_to_stack(&layout_tree, target_pane_id, &[new_pane_id]).unwrap();
     assert_tiles(&stacked_tree, build_cell_rect(0, 0, 80, 24));
 }
 
@@ -965,7 +1011,8 @@ fn stacking_onto_a_missing_anchor_is_rejected() {
     let original_tree = layout_tree.clone();
 
     let missing_pane_id = PaneId::new();
-    let stack_error = add_pane_to_stack(&layout_tree, missing_pane_id, PaneId::new()).unwrap_err();
+    let stack_error =
+        add_panes_to_stack(&layout_tree, missing_pane_id, &[PaneId::new()]).unwrap_err();
     assert_eq!(
         stack_error,
         SplitError::PaneNotFound {

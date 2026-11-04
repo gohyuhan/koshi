@@ -60,7 +60,7 @@ pub(crate) fn register_spawned_pane(
 /// `tab_id`. A `focus_client_id` that is no longer attached counts as none.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate_layout_tree` with
-/// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_pane_to_stack`],
+/// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_panes_to_stack`],
 /// preflighted its fit against the tab size, and spawned the child under
 /// `new_pane_id`.
 ///
@@ -181,7 +181,7 @@ pub fn commit_new_pane(
 /// The caller (the runtime) has minted `new_pane_id`, built
 /// `candidate_layout_tree` from the floating pane's tree with
 /// [`koshi_layout::edit::split_leaf`] or
-/// [`koshi_layout::edit::add_pane_to_stack`], checked that it fits the size
+/// [`koshi_layout::edit::add_panes_to_stack`], checked that it fits the size
 /// the floating pane's tree is solved at, and spawned the child under
 /// `new_pane_id`.
 ///

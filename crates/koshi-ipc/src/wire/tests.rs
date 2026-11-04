@@ -740,7 +740,7 @@ fn sample_events() -> Vec<SessionEvent> {
         },
         SessionEvent::PanePlacementCommitted {
             command_id,
-            source_pane_id,
+            source_pane_ids: vec![source_pane_id],
             source_tab_id: Some(source_tab_id),
             destination_tab_id: Some(destination_tab_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {

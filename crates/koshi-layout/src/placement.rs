@@ -11,7 +11,7 @@
 //!   stack holding a target pane, or forms a stack of the target and the
 //!   source.
 //!
-//! [`place_floating_pane_in_tab`] puts a pane that no tree holds into a tab
+//! [`place_docking_tree_in_tab`] puts a tree whose panes no tab holds into a tab
 //! by an insertion or a stack.
 //!
 //! No placement changes which member of a stack is active: a pane stacked onto
@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::edit::{
-    add_pane_to_stack, remove_leaf, remove_pane_and_normalize, PaneRemovalStatus, RemoveError,
+    add_panes_to_stack, remove_leaf, remove_pane_and_normalize, PaneRemovalStatus, RemoveError,
 };
 use crate::neighbor::{compute_bottom_edge, compute_right_edge};
 use crate::normalize::normalize_layout_tree;
@@ -296,9 +296,9 @@ pub fn place_pane_within_tree(
                 PaneRemovalStatus::SubtreeEmpty => return Ok(LayoutNode::Pane(source_pane_id)),
                 PaneRemovalStatus::PaneNotFound => unreachable!("presence checked above"),
             };
-            let inserted_layout_tree = insert_pane_beside_anchor(
+            let inserted_layout_tree = insert_layout_node_beside_anchor(
                 destination_tree,
-                source_pane_id,
+                LayoutNode::Pane(source_pane_id),
                 placement_anchor,
                 *direction,
             );
@@ -319,7 +319,7 @@ pub fn place_pane_within_tree(
                 unreachable!("the tree holds the source and a different target");
             };
             let stacked_layout_tree =
-                stack_pane_onto_target(&removed_layout_tree, source_pane_id, *target_pane_id)?;
+                stack_panes_onto_target(&removed_layout_tree, &[source_pane_id], *target_pane_id)?;
             validate_layout_fit(stacked_layout_tree, layout_rect, pane_sizing)
         }
     }
@@ -456,9 +456,9 @@ pub fn place_pane_across_tabs(
         } => {
             validate_placement_anchor(destination_tree, source_pane_id, placement_anchor)?;
             let remaining_source_tree = remove_source_leaf(source_tree, source_pane_id);
-            let inserted_layout_tree = insert_pane_beside_anchor(
+            let inserted_layout_tree = insert_layout_node_beside_anchor(
                 destination_tree.clone(),
-                source_pane_id,
+                LayoutNode::Pane(source_pane_id),
                 placement_anchor,
                 *direction,
             );
@@ -471,7 +471,7 @@ pub fn place_pane_across_tabs(
         }
         PlacementTarget::Stack { target_pane_id } => {
             let stacked_layout_tree =
-                stack_pane_onto_target(destination_tree, source_pane_id, *target_pane_id)?;
+                stack_panes_onto_target(destination_tree, &[source_pane_id], *target_pane_id)?;
             let remaining_source_tree = remove_source_leaf(source_tree, source_pane_id);
             let destination_tree =
                 validate_layout_fit(stacked_layout_tree, destination_tab_rect, pane_sizing)?;
@@ -483,64 +483,76 @@ pub fn place_pane_across_tabs(
     }
 }
 
-/// Place `docking_pane_id`, a pane that no leaf of `layout_tree` holds, at
-/// `placement_target` in `layout_tree`, the tree of the tab that receives it.
+/// Place `docking_tree`, a tree that shares no leaf with `layout_tree` and
+/// holds at least one leaf, at `placement_target` in `layout_tree`, the tree
+/// of the tab that receives it.
 ///
 /// `tab_rect` is the rectangle `layout_tree` solves into and `pane_sizing` the
-/// caller's own [`PaneSizing`]. An insertion splits the anchor so the pane
-/// sits on its `direction` side, and a stack adds the pane to the target's
-/// stack as its last member ([`add_pane_to_stack`]).
+/// caller's own [`PaneSizing`]. An insertion splits the anchor so
+/// `docking_tree` sits on its `direction` side as one subtree with its own
+/// weights, and a stack adds every leaf of `docking_tree` to the target's
+/// stack in layout order ([`add_panes_to_stack`]). The result is normalized
+/// once, so a subtree split in the anchor's direction merges into it with
+/// each share in its exact proportion.
 ///
-/// `H[A, B]` with `F` inserted `Right` of `Pane(B)` gives `H[A, B, F]`;
-/// `S[S1, S2]` with `S2` active and `F` stacked onto `S2` gives
-/// `S[S1, S2, F]` with `S2` active.
+/// `H[A, B]` with `Pane(F)` inserted `Right` of `Pane(B)` gives `H[A, B, F]`;
+/// `H[A, B]` with `H[vim, htop]` inserted `Right` of `Pane(B)` gives
+/// `H[A, B, vim, htop]` with the weights `4:2:1:1`; `S[S1, S2]` with `S2`
+/// active and `H[vim, htop]` stacked onto `S2` gives `S[S1, S2, vim, htop]`
+/// with `S2` active.
 ///
 /// # Errors
 ///
-/// - [`PlacementError::PaneInBothTrees`]: `layout_tree` already holds
-///   `docking_pane_id`.
+/// - [`PlacementError::PaneInBothTrees`]: `layout_tree` already holds a leaf
+///   of `docking_tree`, the first such leaf in layout order.
 /// - [`PlacementError::SourcePaneNotFound`]: `placement_target` is a swap,
-///   which needs a source leaf.
+///   which needs a source leaf; it names the first leaf of `docking_tree`.
 /// - [`PlacementError::TargetPaneNotFound`]: the stack target, or a pane the
 ///   anchor names, is not a leaf of `layout_tree`.
-/// - [`PlacementError::AnchorIsSource`]: the anchor is `Pane(docking_pane_id)`.
+/// - [`PlacementError::AnchorIsSource`]: the anchor is the first leaf of
+///   `docking_tree`.
 /// - The anchor errors of an insertion: [`PlacementError::GroupPaneDuplicated`],
 ///   [`PlacementError::GroupIsNotOneSubtree`] and
 ///   [`PlacementError::AnchorInsideStack`].
-/// - [`PlacementError::DestinationTooSmall`]: the tree with the pane does not
-///   fit `tab_rect`.
-pub fn place_floating_pane_in_tab(
+/// - [`PlacementError::DestinationTooSmall`]: the tree with `docking_tree`
+///   does not fit `tab_rect`: every leaf is checked at its minimum.
+pub fn place_docking_tree_in_tab(
     layout_tree: &LayoutNode,
-    docking_pane_id: PaneId,
+    docking_tree: &LayoutNode,
     placement_target: &PlacementTarget,
     tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, PlacementError> {
-    if layout_tree.has_pane(docking_pane_id) {
-        return Err(PlacementError::PaneInBothTrees {
-            pane_id: docking_pane_id,
-        });
+    let docking_pane_ids = docking_tree.list_leaf_pane_ids();
+    let first_docking_pane_id = *docking_pane_ids
+        .first()
+        .expect("a docking tree holds a leaf");
+    if let Some(&pane_id) = docking_pane_ids
+        .iter()
+        .find(|&&docking_pane_id| layout_tree.has_pane(docking_pane_id))
+    {
+        return Err(PlacementError::PaneInBothTrees { pane_id });
     }
     let placed_layout_tree = match placement_target {
         PlacementTarget::Swap { .. } => {
             return Err(PlacementError::SourcePaneNotFound {
-                pane_id: docking_pane_id,
+                pane_id: first_docking_pane_id,
             });
         }
         PlacementTarget::Insert {
             anchor: placement_anchor,
             direction,
         } => {
-            validate_placement_anchor(layout_tree, docking_pane_id, placement_anchor)?;
-            insert_pane_beside_anchor(
+            validate_placement_anchor(layout_tree, first_docking_pane_id, placement_anchor)?;
+            insert_layout_node_beside_anchor(
                 layout_tree.clone(),
-                docking_pane_id,
+                docking_tree.clone(),
                 placement_anchor,
                 *direction,
             )
         }
         PlacementTarget::Stack { target_pane_id } => {
-            stack_pane_onto_target(layout_tree, docking_pane_id, *target_pane_id)?
+            stack_panes_onto_target(layout_tree, &docking_pane_ids, *target_pane_id)?
         }
     };
     validate_layout_fit(placed_layout_tree, tab_rect, pane_sizing)
@@ -556,23 +568,23 @@ fn remove_source_leaf(source_tree: &LayoutNode, source_pane_id: PaneId) -> Optio
     }
 }
 
-/// Add `source_pane_id` to the innermost stack holding `target_pane_id` in
-/// `layout_tree`, as its last member, or form a stack of `target_pane_id`,
-/// then `source_pane_id`, when no stack holds the target
-/// ([`add_pane_to_stack`]).
-/// Then normalize the whole tree once. `layout_tree` does not hold
-/// `source_pane_id`.
+/// Add `source_pane_ids` to the innermost stack holding `target_pane_id` in
+/// `layout_tree`, as its last members in the order given, or form a stack of
+/// `target_pane_id`, then `source_pane_ids`, when no stack holds the target
+/// ([`add_panes_to_stack`]).
+/// Then normalize the whole tree once. `layout_tree` holds no pane of
+/// `source_pane_ids`.
 ///
 /// # Errors
 ///
 /// [`PlacementError::TargetPaneNotFound`] when no leaf of `layout_tree` is
 /// `target_pane_id`.
-fn stack_pane_onto_target(
+fn stack_panes_onto_target(
     layout_tree: &LayoutNode,
-    source_pane_id: PaneId,
+    source_pane_ids: &[PaneId],
     target_pane_id: PaneId,
 ) -> Result<LayoutNode, PlacementError> {
-    let stacked_layout_tree = add_pane_to_stack(layout_tree, target_pane_id, source_pane_id)
+    let stacked_layout_tree = add_panes_to_stack(layout_tree, target_pane_id, source_pane_ids)
         .map_err(|_| PlacementError::TargetPaneNotFound {
             pane_id: target_pane_id,
         })?;
@@ -669,16 +681,17 @@ fn find_group_anchor_path(
     })
 }
 
-/// Split the node `anchor` names in `destination_tree` — a tree the source
-/// leaf has already been removed from — so `source_pane_id` sits on its
-/// `direction` side, then normalize the whole tree once.
+/// Split the node `anchor` names in `destination_tree` — a tree that holds no
+/// leaf of `inserted_node`, the source leaf already removed — so
+/// `inserted_node` sits on its `direction` side, then normalize the whole tree
+/// once.
 ///
 /// `anchor` was validated by [`validate_placement_anchor`] against the tree before the
 /// removal. A `Group` resolves to the shallowest node whose leaf set is the
-/// group minus the source pane.
-fn insert_pane_beside_anchor(
+/// group minus the leaves of `inserted_node`.
+fn insert_layout_node_beside_anchor(
     mut destination_tree: LayoutNode,
-    source_pane_id: PaneId,
+    inserted_node: LayoutNode,
     placement_anchor: &PanePlacementAnchor,
     direction: Direction,
 ) -> LayoutNode {
@@ -691,19 +704,24 @@ fn insert_pane_beside_anchor(
             let remaining_group_pane_ids: Vec<PaneId> = group_pane_ids
                 .iter()
                 .copied()
-                .filter(|&group_pane_id| group_pane_id != source_pane_id)
+                .filter(|&group_pane_id| !inserted_node.has_pane(group_pane_id))
                 .collect();
             find_split_path_by_leaf_set(&destination_tree, &remaining_group_pane_ids)
                 .expect("anchor group validated before the source leaf was removed")
         }
     };
     let placement_anchor_node_slot = destination_tree.get_node_at_path_mut(&placement_anchor_path);
-    let placement_anchor_subtree =
-        std::mem::replace(placement_anchor_node_slot, LayoutNode::Pane(source_pane_id));
-    let source_pane_leaf = LayoutNode::Pane(source_pane_id);
+    // An empty split holds the slot until the new split below replaces it.
+    let placement_anchor_subtree = std::mem::replace(
+        placement_anchor_node_slot,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            compute_split_direction(direction),
+            Vec::new(),
+        )),
+    );
     let split_children = match direction {
-        Direction::Right | Direction::Down => vec![placement_anchor_subtree, source_pane_leaf],
-        Direction::Left | Direction::Up => vec![source_pane_leaf, placement_anchor_subtree],
+        Direction::Right | Direction::Down => vec![placement_anchor_subtree, inserted_node],
+        Direction::Left | Direction::Up => vec![inserted_node, placement_anchor_subtree],
     };
     *placement_anchor_node_slot = LayoutNode::Split(SplitNode::with_equal_weights(
         compute_split_direction(direction),

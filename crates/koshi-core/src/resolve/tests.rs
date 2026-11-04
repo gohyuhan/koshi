@@ -291,6 +291,13 @@ fn build_bindable_action_table() -> Vec<(&'static str, Command)> {
         ),
         ("toggle-pane-floating", Command::TogglePaneFloating),
         (
+            "dock-floating-pane",
+            Command::DockFloatingPane(DockFloatingPaneArgs {
+                pane_id: None,
+                placement_target: None,
+            }),
+        ),
+        (
             "pin-pane",
             Command::SetFloatingPanePinned(SetFloatingPanePinnedArgs {
                 pane_id: None,
@@ -484,6 +491,7 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         Command::MovePane(_) => Some(CommandKind::MovePane),
         Command::PlacePane(_) => Some(CommandKind::PlacePane),
         Command::TogglePaneFloating => Some(CommandKind::TogglePaneFloating),
+        Command::DockFloatingPane(_) => Some(CommandKind::DockFloatingPane),
         Command::ScrollPane(_) => Some(CommandKind::ScrollPane),
         Command::MoveFloatingPane(_) => Some(CommandKind::MoveFloatingPane),
         Command::SetFloatingPanePinned(_) => Some(CommandKind::SetFloatingPanePinned),

@@ -479,6 +479,7 @@ fn user_prefix_of_default_sequences_warns_and_applies() {
             build_ambiguous_prefix(Key::Char('l'), "new-pane-right"),
             build_ambiguous_prefix(Key::Char('m'), "begin-pane-placement"),
             build_ambiguous_prefix(Key::Char('n'), "new-pane"),
+            build_ambiguous_prefix(Key::Char('o'), "undock-pane"),
             build_ambiguous_prefix(Key::Char('s'), "new-pane-stacked"),
             build_ambiguous_prefix(Key::Char('u'), "toggle-pane-floating"),
             build_ambiguous_prefix(Key::Char('w'), "toggle-floating-pane-tray"),
@@ -488,6 +489,16 @@ fn user_prefix_of_default_sequences_warns_and_applies() {
             build_ambiguous_prefix(Key::Named(NamedKey::Right), "focus-pane-right"),
             build_ambiguous_prefix(Key::Named(NamedKey::Up), "focus-pane-up"),
             build_ambiguous_prefix(Key::Named(NamedKey::Down), "focus-pane-down"),
+            ConflictDiagnostic::AmbiguousPrefix {
+                mode_name: ModeName::from_text("normal"),
+                prefix_sequence: prefix_key_sequence.clone(),
+                prefix_action_reference: build_core_action("lock"),
+                longer_sequence: build_two_chord_sequence(
+                    build_character_chord(BindingModifierFlags::CTRL, 'p'),
+                    KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('u')),
+                ),
+                longer_action_reference: build_core_action("dock-floating-pane"),
+            },
             ConflictDiagnostic::AmbiguousPrefix {
                 mode_name: ModeName::from_text("normal"),
                 prefix_sequence: prefix_key_sequence.clone(),

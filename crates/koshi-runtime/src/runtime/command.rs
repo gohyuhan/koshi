@@ -30,12 +30,12 @@ use koshi_core::{
     action::ActionReference,
     command::{
         ClearSelectionArgs, CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command,
-        CommandEnvelope, CommandResult, CommandSource, CopyArgs, DetachArgs, FocusPaneArgs,
-        FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs,
-        NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
-        PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, Selection, SelectionKind,
-        SetSelectionArgs, SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs,
-        VisualCommand, WriteToPaneArgs,
+        CommandEnvelope, CommandResult, CommandSource, CopyArgs, DetachArgs, DockFloatingPaneArgs,
+        FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs,
+        MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+        PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, Selection,
+        SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget, TiledPlacementTarget,
+        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     constant::GRACEFUL_TIMEOUT_DURATION,
     event::{
@@ -54,12 +54,12 @@ use koshi_core::{
 };
 use koshi_layout::{
     content::{find_content_rect, list_content_rects},
-    edit::{add_pane_to_stack, split_leaf},
+    edit::{add_panes_to_stack, split_leaf},
     mode::LayoutMode,
     neighbor::select_directional_neighbor,
     placement::{
-        place_floating_pane_in_tab, place_pane_within_tree, solve_placed_tab, PlacedTabLayout,
-        PlacementError, PlacementTabSizes, PlacementTarget,
+        place_docking_tree_in_tab, place_pane_within_tree, solve_placed_tab, PlacedTabLayout,
+        PlacementError, PlacementTarget,
     },
     resize::{resize_layout_with_sizing, ResizeError},
     solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
@@ -84,7 +84,9 @@ use koshi_session::session::{
     pane_ops::{self, NewPaneSpec},
     placement::{
         commit_cross_tab_placement, commit_dock_placement, commit_undock_placement,
-        compute_placement_tab_sizes, find_lifted_floating_pane_rect, find_nearest_dock_target,
+        compute_placement_tab_sizes, compute_tab_size_after_clients_move,
+        find_lifted_floating_pane_rect, find_nearest_dock_target,
+        find_nearest_floating_pane_dock_target, list_moving_client_ids, DockSource,
         PlacementCommitError,
     },
     state::{compute_one_pane_floating_content_size, FloatingPane, LayoutAreaId, Session},
@@ -463,13 +465,25 @@ enum ResolvedTiledPlacement {
     FloatingSource(DockPaneTarget),
 }
 
-/// The resolved source pane, its tab and the acting client of an undock: a
-/// [`Command::PlacePane`] whose target is [`PanePlacementTarget::Floating`].
+/// The resolved source pane, the tab or the floating pane that holds it, and
+/// the acting client of an undock: a [`Command::PlacePane`] whose target is
+/// [`PanePlacementTarget::Floating`].
 struct UndockPaneTarget {
     session_id: SessionId,
     source_pane_id: PaneId,
-    source_tab_id: TabId,
+    source_layout_area_id: LayoutAreaId,
     client_id: ClientId,
+}
+
+/// The resolved target of a [`Command::DockFloatingPane`]: the dock of every
+/// pane of the floating pane `floating_pane_id` at `tiled_placement_target`,
+/// with `dock_target` naming the pane the command named, the destination tab
+/// and the acting client. The `Ok` half of
+/// [`Server::resolve_dock_floating_pane_target`].
+struct DockFloatingPaneTarget {
+    dock_target: DockPaneTarget,
+    floating_pane_id: FloatingPaneId,
+    tiled_placement_target: TiledPlacementTarget,
 }
 
 impl Server {
@@ -522,6 +536,9 @@ impl Server {
             }
             Command::TogglePaneFloating => {
                 self.handle_toggle_pane_floating(command_id, &envelope.command_source)
+            }
+            Command::DockFloatingPane(command_args) => {
+                self.handle_dock_floating_pane(command_id, &envelope.command_source, &command_args)
             }
             Command::ScrollPane(command_args) => {
                 self.handle_scroll_pane(command_id, &envelope.command_source, &command_args)
