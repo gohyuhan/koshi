@@ -619,9 +619,15 @@ fn find_insertion_under_rect_center(
 ///    pane docks, else the first docked pane. A client whose input was on a
 ///    docked pane focuses that pane, and the acting client of a
 ///    [`DockSource::Pane`] focuses the docked pane.
-/// 4. The destination tab, then each tab a client of step 3 left, is solved
+/// 4. For a [`DockSource::WholeFloatingPane`], each client's focus history
+///    inside the floating pane joins its focus history in the destination
+///    tab, in the same order, each pane once. For a client of step 3, the
+///    panes go right after the pane it focuses there. For every other client
+///    that has a history there, they go at its end. A
+///    [`TiledPlacementTarget::Stack`] changes no other client's history.
+/// 5. The destination tab, then each tab a client of step 3 left, is solved
 ///    again at its tab size ([`Session::update_tab_solve`]).
-/// 5. For a [`DockSource::Pane`], each client whose focused pane inside the
+/// 6. For a [`DockSource::Pane`], each client whose focused pane inside the
 ///    floating pane of step 1 was the pane focuses the pane that inherits it
 ///    there, ranked against the rect the pane held in that client's own view
 ///    of the floating pane before the dock. Then the pane leaves every
@@ -631,14 +637,20 @@ fn find_insertion_under_rect_center(
 /// No other client's input, active tab or shown floating panes change, and
 /// a stack's active member stays the same: a client focused on `vim` in the
 /// stack `[vim]` keeps `vim` open when `htop` is docked into that stack.
+/// Each client of step 4 keeps the member it shows in each stack of a whole
+/// floating pane: a client with `B` open in the stack `[A, B]` of the
+/// floating pane `[A, B] | C` and its input on `C` keeps `B` open in the tab.
+/// A client with no history in the destination tab gets none there.
 /// Docking `htop` out of the floating pane `[vim | htop]` leaves the floating
 /// pane `[vim]` at its size; docking the whole of it leaves no floating pane.
+///
+/// `tiled_placement_target` is the target `destination_tree` was built for.
 ///
 /// Events: for a [`DockSource::Pane`] of a floating pane of 2 or more panes,
 /// [`Event::FloatingPaneLayoutChanged`] with the panes left and the events of
 /// its solve; then [`Event::LayoutChanged`] for the destination tab and the
 /// events of its solve, then the events of each client of step 3, then the
-/// events of the solves of step 4.
+/// events of the solves of step 5.
 ///
 /// # Errors
 ///
@@ -658,6 +670,7 @@ pub fn commit_dock_placement(
     dock_source: DockSource,
     destination_tab_id: TabId,
     destination_tree: LayoutNode,
+    tiled_placement_target: &TiledPlacementTarget,
     acting_client_id: ClientId,
 ) -> Result<Vec<Event>, PlacementCommitError> {
     let (source_floating_pane_id, docked_pane_ids) = match dock_source {
@@ -726,6 +739,20 @@ pub fn commit_dock_placement(
                 ))
             })
             .collect();
+    let floating_focus_history_by_client_id: Vec<(ClientId, Vec<PaneId>)> = match dock_source {
+        DockSource::Pane(_) => Vec::new(),
+        DockSource::WholeFloatingPane(_) => session
+            .clients
+            .list_attached_clients()
+            .filter_map(|client| {
+                let floating_pane_view = client.get_floating_pane_view(source_floating_pane_id)?;
+                Some((
+                    client.get_client_id(),
+                    floating_pane_view.focus_history.clone(),
+                ))
+            })
+            .collect(),
+    };
 
     let mut emitted_events = match dock_source {
         DockSource::Pane(source_pane_id) => {
@@ -748,6 +775,30 @@ pub fn commit_dock_placement(
             landing_pane_id,
             previous_floating_focused_pane_id,
         ));
+    }
+    let is_stacked_onto_target =
+        matches!(tiled_placement_target, TiledPlacementTarget::Stack { .. });
+    for (client_id, floating_focus_history) in floating_focus_history_by_client_id {
+        let is_moving_client = moving_clients
+            .iter()
+            .any(|&(moving_client_id, _, _, _)| moving_client_id == client_id);
+        let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
+            continue;
+        };
+        let focus_history_length = client.list_focus_history(destination_tab_id).len();
+        if !is_moving_client && (is_stacked_onto_target || focus_history_length == 0) {
+            continue;
+        }
+        let history_index = if is_moving_client {
+            1
+        } else {
+            focus_history_length
+        };
+        client.insert_panes_into_focus_history(
+            destination_tab_id,
+            history_index,
+            &floating_focus_history,
+        );
     }
     let left_tab_ids = moving_clients
         .iter()

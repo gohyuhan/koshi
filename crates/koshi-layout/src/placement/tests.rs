@@ -2094,6 +2094,64 @@ fn a_split_floating_pane_inserted_right_of_b_merges_into_the_row_with_its_inner_
 }
 
 #[test]
+fn a_resized_split_floating_pane_inserted_right_of_b_stays_nested_and_keeps_its_resize_offsets() {
+    let [pane_a, pane_b, vim_pane_id, htop_pane_id] = build_sorted_pane_ids();
+    let layout_tree = build_horizontal_split(
+        vec![build_pane_leaf(pane_a), build_pane_leaf(pane_b)],
+        &[1, 2],
+    );
+    // `[vim | htop]` resized from `24/24` to `32/16` in a 48-column floating
+    // pane: the shares stay `1:1`, and the resize offsets are `+8` and `-8`.
+    let docking_tree = LayoutNode::Split(SplitNode {
+        direction: SplitDirection::Horizontal,
+        children: vec![build_pane_leaf(vim_pane_id), build_pane_leaf(htop_pane_id)],
+        weights: vec![
+            SizeWeight {
+                resize_delta: 8,
+                ..build_flex_weight(1)
+            },
+            SizeWeight {
+                resize_delta: -8,
+                ..build_flex_weight(1)
+            },
+        ],
+        active_child_index: 0,
+    });
+
+    let placed_layout_tree = place_docking_tree_in_tab(
+        &layout_tree,
+        &docking_tree,
+        &build_insert_target(PanePlacementAnchor::Pane(pane_b), Direction::Right),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    )
+    .expect("the insertion fits");
+
+    // `B`'s 80 columns split in two. The docked split takes 40 columns:
+    // `20 + 8` for `vim` and `20 - 8` for `htop`.
+    assert_eq!(
+        placed_layout_tree,
+        build_horizontal_split(
+            vec![
+                build_pane_leaf(pane_a),
+                build_pane_leaf(pane_b),
+                docking_tree,
+            ],
+            &[2, 2, 2],
+        )
+    );
+    assert_eq!(
+        list_solved_rects(&placed_layout_tree, FIXTURE_TAB_RECT),
+        vec![
+            (pane_a, build_cell_rect(0, 0, 40, 40)),
+            (pane_b, build_cell_rect(40, 0, 40, 40)),
+            (vim_pane_id, build_cell_rect(80, 0, 28, 40)),
+            (htop_pane_id, build_cell_rect(108, 0, 12, 40)),
+        ]
+    );
+}
+
+#[test]
 fn a_split_floating_pane_inserted_below_b_stays_one_subtree_with_its_own_weights() {
     let [pane_a, pane_b, vim_pane_id, htop_pane_id] = build_sorted_pane_ids();
     let layout_tree = build_horizontal_split(

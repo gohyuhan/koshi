@@ -850,13 +850,21 @@ the screen of the client that docked it.
 
 `koshi dock-pane --all` docks every pane of the floating pane that holds the
 pane, as one subtree, and the floating pane leaves the session. The subtree
-keeps its splits and its split weights. A subtree split in the direction of
-the dock joins that row or column of the tab, and every pane keeps its exact
-share. `--stack-onto` adds its panes to the stack in layout order. The client,
+keeps its splits and its split weights. If no pane of the subtree, or of the
+tab's row or column it docks into, is resized or has a minimum or a preferred
+size, a subtree split in the direction of the dock joins that row or column,
+and every pane keeps its exact share. Else the split stays nested, and each
+resize keeps its cell count: `[vim | htop]` resized from `24/24` to `32/16`
+docks into 40 columns as `28/12`. `--stack-onto` adds its panes to the stack
+in layout order. The client,
 and every other client whose input is on one of its panes, moves to the tab. A
 client whose input was on a docked pane keeps that pane; the client, when its
 input was on no docked pane, takes the pane it focused last in the floating
-pane. A tiled pane is refused with `<pane-id> is not in a floating pane`, and
+pane. Every client that moves, and every client that focuses a pane in the
+tab, keeps the member it shows in each stack of the floating pane. Every
+other client gets no focus in the tab, and sees each stack's own open member
+when it opens the tab. With `--stack-onto`, a client that does not move keeps
+its focus and the member it shows in the target stack. A tiled pane is refused with `<pane-id> is not in a floating pane`, and
 a tab with no room with `tab <name> has no room for <n> more panes`. Example:
 tab `#1` holds `A | B` in an `80x22` pane area, and its only client views it.
 `koshi dock-pane --all` typed in `vim` of the floating pane `[vim | htop]`

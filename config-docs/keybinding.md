@@ -403,9 +403,12 @@ pane of the only tab, or when the session already holds 12 floating panes.
 `<leader>p U` (`core:dock-floating-pane`) docks every pane of the floating pane
 that holds this client's input into this client's active tab, as one subtree:
 
-- The subtree keeps its splits and its split weights. A subtree split in the
-  direction of the dock joins that row or column of the tab, and every pane
-  keeps its exact share.
+- The subtree keeps its splits and its split weights. If no pane of the
+  subtree, or of the tab's row or column it docks into, is resized or has a
+  minimum or a preferred size, a subtree split in the direction of the dock
+  joins that row or column, and every pane keeps its exact share. Else the
+  split stays nested, and each resize keeps its cell count: `[vim | htop]`
+  resized from `24/24` to `32/16` docks into 40 columns as `28/12`.
 - The session takes the center cell of the rect where this client draws the
   floating pane, and docks the subtree beside the span under that cell, as
   `<leader>p u` docks one pane. When this client draws the floating pane
@@ -414,6 +417,10 @@ that holds this client's input into this client's active tab, as one subtree:
   whose input is on one of its panes, moves to the tab. A client whose input
   was on a docked pane keeps that pane. This client, when its input was on no
   docked pane, takes the pane it focused last in the floating pane.
+- Every client that moves, and every client that focuses a pane in the tab,
+  keeps the member it shows in each stack of the floating pane. Every other
+  client gets no focus in the tab, and sees each stack's own open member when
+  it opens the tab.
 - If the tab has no room for the subtree, the session refuses the dock with
   `tab <name> has no room for <n> more panes`, and nothing changes. A focused
   tiled pane is refused with `<pane-id> is not in a floating pane`.

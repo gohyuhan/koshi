@@ -492,8 +492,12 @@ pub fn place_pane_across_tabs(
 /// `docking_tree` sits on its `direction` side as one subtree with its own
 /// weights, and a stack adds every leaf of `docking_tree` to the target's
 /// stack in layout order ([`add_panes_to_stack`]). The result is normalized
-/// once, so a subtree split in the anchor's direction merges into it with
-/// each share in its exact proportion.
+/// once ([`normalize_layout_tree`]). A subtree split in the anchor's direction
+/// merges into it with each share in its exact proportion when every weight
+/// involved is a plain flex share. A split with a resize offset, a floor or a
+/// target stays nested, and each resize offset keeps its cell count:
+/// `H[vim, htop]` with the shares `1:1` and the offsets `+8/-8`, inserted
+/// into a 40-column slot, solves to `28/12`.
 ///
 /// `H[A, B]` with `Pane(F)` inserted `Right` of `Pane(B)` gives `H[A, B, F]`;
 /// `H[A, B]` with `H[vim, htop]` inserted `Right` of `Pane(B)` gives

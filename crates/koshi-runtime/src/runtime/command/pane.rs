@@ -1923,6 +1923,7 @@ impl Server {
                 dock_source,
                 dock_target.destination_tab_id,
                 destination_tree,
+                tiled_placement_target,
                 dock_target.client_id,
             )
             .map_err(|placement_commit_error| {
