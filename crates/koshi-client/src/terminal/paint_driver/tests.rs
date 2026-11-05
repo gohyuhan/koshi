@@ -5,17 +5,21 @@
 //! resize or a row list out of order or past the screen, held bytes leave at a
 //! flush or in writes of 64 KiB, a resize and a failed frame clear the
 //! screen, and a failed write drops the held bytes. The terminal output
-//! backend writes the bytes of a `CrosstermBackend` for seeded cells.
+//! backend writes the bytes of a `CrosstermBackend` for seeded cells, and
+//! writes the cells under a glyph before the glyph. A terminal that reads the
+//! bytes of a frame with a VS16 emoji shows each cell in its own column.
 
 use super::*;
 
 use std::num::NonZeroU16;
 
 use ratatui::backend::TestBackend;
-use ratatui::buffer::{CellDiffOption, CellWidth};
+use ratatui::buffer::CellDiffOption;
 use ratatui::style::Style;
 use ratatui::Terminal;
 
+use koshi_core::process::PtySize;
+use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::output_workloads::SeededSequence;
 
 /// A terminal sink that keeps every byte, the byte count of every write, and
@@ -931,10 +935,12 @@ fn a_frame_draws_every_row_unless_the_shown_frame_and_a_sorted_row_list_inside_i
     );
 }
 
-/// Seeded cell updates over an `80x24` screen: runs of neighboring cells
-/// and jumps, every modifier set from 12 bits, the reset, named, indexed and
-/// truecolor foregrounds, backgrounds and underline colors, and symbols
-/// from ASCII to `中`, `U+2764` with VS16 and `e` with `U+0301`.
+/// Seeded cell updates over an `80x24` screen: runs of cells in which each
+/// cell starts at the column after the end of the cell before it, jumps after
+/// a 1-column cell, every modifier set from 12 bits, the reset, named, indexed
+/// and truecolor foregrounds, backgrounds and underline colors, and symbols
+/// from ASCII to `中`, `U+2764` with VS16 and `e` with `U+0301`. No cell lies
+/// under the glyph of the cell before it.
 fn build_seeded_cell_updates(frame_source: &mut SeededFrameSource) -> Vec<(u16, u16, Cell)> {
     let symbols = ["a", " ", "中", "\u{2764}\u{FE0F}", "e\u{0301}", "─"];
     let colors = [
@@ -947,14 +953,16 @@ fn build_seeded_cell_updates(frame_source: &mut SeededFrameSource) -> Vec<(u16, 
     let mut cell_updates = Vec::new();
     let mut column_index = 0;
     let mut row_index = 0;
+    let mut last_cell_width = 1;
     for _ in 0..frame_source.seeded_sequence.compute_next_index(200) {
-        if frame_source.seeded_sequence.compute_next_index(4) == 0 {
+        let is_jump = frame_source.seeded_sequence.compute_next_index(4) == 0;
+        if is_jump && last_cell_width == 1 {
             column_index = u16::try_from(frame_source.seeded_sequence.compute_next_index(80))
                 .expect("a column");
             row_index =
                 u16::try_from(frame_source.seeded_sequence.compute_next_index(24)).expect("a row");
         } else {
-            column_index = (column_index + 1) % 80;
+            column_index = (column_index + last_cell_width) % 80;
         }
         let mut cell_update = Cell::default();
         cell_update.set_symbol(
@@ -975,6 +983,7 @@ fn build_seeded_cell_updates(frame_source: &mut SeededFrameSource) -> Vec<(u16, 
             u16::try_from(frame_source.seeded_sequence.compute_next_index(1 << 12))
                 .expect("12 bits"),
         );
+        last_cell_width = cell_update.cell_width();
         cell_updates.push((column_index, row_index, cell_update));
     }
     cell_updates
@@ -1042,4 +1051,134 @@ fn a_bold_cell_writes_its_move_attribute_symbol_and_the_resets() {
         recording_sink.take_recorded_bytes(),
         b"\x1b[1;4H\x1b[1mx\x1b[39m\x1b[49m\x1b[59m\x1b[0m"
     );
+}
+
+#[test]
+fn cells_under_a_glyph_are_written_before_the_glyph_and_the_next_cell_moves_to_its_column() {
+    let recording_sink = RecordingSink::default();
+    let mut frame_output = TerminalOutput::from_terminal_sink(Box::new(recording_sink.clone()));
+    let mut terminal_output_backend = TerminalOutputBackend::from_terminal_output(&frame_output);
+    let mut warning_emoji_cell = Cell::default();
+    warning_emoji_cell.set_symbol("\u{26A0}\u{FE0F}");
+    let mut blank_cell = Cell::default();
+    blank_cell.set_symbol(" ");
+    let mut three_column_cell = Cell::default();
+    three_column_cell
+        .set_symbol("\u{4E16}\u{FF9E}")
+        .set_diff_option(CellDiffOption::ForcedWidth(
+            NonZeroU16::new(3).expect("3 is not 0"),
+        ));
+    let mut letter_cell = Cell::default();
+    letter_cell.set_symbol("a");
+    let mut wide_cell = Cell::default();
+    wide_cell.set_symbol("\u{6F22}");
+    let mut next_row_letter_cell = Cell::default();
+    next_row_letter_cell.set_symbol("b");
+    let cell_updates = [
+        (0, 0, &warning_emoji_cell),
+        (1, 0, &blank_cell),
+        (2, 0, &three_column_cell),
+        (3, 0, &blank_cell),
+        (4, 0, &blank_cell),
+        (5, 0, &letter_cell),
+        (8, 1, &wide_cell),
+        (9, 2, &next_row_letter_cell),
+    ];
+
+    Backend::draw(&mut terminal_output_backend, cell_updates.into_iter()).expect("the cells draw");
+    frame_output.flush().expect("the frame writes out");
+
+    assert_eq!(
+        String::from_utf8_lossy(&recording_sink.take_recorded_bytes()),
+        "\x1b[1;2H \x1b[1;1H\u{26A0}\u{FE0F}\x1b[1;4H  \x1b[1;3H\u{4E16}\u{FF9E}\x1b[1;6Ha\
+         \x1b[2;9H\u{6F22}\x1b[3;10Hb\x1b[39m\x1b[49m\x1b[59m\x1b[0m"
+    );
+}
+
+/// Each cell of row `row_index` of the active screen of `terminal_engine` that
+/// holds a glyph other than a blank, with its column: the text of its
+/// character and its combining characters. The right half of a wide glyph is
+/// left out.
+fn list_row_glyphs(terminal_engine: &TerminalEngine, row_index: u16) -> Vec<(u16, String)> {
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    let mut row_glyphs = Vec::new();
+    let mut column_index = 0;
+    while let Some(grid_cell) = active_grid.get_cell(row_index, column_index) {
+        if grid_cell.get_display_width() != 0 && grid_cell.get_character() != ' ' {
+            let mut glyph_text = String::from(grid_cell.get_character());
+            glyph_text.extend(grid_cell.list_combining_characters());
+            row_glyphs.push((column_index, glyph_text));
+        }
+        column_index += 1;
+    }
+    row_glyphs
+}
+
+#[test]
+fn vs16_emojis_over_changed_cells_write_their_right_halves_first_and_every_cell_keeps_its_column() {
+    let terminal_size = build_terminal_size(8, 2);
+    let frame_area = Rect::new(0, 0, 8, 2);
+    let mut first_frame_cells = Buffer::empty(frame_area);
+    first_frame_cells.set_string(0, 0, "abcdefgh", Style::default());
+    let mut second_frame_cells = Buffer::empty(frame_area);
+    second_frame_cells[(0, 0)].set_symbol("\u{26A0}\u{FE0F}");
+    second_frame_cells.set_string(2, 0, "XYZX", Style::default());
+    second_frame_cells[(6, 0)].set_symbol("\u{2764}\u{FE0F}");
+    let listed_rows: &[u16] = &[0];
+
+    for changed_rows in [None, Some(listed_rows)] {
+        let recording_sink = RecordingSink::default();
+        let mut frame_output = TerminalOutput::from_terminal_sink(Box::new(recording_sink.clone()));
+        let mut paint_driver = PaintDriver::from_backend(
+            TerminalOutputBackend::from_terminal_output(&frame_output),
+            terminal_size,
+        );
+        let mut host_terminal = TerminalEngine::from_pty_size(PtySize {
+            column_count: 8,
+            row_count: 2,
+        });
+
+        paint_driver
+            .draw_frame(terminal_size, None, |frame_buffer, _| {
+                copy_frame_cells(&first_frame_cells, frame_buffer);
+                None
+            })
+            .expect("the first frame draws");
+        frame_output.flush().expect("the first frame writes out");
+        let _ = host_terminal.process_pty_output(&recording_sink.take_recorded_bytes());
+        paint_driver
+            .draw_frame(terminal_size, changed_rows, |frame_buffer, _| {
+                copy_frame_cells(&second_frame_cells, frame_buffer);
+                None
+            })
+            .expect("the second frame draws");
+        frame_output.flush().expect("the second frame writes out");
+        let second_frame_bytes = recording_sink.take_recorded_bytes();
+        let _ = host_terminal.process_pty_output(&second_frame_bytes);
+
+        assert_eq!(
+            String::from_utf8_lossy(&second_frame_bytes),
+            "\x1b[1;2H \x1b[1;1H\u{26A0}\u{FE0F}\x1b[1;3HXYZX\x1b[1;8H \x1b[1;7H\u{2764}\u{FE0F}\
+             \x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l",
+            "changed rows {changed_rows:?}"
+        );
+        assert_eq!(
+            list_row_glyphs(&host_terminal, 0),
+            [
+                (0, "\u{26A0}\u{FE0F}"),
+                (2, "X"),
+                (3, "Y"),
+                (4, "Z"),
+                (5, "X"),
+                (6, "\u{2764}\u{FE0F}"),
+            ]
+            .map(|(column_index, glyph_text)| (column_index, glyph_text.to_owned())),
+            "changed rows {changed_rows:?}"
+        );
+        assert_eq!(
+            list_row_glyphs(&host_terminal, 1),
+            Vec::<(u16, String)>::new(),
+            "changed rows {changed_rows:?}"
+        );
+    }
 }

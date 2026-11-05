@@ -15,7 +15,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, IntoCrossterm, WindowSize};
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::crossterm::cursor::MoveTo;
 use ratatui::crossterm::queue;
 use ratatui::crossterm::style::{
@@ -145,8 +145,9 @@ impl Write for TerminalOutput {
 /// Every byte reaches the held bytes in call order. Neither handle's flush
 /// writes anything.
 ///
-/// [`Backend::draw`] writes the bytes `CrosstermBackend::draw` writes, and
-/// allocates nothing. Example: one cell `x` in bold at `(3, 0)` writes
+/// [`Backend::draw`] writes the bytes `CrosstermBackend::draw` writes for the
+/// cells in the order [`Backend::draw`] puts them in, and allocates nothing.
+/// Example: one cell `x` in bold at `(3, 0)` writes
 /// `ESC [ 1 ; 4 H`, `ESC [ 1 m`, `x`, then `ESC [ 39 m`, `ESC [ 49 m`,
 /// `ESC [ 59 m` and `ESC [ 0 m`.
 pub(crate) struct TerminalOutputBackend {
@@ -177,6 +178,13 @@ impl Backend for TerminalOutputBackend {
     /// underline color differs, then its symbol. The first cell is compared
     /// with no attribute and reset colors. The foreground, background and
     /// underline colors and the attributes are reset after the last cell.
+    ///
+    /// The cells are written in the order of `cell_updates`, except the cells
+    /// that follow a glyph and lie under it ([`is_cell_under_glyph`]): they
+    /// are written before the glyph, and the cell after the glyph gets its
+    /// own `MoveTo`. Example: `⚠️` (`U+26A0` `U+FE0F`) at `(0, 0)`, a blank at
+    /// `(1, 0)` and `x` at `(2, 0)` write `ESC [ 1 ; 2 H`, the blank,
+    /// `ESC [ 1 ; 1 H`, `⚠️`, `ESC [ 1 ; 3 H`, then `x`.
     fn draw<'a, I>(&mut self, cell_updates: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
@@ -186,7 +194,24 @@ impl Backend for TerminalOutputBackend {
         let mut underline_color = Color::Reset;
         let mut modifier = Modifier::empty();
         let mut last_position: Option<Position> = None;
-        for (column_index, row_index, cell) in cell_updates {
+        let mut cell_updates = cell_updates.peekable();
+        let mut held_glyph_update: Option<(u16, u16, &'a Cell)> = None;
+        let ordered_cell_updates = std::iter::from_fn(|| {
+            let glyph_update = match held_glyph_update.take() {
+                Some(glyph_update) => glyph_update,
+                None => cell_updates.next()?,
+            };
+            match cell_updates
+                .next_if(|cell_update| is_cell_under_glyph(*cell_update, glyph_update))
+            {
+                Some(covered_cell_update) => {
+                    held_glyph_update = Some(glyph_update);
+                    Some(covered_cell_update)
+                }
+                None => Some(glyph_update),
+            }
+        });
+        for (column_index, row_index, cell) in ordered_cell_updates {
             let is_after_last_cell = last_position.is_some_and(|last_position| {
                 last_position.y == row_index && last_position.x.checked_add(1) == Some(column_index)
             });
@@ -262,6 +287,20 @@ impl Backend for TerminalOutputBackend {
     fn flush(&mut self) -> io::Result<()> {
         Backend::flush(&mut self.crossterm_backend)
     }
+}
+
+/// Return whether `cell_update` lies under the glyph of `glyph_update`: on the
+/// glyph's row, right of the glyph's column, and inside the columns of the
+/// glyph's cell width ([`CellWidth::cell_width`]). Example: with `漢` at
+/// `(4, 1)`, the cell at `(5, 1)` lies under it, and the cells at `(4, 1)`,
+/// `(6, 1)` and `(5, 2)` do not.
+fn is_cell_under_glyph(cell_update: (u16, u16, &Cell), glyph_update: (u16, u16, &Cell)) -> bool {
+    let (column_index, row_index, _) = cell_update;
+    let (glyph_column_index, glyph_row_index, glyph_cell) = glyph_update;
+    let glyph_end_column_index = u32::from(glyph_column_index) + u32::from(glyph_cell.cell_width());
+    row_index == glyph_row_index
+        && column_index > glyph_column_index
+        && u32::from(column_index) < glyph_end_column_index
 }
 
 /// Write the SGR sequences that change the text attributes from
