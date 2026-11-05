@@ -1617,6 +1617,7 @@ fn verb_help_lists_the_remote_flags_after_the_verbs_own_flags() {
             "tab",
             "direction",
             "stack-onto",
+            "all",
             "client",
             "remote",
             "certificate-fingerprint",
@@ -2394,6 +2395,46 @@ fn dock_pane_with_a_tab_or_a_stack_target_is_not_bare() {
             Command::PlacePane(PlacePaneArgs {
                 source_pane_id: None,
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Stack {
+                    target_pane_id: stack_pane_id,
+                }),
+            }),
+        ))
+    );
+}
+
+#[test]
+fn dock_pane_all_docks_the_whole_floating_pane_that_holds_the_pane() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = pane_id.to_string();
+    let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let stack_pane_id = PaneId::new();
+    let stack_flag = stack_pane_id.to_string();
+
+    assert_eq!(
+        build_cli_action_with_resolved_tab(
+            &["koshi", "dock-pane", "--pane", &pane_flag, "--all"],
+            tab_id
+        ),
+        (
+            build_core_action_reference("dock-pane"),
+            Command::DockFloatingPane(DockFloatingPaneArgs {
+                pane_id: Some(pane_id),
+                placement_target: Some(TiledPlacementTarget::Split {
+                    destination_tab_id: tab_id,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Right,
+                }),
+            }),
+        )
+    );
+    assert_eq!(
+        parse_cli_command(&["koshi", "dock-pane", "--all", "--stack-onto", &stack_flag])
+            .build_action_command(&ResolvedTargets::default(), Direction::Right),
+        Some((
+            build_core_action_reference("dock-pane"),
+            Command::DockFloatingPane(DockFloatingPaneArgs {
+                pane_id: None,
+                placement_target: Some(TiledPlacementTarget::Stack {
                     target_pane_id: stack_pane_id,
                 }),
             }),
@@ -5173,7 +5214,7 @@ fn build_actions_run_request_for(action_reference_text: &str) -> Result<SessionR
 fn every_registered_action_runs_as_its_key_does_or_names_the_verb_that_takes_its_arguments() {
     let action_registry = ActionRegistry::new();
     let action_seeds = build_core_action_seeds();
-    assert_eq!(action_seeds.len(), 93);
+    assert_eq!(action_seeds.len(), 94);
     for (action_reference, action_metadata) in &action_seeds {
         let key_dispatch_plan = koshi_core::resolve::resolve_action_with_scroll_line_count(
             action_reference,

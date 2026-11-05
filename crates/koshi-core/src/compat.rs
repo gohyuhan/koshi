@@ -95,6 +95,16 @@ pub struct Surface {
 /// - The `FloatingPaneLayoutChanged` event in a command result carries
 ///   `pane_ids`: every pane of a floating pane whose tree, or one client's
 ///   zoom or shown stack member in it, changed, in layout order.
+/// - The `DockFloatingPane` command docks every pane of the floating pane
+///   that holds the pane it names into a tab, as one subtree with its split
+///   weights. 5 has no such command.
+/// - A `PlacePane` command with a `Floating` target moves a pane of a
+///   floating pane of 2 or more panes into a new floating pane. 5 refused
+///   every pane of a floating pane.
+/// - The `PanePlacementCommitted` event, in a command result and on the
+///   session's event stream, carries `source_pane_ids`: every pane the
+///   placement takes from its source, in layout order. 5 carried one
+///   `source_pane_id`.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

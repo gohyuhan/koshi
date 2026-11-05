@@ -88,7 +88,7 @@ pub fn log_event(runtime_event: &Event) {
         Event::PanePlacementCommitted(event_payload) => {
             tracing::info!(
                 command_id = %event_payload.command_id,
-                source_pane_id = %event_payload.source_pane_id,
+                source_pane_ids = %format_pane_ids(&event_payload.source_pane_ids),
                 source_tab_id = event_payload.source_tab_id.map(tracing::field::display),
                 destination_tab_id = event_payload.destination_tab_id.map(tracing::field::display),
                 placement_target = ?event_payload.placement_target,

@@ -644,7 +644,7 @@ fn every_other_frame_keeps_the_stream_reading() {
         },
         SessionEvent::PanePlacementCommitted {
             command_id: CommandId::new(),
-            source_pane_id: PaneId::new(),
+            source_pane_ids: vec![PaneId::new()],
             source_tab_id: Some(tab_id),
             destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -7303,7 +7303,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
             .send(build_session_event_incoming(
                 SessionEvent::PanePlacementCommitted {
                     command_id,
-                    source_pane_id,
+                    source_pane_ids: vec![source_pane_id],
                     source_tab_id: Some(active_tab_id),
                     destination_tab_id: Some(active_tab_id),
                     placement_target: PanePlacementTarget::Tiled(producer_placement_target),
@@ -11835,7 +11835,7 @@ fn run_attachment_with_committed_swap_notice(
         }
         send_session_event(SessionEvent::PanePlacementCommitted {
             command_id: notice_command_id,
-            source_pane_id: left_pane_id,
+            source_pane_ids: vec![left_pane_id],
             source_tab_id: Some(active_tab_id),
             destination_tab_id: Some(active_tab_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
@@ -14284,7 +14284,7 @@ fn an_attached_viewer_redraws_an_undock_slide_with_no_new_session_frame() {
         send_incoming(build_session_event_incoming(
             SessionEvent::PanePlacementCommitted {
                 command_id: CommandId::new(),
-                source_pane_id: undocked_pane_id,
+                source_pane_ids: vec![undocked_pane_id],
                 source_tab_id: Some(source_tab_id),
                 destination_tab_id: None,
                 placement_target: PanePlacementTarget::Floating {

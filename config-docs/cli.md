@@ -644,8 +644,8 @@ in `koshi.kdl`, which ends it once the last terminal leaves.
 | `koshi resize-pane` | `--direction`, `--size`, `--pane`, `--client` | Move one border up to a signed cell count |
 | `koshi move-pane` | `--direction` and `--pane`, or `--pane`, `--x`, `--y` and `--client` | Swap a pane with its visible neighbor in its tab or floating pane in one step, or move a floating pane |
 | `koshi place-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--client` | Insert a pane at one side of a tab's tiled layout, or into a stack |
-| `koshi undock-pane` | `--pane`, `--x`, `--y`, `--client` | Float a tiled pane up where it is drawn |
-| `koshi dock-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--client` | Put a pane of a floating pane into a tab's tiled layout |
+| `koshi undock-pane` | `--pane`, `--x`, `--y`, `--client` | Float a tiled pane, or move a pane out of its floating pane, where it is drawn |
+| `koshi dock-pane` | `--pane`, `--tab` and `--direction` or `--stack-onto`, `--all`, `--client` | Put a pane of a floating pane, or with `--all` every pane of it, into a tab's tiled layout |
 | `koshi pin-pane`, `koshi unpin-pane` | `--pane`, `--client` | Pin or unpin a floating pane on one screen |
 | `koshi minimize-pane`, `koshi restore-pane` | `--pane` or `--all`, `--client` | Minimize or restore floating panes on one screen |
 | `koshi scroll-pane` | `--lines`, `--pane`, `--client` | Scroll one client's view of a pane by signed line count |
@@ -795,6 +795,15 @@ size `40x19`. In an `80x22` tab that holds only the stack `[vim, htop]` with
 `vim` open, `koshi undock-pane --pane <htop>` floats `htop` at `(0, 1)` with
 the size `72x19`.
 
+`koshi undock-pane` on a pane of a floating pane of 2 or more panes moves the
+pane into a new floating pane, at the box where the client draws it, grown up
+by one row for the titlebar strip. The floating pane it leaves keeps its other
+panes and the size it asks for. A pane alone in its floating pane is refused
+with `<pane-id> is already alone in its floating pane`. Example: the floating
+pane `[vim | htop]` is drawn at `(16, 4)` with the size `48x13`. `koshi
+undock-pane --pane <htop>` floats `htop` at `(40, 4)` with the size `24x13`,
+and `[vim]` stays at the size `48x13`.
+
 `koshi dock-pane` puts a pane of a floating pane into a tab's tiled layout.
 Only that pane leaves its floating pane: a floating pane of 2 or more panes
 keeps its other panes and the size it asks for. If its panes held it larger
@@ -838,6 +847,28 @@ open and focused, and the second still sees `htop`.
 Example: tab `#1` holds `[S1, S2]` stacked, and `F` floats. `koshi dock-pane
 --pane <F> --stack-onto <S2>` gives the stack `[S1, S2, F]`, with `F` open on
 the screen of the client that docked it.
+
+`koshi dock-pane --all` docks every pane of the floating pane that holds the
+pane, as one subtree, and the floating pane leaves the session. The subtree
+keeps its splits and its split weights. If no pane of the subtree, or of the
+tab's row or column it docks into, is resized or has a minimum or a preferred
+size, a subtree split in the direction of the dock joins that row or column,
+and every pane keeps its exact share. Else the split stays nested, and each
+resize keeps its cell count: `[vim | htop]` resized from `24/24` to `32/16`
+docks into 40 columns as `28/12`. `--stack-onto` adds its panes to the stack
+in layout order. The client,
+and every other client whose input is on one of its panes, moves to the tab. A
+client whose input was on a docked pane keeps that pane; the client, when its
+input was on no docked pane, takes the pane it focused last in the floating
+pane. Every client that moves, and every client that focuses a pane in the
+tab, keeps the member it shows in each stack of the floating pane. Every
+other client gets no focus in the tab, and sees each stack's own open member
+when it opens the tab. With `--stack-onto`, a client that does not move keeps
+its focus and the member it shows in the target stack. A tiled pane is refused with `<pane-id> is not in a floating pane`, and
+a tab with no room with `tab <name> has no room for <n> more panes`. Example:
+tab `#1` holds `A | B` in an `80x22` pane area, and its only client views it.
+`koshi dock-pane --all` typed in `vim` of the floating pane `[vim | htop]`
+gives `A | B | vim | htop`, each pane 20 columns wide.
 
 `koshi move-pane --pane <PANE_ID> --x <COLUMN> --y <ROW>` moves a floating
 pane on one client's screen. A pinned pane is refused with `<pane> is pinned;

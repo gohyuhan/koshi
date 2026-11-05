@@ -274,14 +274,17 @@ pub struct FloatingPaneLayoutChanged {
 pub struct PanePlacementCommitted {
     /// The command whose transaction committed this placement.
     pub command_id: CommandId,
-    /// The pane placed in the destination layout.
-    pub source_pane_id: PaneId,
-    /// The tab that owned the pane before the placement; `None` when the pane
+    /// The panes the placement takes from their source: the source pane
+    /// alone, or every pane of a floating pane that docks whole, in layout
+    /// order. A swap names its source pane and not the pane it exchanges
+    /// with.
+    pub source_pane_ids: Vec<PaneId>,
+    /// The tab that owned the panes before the placement; `None` when they
     /// floated. A message without `source_tab_id` is refused.
     #[serde(deserialize_with = "Option::deserialize")]
     pub source_tab_id: Option<TabId>,
-    /// The tab that owns the pane after the placement; `None` when the pane
-    /// floats. A message without `destination_tab_id` is refused.
+    /// The tab that owns the panes after the placement; `None` when they
+    /// float. A message without `destination_tab_id` is refused.
     #[serde(deserialize_with = "Option::deserialize")]
     pub destination_tab_id: Option<TabId>,
     /// The checked swap, insertion or undock target used by the committed

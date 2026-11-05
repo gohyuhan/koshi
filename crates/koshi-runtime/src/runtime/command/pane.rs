@@ -180,10 +180,10 @@ impl Server {
                 new_pane_id,
                 direction,
             ),
-            None => add_pane_to_stack(
+            None => add_panes_to_stack(
                 source_layout_tree,
                 new_pane_target.source_pane_id,
-                new_pane_id,
+                &[new_pane_id],
             ),
         };
         let candidate_layout_tree =
@@ -1327,7 +1327,7 @@ impl Server {
         let mut emitted_events = vec![
             Event::PanePlacementCommitted(PanePlacementCommitted {
                 command_id,
-                source_pane_id: pane_id,
+                source_pane_ids: vec![pane_id],
                 source_tab_id: None,
                 destination_tab_id: None,
                 placement_target: PanePlacementTarget::Tiled(tiled_placement_target),
@@ -1466,11 +1466,12 @@ impl Server {
         )? {
             ResolvedTiledPlacement::TiledSource(placement_target) => placement_target,
             ResolvedTiledPlacement::FloatingSource(dock_target) => {
+                let dock_source = DockSource::Pane(dock_target.source_pane_id);
                 return self.apply_dock_pane(
                     command_id,
-                    command_args,
                     tiled_placement_target,
                     dock_target,
+                    dock_source,
                     expected_placed_tab_layout,
                 );
             }
@@ -1545,7 +1546,8 @@ impl Server {
             placement_target.client_id,
         );
         Self::require_client(session, placement_target.client_id)?;
-        let destination_tab_size = require_placement_destination_tab_size(placement_tab_sizes)?;
+        let destination_tab_size =
+            require_placement_destination_tab_size(placement_tab_sizes.destination_tab_size)?;
         let destination_tab_rect = Rect::from_size_at_origin(destination_tab_size);
         let layout_target = PlacementTarget::from_tiled_placement_target(tiled_placement_target);
         let destination_tree = session
@@ -1587,7 +1589,7 @@ impl Server {
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = vec![Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: placement_target.source_pane_id,
+            source_pane_ids: vec![placement_target.source_pane_id],
             source_tab_id: Some(placement_target.source_tab_id),
             destination_tab_id: Some(placement_target.destination_tab_id),
             placement_target: command_args.placement_target.clone(),
@@ -1639,8 +1641,8 @@ impl Server {
     /// Handle [`Command::TogglePaneFloating`]: run the [`Command::PlacePane`]
     /// that [`Self::resolve_toggle_pane_floating_args`] gives, as
     /// [`Self::apply_place_pane`] runs it: the undock of a tiled or stacked
-    /// pane, or the dock of a floating pane. A refusal is that undock's or
-    /// that dock's, and changes nothing.
+    /// pane, or the dock of a pane of a floating pane. A refusal is that
+    /// undock's or that dock's, and changes nothing.
     pub(super) fn handle_toggle_pane_floating(
         &mut self,
         command_id: CommandId,
@@ -1652,35 +1654,69 @@ impl Server {
         self.apply_place_pane(command_id, command_source, &place_pane_args, None)
     }
 
-    /// Undock the tiled or stacked pane `undock_target.source_pane_id`: make it
-    /// a floating pane of its session. The target comes from
+    /// Handle [`Command::DockFloatingPane`]: dock every pane of the floating
+    /// pane that holds the named pane, as one subtree, at the target
+    /// [`Self::resolve_dock_floating_pane_target`] gives
+    /// ([`Self::apply_dock_pane`] with [`DockSource::WholeFloatingPane`]). A
+    /// refusal is that resolution's or that dock's, and changes nothing.
+    pub(super) fn handle_dock_floating_pane(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+        command_args: &DockFloatingPaneArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let DockFloatingPaneTarget {
+            dock_target,
+            floating_pane_id,
+            tiled_placement_target,
+        } = self.resolve_dock_floating_pane_target(command_args, command_source, acting_session)?;
+        self.apply_dock_pane(
+            command_id,
+            &tiled_placement_target,
+            dock_target,
+            DockSource::WholeFloatingPane(floating_pane_id),
+            None,
+        )
+    }
+
+    /// Undock `undock_target.source_pane_id`, a tiled or stacked pane or a
+    /// pane of a floating pane of 2 or more panes: make it a new floating pane
+    /// of its session. The target comes from
     /// [`Self::resolve_undock_pane_target`].
     ///
-    /// The pane asks for the cells of the rect the acting client draws it in
+    /// The pane asks for the cells of the rect the acting client draws it in,
+    /// with the titlebar strip row above it for a pane of a floating pane
     /// ([`find_lifted_floating_pane_rect`]), a stack member the acting client
     /// draws on its header asks for the rect it opens into, and a pane the
     /// acting client does not draw asks for [`DEFAULT_FLOATING_PANE_SIZE`]. The
     /// acting client stores `top_left_cell` when it is set, else the rect's
     /// top-left cell, else its default placement. A `40x19` pane drawn at
     /// `(40, 0)` floats as `Cells(40)` by `Cells(19)` at `(40, 0)`, or at
-    /// `(5, 3)` with `top_left_cell` `(5, 3)`.
+    /// `(5, 3)` with `top_left_cell` `(5, 3)`. `htop` of the floating pane
+    /// `[vim | htop]` drawn `48x13` at `(16, 4)` floats as `Cells(24)` by
+    /// `Cells(13)` at `(40, 4)`.
     ///
     /// The pane keeps its id, its PTY and its terminal state.
-    /// [`commit_undock_placement`] adds the member at
+    /// [`commit_undock_placement`] adds the new floating pane at
     /// [`Session::compute_new_floating_pane_size`], takes the leaf out of its
-    /// tab, closes a tab left with no pane, and shows the pane for the acting
-    /// client and for every other client whose input is on the pane, each when
-    /// it can draw floating panes. Such another client holds the pane at the
-    /// top-left cell of the rect it drew the pane in. Every other client holds
-    /// the pane minimized at its default placement.
+    /// tab or floating pane, closes a tab left with no pane, and shows the new
+    /// floating pane for the acting client and for every other client whose
+    /// input is on the pane, each when it can draw floating panes. Such another
+    /// client holds it at the top-left cell of the rect it drew the pane in.
+    /// Every other client holds it minimized at its default placement. A
+    /// floating pane the pane leaves keeps its desired size and its other
+    /// panes, and its outer size is solved again against its smaller tree's
+    /// minimum.
     ///
-    /// Every attached client gains a view of the pane.
+    /// Every attached client gains a view of the new floating pane.
     ///
     /// Emits [`Event::PanePlacementCommitted`] with `destination_tab_id: None`,
-    /// then the commit's events, then one [`Event::PtyResized`] per pane the
-    /// source tab, or the tab its viewers land on, resizes
-    /// ([`Self::reflow_tab_or_landing_tab`]), then one per floating pane whose
-    /// size changed, the undocked pane included
+    /// and `source_tab_id: None` for a pane of a floating pane, then the
+    /// commit's events, then, for a tiled source, one [`Event::PtyResized`] per
+    /// pane the source tab, or the tab its viewers land on, resizes
+    /// ([`Self::reflow_tab_or_landing_tab`]), then one per pane of a floating
+    /// pane whose size changed, the undocked pane included
     /// ([`Self::reflow_floating_panes`]).
     fn apply_undock_pane(
         &mut self,
@@ -1701,7 +1737,7 @@ impl Server {
         let lifted_floating_pane_rect = find_lifted_floating_pane_rect(
             session,
             undock_target.client_id,
-            undock_target.source_tab_id,
+            undock_target.source_layout_area_id,
             undock_target.source_pane_id,
         );
         let (desired_size, lifted_position) = match lifted_floating_pane_rect {
@@ -1716,17 +1752,21 @@ impl Server {
             None => lifted_position,
         };
         let solved_size = session.compute_new_floating_pane_size(desired_size);
+        let source_tab_id = match undock_target.source_layout_area_id {
+            LayoutAreaId::Tab(source_tab_id) => Some(source_tab_id),
+            LayoutAreaId::FloatingPane(_) => None,
+        };
         let mut emitted_events = vec![Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: undock_target.source_pane_id,
-            source_tab_id: Some(undock_target.source_tab_id),
+            source_pane_ids: vec![undock_target.source_pane_id],
+            source_tab_id,
             destination_tab_id: None,
             placement_target: command_args.placement_target.clone(),
         })];
         emitted_events.extend(
             commit_undock_placement(
                 session,
-                undock_target.source_tab_id,
+                undock_target.source_layout_area_id,
                 undock_target.source_pane_id,
                 (desired_size, solved_size),
                 (undock_target.client_id, acting_position),
@@ -1739,12 +1779,14 @@ impl Server {
             })?,
         );
 
-        self.reflow_tab_or_landing_tab(
-            undock_target.session_id,
-            undock_target.source_tab_id,
-            pty_backend.as_ref(),
-            &mut emitted_events,
-        );
+        if let Some(source_tab_id) = source_tab_id {
+            self.reflow_tab_or_landing_tab(
+                undock_target.session_id,
+                source_tab_id,
+                pty_backend.as_ref(),
+                &mut emitted_events,
+            );
+        }
         self.reflow_floating_panes(
             pty_backend.as_ref(),
             undock_target.session_id,
@@ -1753,41 +1795,45 @@ impl Server {
         Ok(self.commit_events(command_id, emitted_events))
     }
 
-    /// Dock the floating pane `dock_target.source_pane_id` into
-    /// `dock_target`'s destination tab at `tiled_placement_target`: an
-    /// insertion beside a pane, a group or the whole tab, or a stack onto a
-    /// tiled pane. The target comes from [`Self::resolve_tiled_placement_target`].
+    /// Dock the panes `dock_source` names into `dock_target`'s destination tab
+    /// at `tiled_placement_target`: an insertion beside a pane, a group or the
+    /// whole tab, or a stack onto a tiled pane. The panes are the pane
+    /// `dock_target.source_pane_id` alone, or every pane of its floating pane
+    /// as one subtree with its split weights. The target comes from
+    /// [`Self::resolve_tiled_placement_target`] or
+    /// [`Self::resolve_dock_floating_pane_target`].
     ///
     /// The destination tree is built against the destination tab's size once
-    /// the acting client and every client whose input is on the pane view it
-    /// ([`compute_placement_tab_sizes`]) with [`place_floating_pane_in_tab`],
-    /// then [`commit_dock_placement`] takes the pane out of its floating pane
-    /// and installs the tree. The pane keeps its id, its PTY and its terminal
-    /// state. A floating pane of one pane leaves with the pane; a floating
-    /// pane of 2 or more panes keeps its other panes and its desired size,
-    /// and [`Self::reflow_floating_panes`] solves its outer size again against
-    /// the minimum of its smaller tree. `60%` of a 10-column pane area gives
-    /// `[A | B]`, which needs 8 columns, an outer width of 8; after `B` docks,
-    /// `[A]` has an outer width of 6.
+    /// the acting client and every client whose input is on a docked pane
+    /// view it ([`compute_tab_size_after_clients_move`]) with
+    /// [`place_docking_tree_in_tab`], then [`commit_dock_placement`] takes the
+    /// panes out of their floating pane and installs the tree. Each pane keeps
+    /// its id, its PTY and its terminal state. A floating pane left with no
+    /// pane leaves the floating set; a floating pane that keeps panes keeps
+    /// its desired size, and [`Self::reflow_floating_panes`] solves its outer
+    /// size again against the minimum of its smaller tree. `60%` of a
+    /// 10-column pane area gives `[A | B]`, which needs 8 columns, an outer
+    /// width of 8; after `B` docks, `[A]` has an outer width of 6.
     ///
     /// A tree that does not fit the destination is refused with
     /// [`RejectReason::InvalidState`] `tab <name> has no room for another
-    /// pane`; every other layout refusal is
+    /// pane` for one docked pane, and `tab <name> has no room for 2 more
+    /// panes` for two; every other layout refusal is
     /// [`Self::build_placement_rejection`]'s. A refusal changes nothing.
     ///
-    /// Emits [`Event::PanePlacementCommitted`] with `source_tab_id: None`,
-    /// then the commit's events, then one [`Event::PtyResized`] per pane the
-    /// destination tab resizes, the docked pane included, then one per pane
-    /// each tab that a moving client left resizes
-    /// ([`Self::reflow_tab_if_viewed`]), then, when the floating pane keeps
-    /// panes, one per pane of a floating pane that resizes
+    /// Emits [`Event::PanePlacementCommitted`] with every docked pane in
+    /// layout order and `source_tab_id: None`, then the commit's events, then
+    /// one [`Event::PtyResized`] per pane the destination tab resizes, the
+    /// docked panes included, then one per pane each tab that a moving client
+    /// left resizes ([`Self::reflow_tab_if_viewed`]), then, when the floating
+    /// pane keeps panes, one per pane of a floating pane that resizes
     /// ([`Self::reflow_floating_panes`]).
     fn apply_dock_pane(
         &mut self,
         command_id: CommandId,
-        command_args: &PlacePaneArgs,
         tiled_placement_target: &TiledPlacementTarget,
         dock_target: DockPaneTarget,
+        dock_source: DockSource,
         expected_placed_tab_layout: Option<&PlacedTabLayout>,
     ) -> Result<CommandResult, Rejection> {
         let pane_sizing = self.get_pane_sizing();
@@ -1796,34 +1842,62 @@ impl Server {
             .session_by_id
             .get_mut(&dock_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let (source_floating_pane_id, docking_tree) = match dock_source {
+            DockSource::Pane(pane_id) => (
+                session
+                    .floating_set
+                    .find_floating_pane_by_pane_id(pane_id)
+                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?
+                    .1
+                    .get_floating_pane_id(),
+                LayoutNode::Pane(pane_id),
+            ),
+            DockSource::WholeFloatingPane(floating_pane_id) => (
+                floating_pane_id,
+                session
+                    .floating_set
+                    .find_floating_pane_by_id(floating_pane_id)
+                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?
+                    .1
+                    .get_layout_tree()
+                    .clone(),
+            ),
+        };
+        let docked_pane_ids = docking_tree.list_leaf_pane_ids();
         let destination_tab = session
             .tabs
             .get(&dock_target.destination_tab_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
         Self::require_client(session, dock_target.client_id)?;
         let destination_tab_size =
-            require_placement_destination_tab_size(compute_placement_tab_sizes(
+            require_placement_destination_tab_size(compute_tab_size_after_clients_move(
                 session,
-                dock_target.source_pane_id,
                 dock_target.destination_tab_id,
                 None,
-                dock_target.client_id,
+                &list_moving_client_ids(session, &docked_pane_ids, dock_target.client_id),
+                &[],
             ))?;
-        let destination_tree = place_floating_pane_in_tab(
+        let destination_tree = place_docking_tree_in_tab(
             destination_tab.get_layout_tree(),
-            dock_target.source_pane_id,
+            &docking_tree,
             &PlacementTarget::from_tiled_placement_target(tiled_placement_target),
             Rect::from_size_at_origin(destination_tab_size),
             pane_sizing,
         )
         .map_err(|placement_error| match placement_error {
-            PlacementError::DestinationTooSmall { .. } => Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                &format!(
-                    "tab {} has no room for another pane",
-                    destination_tab.get_tab_name()
-                ),
-            ),
+            PlacementError::DestinationTooSmall { .. } => {
+                let no_room_help = match docked_pane_ids.len() {
+                    1 => format!(
+                        "tab {} has no room for another pane",
+                        destination_tab.get_tab_name()
+                    ),
+                    docked_pane_count => format!(
+                        "tab {} has no room for {docked_pane_count} more panes",
+                        destination_tab.get_tab_name()
+                    ),
+                };
+                Rejection::from_reason_and_help(RejectReason::InvalidState, &no_room_help)
+            }
             other_placement_error => Self::build_placement_rejection(&other_placement_error),
         })?;
         Self::validate_expected_placed_tab_layout(
@@ -1836,23 +1910,20 @@ impl Server {
             expected_placed_tab_layout,
         )?;
 
-        let source_floating_pane_id = session
-            .floating_set
-            .find_floating_pane_by_pane_id(dock_target.source_pane_id)
-            .map(|(_, source_floating_pane)| source_floating_pane.get_floating_pane_id());
         let mut emitted_events = vec![Event::PanePlacementCommitted(PanePlacementCommitted {
             command_id,
-            source_pane_id: dock_target.source_pane_id,
+            source_pane_ids: docked_pane_ids,
             source_tab_id: None,
             destination_tab_id: Some(dock_target.destination_tab_id),
-            placement_target: command_args.placement_target.clone(),
+            placement_target: PanePlacementTarget::Tiled(tiled_placement_target.clone()),
         })];
         emitted_events.extend(
             commit_dock_placement(
                 session,
-                dock_target.source_pane_id,
+                dock_source,
                 dock_target.destination_tab_id,
                 destination_tree,
+                tiled_placement_target,
                 dock_target.client_id,
             )
             .map_err(|placement_commit_error| {
@@ -1863,13 +1934,10 @@ impl Server {
             })?,
         );
 
-        let is_source_floating_pane_kept =
-            source_floating_pane_id.is_some_and(|source_floating_pane_id| {
-                session
-                    .floating_set
-                    .find_floating_pane_by_id(source_floating_pane_id)
-                    .is_some()
-            });
+        let is_source_floating_pane_kept = session
+            .floating_set
+            .find_floating_pane_by_id(source_floating_pane_id)
+            .is_some();
         let mut tab_ids_to_reflow = vec![dock_target.destination_tab_id];
         for tab_id in list_tab_ids_switched_away_from(&emitted_events) {
             if !tab_ids_to_reflow.contains(&tab_id) {
@@ -1992,7 +2060,7 @@ impl Server {
         let mut emitted_events = vec![
             Event::PanePlacementCommitted(PanePlacementCommitted {
                 command_id,
-                source_pane_id: placement_target.source_pane_id,
+                source_pane_ids: vec![placement_target.source_pane_id],
                 source_tab_id: Some(placement_target.source_tab_id),
                 destination_tab_id: Some(placement_target.destination_tab_id),
                 placement_target: command_args.placement_target.clone(),
@@ -2774,18 +2842,19 @@ impl Server {
     }
 }
 
-/// The destination tab size of `placement_tab_sizes`
-/// ([`compute_placement_tab_sizes`]).
+/// `destination_tab_size`, the size a placement's destination tab takes once
+/// the clients it moves view it ([`compute_placement_tab_sizes`],
+/// [`compute_tab_size_after_clients_move`]).
 ///
 /// # Errors
 ///
 /// [`RejectReason::InvalidState`] `destination tab has no drawable client
-/// view` when none of the clients that then view the destination tab has a
-/// pane area.
+/// view` when `destination_tab_size` is `None`: none of the clients that then
+/// view the destination tab has a pane area.
 fn require_placement_destination_tab_size(
-    placement_tab_sizes: PlacementTabSizes,
+    destination_tab_size: Option<Size>,
 ) -> Result<Size, Rejection> {
-    placement_tab_sizes.destination_tab_size.ok_or_else(|| {
+    destination_tab_size.ok_or_else(|| {
         Rejection::from_reason_and_help(
             RejectReason::InvalidState,
             "destination tab has no drawable client view",

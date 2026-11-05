@@ -529,6 +529,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
+            "core:dock-floating-pane",
+            CommandKind::DockFloatingPane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
             "core:move-floating-pane",
             CommandKind::MoveFloatingPane,
             Client,
@@ -1286,6 +1292,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:confirm-pane-placement",
         "core:cycle-pane-placement-span",
         "core:dismiss-selected-notification",
+        "core:dock-floating-pane",
         "core:dock-pane",
         "core:focus-next-floating-pane",
         "core:focus-pane",

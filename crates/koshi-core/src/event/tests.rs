@@ -120,7 +120,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
         (
             serde_json::json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
-                "source_pane_id": wire_identifier,
+                "source_pane_ids": [wire_identifier],
                 "destination_tab_id": null,
                 "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
@@ -129,7 +129,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
         (
             serde_json::json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
-                "source_pane_id": wire_identifier,
+                "source_pane_ids": [wire_identifier],
                 "source_tab_id": null,
                 "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
@@ -265,7 +265,7 @@ fn remaining_event_variants_survive_a_json_round_trip() {
     }));
     assert_json_roundtrip(&Event::PanePlacementCommitted(PanePlacementCommitted {
         command_id: CommandId::new(),
-        source_pane_id: PaneId::new(),
+        source_pane_ids: vec![PaneId::new()],
         source_tab_id: Some(TabId::new()),
         destination_tab_id: Some(destination_tab_id),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -416,7 +416,7 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 24] {
         (
             Event::PanePlacementCommitted(PanePlacementCommitted {
                 command_id: CommandId::new(),
-                source_pane_id: PaneId::new(),
+                source_pane_ids: vec![PaneId::new()],
                 source_tab_id: Some(TabId::new()),
                 destination_tab_id: Some(TabId::new()),
                 placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {

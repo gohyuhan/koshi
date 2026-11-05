@@ -25,12 +25,12 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, DetachArgs, FocusPaneArgs,
-    FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs, MoveTabArgs,
-    NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
-    PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs, SetAllFloatingPanesMinimizedArgs,
-    SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs, SwitchSessionArgs, TabTarget,
-    TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
+    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, DetachArgs, DockFloatingPaneArgs,
+    FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs,
+    MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+    PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs,
+    SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs,
+    SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, Point,
@@ -587,9 +587,12 @@ pub enum CliCommand {
         #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
         client_id: Option<ClientId>,
     },
-    /// Float a tiled or stacked pane above the tiled panes, at the top-left
-    /// cell and the size where the client draws it, each axis cut to 90% of
-    /// the smallest pane area that an attached client draws floating panes in.
+    /// Float a tiled or stacked pane above the tiled panes, or move a pane out
+    /// of a floating pane of 2 or more panes into a floating pane of its own,
+    /// at the top-left cell and the size where the client draws it, each axis
+    /// cut to 90% of the smallest pane area that an attached client draws
+    /// floating panes in. A pane of a floating pane takes the titlebar strip
+    /// row above it too.
     UndockPane {
         /// Pane to float; defaults to the pane this command runs in, else the
         /// focused pane.
@@ -640,6 +643,10 @@ pub enum CliCommand {
         /// no stack forms a new stack with it.
         #[arg(long = "stack-onto", value_parser = parse_pane_id, value_name = "PANE_ID")]
         stack_onto_pane_id: Option<PaneId>,
+        /// Dock every pane of the floating pane that holds the pane, as one
+        /// subtree with its split weights; a tiled pane is refused.
+        #[arg(long = "all")]
+        should_dock_floating_pane: bool,
         /// Client that moves to the destination tab; defaults to the issuing
         /// client, else the session's only attached one.
         #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
@@ -1637,20 +1644,30 @@ impl CliCommand {
                 tab_reference,
                 direction,
                 stack_onto_pane_id,
+                should_dock_floating_pane,
                 client_id: _,
-            } => (
-                "dock-pane",
-                Command::PlacePane(PlacePaneArgs {
-                    source_pane_id: pane_id.or(resolved_targets.pane_id),
-                    placement_target: PanePlacementTarget::Tiled(build_tiled_placement_target(
-                        *stack_onto_pane_id,
-                        resolved_targets
-                            .tab_id
-                            .or(resolve_tab_reference_id(tab_reference)),
-                        Some(direction.map(Direction::from).unwrap_or(Direction::Right)),
-                    )),
-                }),
-            ),
+            } => {
+                let tiled_placement_target = build_tiled_placement_target(
+                    *stack_onto_pane_id,
+                    resolved_targets
+                        .tab_id
+                        .or(resolve_tab_reference_id(tab_reference)),
+                    Some(direction.map(Direction::from).unwrap_or(Direction::Right)),
+                );
+                let source_pane_id = pane_id.or(resolved_targets.pane_id);
+                let command = if *should_dock_floating_pane {
+                    Command::DockFloatingPane(DockFloatingPaneArgs {
+                        pane_id: source_pane_id,
+                        placement_target: Some(tiled_placement_target),
+                    })
+                } else {
+                    Command::PlacePane(PlacePaneArgs {
+                        source_pane_id,
+                        placement_target: PanePlacementTarget::Tiled(tiled_placement_target),
+                    })
+                };
+                ("dock-pane", command)
+            }
             CliCommand::PinPane {
                 pane_id,
                 client_id: _,
@@ -2320,6 +2337,7 @@ pub fn build_actions_run_request(
         | Command::Visual(_)
         | Command::TogglePaneFullscreen
         | Command::TogglePaneFloating
+        | Command::DockFloatingPane(_)
         | Command::MoveTab(_)
         | Command::MovePane(_)
         | Command::PlacePane(_)

@@ -586,10 +586,23 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             build_bound_action("begin-pane-placement"),
         ),
         // `u` floats the focused tiled pane where it is drawn, or docks the
-        // focused floating pane beside the tiled pane under its center.
+        // focused pane of a floating pane beside the tiled pane under its
+        // center.
         (
             parse_default_key_sequence("<leader>p u"),
             build_bound_action("toggle-pane-floating"),
+        ),
+        // Shift+`u` docks every pane of the focused floating pane, as one
+        // subtree, beside the tiled pane under the floating pane's center.
+        (
+            parse_default_key_sequence("<leader>p <S-u>"),
+            build_bound_action("dock-floating-pane"),
+        ),
+        // `o` moves the focused pane out of its floating pane into a floating
+        // pane of its own, or floats the focused tiled pane.
+        (
+            parse_default_key_sequence("<leader>p o"),
+            build_bound_action("undock-pane"),
         ),
         // Tab and Shift+Tab under the pane prefix show and focus the next or
         // previous floating pane, in the order the floating panes were created.

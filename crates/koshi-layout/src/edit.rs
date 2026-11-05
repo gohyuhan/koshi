@@ -75,23 +75,25 @@ pub fn split_leaf(
     Ok(edited_layout_tree)
 }
 
-/// Stack `new_pane_id` onto `anchor_pane_id`'s position.
+/// Stack `new_pane_ids` onto `anchor_pane_id`'s position, in the order given.
 ///
-/// If `anchor_pane_id` already sits inside a stack, the new pane is appended as the
-/// last member of the innermost stack holding it, and the stack's active member
-/// stays the same; otherwise the anchor's leaf becomes a two-member stack of
-/// `anchor_pane_id` then `new_pane_id`, with `anchor_pane_id` active. The new
+/// If `anchor_pane_id` already sits inside a stack, the new panes are appended as the
+/// last members of the innermost stack holding it, and the stack's active member
+/// stays the same. Else the anchor's leaf becomes a stack of
+/// `anchor_pane_id` then the new panes, with `anchor_pane_id` active. A new
 /// pane is never the active member: `S[a, b]` with `b` active, `c` stacked onto
-/// `a`, gives `S[a, b, c]` with `b` active.
+/// `a`, gives `S[a, b, c]` with `b` active; plain `a` with `[c, d]` gives
+/// `S[a, c, d]` with `a` active. An empty `new_pane_ids` gives `layout_tree`
+/// unchanged.
 ///
 /// # Errors
 ///
 /// [`SplitError::PaneNotFound`] when `anchor_pane_id` has no leaf in `layout_tree`; the
 /// caller's tree is unchanged.
-pub fn add_pane_to_stack(
+pub fn add_panes_to_stack(
     layout_tree: &LayoutNode,
     anchor_pane_id: PaneId,
-    new_pane_id: PaneId,
+    new_pane_ids: &[PaneId],
 ) -> Result<LayoutNode, SplitError> {
     if !layout_tree.has_pane(anchor_pane_id) {
         return Err(SplitError::PaneNotFound {
@@ -100,20 +102,26 @@ pub fn add_pane_to_stack(
     }
 
     let mut edited_layout_tree = layout_tree.clone();
+    if new_pane_ids.is_empty() {
+        return Ok(edited_layout_tree);
+    }
     if let Some(containing_stack) = edited_layout_tree.find_containing_stack_mut(anchor_pane_id) {
-        containing_stack
-            .children
-            .push(LayoutNode::Pane(new_pane_id));
-        containing_stack.weights.push(SizeWeight::default());
+        for &new_pane_id in new_pane_ids {
+            containing_stack
+                .children
+                .push(LayoutNode::Pane(new_pane_id));
+            containing_stack.weights.push(SizeWeight::default());
+        }
     } else {
         let pane_path = edited_layout_tree
             .find_pane_path(anchor_pane_id)
             .expect("presence checked above");
         let anchor_pane_node_slot = edited_layout_tree.get_node_at_path_mut(&pane_path);
-        *anchor_pane_node_slot = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
-            vec![anchor_pane_id, new_pane_id],
-            0,
-        ));
+        let stacked_pane_ids = std::iter::once(anchor_pane_id)
+            .chain(new_pane_ids.iter().copied())
+            .collect();
+        *anchor_pane_node_slot =
+            LayoutNode::Split(SplitNode::from_stacked_pane_ids(stacked_pane_ids, 0));
     }
     Ok(edited_layout_tree)
 }

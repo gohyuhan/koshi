@@ -315,7 +315,7 @@ fn submit_pane_swap(
         .expect("the swap commits one pane placement");
     SessionEvent::PanePlacementCommitted {
         command_id: pane_placement_committed.command_id,
-        source_pane_id: pane_placement_committed.source_pane_id,
+        source_pane_ids: pane_placement_committed.source_pane_ids,
         source_tab_id: pane_placement_committed.source_tab_id,
         destination_tab_id: pane_placement_committed.destination_tab_id,
         placement_target: pane_placement_committed.placement_target,

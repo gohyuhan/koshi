@@ -55,7 +55,7 @@ fn list_test_events() -> Vec<SessionEvent> {
         },
         SessionEvent::PanePlacementCommitted {
             command_id,
-            source_pane_id: pane_id,
+            source_pane_ids: vec![pane_id],
             source_tab_id: Some(tab_id),
             destination_tab_id: Some(tab_id),
             placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -332,7 +332,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!({ "ImageContentReleased": { "image_content_ids": [3, 1, 4] } }),
             json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
-                "source_pane_id": wire_identifier,
+                "source_pane_ids": [wire_identifier],
                 "source_tab_id": wire_identifier,
                 "destination_tab_id": wire_identifier,
                 "placement_target": {
@@ -751,7 +751,7 @@ fn a_placement_of_a_floating_pane_writes_a_null_source_tab_id_and_reads_it_back(
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
     let placement_event = SessionEvent::PanePlacementCommitted {
         command_id: CommandId::from_uuid(build_fixed_test_uuid()),
-        source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        source_pane_ids: vec![PaneId::from_uuid(build_fixed_test_uuid())],
         source_tab_id: None,
         destination_tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Split {
@@ -762,7 +762,7 @@ fn a_placement_of_a_floating_pane_writes_a_null_source_tab_id_and_reads_it_back(
     };
     let expected_json = json!({ "PanePlacementCommitted": {
         "command_id": wire_identifier,
-        "source_pane_id": wire_identifier,
+        "source_pane_ids": [wire_identifier],
         "source_tab_id": null,
         "destination_tab_id": wire_identifier,
         "placement_target": {
@@ -793,7 +793,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
         (
             json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
-                "source_pane_id": wire_identifier,
+                "source_pane_ids": [wire_identifier],
                 "destination_tab_id": null,
                 "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),
@@ -802,7 +802,7 @@ fn an_event_missing_a_tab_id_field_is_refused() {
         (
             json!({ "PanePlacementCommitted": {
                 "command_id": wire_identifier,
-                "source_pane_id": wire_identifier,
+                "source_pane_ids": [wire_identifier],
                 "source_tab_id": null,
                 "placement_target": { "Tiled": { "Swap": { "target_pane_id": wire_identifier } } }
             } }),

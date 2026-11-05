@@ -73,8 +73,10 @@ pub enum Command {
     /// Commit one checked pane placement ([`PanePlacementTarget`]): a swap
     /// with another pane, an insertion beside a pane, a group, or a whole tab,
     /// or a move into a pane's stack, in the source tab or another tab. A
-    /// floating source pane docks there. A `Floating` target undocks a tiled
-    /// or stacked source pane.
+    /// source pane inside a floating pane docks there alone. A `Floating`
+    /// target undocks a tiled or stacked source pane, or moves a source pane
+    /// out of a floating pane of 2 or more panes into a floating pane of its
+    /// own.
     ///
     /// - Pane placement mode sends it when the user confirms with Enter or a
     ///   mouse drop. `koshi place-pane`, `koshi undock-pane`,
@@ -106,6 +108,20 @@ pub enum Command {
     /// `core:toggle-pane-floating` sends it. Example: tab `A | B`, with a
     /// floating pane `F` centered near `B`'s right edge, gives `A | B | F`.
     TogglePaneFloating,
+    /// Dock every pane of the floating pane that holds a pane into a tab's
+    /// tiled layout, as one subtree with its split weights
+    /// ([`DockFloatingPaneArgs`]). The floating pane leaves the session's
+    /// floating panes. Every pane keeps its id, its PTY and its terminal
+    /// state.
+    ///
+    /// - `core:dock-floating-pane` and `koshi dock-pane --all` send it.
+    /// - The session emits
+    ///   [`PanePlacementCommitted`](crate::event::PanePlacementCommitted)
+    ///   first, naming every pane of the floating pane.
+    ///
+    /// Example: tab `H[A, B]`, with the floating pane `[vim | htop]` docked
+    /// right of `B`, gives `H[A, B, vim, htop]` with the weights `4:2:1:1`.
+    DockFloatingPane(DockFloatingPaneArgs),
     /// Move one client's view of a pane through its scrollback.
     ScrollPane(ScrollPaneArgs),
     /// Store a new top-left cell for a floating pane in one client's view.
@@ -199,6 +215,8 @@ pub enum CommandKind {
     PlacePane,
     /// Names [`Command::TogglePaneFloating`].
     TogglePaneFloating,
+    /// Names [`Command::DockFloatingPane`].
+    DockFloatingPane,
     /// Names [`Command::ScrollPane`].
     ScrollPane,
     /// Names [`Command::MoveFloatingPane`].
@@ -323,6 +341,24 @@ pub struct CloseFloatingPaneArgs {
     pub should_kill_process_tree: bool,
 }
 
+/// Arguments for [`Command::DockFloatingPane`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DockFloatingPaneArgs {
+    /// A pane of the floating pane to dock. `None` takes the issuing pane for
+    /// an in-session CLI, and the pane that takes the acting client's input
+    /// for every other source.
+    pub pane_id: Option<PaneId>,
+    /// Where the floating pane's tree goes. `None` takes the insertion beside
+    /// the smallest pane, group or tab span under the center cell of the rect
+    /// the acting client draws the floating pane in, on that span's edge
+    /// nearest the cell, else the insertion at the right edge of that
+    /// client's active tab. A `Stack` target adds every pane of the floating
+    /// pane to the target's stack in layout order, and the pane that takes
+    /// the acting client's input is open for that client: `[S]` with
+    /// `[vim | htop]`, `htop` focused, gives `[S, vim, htop]` with `htop` open.
+    pub placement_target: Option<TiledPlacementTarget>,
+}
+
 /// Arguments for [`Command::ResizePane`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResizePaneArgs {
@@ -408,11 +444,13 @@ pub enum PanePlacementAnchor {
 pub enum PanePlacementTarget {
     /// Place the source pane in a tab's tiled layout.
     Tiled(TiledPlacementTarget),
-    /// Make the tiled or stacked source pane a floating pane of its session:
-    /// undock it. The pane keeps its id, its PTY and its terminal state, and
-    /// asks for the size of the rect the acting client draws it in. A pane
-    /// the acting client does not draw asks for 60% x 60% of the shared
-    /// floating viewport.
+    /// Make the source pane a new floating pane of its session: undock a
+    /// tiled or stacked pane, or move a pane out of a floating pane of 2 or
+    /// more panes. The pane keeps its id, its PTY and its terminal state, and
+    /// asks for the size of the rect the acting client draws it in, with the
+    /// titlebar strip row above it for a pane of a floating pane. A pane the
+    /// acting client does not draw asks for 60% x 60% of the shared floating
+    /// viewport.
     Floating {
         /// The acting client's top-left cell of the floating pane, counted
         /// from that client's pane-area origin. `None` keeps the top-left

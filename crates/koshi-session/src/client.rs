@@ -737,6 +737,36 @@ impl Client {
         self.clear_own_active_tab_solve();
     }
 
+    /// Insert each pane of `pane_ids` that this client's focus history in
+    /// `tab_id` does not hold, in the order given, at `history_index` of that
+    /// history, or at its end when `history_index` is past it. The zoom does
+    /// not change.
+    ///
+    /// The history `[a, b]` with `[c, a, d]` inserted at `1` is `[a, c, d, b]`.
+    /// An empty history with `[c, d]` inserted is `[c, d]`, and `c` becomes
+    /// the focused pane.
+    pub fn insert_panes_into_focus_history(
+        &mut self,
+        tab_id: TabId,
+        history_index: usize,
+        pane_ids: &[PaneId],
+    ) {
+        let focus_history = self.list_focus_history(tab_id);
+        let inserted_pane_ids: Vec<PaneId> = pane_ids
+            .iter()
+            .copied()
+            .filter(|pane_id| !focus_history.contains(pane_id))
+            .collect();
+        if inserted_pane_ids.is_empty() {
+            return;
+        }
+        let focus_history = self.focus_history_by_tab_id.entry(tab_id).or_default();
+        let insertion_index = history_index.min(focus_history.len());
+        focus_history.splice(insertion_index..insertion_index, inserted_pane_ids);
+        self.is_view_changed = true;
+        self.clear_own_active_tab_solve();
+    }
+
     /// Focus `pane_id` in `tab_id` for this client, as
     /// [`update_focused_pane`](Self::update_focused_pane) does. When `tab_id`
     /// is this client's active tab, `pane_id` also takes this client's input:

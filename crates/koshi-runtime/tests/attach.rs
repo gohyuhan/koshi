@@ -1378,7 +1378,7 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
             // frame that arrived before it.
             let expected_commit_frame = SessionFrame::Event(SessionEvent::PanePlacementCommitted {
                 command_id: placement_command_id,
-                source_pane_id,
+                source_pane_ids: vec![source_pane_id],
                 source_tab_id: Some(active_tab_id),
                 destination_tab_id: Some(active_tab_id),
                 placement_target: PanePlacementTarget::Tiled(placement_target),

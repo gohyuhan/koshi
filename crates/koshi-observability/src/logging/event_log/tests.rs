@@ -958,11 +958,12 @@ fn a_floating_pane_line_carries_no_tab_id_field() {
 #[test]
 fn a_placement_from_a_floating_pane_logs_only_its_destination_tab() {
     let source_pane_id = PaneId::new();
+    let second_source_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
 
     let log_output = capture_event_logs(&[Event::PanePlacementCommitted(PanePlacementCommitted {
         command_id: CommandId::new(),
-        source_pane_id,
+        source_pane_ids: vec![source_pane_id, second_source_pane_id],
         source_tab_id: None,
         destination_tab_id: Some(destination_tab_id),
         placement_target: PanePlacementTarget::Tiled(TiledPlacementTarget::Swap {
@@ -976,7 +977,9 @@ fn a_placement_from_a_floating_pane_logs_only_its_destination_tab() {
         "expected exactly one line: {log_output}"
     );
     assert!(
-        log_output.contains(&format!(r#""source_pane_id":"{source_pane_id}""#)),
+        log_output.contains(&format!(
+            r#""source_pane_ids":"{source_pane_id},{second_source_pane_id}""#
+        )),
         "{log_output}"
     );
     assert!(

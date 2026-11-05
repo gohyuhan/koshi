@@ -133,6 +133,7 @@ impl Server {
                 | Command::MovePane(_)
                 | Command::PlacePane(_)
                 | Command::TogglePaneFloating
+                | Command::DockFloatingPane(_)
                 | Command::ScrollPane(_)
                 | Command::MoveFloatingPane(_)
                 | Command::SetFloatingPanePinned(_)
@@ -304,6 +305,17 @@ impl Server {
                     session,
                 )
                 .map(drop),
+            // A dock of a whole floating pane checks its pane here. Its
+            // handler checks the destination as a dock does.
+            Command::DockFloatingPane(command_args) => {
+                let pane_target = self.resolve_pane_target(
+                    command_args.pane_id,
+                    command_source.get_target_client_id(),
+                    command_source,
+                    session,
+                )?;
+                Self::require_floating_pane_id(&pane_target).map(drop)
+            }
             Command::ScrollPane(command_args) => self
                 .resolve_scroll_pane_target(command_args, command_source, session)
                 .map(drop),
@@ -542,35 +554,102 @@ impl Server {
             command_source,
             session,
         )?;
-        let LayoutAreaId::FloatingPane(floating_pane_id) = pane_target.layout_area_id else {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                &format!("{} is not in a floating pane", pane_target.pane_id),
-            ));
-        };
         Ok(CloseFloatingPaneTarget {
             session_id: pane_target.session_id,
+            floating_pane_id: Self::require_floating_pane_id(&pane_target)?,
+        })
+    }
+
+    /// The floating pane that holds `pane_target`'s pane, for a command that
+    /// acts on a whole floating pane. A pane of a tab is
+    /// [`RejectReason::InvalidState`] `<pane-id> is not in a floating pane`.
+    pub(super) fn require_floating_pane_id(
+        pane_target: &PaneTarget,
+    ) -> Result<FloatingPaneId, Rejection> {
+        match pane_target.layout_area_id {
+            LayoutAreaId::FloatingPane(floating_pane_id) => Ok(floating_pane_id),
+            LayoutAreaId::Tab(_) => Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                &format!("{} is not in a floating pane", pane_target.pane_id),
+            )),
+        }
+    }
+
+    /// Resolve a [`Command::DockFloatingPane`]: the floating pane that holds
+    /// the pane [`Self::resolve_pane_target`] gives for `command_args.pane_id`
+    /// ([`Self::require_floating_pane_id`]), the acting client
+    /// ([`Self::resolve_view_client`]), and where the floating pane's tree
+    /// goes. [`Self::handle_dock_floating_pane`] calls it.
+    ///
+    /// With no `placement_target`, the tree goes beside the span nearest the
+    /// center of the rect the acting client draws the floating pane in
+    /// ([`find_nearest_floating_pane_dock_target`]), else to the right edge of
+    /// that client's active tab. The destination is checked as a dock's
+    /// ([`Self::resolve_placement_destination`]).
+    ///
+    /// Each refusal changes nothing: a tiled pane is
+    /// [`Self::require_floating_pane_id`]'s, and a swap, a stack onto a
+    /// floating pane and a bad destination are
+    /// [`Self::resolve_placement_destination`]'s.
+    pub(super) fn resolve_dock_floating_pane_target(
+        &self,
+        command_args: &DockFloatingPaneArgs,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<DockFloatingPaneTarget, Rejection> {
+        let pane_target = self.resolve_pane_target(
+            command_args.pane_id,
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
+        let floating_pane_id = Self::require_floating_pane_id(&pane_target)?;
+        let owner_session = self
+            .session_by_id
+            .get(&pane_target.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let tiled_placement_target = match &command_args.placement_target {
+            Some(tiled_placement_target) => tiled_placement_target.clone(),
+            None => {
+                let client_id = Self::resolve_view_client(
+                    command_source.get_target_client_id(),
+                    command_source,
+                    owner_session,
+                )?;
+                let client = Self::require_client(owner_session, client_id)?;
+                find_nearest_floating_pane_dock_target(owner_session, client, floating_pane_id)
+                    .unwrap_or(TiledPlacementTarget::Split {
+                        destination_tab_id: client.get_active_tab_id(),
+                        anchor: PanePlacementAnchor::Tab,
+                        direction: Direction::Right,
+                    })
+            }
+        };
+        let (destination_tab_id, client_id) = self.resolve_placement_destination(
+            &pane_target,
+            &tiled_placement_target,
+            command_source,
+        )?;
+        Ok(DockFloatingPaneTarget {
+            dock_target: DockPaneTarget {
+                session_id: pane_target.session_id,
+                source_pane_id: pane_target.pane_id,
+                destination_tab_id,
+                client_id,
+            },
             floating_pane_id,
+            tiled_placement_target,
         })
     }
 
     /// Resolve the source pane, destination tab, and acting client of a checked
-    /// placement into a tab's tiled layout, `tiled_placement_target`. A swap's
-    /// and a stack's destination tab is the tab of its target pane, which may
-    /// be the source tab. The destination target must stay inside the source
-    /// pane's session. The acting client is the target client the command
-    /// source names, else the issuing client while it is attached there, else,
-    /// for a CLI source, the sole attached client
-    /// ([`Self::resolve_view_client`]).
+    /// placement into a tab's tiled layout, `tiled_placement_target`
+    /// ([`Self::resolve_placement_destination`]).
     ///
-    /// A floating source pane resolves to a dock
-    /// ([`ResolvedTiledPlacement::FloatingSource`]). Each refusal is
-    /// [`RejectReason::InvalidState`] and changes nothing:
-    /// - a swap from or onto a floating pane: `<pane-id> is floating; a swap
-    ///   exchanges tiled slots`;
-    /// - a stack onto a floating pane: `<pane-id> is floating; a stack holds
-    ///   tiled panes`;
-    /// - a target pane in another session, with no help.
+    /// A source pane inside a floating pane resolves to a dock of that pane
+    /// alone ([`ResolvedTiledPlacement::FloatingSource`]). Each refusal is
+    /// [`Self::resolve_pane_target`]'s or
+    /// [`Self::resolve_placement_destination`]'s, and changes nothing.
     pub(super) fn resolve_tiled_placement_target(
         &self,
         command_args: &PlacePaneArgs,
@@ -584,6 +663,54 @@ impl Server {
             command_source,
             session,
         )?;
+        let (destination_tab_id, client_id) = self.resolve_placement_destination(
+            &source_pane_target,
+            tiled_placement_target,
+            command_source,
+        )?;
+        let resolved_tiled_placement = match source_pane_target.layout_area_id {
+            LayoutAreaId::Tab(source_tab_id) => {
+                ResolvedTiledPlacement::TiledSource(PlacePaneTarget {
+                    session_id: source_pane_target.session_id,
+                    source_pane_id: source_pane_target.pane_id,
+                    source_tab_id,
+                    destination_tab_id,
+                    client_id,
+                })
+            }
+            LayoutAreaId::FloatingPane(_) => {
+                ResolvedTiledPlacement::FloatingSource(DockPaneTarget {
+                    session_id: source_pane_target.session_id,
+                    source_pane_id: source_pane_target.pane_id,
+                    destination_tab_id,
+                    client_id,
+                })
+            }
+        };
+        Ok(resolved_tiled_placement)
+    }
+
+    /// The destination tab and the acting client of a placement of
+    /// `source_pane_target`'s pane at `tiled_placement_target`. A swap's and a
+    /// stack's destination tab is the tab of its target pane, which may be the
+    /// source tab. The destination target must stay inside the source pane's
+    /// session. The acting client is the target client the command source
+    /// names, else the issuing client while it is attached there, else, for a
+    /// CLI source, the sole attached client ([`Self::resolve_view_client`]).
+    ///
+    /// Each refusal is [`RejectReason::InvalidState`] and changes nothing,
+    /// checked in this order:
+    /// - a swap from a pane inside a floating pane, or onto one: `<pane-id> is
+    ///   floating; a swap exchanges tiled slots`;
+    /// - a stack onto a pane inside a floating pane: `<pane-id> is floating; a
+    ///   stack holds tiled panes`;
+    /// - a target pane in another session, with no help.
+    pub(super) fn resolve_placement_destination(
+        &self,
+        source_pane_target: &PaneTarget,
+        tiled_placement_target: &TiledPlacementTarget,
+        command_source: &CommandSource,
+    ) -> Result<(TabId, ClientId), Rejection> {
         if matches!(
             source_pane_target.layout_area_id,
             LayoutAreaId::FloatingPane(_)
@@ -645,26 +772,7 @@ impl Server {
             command_source,
             owner_session,
         )?;
-        let resolved_tiled_placement = match source_pane_target.layout_area_id {
-            LayoutAreaId::Tab(source_tab_id) => {
-                ResolvedTiledPlacement::TiledSource(PlacePaneTarget {
-                    session_id: source_pane_target.session_id,
-                    source_pane_id: source_pane_target.pane_id,
-                    source_tab_id,
-                    destination_tab_id,
-                    client_id,
-                })
-            }
-            LayoutAreaId::FloatingPane(_) => {
-                ResolvedTiledPlacement::FloatingSource(DockPaneTarget {
-                    session_id: source_pane_target.session_id,
-                    source_pane_id: source_pane_target.pane_id,
-                    destination_tab_id,
-                    client_id,
-                })
-            }
-        };
-        Ok(resolved_tiled_placement)
+        Ok((destination_tab_id, client_id))
     }
 
     /// The [`PlacePaneArgs`] that a [`Command::TogglePaneFloating`] runs as,
@@ -719,13 +827,15 @@ impl Server {
         })
     }
 
-    /// Resolve the source pane, its tab, and the acting client of an undock:
-    /// a [`Command::PlacePane`] whose target is
-    /// [`PanePlacementTarget::Floating`].
+    /// Resolve the source pane, the tab or the floating pane that holds it,
+    /// and the acting client of an undock: a [`Command::PlacePane`] whose
+    /// target is [`PanePlacementTarget::Floating`]. A source inside a floating
+    /// pane of 2 or more panes moves out into a floating pane of its own.
     ///
     /// Each refusal is [`RejectReason::InvalidState`] and changes nothing,
     /// checked in this order:
-    /// - a floating source: `<pane-id> is already floating`;
+    /// - a source that is the only pane of its floating pane: `<pane-id> is
+    ///   already alone in its floating pane`;
     /// - a source that is the only pane of the session's only tab: `the last
     ///   pane of the last tab cannot be undocked; a session needs one tiled
     ///   pane`. Floating panes do not count;
@@ -747,28 +857,41 @@ impl Server {
             command_source,
             session,
         )?;
-        let LayoutAreaId::Tab(source_tab_id) = source_pane_target.layout_area_id else {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                &format!("{} is already floating", source_pane_target.pane_id),
-            ));
-        };
         let owner_session = self
             .session_by_id
             .get(&source_pane_target.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-        let source_tab = owner_session
-            .tabs
-            .get(&source_tab_id)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let is_last_tiled_pane = owner_session.tabs.len() == 1
-            && source_tab.get_layout_tree().list_leaf_pane_ids()
-                == vec![source_pane_target.pane_id];
-        if is_last_tiled_pane {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                &PlacementCommitError::LastTiledPane.to_string(),
-            ));
+        let source_pane_ids = [source_pane_target.pane_id];
+        match source_pane_target.layout_area_id {
+            LayoutAreaId::Tab(source_tab_id) => {
+                let source_tab = owner_session
+                    .tabs
+                    .get(&source_tab_id)
+                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+                if owner_session.tabs.len() == 1
+                    && source_tab.get_layout_tree().list_leaf_pane_ids() == source_pane_ids
+                {
+                    return Err(Rejection::from_reason_and_help(
+                        RejectReason::InvalidState,
+                        &PlacementCommitError::LastTiledPane.to_string(),
+                    ));
+                }
+            }
+            LayoutAreaId::FloatingPane(source_floating_pane_id) => {
+                let (_, source_floating_pane) = owner_session
+                    .floating_set
+                    .find_floating_pane_by_id(source_floating_pane_id)
+                    .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+                if source_floating_pane.list_pane_ids() == source_pane_ids {
+                    return Err(Rejection::from_reason_and_help(
+                        RejectReason::InvalidState,
+                        &PlacementCommitError::AloneInFloatingPane {
+                            pane_id: source_pane_target.pane_id,
+                        }
+                        .to_string(),
+                    ));
+                }
+            }
         }
         if owner_session.floating_set.is_full() {
             return Err(Rejection::from_reason_and_help(
@@ -784,7 +907,7 @@ impl Server {
         Ok(UndockPaneTarget {
             session_id: source_pane_target.session_id,
             source_pane_id: source_pane_target.pane_id,
-            source_tab_id,
+            source_layout_area_id: source_pane_target.layout_area_id,
             client_id,
         })
     }

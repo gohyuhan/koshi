@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
-use koshi_layout::edit::{add_pane_to_stack, remove_pane, split_leaf};
+use koshi_layout::edit::{add_panes_to_stack, remove_pane, split_leaf};
 use koshi_layout::normalize::normalize_layout_tree;
 use koshi_layout::resize::resize_layout_with_sizing;
 use koshi_layout::size::SizeWeight;
@@ -207,10 +207,10 @@ fn apply_layout_operation(
         }
         LayoutOperation::Stack { target_leaf_index } => {
             let new_pane_id = PaneId::new();
-            if let Ok(next_layout_tree) = add_pane_to_stack(
+            if let Ok(next_layout_tree) = add_panes_to_stack(
                 layout_tree,
                 select_leaf_pane_id(target_leaf_index),
-                new_pane_id,
+                &[new_pane_id],
             ) {
                 *layout_tree = next_layout_tree;
                 live_pane_ids.insert(new_pane_id);
