@@ -624,6 +624,14 @@ Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Contributing
+
+Thank you for your interest in koshi. Koshi is not open to contributions at
+the moment, because the maintainer cannot give pull requests the review time
+they deserve. Bug reports are always welcome through the
+[bug report template](.github/ISSUE_TEMPLATE/bug-report.md). You are also free
+to fork koshi and build on top of it under the terms of the [license](LICENSE).
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
