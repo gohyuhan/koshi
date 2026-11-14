@@ -219,6 +219,8 @@ fn build_populated_test_session_overview() -> SessionOverview {
         }],
         clients: vec![ClientDiscovery {
             client_id,
+            label: "C-swift-otter".to_string(),
+            color_index: 1,
             session_id,
             attached_at: event_timestamp,
             viewport_size: Size {
@@ -652,6 +654,8 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
             }],
             "clients": [{
                 "client_id": "00000000-0000-0000-0000-000000000001",
+                "label": "C-swift-otter",
+                "color_index": 1,
                 "session_id": "00000000-0000-0000-0000-000000000001",
                 "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
                 "viewport_size": { "column_count": 80, "row_count": 24 },
@@ -687,6 +691,8 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
     // A client row written without `origin` decodes with `origin: None`.
     let client_row_without_origin_json = json!({
         "client_id": "00000000-0000-0000-0000-000000000001",
+        "label": "C-swift-otter",
+        "color_index": 2,
         "session_id": "00000000-0000-0000-0000-000000000001",
         "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
         "viewport_size": { "column_count": 80, "row_count": 24 },
@@ -701,6 +707,8 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
         decoded_client_row,
         ClientDiscovery {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+            label: "C-swift-otter".to_string(),
+            color_index: 2,
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
             attached_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             viewport_size: Size {

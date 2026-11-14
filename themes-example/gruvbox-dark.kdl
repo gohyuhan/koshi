@@ -1,6 +1,6 @@
 // Gruvbox Dark — https://github.com/morhetz/gruvbox
 // Copy to your config dir as themes/gruvbox-dark.kdl, then set `theme "gruvbox-dark"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#fabd2f"

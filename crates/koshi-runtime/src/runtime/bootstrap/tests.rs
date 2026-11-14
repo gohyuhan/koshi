@@ -528,6 +528,7 @@ fn the_first_client_emits_one_pane_focus_for_the_tab_it_views() {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
 
     let pane_focus_events: Vec<PaneFocused> = emitted_events
@@ -767,6 +768,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     assert_eq!(
         server
@@ -797,6 +799,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     assert_eq!(
         server
@@ -845,6 +848,7 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     // The same id arriving again is a re-attach: it updates the view in place
     // and leaves the mode alone.
@@ -857,6 +861,7 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
 
     assert_eq!(

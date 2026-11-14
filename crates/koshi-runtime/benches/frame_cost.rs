@@ -138,6 +138,7 @@ fn build_pane_grid_server(grid_side_pane_count: u16) -> (Server, ClientId, Vec<P
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     let first_pane_id = *server
         .list_terminal_engines()

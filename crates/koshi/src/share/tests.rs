@@ -1468,6 +1468,8 @@ fn build_client_discovery(
 ) -> ClientDiscovery {
     ClientDiscovery {
         client_id,
+        label: "C-swift-otter".to_string(),
+        color_index: 0,
         session_id: SessionId::new(),
         attached_at: SystemTime::UNIX_EPOCH,
         viewport_size: Size {

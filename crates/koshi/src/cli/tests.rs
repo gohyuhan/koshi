@@ -5159,6 +5159,8 @@ fn every_id_the_json_output_prints_parses_back_through_its_target_flag() {
         serde_json::from_str(&crate::output::render_clients(
             &[koshi_link::discovery::ClientRow {
                 client_id,
+                label: "C-swift-otter".to_string(),
+                color_index: 0,
                 session_id,
                 session_name: "quiet-lake".to_string(),
             }],

@@ -97,6 +97,13 @@ pub struct PaneDiscovery {
 pub struct ClientDiscovery {
     /// Stable client id.
     pub client_id: ClientId,
+    /// The name the session gave the client at attach, such as
+    /// `C-swift-otter`.
+    pub label: String,
+    /// The index the session gave the client at attach, held by no other
+    /// attached client. The client prints as
+    /// [`compute_client_number`](crate::client::compute_client_number) of it.
+    pub color_index: u32,
     /// The session the client is attached to.
     pub session_id: SessionId,
     /// When the client attached.

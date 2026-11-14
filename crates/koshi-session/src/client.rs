@@ -214,9 +214,11 @@ pub struct Client {
     /// This client's display name, `C-<adjective>-<noun>`, generated at
     /// attach and never changed.
     label: String,
-    /// Which palette entry paints this client's identity in the UI, chosen by
-    /// the caller at attach.
-    color_index: u8,
+    /// This client's index, chosen by the caller at attach and never changed.
+    /// The client prints as
+    /// [`compute_client_number`](koshi_core::client::compute_client_number) of
+    /// it: index `0` prints `1`.
+    color_index: u32,
     /// The panes this client focused in each tab, newest first, each pane
     /// once. The first pane is the one this client focuses in that tab, and
     /// the active tab's first pane takes this client's input while no
@@ -331,7 +333,7 @@ impl Client {
         active_tab_id: TabId,
         origin: ClientOrigin,
         label: String,
-        color_index: u8,
+        color_index: u32,
     ) -> Self {
         Client {
             client_id,
@@ -391,9 +393,9 @@ impl Client {
         &self.label
     }
 
-    /// Which palette entry paints this client's identity.
+    /// This client's index, as the caller chose it at attach.
     #[must_use]
-    pub fn get_color_index(&self) -> u8 {
+    pub fn get_color_index(&self) -> u32 {
         self.color_index
     }
 

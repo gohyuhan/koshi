@@ -39,9 +39,11 @@ const SAVED_VIEW_LIFETIME_DURATION: Duration = Duration::from_secs(24 * 60 * 60)
 /// drops the oldest.
 const MAX_SAVED_VIEW_RECORD_COUNT: usize = 32;
 
-/// What one detached client was looking at.
+/// What one detached client was looking at, and the index it held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedView {
+    /// The client's index ([`Client::get_color_index`]).
+    pub color_index: u32,
     /// The tab the client was viewing.
     pub active_tab_id: TabId,
     /// The panes the client focused in each tab, newest first
@@ -128,6 +130,7 @@ impl SavedViewStore {
             connection_token_hash,
             expires_at,
             saved_view: SavedView {
+                color_index: client.get_color_index(),
                 active_tab_id: client.get_active_tab_id(),
                 focus_history_by_tab_id: client.list_focus_histories().clone(),
                 zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),

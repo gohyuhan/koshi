@@ -15,3 +15,14 @@ pub enum ClientOrigin {
     /// Connected from another machine.
     Remote,
 }
+
+/// The number every surface prints for a client whose `color_index` is
+/// `color_index`: `color_index + 1`. `0` → `1`, `11` → `12`, `4294967295` →
+/// `4294967296`.
+#[must_use]
+pub fn compute_client_number(color_index: u32) -> u64 {
+    u64::from(color_index) + 1
+}
+
+#[cfg(test)]
+mod tests;

@@ -224,6 +224,7 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
         None,
         attachment_time,
         false,
+        None,
     );
 
     let overview = server.build_overview().expect("one session is running");
@@ -233,6 +234,54 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
     assert_eq!(overview.panes.len(), 1);
     assert_eq!(overview.panes[0].focused_by_client_ids, sorted_client_ids);
     assert_eq!(overview.session.attached_client_ids, sorted_client_ids);
+}
+
+#[test]
+fn the_overview_carries_each_clients_label_and_index() {
+    let mut server = build_test_runtime();
+    let session_id = SessionId::new();
+    let attachment_time = SystemTime::UNIX_EPOCH;
+    let seeded_client_id = create_session_with_attached_client(
+        &mut server,
+        session_id,
+        VIEWPORT_SIZE,
+        attachment_time,
+    )
+    .expect("bootstrap");
+    let tab_id = server.list_sessions()[&session_id]
+        .tabs
+        .keys()
+        .next()
+        .copied()
+        .expect("the genesis tab");
+    let joining_client_id = ClientId::new();
+    server.handle_client_attach(
+        session_id,
+        joining_client_id,
+        VIEWPORT_SIZE,
+        None,
+        tab_id,
+        None,
+        attachment_time,
+        false,
+        None,
+    );
+
+    let overview = server.build_overview().expect("one session is running");
+
+    let session_clients = &server.list_sessions()[&session_id].clients;
+    for (client_id, expected_color_index) in [(seeded_client_id, 0), (joining_client_id, 1)] {
+        let client_discovery = overview
+            .clients
+            .iter()
+            .find(|client_discovery| client_discovery.client_id == client_id)
+            .expect("every attached client has a row");
+        let client = session_clients
+            .get_client_by_id(client_id)
+            .expect("the attached client");
+        assert_eq!(client_discovery.label, client.get_label());
+        assert_eq!(client_discovery.color_index, expected_color_index);
+    }
 }
 
 #[test]
@@ -263,6 +312,7 @@ fn the_overview_reports_where_each_client_connected_from() {
         None,
         attachment_time,
         true,
+        None,
     );
 
     let overview = server.build_overview().expect("one session is running");
@@ -320,6 +370,7 @@ fn discovery_reports_the_raw_pane_area() {
         None,
         attachment_time,
         false,
+        None,
     );
 
     let overview = server.build_overview().expect("one session is running");

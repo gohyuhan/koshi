@@ -1,6 +1,6 @@
 // Zenburn — https://github.com/jnurmine/Zenburn
 // Copy to your config dir as themes/zenburn.kdl, then set `theme "zenburn"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#f0dfaf"

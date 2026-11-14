@@ -105,6 +105,11 @@ pub struct Surface {
 ///   session's event stream, carries `source_pane_ids`: every pane the
 ///   placement takes from its source, in layout order. 5 carried one
 ///   `source_pane_id`.
+/// - The viewing client of a painted frame carries `color_index`, the index
+///   the session gave that client and no other attached client holds. 5 has
+///   no such field.
+/// - Each client of a `Discovery` answer carries `label` and `color_index`.
+///   5 has neither field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -242,8 +247,14 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// client's shown floating panes and floating focus, and each detached client's
 /// saved view are keyed by floating pane id, and each view holds the client's
 /// focus history inside the floating pane and its zoom there. Each tab holds
-/// its layout tree and solved size in `layout_area`. A session of format 5
-/// keeps its clients, and the body keeps its saved views and resume-token
+/// its layout tree and solved size in `layout_area`. Each client's
+/// `color_index` is a number from `0` to `4294967295`, where format 5 held `0`
+/// to `255`. No two clients of one session hold the same `color_index`: of
+/// the format 5 clients of one session that share an index, the one with the
+/// lowest client id keeps it, and each other one takes the lowest index that
+/// no client of that session holds. Each saved view holds `color_index`, the
+/// index its client held, and a saved view of format 5 takes `0`. A session
+/// of format 5 keeps its clients, and the body keeps its saved views and resume-token
 /// hashes. Format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views
 /// detached clients left with the resume-token hashes, and the process IDs of

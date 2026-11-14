@@ -1,6 +1,6 @@
 // Dracula — https://draculatheme.com
 // Copy to your config dir as themes/dracula.kdl, then set `theme "dracula"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#bd93f9"

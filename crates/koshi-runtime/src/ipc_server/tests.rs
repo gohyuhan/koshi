@@ -248,6 +248,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
         }],
         client_snapshot: ClientSnapshot {
             client_id,
+            color_index: 0,
             viewport_size: CLIENT_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),

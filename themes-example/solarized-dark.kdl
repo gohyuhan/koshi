@@ -1,6 +1,6 @@
 // Solarized Dark — https://ethanschoonover.com/solarized
 // Copy to your config dir as themes/solarized-dark.kdl, then set `theme "solarized-dark"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#268bd2"

@@ -135,6 +135,8 @@ fn pane_lifecycle_serializes_and_decodes_as_its_variant_name() {
 fn build_client_discovery(client_origin: Option<ClientOrigin>) -> ClientDiscovery {
     ClientDiscovery {
         client_id: ClientId::from_uuid(build_fixed_uuid()),
+        label: "C-swift-otter".to_string(),
+        color_index: 3,
         session_id: SessionId::from_uuid(build_fixed_uuid()),
         attached_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         viewport_size: Size {
@@ -146,6 +148,28 @@ fn build_client_discovery(client_origin: Option<ClientOrigin>) -> ClientDiscover
         lock_mode: LockMode::Normal,
         origin: client_origin,
         pane_area: None,
+    }
+}
+
+#[test]
+fn a_client_row_carrying_no_label_or_no_color_index_is_refused() {
+    for required_field_name in ["label", "color_index"] {
+        let mut client_discovery_json =
+            serde_json::to_value(build_client_discovery(Some(ClientOrigin::Local)))
+                .expect("serialize");
+        client_discovery_json
+            .as_object_mut()
+            .expect("a client row is a JSON object")
+            .remove(required_field_name)
+            .expect("the row carries the field to remove");
+
+        let decode_error = serde_json::from_value::<ClientDiscovery>(client_discovery_json)
+            .expect_err("a row missing a required field is refused");
+
+        assert_eq!(
+            decode_error.to_string(),
+            format!("missing field `{required_field_name}`")
+        );
     }
 }
 

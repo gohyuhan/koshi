@@ -1,6 +1,6 @@
 // SynthWave '84 — https://github.com/robb0wen/synthwave-vscode
 // Copy to your config dir as themes/synthwave-84.kdl, then set `theme "synthwave-84"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#ff7edb"

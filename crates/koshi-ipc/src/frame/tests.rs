@@ -159,6 +159,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
         }],
         client_snapshot: FrameClient {
             client_id: ClientId::from_uuid(Uuid::from_u128(3)),
+            color_index: 4,
             viewport_size: Size {
                 column_count: 4,
                 row_count: 3,
@@ -535,6 +536,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
             }],
             "client_snapshot": {
                 "client_id": "00000000-0000-0000-0000-000000000003",
+                "color_index": 4,
                 "viewport_size": { "column_count": 4, "row_count": 3 },
                 "active_tab_id": "00000000-0000-0000-0000-000000000002",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",

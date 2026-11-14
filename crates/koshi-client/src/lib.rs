@@ -343,7 +343,7 @@ pub struct Client {
     /// floating pane move mode, and the floating pane tray overlay this value
     /// without changing it: each returns to Normal or Locked.
     /// The session keeps its own copy, which `koshi lock --client` reaches and
-    /// `koshi list-clients` reports.
+    /// `koshi inspect client` reports.
     lock_mode: LockMode,
     /// The newest lock command this viewer sent, or holds to send, whose lock
     /// mode [`lock_mode`](Self::lock_mode) shows before the session runs it.

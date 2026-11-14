@@ -1946,6 +1946,9 @@ pub struct ScrollbackMetadata {
 pub struct ClientSnapshot {
     /// The client's stable identifier.
     pub client_id: ClientId,
+    /// The client's index as the session assigned it, held by no other
+    /// attached client. The same for every frame of one connection.
+    pub color_index: u32,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is currently viewing.
@@ -1961,7 +1964,7 @@ pub struct ClientSnapshot {
     pub active_tab_focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it: it drives the mode tag,
     /// decides whether a paste from the client's own terminal reaches the pane,
-    /// and is what `koshi list-clients` reports.
+    /// and is what `koshi inspect client` reports.
     pub lock_mode: LockMode,
     /// The last lock command that the client's own connection sent and the
     /// session ran before it built this snapshot. `None` before the session

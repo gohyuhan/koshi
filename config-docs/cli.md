@@ -472,7 +472,7 @@ id line.
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running one |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tab ids, names, and owning sessions |
 | `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, and session ids and names |
-| `koshi list-clients [--session <NAME_OR_ID>]` | List client ids and owning sessions |
+| `koshi list-clients [--session <NAME_OR_ID>]` | List client ids, numbers, labels, and owning sessions |
 | `koshi inspect session <NAME_OR_ID>` | Show one session's full record |
 | `koshi inspect tab <NAME_OR_ID>` | Show one tab's full record |
 | `koshi inspect pane <PANE_ID>` | Show one pane's full record |
@@ -499,6 +499,23 @@ and a size, a rectangle, or a cell is an object of numbers:
 client --format json` writes `pane_area` as `null` for no report,
 `"starving"`, or a size object, and `origin` as `"local"`, `"remote"`, or
 `null`.
+
+`koshi list-clients` and `koshi inspect client` print each client's `number`
+and `label` after its id. No two clients attached to one session have the
+same number. The session gives each new client the lowest number from `1` up
+that no attached client holds. Example: if clients `1` and `3` are attached,
+the next client gets `2`, and the client after it gets `4`. If a terminal
+reconnects with its saved view, it gets its old number back while no attached
+client holds that number. Clients of two different sessions can have the same
+number. The label is the name the session gave the client, such as
+`C-swift-otter`. `--format json` writes the same values: `"client_number": 2`
+and `"label": "C-swift-otter"`.
+
+```text
+id                                           number  label          session  session_name
+client-0192f7d0-6c1e-7a51-9d4e-000000000001  1       C-swift-otter  …        work
+client-0192f7d0-6c1e-7a51-9d4e-000000000002  2       C-brave-heron  …        work
+```
 
 `koshi list-panes` lists the tiled panes of each session in tab order, then
 its floating panes in the order they were created. A floating pane prints

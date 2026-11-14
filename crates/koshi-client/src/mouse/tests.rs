@@ -160,6 +160,7 @@ pub(crate) fn build_mouse_frame(
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            color_index: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id,

@@ -120,6 +120,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
 
     let client_snapshot = ClientSnapshot {
         client_id: ClientId::new(),
+        color_index: 0,
         viewport_size: Size {
             column_count: 80,
             row_count: 24,

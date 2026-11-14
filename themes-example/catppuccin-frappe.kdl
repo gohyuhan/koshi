@@ -1,6 +1,6 @@
 // Catppuccin Frappé — https://catppuccin.com
 // Copy to your config dir as themes/catppuccin-frappe.kdl, then set `theme "catppuccin-frappe"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#ca9ee6"

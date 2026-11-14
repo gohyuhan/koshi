@@ -4,6 +4,8 @@
 
 use super::*;
 
+use std::collections::HashSet;
+
 use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::ConnectionToken;
@@ -76,7 +78,9 @@ impl Server {
     /// that caller's last client detached. A token that proves a
     /// `resume_client_id` claim has no view filed under it: a client's view is
     /// filed only once its record goes. A view that comes back puts the client on the
-    /// tab it names while the session holds that tab, and then
+    /// tab it names while the session holds that tab, gives the client the
+    /// `color_index` it names while no attached client holds that index
+    /// ([`Self::handle_client_attach`]), and then
     /// restores the rest of the view onto the freshly minted client
     /// ([`Self::restore_saved_view`]). The token
     /// is consumed by this one attach: presenting it again restores nothing. A
@@ -216,6 +220,7 @@ impl Server {
             cell_size,
             attached_at,
             is_remote,
+            saved_view.as_ref().map(|saved_view| saved_view.color_index),
         ));
         if let Some(saved_view) = saved_view {
             emitted_events.extend(self.restore_saved_view(
@@ -363,10 +368,14 @@ impl Server {
     /// is never recorded twice. Within the target session an id that is already
     /// attached is a re-attach: its view updates in place, keeping its per-tab
     /// focus, zoom, scrollback offsets, selections, floating view, lock mode,
-    /// mouse selection mode, label and color, and the tab it moves off of
+    /// mouse selection mode, label and `color_index`, and the tab it moves off of
     /// reflows too. A fresh id is registered anew with a generated
     /// `C-<adjective>-<noun>` label that no client in the session already
-    /// holds, and the lowest palette index no attached client is painted in.
+    /// holds, and a `color_index` that no attached client holds:
+    /// `saved_color_index` while no attached client holds it, else the lowest
+    /// index no attached client holds. Example: with indexes `0` and `2` held
+    /// and no saved index, the fresh id takes `1`; with `0` to `11` held, it
+    /// takes `12`; with `saved_color_index` `5` and `5` free, it takes `5`.
     ///
     /// A fresh id also takes the session's starting lock: a session seeded from
     /// a profile carrying `lock` registers its first client in
@@ -403,8 +412,8 @@ impl Server {
     /// reads the clock itself.
     // Carries the whole of one attach: where it lands (`session_id`,
     // `client_id`, `active_tab_id`), the view it arrives with (`viewport_size`,
-    // `pane_area`, `cell_size`), and where it came from (`attached_at`,
-    // `is_remote`).
+    // `pane_area`, `cell_size`), where it came from (`attached_at`,
+    // `is_remote`), and the index its saved view held (`saved_color_index`).
     #[allow(clippy::too_many_arguments)]
     pub fn handle_client_attach(
         &mut self,
@@ -416,6 +425,7 @@ impl Server {
         cell_size: Option<PixelCellSize>,
         attached_at: SystemTime,
         is_remote: bool,
+        saved_color_index: Option<u32>,
     ) -> Vec<Event> {
         let client_origin = if is_remote {
             ClientOrigin::Remote
@@ -485,16 +495,21 @@ impl Server {
                     .list_attached_clients()
                     .any(|client| client.get_label() == candidate_label)
             });
-            let color_index = (0..=u8::MAX)
-                .find(|candidate_color_index| {
-                    !session
-                        .clients
-                        .list_attached_clients()
-                        .any(|client| client.get_color_index() == *candidate_color_index)
-                })
-                // Every palette index is in use: this client takes index 0,
-                // which another client already holds.
-                .unwrap_or(0);
+            let held_color_indexes: HashSet<u32> = session
+                .clients
+                .list_attached_clients()
+                .map(|client| client.get_color_index())
+                .collect();
+            let color_index = match saved_color_index {
+                Some(saved_color_index) if !held_color_indexes.contains(&saved_color_index) => {
+                    saved_color_index
+                }
+                _ => (0..)
+                    .find(|candidate_color_index| {
+                        !held_color_indexes.contains(candidate_color_index)
+                    })
+                    .expect("n attached clients hold at most n of the indexes 0 to n"),
+            };
             let mut client = Client::from_attachment(
                 client_id,
                 session_id,

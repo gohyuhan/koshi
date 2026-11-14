@@ -290,6 +290,7 @@ fn build_clipboard_routing_fixture(
         None,
         SystemTime::UNIX_EPOCH,
         true,
+        None,
     );
     let (local_receiver, _) = server.subscribe(local_client_id, 60);
     let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
@@ -623,6 +624,7 @@ fn a_tool_copy_that_one_client_on_another_machine_cannot_take_still_reaches_the_
         None,
         SystemTime::UNIX_EPOCH,
         true,
+        None,
     );
 
     assert!(!fixture

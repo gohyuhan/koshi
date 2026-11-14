@@ -310,13 +310,14 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
         .collect()
 }
 
-/// The viewer state of `client` that a frame carries: its id, viewport size,
-/// active tab, the pane that takes its input, its focused pane in the active
-/// tab, lock mode, last applied lock command, floating pane move and pane
-/// placement, and whether mouse-select is on.
+/// The viewer state of `client` that a frame carries: its id, index, viewport
+/// size, active tab, the pane that takes its input, its focused pane in the
+/// active tab, lock mode, last applied lock command, floating pane move and
+/// pane placement, and whether mouse-select is on.
 fn build_client_snapshot(client: &Client) -> ClientSnapshot {
     ClientSnapshot {
         client_id: client.get_client_id(),
+        color_index: client.get_color_index(),
         viewport_size: client.get_viewport_size(),
         active_tab_id: client.get_active_tab_id(),
         focused_pane_id: client.get_active_focused_pane_id(),

@@ -1,6 +1,6 @@
 // One Dark — https://github.com/atom/atom/tree/master/packages/one-dark-syntax
 // Copy to your config dir as themes/one-dark.kdl, then set `theme "one-dark"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#61afef"

@@ -160,6 +160,8 @@ fn build_session_overview(
         panes: pane_discoveries,
         clients: vec![ClientDiscovery {
             client_id: ClientId::new(),
+            label: "C-swift-otter".to_string(),
+            color_index: 0,
             session_id,
             attached_at: SystemTime::UNIX_EPOCH,
             viewport_size: Size {
@@ -328,6 +330,8 @@ fn client_rows_name_the_session_they_are_attached_to() {
         build_client_rows(&session_overviews),
         vec![ClientRow {
             client_id: session_overviews[0].clients[0].client_id,
+            label: "C-swift-otter".to_string(),
+            color_index: 0,
             session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
         }]
@@ -342,6 +346,8 @@ fn client_rows_are_one_row_per_attached_client_across_sessions() {
     ];
     let second_client_discovery = ClientDiscovery {
         client_id: ClientId::new(),
+        label: "C-brave-heron".to_string(),
+        color_index: 1,
         ..session_overviews[0].clients[0].clone()
     };
     session_overviews[0]
@@ -353,16 +359,22 @@ fn client_rows_are_one_row_per_attached_client_across_sessions() {
         vec![
             ClientRow {
                 client_id: session_overviews[0].clients[0].client_id,
+                label: "C-swift-otter".to_string(),
+                color_index: 0,
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             ClientRow {
                 client_id: second_client_discovery.client_id,
+                label: "C-brave-heron".to_string(),
+                color_index: 1,
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             ClientRow {
                 client_id: session_overviews[1].clients[0].client_id,
+                label: "C-swift-otter".to_string(),
+                color_index: 0,
                 session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
             },
@@ -1724,6 +1736,7 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
     let mut unfiltered_session_overview =
         build_session_overview("web\u{7f}srv", &[("ta\u{202e}b", 1)]);
     unfiltered_session_overview.panes[0].pane_title = Some("ti\u{7f}tle".to_string());
+    unfiltered_session_overview.clients[0].label = "C-swift\u{1b}-otter".to_string();
 
     assert_eq!(
         unfiltered_session_overview.session.session_name,
@@ -1747,6 +1760,7 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
     assert_eq!(pane_rows[0].session_name, "websrv");
 
     let client_rows = build_client_rows(std::slice::from_ref(&unfiltered_session_overview));
+    assert_eq!(client_rows[0].label, "C-swift-otter");
     assert_eq!(client_rows[0].session_name, "websrv");
 }
 
@@ -1826,6 +1840,8 @@ fn filter_reported_text_filters_every_string_the_answering_session_chose() {
         "-c".to_string(),
         "\u{1b}]0;pwned\u{7}".to_string(),
     ]);
+    answered_session_overview.clients[0].label = "C-swift\u{1b}[2J-\u{202e}otter".to_string();
+    answered_session_overview.clients[0].color_index = 7;
     let pane_ids: Vec<PaneId> = answered_session_overview
         .panes
         .iter()
@@ -1849,6 +1865,14 @@ fn filter_reported_text_filters_every_string_the_answering_session_chose() {
         Some(["sh".to_string(), "-c".to_string(), "]0;pwned".to_string()].as_slice())
     );
     assert_eq!(
+        answered_session_overview.clients[0].label,
+        "C-swift[2J-otter"
+    );
+    assert_eq!(
+        answered_session_overview.clients[0].color_index, 7,
+        "a client index is carried, never altered"
+    );
+    assert_eq!(
         answered_session_overview
             .panes
             .iter()
@@ -1869,6 +1893,7 @@ fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
     hostile_session_overview.tabs[0].tab_name = "edi\u{7f}tor".to_string();
     hostile_session_overview.panes[0].command_argv = Some(vec!["\u{1b}]0;pwned\u{7}".to_string()]);
     hostile_session_overview.panes[0].working_directory = Some(PathBuf::from("/tmp/\u{1b}[2J"));
+    hostile_session_overview.clients[0].label = "C-\u{1b}]0;pwned\u{7}".to_string();
     let overview_server_thread =
         spawn_overview_server(runtime_directory.path(), hostile_session_overview);
 
@@ -1892,6 +1917,7 @@ fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
         fetched_session_overview.panes[0].working_directory,
         Some(PathBuf::from("/tmp/[2J"))
     );
+    assert_eq!(fetched_session_overview.clients[0].label, "C-]0;pwned");
 }
 
 #[test]

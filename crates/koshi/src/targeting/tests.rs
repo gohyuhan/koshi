@@ -75,8 +75,11 @@ fn build_session_overview(
             .collect(),
         clients: client_ids
             .iter()
-            .map(|client_id| ClientDiscovery {
+            .zip(0..)
+            .map(|(client_id, color_index)| ClientDiscovery {
                 client_id: *client_id,
+                label: format!("C-client-{color_index}"),
+                color_index,
                 session_id,
                 attached_at: SystemTime::UNIX_EPOCH,
                 viewport_size: Size {
