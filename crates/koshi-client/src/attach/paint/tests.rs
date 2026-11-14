@@ -376,6 +376,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
         pane_snapshots,
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            color_index: 0,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,

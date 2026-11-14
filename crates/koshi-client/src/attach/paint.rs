@@ -148,6 +148,7 @@ fn build_render_snapshot_with_images(
             .collect(),
         client_snapshot: ClientSnapshot {
             client_id: painted_frame.client_snapshot.client_id,
+            color_index: painted_frame.client_snapshot.color_index,
             viewport_size: painted_frame.client_snapshot.viewport_size,
             active_tab_id: painted_frame.client_snapshot.active_tab_id,
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,

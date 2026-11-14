@@ -232,6 +232,7 @@ pub(crate) fn build_render_snapshot(
         ],
         client_snapshot: ClientSnapshot {
             client_id,
+            color_index: 0,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,
@@ -730,6 +731,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
     let focused_pane_id = PaneId::new();
     let empty_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(focused_pane_id, empty_pane_id);
+    render_snapshot.client_snapshot.color_index = 300;
     render_snapshot.client_snapshot.active_tab_focused_pane_id = Some(empty_pane_id);
     render_snapshot
         .client_snapshot
@@ -849,6 +851,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame.client_snapshot,
         FrameClient {
             client_id: render_snapshot.client_snapshot.client_id,
+            color_index: 300,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6

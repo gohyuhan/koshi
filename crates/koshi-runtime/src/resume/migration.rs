@@ -1305,11 +1305,15 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 ///    `focus_history: [<u>]` and `zoomed_pane_id: null`.
 ///    `shown_floating_pane_ids` and `focused_floating_pane_id` keep their
 ///    values.
+/// 4. Each saved view gains `color_index: 0`.
+/// 5. The client records of each session hold distinct `color_index` values,
+///    as [`assign_unique_color_indexes_five_to_six`] states.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
 /// a client record or a saved view is not an object, or misses a field that
-/// format 5 writes.
+/// format 5 writes, or when a client record's `color_index` is not a whole
+/// number.
 fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageError> {
     let body_fields = get_json_object(resume_body, "body")?;
     let sessions = get_required_json_field(body_fields, "session_by_id", "body")?;
@@ -1336,11 +1340,13 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             "client_by_id",
             &clients_path,
         )?;
+        let client_by_id_path = format!("{clients_path}.client_by_id");
         migrate_json_object_members(
             client_by_id,
-            &format!("{clients_path}.client_by_id"),
+            &client_by_id_path,
             migrate_floating_pane_views_five_to_six,
-        )
+        )?;
+        assign_unique_color_indexes_five_to_six(client_by_id, &client_by_id_path)
     })?;
     let Some(saved_view_store) = body_fields.get_mut("saved_view_store") else {
         return Ok(());
@@ -1354,15 +1360,16 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
         saved_view_records,
         "body.saved_view_store.saved_view_records",
         |saved_view_record, record_path| {
+            let saved_view_path = format!("{record_path}.saved_view");
             let saved_view = get_required_json_field(
                 get_json_object(saved_view_record, record_path)?,
                 "saved_view",
                 record_path,
             )?;
-            migrate_floating_pane_views_five_to_six(
-                saved_view,
-                &format!("{record_path}.saved_view"),
-            )
+            migrate_floating_pane_views_five_to_six(saved_view, &saved_view_path)?;
+            get_json_object(saved_view, &saved_view_path)?
+                .insert("color_index".to_string(), serde_json::json!(0));
+            Ok(())
         },
     )
 }
@@ -1404,6 +1411,48 @@ fn migrate_floating_set_five_to_six(
         }));
     }
     floating_set_fields.insert("floating_panes".to_string(), Value::Array(floating_panes));
+    Ok(())
+}
+
+/// Give each client record of one session's `client_by_id` a `color_index`
+/// that no other record of that session holds. The records are read in
+/// client id order. The first record that holds an index keeps it. Each
+/// record after it that holds the same index takes the lowest index that no
+/// record holds. Example: `A: 0`, `B: 0`, `C: 1` → `A: 0`, `B: 2`, `C: 1`.
+///
+/// # Errors
+/// Returns an invalid-resume error when `client_by_id` or a record is not an
+/// object, or a record's `color_index` is missing or is not a whole number.
+fn assign_unique_color_indexes_five_to_six(
+    client_by_id: &mut Value,
+    json_path: &str,
+) -> Result<(), StorageError> {
+    let mut held_color_indexes: HashSet<u64> = HashSet::new();
+    let mut duplicate_client_fields: Vec<&mut Map<String, Value>> = Vec::new();
+    for (client_key, client_record) in get_json_object(client_by_id, json_path)? {
+        let record_path = format!("{json_path}.{client_key}");
+        let client_fields = get_json_object(client_record, &record_path)?;
+        let color_index = get_required_json_field(client_fields, "color_index", &record_path)?
+            .as_u64()
+            .ok_or_else(|| {
+                build_invalid_resume_error(format!(
+                    "{record_path}.color_index must be a whole number"
+                ))
+            })?;
+        if !held_color_indexes.insert(color_index) {
+            duplicate_client_fields.push(client_fields);
+        }
+    }
+    let mut candidate_color_indexes = 0..;
+    for client_fields in duplicate_client_fields {
+        let free_color_index = candidate_color_indexes
+            .find(|candidate_color_index| !held_color_indexes.contains(candidate_color_index))
+            .expect("n records hold at most n of the indexes 0 to n");
+        client_fields.insert(
+            "color_index".to_string(),
+            serde_json::json!(free_color_index),
+        );
+    }
     Ok(())
 }
 

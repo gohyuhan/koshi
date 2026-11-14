@@ -54,6 +54,8 @@ impl Server {
             .list_attached_clients()
             .map(|client| ClientDiscovery {
                 client_id: client.get_client_id(),
+                label: client.get_label().to_string(),
+                color_index: client.get_color_index(),
                 session_id: session.session_id,
                 attached_at: client.get_attached_at(),
                 viewport_size: client.get_viewport_size(),

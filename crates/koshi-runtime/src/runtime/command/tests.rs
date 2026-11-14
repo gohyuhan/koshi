@@ -290,6 +290,7 @@ pub(crate) fn attach_client_through_server(
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     attached_client_id
 }
@@ -343,6 +344,7 @@ pub(crate) fn attach_client_to_only_tab(
         None,
         attached_at,
         false,
+        None,
     );
     client_id
 }
@@ -15231,6 +15233,7 @@ fn client_attach_records_the_view_of_the_joining_client_only() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -15752,6 +15755,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     let expected_pty_size = compute_root_pane_pty_size(
@@ -15921,6 +15925,7 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -15985,6 +15990,7 @@ fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     // bob's record came across an update, and bob does not attach again.
     runtime.client_ids_awaiting_reconnect.insert(bob_client_id);
@@ -16053,6 +16059,7 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // A 21-column pane area caps a floating pane at 18 columns, below the
@@ -16157,6 +16164,7 @@ fn a_starving_client_beside_a_roomy_one_leaves_every_floating_pane_as_it_is() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -16263,6 +16271,7 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -16311,6 +16320,7 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -16370,6 +16380,7 @@ fn a_floating_pane_takes_the_cell_size_of_the_earliest_attached_client_on_any_ta
         Some(bob_cell_size),
         SystemTime::now(),
         false,
+        None,
     );
     assert_eq!(read_floating_cell_size(&runtime), Some(alice_cell_size));
 
@@ -16401,6 +16412,7 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     let mut other_session = build_bare_session(SessionId::new());
     let (other_tab_id, other_pane_id) = (TabId::new(), PaneId::new());
@@ -16420,6 +16432,7 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -16464,6 +16477,7 @@ fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
         Some(cell_size),
         SystemTime::now(),
         false,
+        None,
     );
     let measured_client = runtime.session_by_id[&session_id]
         .clients
@@ -16610,6 +16624,7 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // No reflow, but the joining client still lands on the tab's pane.
@@ -16666,6 +16681,7 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // The attaching client lands focused on the tab's only pane, so the first
@@ -16717,6 +16733,7 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     let newly_focused_pane_id = PaneId::new();
     runtime
@@ -16734,6 +16751,7 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -16795,6 +16813,7 @@ fn attaching_passes_over_a_focus_history_entry_collapsed_to_a_stack_header() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     let session = &runtime.session_by_id[&session_id];
@@ -16863,6 +16882,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     let resize_count_before_detach = fake_pty_backend
         .list_pane_sizes(pane_id)
@@ -16924,6 +16944,7 @@ fn client_detach_records_the_leaving_client_and_no_other_view() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     let _ = take_session_view_changes(&mut runtime, session_id);
 
@@ -17042,6 +17063,7 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // One of two clients leaves: one is still attached, so nothing quits.
@@ -17122,6 +17144,7 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     assert_eq!(
         runtime.session_by_id[&session_id].clients.count_clients(),
@@ -17171,6 +17194,7 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     let command_envelope = build_command_envelope(
@@ -17318,6 +17342,7 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // One of two clients quits: the other is still attached, so nothing quits.
@@ -17433,6 +17458,7 @@ fn client_attach_to_an_unknown_session_is_dropped() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     assert!(emitted_events.is_empty());
 }
@@ -17476,6 +17502,7 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert!(emitted_events.is_empty());
@@ -17539,6 +17566,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     runtime.handle_client_attach(
         session_id,
@@ -17549,6 +17577,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     assert_eq!(
         *fake_pty_backend
@@ -17579,6 +17608,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     let expected_pty_size = compute_root_pane_pty_size(
@@ -17666,6 +17696,7 @@ fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged()
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -17702,6 +17733,7 @@ fn client_detach_marks_the_view_of_every_other_subscriber() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
@@ -17901,6 +17933,7 @@ fn same_session_reattach_preserves_client_view_state() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     let client_record = runtime.session_by_id[&session_id]
@@ -17969,6 +18002,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // It left session 1 entirely and is now the 40x24 co-viewer of session 2.
@@ -20186,6 +20220,7 @@ fn detach_all_takes_every_attached_client() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     let (initial_client_delivery_receiver, _) = runtime.subscribe(initial_client_id, 60);
     let (additional_client_delivery_receiver, _) = runtime.subscribe(additional_client_id, 60);
@@ -20301,6 +20336,7 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     // An external CLI names no client of its own, and two are attached.
@@ -20831,6 +20867,7 @@ fn a_client_the_router_bridged_from_another_machine_is_recorded_remote() {
         None,
         SystemTime::now(),
         true,
+        None,
     );
 
     assert_eq!(
@@ -20872,6 +20909,7 @@ fn a_client_that_reached_this_machine_directly_is_recorded_local() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -20913,6 +20951,7 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     assert_eq!(
         runtime
@@ -20935,6 +20974,7 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         None,
         SystemTime::now(),
         true,
+        None,
     );
 
     assert_eq!(
@@ -20977,6 +21017,7 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
         None,
         SystemTime::now(),
         true,
+        None,
     );
 
     runtime.handle_client_attach(
@@ -20988,6 +21029,7 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     assert_eq!(
@@ -21463,6 +21505,7 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     assert_eq!(
         runtime.session_by_id[&session_id]
@@ -21482,6 +21525,7 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
 
     let attached_client = runtime.session_by_id[&session_id]
@@ -21710,6 +21754,7 @@ fn attach_bob(
         None,
         SystemTime::now(),
         false,
+        None,
     );
     bob_client_id
 }

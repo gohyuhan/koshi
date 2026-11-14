@@ -1,6 +1,6 @@
 // Rosé Pine Moon — https://rosepinetheme.com
 // Copy to your config dir as themes/rose-pine-moon.kdl, then set `theme "rose-pine-moon"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#c4a7e7"

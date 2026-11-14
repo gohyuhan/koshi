@@ -82,6 +82,7 @@ pub(crate) fn create_session_with_attached_client(
         None,
         std::time::SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     client_id
 }
@@ -1547,6 +1548,7 @@ fn build_render_snapshot(
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
             client_id,
+            color_index: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id,
             focused_pane_id: None,

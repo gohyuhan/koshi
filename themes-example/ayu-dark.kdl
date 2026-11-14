@@ -1,6 +1,6 @@
 // Ayu Dark — https://github.com/ayu-theme/ayu-vim
 // Copy to your config dir as themes/ayu-dark.kdl, then set `theme "ayu-dark"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#ffb454"

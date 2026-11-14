@@ -618,6 +618,9 @@ pub(crate) fn compute_frame_image_byte_count(
 pub struct FrameClient {
     /// The client's stable id.
     pub client_id: ClientId,
+    /// The client's index as the session assigned it, held by no other
+    /// attached client. The same for every frame of one connection.
+    pub color_index: u32,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is viewing.

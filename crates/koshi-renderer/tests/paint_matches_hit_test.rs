@@ -202,6 +202,7 @@ fn build_render_snapshot(
         pane_snapshots,
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            color_index: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id,

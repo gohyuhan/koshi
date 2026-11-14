@@ -1,6 +1,6 @@
 // Monokai — https://monokai.pro
 // Copy to your config dir as themes/monokai.kdl, then set `theme "monokai"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#f92672"

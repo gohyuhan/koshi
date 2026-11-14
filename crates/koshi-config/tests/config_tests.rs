@@ -147,8 +147,8 @@ fn profile_example_parses() {
     assert_eq!(profile_template.tabs[1].focused_leaf_index, 1);
 }
 
-/// Every ready-made theme shipped in `themes-example/` parses with no warnings
-/// and sets all thirteen color roles.
+/// Every ready-made theme shipped in `themes-example/` declares `version 2`,
+/// parses with no warnings, and sets all thirteen color roles.
 ///
 /// The parser skips an unknown role name with a warning. An unset role keeps
 /// that part of the chrome at koshi's default color.
@@ -175,6 +175,10 @@ fn every_shipped_example_theme_is_complete_and_warning_free() {
             .to_string_lossy();
         let theme_source_text =
             std::fs::read_to_string(&theme_path).expect("theme file is readable");
+        assert!(
+            theme_source_text.lines().any(|line| line == "version 2"),
+            "{theme_file_name} does not declare `version 2`"
+        );
         let (parsed_theme, parse_warnings) = parse_theme(&theme_path, &theme_source_text)
             .unwrap_or_else(|parse_error| {
                 panic!("{theme_file_name} does not parse: {parse_error}")

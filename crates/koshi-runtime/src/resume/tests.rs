@@ -489,6 +489,7 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
             SystemTime::UNIX_EPOCH + Duration::from_secs(101),
         ),
         Some(SavedView {
+            color_index: 0,
             active_tab_id: first_tab_id,
             focus_history_by_tab_id: HashMap::from([(
                 first_tab_id,
@@ -519,6 +520,56 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
             shown_floating_pane_ids: vec![cells_floating_pane_id],
         })
     );
+}
+
+#[test]
+fn migrate_format_five_gives_a_client_sharing_an_index_a_free_one_that_its_reconnect_keeps() {
+    let session_id: SessionId = parse_format_five_id(1);
+    let first_client_id: ClientId = parse_format_five_id(5);
+    let second_client_id: ClientId = parse_format_five_id(10);
+    let (resume_header, resume_body) = read_edited_format_five_fixture(|fixture_json| {
+        fixture_json["raw_body"]["session_by_id"]["00000000-0000-7000-8000-abcd50000001"]
+            ["clients"]["client_by_id"]["00000000-0000-7000-8000-abcd50000010"]["color_index"] =
+            serde_json::json!(0);
+    });
+    let (mut resumed_server, _inbox_sender) =
+        build_resumed_server(&resume_header, resume_body.expect("the edited body reads"));
+    let second_resume_token = resumed_server
+        .saved_view_store
+        .mint_resume_token(second_client_id);
+
+    for (client_id, resume_token) in [
+        (
+            first_client_id,
+            ConnectionToken::from_secret("format-five-first-client-token"),
+        ),
+        (second_client_id, second_resume_token),
+    ] {
+        let attachment = resumed_server
+            .handle_ipc_attach(
+                Some(client_id),
+                Some(resume_token),
+                FIRST_CLIENT_VIEWPORT_SIZE,
+                None,
+                None,
+                SystemTime::UNIX_EPOCH,
+                false,
+                60,
+                None,
+            )
+            .expect("the session hands the record back");
+        assert_eq!(attachment.client_id, client_id);
+    }
+
+    let session_clients = &resumed_server.session_by_id[&session_id].clients;
+    let read_color_index = |client_id: ClientId| {
+        session_clients
+            .get_client_by_id(client_id)
+            .expect("the reconnected client")
+            .get_color_index()
+    };
+    assert_eq!(read_color_index(first_client_id), 0);
+    assert_eq!(read_color_index(second_client_id), 1);
 }
 
 #[test]
@@ -1504,6 +1555,7 @@ fn build_populated_server() -> PopulatedServer {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
 
     let first_tab_pane_ids = list_tab_pane_ids(&server, session_id, first_tab_id);
@@ -3357,7 +3409,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
         filed_tab_id,
         ClientOrigin::Local,
         "C-swift-otter".to_string(),
-        3,
+        300,
     );
     let mut saved_view_store = SavedViewStore::default();
     let waiting_resume_token = saved_view_store.mint_resume_token(waiting_client_id);
@@ -3385,6 +3437,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
     assert_eq!(
         read_saved_view_store.take_saved_view(&filed_resume_token, filed_at),
         Some(SavedView {
+            color_index: 300,
             active_tab_id: filed_tab_id,
             focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),

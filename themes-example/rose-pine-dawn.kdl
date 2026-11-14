@@ -3,7 +3,7 @@
 //
 // A light theme: the ramp is dark so it reads on the pale bar, and `on-ramp` is
 // pale because it sits on top of those dark ramp blocks.
-version 1
+version 2
 
 colors {
     ramp-start "#907aa9"

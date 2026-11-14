@@ -430,6 +430,7 @@ fn detaching_a_client_leaves_the_server_healthy_with_panes_alive() {
         None,
         SystemTime::now(),
         false,
+        None,
     );
     // Same size, so nothing reflows; the joining client still lands on the
     // tab's pane, which is the one event a same-size attach carries.
@@ -1375,15 +1376,18 @@ fn get_booted_parts(server: &Server, client_id: ClientId) -> (SessionId, TabId, 
     (session_id, tab_id, pane_id)
 }
 
-/// The view a booted client files: `booted_tab_id` active with `root_pane_id`
-/// focused, no zoom, `scroll_offset_by_pane_id` as its scroll positions, and no
-/// floating pane view.
+/// The view a client of a booted session files: `color_index`,
+/// `booted_tab_id` active with `root_pane_id` focused, no zoom,
+/// `scroll_offset_by_pane_id` as its scroll positions, and no floating pane
+/// view.
 fn build_booted_saved_view(
+    color_index: u32,
     booted_tab_id: TabId,
     root_pane_id: PaneId,
     scroll_offset_by_pane_id: HashMap<PaneId, usize>,
 ) -> SavedView {
     SavedView {
+        color_index,
         active_tab_id: booted_tab_id,
         focus_history_by_tab_id: HashMap::from([(booted_tab_id, vec![root_pane_id])]),
         zoomed_pane_id_by_tab_id: HashMap::new(),
@@ -1916,6 +1920,185 @@ fn an_attach_presenting_no_token_still_mints_one_and_files_no_view() {
             .saved_view_store
             .take_saved_view(&attachment.resume_token, now),
         None
+    );
+}
+
+/// The `color_index` of `client_id` in the session that holds it.
+fn get_client_color_index(server: &Server, client_id: ClientId) -> u32 {
+    server
+        .get_session_for_client(client_id)
+        .and_then(|session| session.clients.get_client_by_id(client_id))
+        .expect("the client is attached")
+        .get_color_index()
+}
+
+#[test]
+fn a_fresh_client_takes_the_lowest_index_no_attached_client_holds() {
+    let (mut server, booted_client_id) = boot_server();
+    let attached_client_ids: Vec<ClientId> = (0..3)
+        .map(|_| {
+            attach_client_through_server(&mut server, booted_client_id, TEST_VIEWPORT_SIZE, None)
+        })
+        .collect();
+    assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+    assert_eq!(
+        attached_client_ids
+            .iter()
+            .map(|attached_client_id| get_client_color_index(&server, *attached_client_id))
+            .collect::<Vec<u32>>(),
+        vec![1, 2, 3]
+    );
+
+    let _ = server.handle_client_detach(attached_client_ids[0]);
+    let gap_filling_client_id =
+        attach_client_through_server(&mut server, booted_client_id, TEST_VIEWPORT_SIZE, None);
+    let next_client_id =
+        attach_client_through_server(&mut server, booted_client_id, TEST_VIEWPORT_SIZE, None);
+
+    assert_eq!(get_client_color_index(&server, gap_filling_client_id), 1);
+    assert_eq!(get_client_color_index(&server, next_client_id), 4);
+}
+
+#[test]
+fn three_hundred_attached_clients_each_hold_an_index_no_other_client_holds() {
+    let (mut server, booted_client_id) = boot_server();
+    for _ in 1..300 {
+        attach_client_through_server(&mut server, booted_client_id, TEST_VIEWPORT_SIZE, None);
+    }
+
+    let mut color_indexes: Vec<u32> = server
+        .get_session_for_client(booted_client_id)
+        .expect("the booted session")
+        .clients
+        .list_attached_clients()
+        .map(|client| client.get_color_index())
+        .collect();
+    color_indexes.sort_unstable();
+    assert_eq!(color_indexes, (0..300).collect::<Vec<u32>>());
+}
+
+#[test]
+fn a_re_attach_keeps_its_index_whatever_saved_index_it_names() {
+    let (mut server, booted_client_id) = boot_server();
+    let (session_id, booted_tab_id, _root_pane_id) = get_booted_parts(&server, booted_client_id);
+
+    let _ = server.handle_client_attach(
+        session_id,
+        booted_client_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        booted_tab_id,
+        None,
+        SystemTime::now(),
+        false,
+        Some(7),
+    );
+
+    assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+}
+
+#[test]
+fn a_token_takes_back_the_index_its_client_held_while_no_attached_client_holds_it() {
+    let (mut server, booted_client_id) = boot_server();
+    let now = SystemTime::now();
+    let first_attachment = attach_with_token(&mut server, None, now);
+    let leaving_attachment = attach_with_token(&mut server, None, now);
+    assert_eq!(
+        get_client_color_index(&server, leaving_attachment.client_id),
+        2
+    );
+    server.save_client_view(leaving_attachment.client_id, now);
+    let _ = server.handle_client_detach(leaving_attachment.client_id);
+    let _ = server.handle_client_detach(first_attachment.client_id);
+
+    let returning_attachment =
+        attach_with_token(&mut server, Some(leaving_attachment.resume_token), now);
+
+    // Index 1 is free as well; the saved index 2 comes first.
+    assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+    assert_eq!(
+        get_client_color_index(&server, returning_attachment.client_id),
+        2
+    );
+}
+
+#[test]
+fn a_token_whose_index_another_client_took_gets_the_lowest_free_index() {
+    let (mut server, booted_client_id) = boot_server();
+    let now = SystemTime::now();
+    let leaving_attachment = attach_with_token(&mut server, None, now);
+    server.save_client_view(leaving_attachment.client_id, now);
+    let _ = server.handle_client_detach(leaving_attachment.client_id);
+    let taking_attachment = attach_with_token(&mut server, None, now);
+
+    let returning_attachment =
+        attach_with_token(&mut server, Some(leaving_attachment.resume_token), now);
+
+    assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+    assert_eq!(
+        get_client_color_index(&server, taking_attachment.client_id),
+        1
+    );
+    assert_eq!(
+        get_client_color_index(&server, returning_attachment.client_id),
+        2
+    );
+}
+
+#[test]
+fn a_token_naming_a_client_still_attached_hands_its_index_to_the_client_that_replaces_it() {
+    let (mut server, booted_client_id) = boot_server();
+    let now = SystemTime::now();
+    let first_attachment = attach_with_token(&mut server, None, now);
+    let replaced_attachment = attach_with_token(&mut server, None, now);
+    let _ = server.handle_client_detach(first_attachment.client_id);
+
+    let replacing_attachment =
+        attach_with_token(&mut server, Some(replaced_attachment.resume_token), now);
+
+    assert!(server
+        .get_session_for_client(replaced_attachment.client_id)
+        .is_none());
+    assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+    assert_eq!(
+        get_client_color_index(&server, replacing_attachment.client_id),
+        2
+    );
+}
+
+#[test]
+fn a_client_awaiting_its_reconnect_keeps_its_index_from_fresh_clients_and_takes_it_back() {
+    let (mut server, booted_client_id) = boot_server();
+    let reconnecting_client_id =
+        attach_client_through_server(&mut server, booted_client_id, TEST_VIEWPORT_SIZE, None);
+    let resume_token = server
+        .saved_view_store
+        .mint_resume_token(reconnecting_client_id);
+    server
+        .client_ids_awaiting_reconnect
+        .insert(reconnecting_client_id);
+
+    let fresh_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    let reconnected_attachment = server
+        .handle_ipc_attach(
+            Some(reconnecting_client_id),
+            Some(resume_token),
+            TEST_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            false,
+            60,
+            None,
+        )
+        .expect("the session hands the record back");
+
+    assert_eq!(reconnected_attachment.client_id, reconnecting_client_id);
+    assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+    assert_eq!(get_client_color_index(&server, reconnecting_client_id), 1);
+    assert_eq!(
+        get_client_color_index(&server, fresh_attachment.client_id),
+        2
     );
 }
 
@@ -2557,6 +2740,7 @@ fn a_client_the_restart_grace_still_holds_files_no_view_and_keeps_its_token() {
     assert_eq!(
         server.saved_view_store.take_saved_view(&resume_token, now),
         Some(build_booted_saved_view(
+            0,
             booted_tab_id,
             root_pane_id,
             HashMap::from([(root_pane_id, 500)])
@@ -2626,6 +2810,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
             .saved_view_store
             .take_saved_view(&leaving_attachment.resume_token, now),
         Some(build_booted_saved_view(
+            1,
             booted_tab_id,
             root_pane_id,
             HashMap::from([(root_pane_id, 42)])
@@ -2687,6 +2872,7 @@ fn a_client_the_session_no_longer_holds_files_no_view_and_drops_its_token() {
             .saved_view_store
             .take_saved_view(&next_attachment.resume_token, now),
         Some(build_booted_saved_view(
+            1,
             booted_tab_id,
             root_pane_id,
             HashMap::from([(root_pane_id, 500)])
@@ -3866,6 +4052,7 @@ fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_c
             .saved_view_store
             .take_saved_view(&attachment.resume_token, detached_at),
         Some(build_booted_saved_view(
+            1,
             booted_tab_id,
             root_pane_id,
             HashMap::new()
@@ -3899,6 +4086,7 @@ fn a_client_that_does_not_return_ends_its_session_under_auto_close_and_still_fil
             .saved_view_store
             .take_saved_view(&attachment.resume_token, detached_at),
         Some(build_booted_saved_view(
+            1,
             booted_tab_id,
             root_pane_id,
             HashMap::new()

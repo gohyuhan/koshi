@@ -120,6 +120,7 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
         pane_snapshots: vec![build_pane_snapshot(tiled_pane_id)],
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            color_index: 0,
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: Some(tiled_pane_id),

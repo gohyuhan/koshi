@@ -1,6 +1,6 @@
 // Kanagawa (Wave) — https://github.com/rebelot/kanagawa.nvim
 // Copy to your config dir as themes/kanagawa.kdl, then set `theme "kanagawa"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#7e9cd8"

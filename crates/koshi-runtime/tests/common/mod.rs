@@ -138,6 +138,7 @@ pub fn create_session_with_attached_client(server: &mut Server) -> ClientId {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     client_id
 }

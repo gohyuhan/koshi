@@ -1,6 +1,6 @@
 // Everforest Dark — https://github.com/sainnhe/everforest
 // Copy to your config dir as themes/everforest-dark.kdl, then set `theme "everforest-dark"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#a7c080"

@@ -1,6 +1,6 @@
 // Catppuccin Mocha — https://catppuccin.com
 // Copy to your config dir as themes/catppuccin-mocha.kdl, then set `theme "catppuccin-mocha"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#cba6f7"

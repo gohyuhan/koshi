@@ -1009,6 +1009,7 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
                     "solved_tab_size": {"column_count": 80, "row_count": 22}
                 }},
                 "clients": {"client_by_id": {"C": {
+                    "color_index": 0,
                     "floating_pane_view_by_pane_id": {
                         "P1": {"position": {"Pinned": {"column": 10, "row": 3}}, "is_minimized": false},
                         "P2": {"position": "Default", "is_minimized": true}
@@ -1070,6 +1071,7 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
                         }
                     }},
                     "clients": {"client_by_id": {"C": {
+                        "color_index": 0,
                         "floating_pane_view_by_floating_pane_id": {
                             "P1": {
                                 "position": {"Pinned": {"column": 10, "row": 3}},
@@ -1096,6 +1098,7 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
                     "connection_token_hash": "second-hash",
                     "expires_at": {"secs_since_epoch": 86500, "nanos_since_epoch": 0},
                     "saved_view": {
+                        "color_index": 0,
                         "active_tab_id": "T",
                         "floating_pane_view_by_floating_pane_id": {
                             "P2": {
@@ -1110,6 +1113,49 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
                 }]
             }
         })
+    );
+}
+
+#[test]
+fn step_five_moves_each_client_after_the_first_holder_of_an_index_to_the_lowest_free_index() {
+    let build_client_record = |color_index: u64| serde_json::json!({"color_index": color_index, "floating_pane_view_by_pane_id": {}});
+    let mut resume_body = serde_json::json!({"session_by_id": {
+        "S": {
+            "floating_set": {"members": []},
+            "tabs": {},
+            "clients": {"client_by_id": {
+                "A": build_client_record(0),
+                "B": build_client_record(0),
+                "C": build_client_record(1),
+                "D": build_client_record(0),
+                "E": build_client_record(5)
+            }}
+        },
+        "T": {
+            "floating_set": {"members": []},
+            "tabs": {},
+            "clients": {"client_by_id": {"F": build_client_record(0)}}
+        }
+    }});
+
+    migrate_resume_five_to_six(&mut resume_body).expect("step 5 converts the body");
+
+    let read_color_index = |session_key: &str, client_key: &str| {
+        resume_body["session_by_id"][session_key]["clients"]["client_by_id"][client_key]
+            ["color_index"]
+            .clone()
+    };
+    for (client_key, expected_color_index) in [("A", 0), ("B", 2), ("C", 1), ("D", 3), ("E", 5)] {
+        assert_eq!(
+            read_color_index("S", client_key),
+            serde_json::json!(expected_color_index),
+            "client {client_key}"
+        );
+    }
+    assert_eq!(
+        read_color_index("T", "F"),
+        serde_json::json!(0),
+        "another session's index 0 is its own"
     );
 }
 
@@ -1239,6 +1285,19 @@ fn step_five_names_the_missing_or_misshapen_field() {
             }}}})),
             "body.session_by_id.S.clients.client_by_id.C.floating_pane_view_by_pane_id.P must \
              be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "floating_pane_view_by_pane_id": {}
+            }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.color_index is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "color_index": "two",
+                "floating_pane_view_by_pane_id": {}
+            }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.color_index must be a whole number",
         ),
         (
             build_saved_view_body(serde_json::json!(7)),

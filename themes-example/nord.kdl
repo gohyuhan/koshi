@@ -1,6 +1,6 @@
 // Nord — https://www.nordtheme.com
 // Copy to your config dir as themes/nord.kdl, then set `theme "nord"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#88c0d0"

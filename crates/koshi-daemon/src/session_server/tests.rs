@@ -677,6 +677,7 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
         None,
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     let open_second_tab_command_id = CommandId::new();
     let command_envelope = CommandEnvelope::from_parts(

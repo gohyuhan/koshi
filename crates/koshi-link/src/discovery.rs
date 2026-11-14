@@ -110,6 +110,11 @@ pub struct PaneRow {
 pub struct ClientRow {
     /// Stable client id.
     pub client_id: ClientId,
+    /// The client's label, filtered by [`sanitize_reported_text`].
+    pub label: String,
+    /// The client's index as the session assigned it, held by no other
+    /// attached client.
+    pub color_index: u32,
     /// The session the client is attached to.
     pub session_id: SessionId,
     /// That session's display name.
@@ -840,6 +845,8 @@ pub fn build_client_rows(session_overviews: &[SessionOverview]) -> Vec<ClientRow
                 .iter()
                 .map(|client_discovery| ClientRow {
                     client_id: client_discovery.client_id,
+                    label: sanitize_reported_text(&client_discovery.label),
+                    color_index: client_discovery.color_index,
                     session_id: session_overview.session.session_id,
                     session_name: sanitize_reported_text(&session_overview.session.session_name),
                 })
@@ -848,9 +855,9 @@ pub fn build_client_rows(session_overviews: &[SessionOverview]) -> Vec<ClientRow
 }
 
 /// Filter every string `session_overview` took from the session that answered through
-/// [`sanitize_reported_text`]: the session name, each tab name, and each pane's
-/// title, working directory and argv. Ids, times, sizes and counts are left as
-/// they are.
+/// [`sanitize_reported_text`]: the session name, each tab name, each pane's
+/// title, working directory and argv, and each client's label. Ids, times,
+/// sizes, counts and client indexes are left as they are.
 ///
 /// Every overview read off a socket passes through this before a listing row,
 /// an `inspect` record, or a `--session <name>` lookup reads it.
@@ -880,6 +887,9 @@ pub fn filter_session_overview_text(session_overview: &mut SessionOverview) {
                 *command_argument = sanitize_reported_text(command_argument);
             }
         }
+    }
+    for client_discovery in &mut session_overview.clients {
+        client_discovery.label = sanitize_reported_text(&client_discovery.label);
     }
 }
 

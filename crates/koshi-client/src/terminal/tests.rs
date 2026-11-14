@@ -5947,6 +5947,7 @@ fn a_host_resize_of_one_client_redraws_its_images_and_writes_no_image_to_another
         Some(build_one_pixel_cell_size()),
         SystemTime::UNIX_EPOCH,
         false,
+        None,
     );
     server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
     let mut sixel_client = build_launch_client(sixel_client_id);

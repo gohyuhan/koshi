@@ -1,6 +1,6 @@
 // Tokyo Night Storm — https://github.com/folke/tokyonight.nvim
 // Copy to your config dir as themes/tokyo-night-storm.kdl, then set `theme "tokyo-night-storm"` in koshi.kdl.
-version 1
+version 2
 
 colors {
     ramp-start "#7aa2f7"

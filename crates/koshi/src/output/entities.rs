@@ -7,7 +7,7 @@
 //! serializes them, and the table cells read them.
 
 use super::*;
-use koshi_core::client::ClientOrigin;
+use koshi_core::client::{compute_client_number, ClientOrigin};
 use koshi_core::geometry::PaneArea;
 
 /// Render a `list-sessions` answer.
@@ -255,6 +255,11 @@ struct PaneListingRow {
 struct ClientListingRow {
     /// The client id, as `client-<uuid>`.
     client_id: String,
+    /// The client's number, held by no other client attached to its session
+    /// ([`compute_client_number`]).
+    client_number: u64,
+    /// The client's label, such as `C-swift-otter`.
+    label: String,
     /// The id of the session the client is attached to, as `session-<uuid>`.
     session_id: String,
     /// That session's display name.
@@ -322,6 +327,11 @@ struct PaneReport {
 struct ClientReport {
     /// The client id, as `client-<uuid>`.
     client_id: String,
+    /// The client's number, held by no other client attached to its session
+    /// ([`compute_client_number`]).
+    client_number: u64,
+    /// The client's label, such as `C-swift-otter`.
+    label: String,
     /// The id of the session the client is attached to, as `session-<uuid>`.
     session_id: String,
     /// When the client attached, as [`format_utc_timestamp`] writes it.
@@ -407,6 +417,8 @@ fn build_pane_listing_row(pane_row: &PaneRow) -> PaneListingRow {
 fn build_client_listing_row(client_row: &ClientRow) -> ClientListingRow {
     ClientListingRow {
         client_id: client_row.client_id.to_string(),
+        client_number: compute_client_number(client_row.color_index),
+        label: client_row.label.clone(),
         session_id: client_row.session_id.to_string(),
         session_name: client_row.session_name.clone(),
     }
@@ -466,6 +478,8 @@ fn build_pane_report(pane_discovery: &PaneDiscovery) -> PaneReport {
 fn build_client_report(client_discovery: &ClientDiscovery) -> ClientReport {
     ClientReport {
         client_id: client_discovery.client_id.to_string(),
+        client_number: compute_client_number(client_discovery.color_index),
+        label: client_discovery.label.clone(),
         session_id: client_discovery.session_id.to_string(),
         attached_at: format_utc_timestamp(client_discovery.attached_at),
         viewport_size: client_discovery.viewport_size,
@@ -492,7 +506,7 @@ const TAB_ROW_HEADERS: &[&str] = &["id", "name", "session", "session_name"];
 const PANE_ROW_HEADERS: &[&str] = &["id", "name", "tab", "tab_name", "session", "session_name"];
 
 /// Column headers for `list-clients`, matching [`format_client_row_cells`].
-const CLIENT_ROW_HEADERS: &[&str] = &["id", "session", "session_name"];
+const CLIENT_ROW_HEADERS: &[&str] = &["id", "number", "label", "session", "session_name"];
 
 /// Field names for an `inspect session`, matching [`render_session_fields`] order.
 const SESSION_HEADERS: &[&str] = &["id", "name", "created_at", "clients", "panes"];
@@ -517,6 +531,8 @@ const PANE_HEADERS: &[&str] = &[
 /// `pane_area` prints `-` for no report, `starving`, or `WxH`.
 const CLIENT_HEADERS: &[&str] = &[
     "id",
+    "number",
+    "label",
     "session",
     "attached_at",
     "viewport",
@@ -580,6 +596,8 @@ fn format_pane_tab_cell(tab_id: Option<&String>) -> String {
 fn format_client_row_cells(client: &ClientListingRow) -> Vec<String> {
     vec![
         client.client_id.clone(),
+        client.client_number.to_string(),
+        client.label.clone(),
         client.session_id.clone(),
         client.session_name.clone(),
     ]
@@ -629,6 +647,8 @@ fn render_pane_fields(pane_report: &PaneReport) -> Vec<String> {
 fn render_client_fields(client_report: &ClientReport) -> Vec<String> {
     vec![
         client_report.client_id.clone(),
+        client_report.client_number.to_string(),
+        client_report.label.clone(),
         client_report.session_id.clone(),
         client_report.attached_at.clone(),
         format_size_cell(client_report.viewport_size),

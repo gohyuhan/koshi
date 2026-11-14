@@ -117,6 +117,8 @@ fn build_test_pane_row() -> PaneRow {
 fn build_test_client_row() -> ClientRow {
     ClientRow {
         client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+        label: "C-swift-otter".to_string(),
+        color_index: 11,
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         session_name: "quiet-lake".to_string(),
     }
@@ -125,6 +127,8 @@ fn build_test_client_row() -> ClientRow {
 fn build_test_client_discovery() -> ClientDiscovery {
     ClientDiscovery {
         client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+        label: "C-swift-otter".to_string(),
+        color_index: 11,
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         attached_at: build_fixed_test_time(),
         viewport_size: Size {
@@ -277,6 +281,8 @@ fn client_list_json_carries_the_owning_session() {
     let expected_text = r#"[
   {
     "client_id": "client-00000000-0000-0000-0000-000000000001",
+    "client_number": 12,
+    "label": "C-swift-otter",
     "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
@@ -377,6 +383,8 @@ fn build_non_utf8_path() -> PathBuf {
 fn client_json_schema_is_stable() {
     let expected_text = r#"{
   "client_id": "client-00000000-0000-0000-0000-000000000001",
+  "client_number": 12,
+  "label": "C-swift-otter",
   "session_id": "session-00000000-0000-0000-0000-000000000001",
   "attached_at": "1970-01-01T00:20:34Z",
   "viewport_size": {
@@ -410,6 +418,8 @@ fn a_reported_pane_area_json_is_the_size_object() {
         render_client(&reported_client_discovery, OutputFormat::Json),
         r#"{
   "client_id": "client-00000000-0000-0000-0000-000000000001",
+  "client_number": 12,
+  "label": "C-swift-otter",
   "session_id": "session-00000000-0000-0000-0000-000000000001",
   "attached_at": "1970-01-01T00:20:34Z",
   "viewport_size": {
@@ -663,6 +673,8 @@ focused_by: 1
 fn client_fields_render_as_lines() {
     let expected_text = "\
 id: client-00000000-0000-0000-0000-000000000001
+number: 12
+label: C-swift-otter
 session: session-00000000-0000-0000-0000-000000000001
 attached_at: 1970-01-01T00:20:34Z
 viewport: 120x40
@@ -687,6 +699,8 @@ fn a_starving_client_prints_starving_in_the_pane_area_column() {
     assert_eq!(
         render_client(&starving_client_discovery, OutputFormat::Table),
         r#"id: client-00000000-0000-0000-0000-000000000001
+number: 12
+label: C-swift-otter
 session: session-00000000-0000-0000-0000-000000000001
 attached_at: 1970-01-01T00:20:34Z
 viewport: 120x40
@@ -711,6 +725,8 @@ fn a_reported_pane_area_prints_as_columns_by_rows() {
     assert_eq!(
         render_client(&reported_client_discovery, OutputFormat::Table),
         r#"id: client-00000000-0000-0000-0000-000000000001
+number: 12
+label: C-swift-otter
 session: session-00000000-0000-0000-0000-000000000001
 attached_at: 1970-01-01T00:20:34Z
 viewport: 120x40
@@ -1937,9 +1953,9 @@ fn client_list_table_widens_columns_to_the_widest_row() {
         ..build_test_client_row()
     };
     let expected_text = "\
-id                                           session                                       session_name
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  quiet-lake
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  wandering-heron
+id                                           number  label          session                                       session_name
+client-00000000-0000-0000-0000-000000000001  12      C-swift-otter  session-00000000-0000-0000-0000-000000000001  quiet-lake
+client-00000000-0000-0000-0000-000000000001  12      C-swift-otter  session-00000000-0000-0000-0000-000000000001  wandering-heron
 ";
     assert_eq!(
         render_clients(
@@ -1954,7 +1970,7 @@ client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000
 fn empty_client_list_table_is_just_the_header() {
     assert_eq!(
         render_clients(&[], OutputFormat::Table),
-        "id  session  session_name\n"
+        "id  number  label  session  session_name\n"
     );
 }
 
@@ -2089,8 +2105,8 @@ id                                         tab                                  
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
-id                                           session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
+id                                           number  label          session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  12      C-swift-otter  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
 
 ";
     assert_eq!(
@@ -2112,7 +2128,7 @@ panes
 id  tab  session  title  cwd  command  state  focused_by
 
 clients
-id  session  attached_at  viewport  pane_area  active_tab  focused_pane  lock
+id  number  label  session  attached_at  viewport  pane_area  active_tab  focused_pane  lock
 
 ";
     assert_eq!(render_dump_state(&[], OutputFormat::Table), expected_text);
@@ -2143,8 +2159,8 @@ id                                         tab                                  
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  mysql ***  running  1
 
 clients
-id                                           session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
+id                                           number  label          session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  12      C-swift-otter  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
 
 "#
     );
@@ -2181,9 +2197,9 @@ pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000
 pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
-id                                           session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
-client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
+id                                           number  label          session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  12      C-swift-otter  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
+client-00000000-0000-0000-0000-000000000001  12      C-swift-otter  session-00000000-0000-0000-0000-000000000001  1970-01-01T00:20:34Z  120x40    -          tab-00000000-0000-0000-0000-000000000001  -             normal
 
 "#
     );
@@ -2225,6 +2241,8 @@ fn dump_state_json_is_an_array_of_whole_overviews() {
             }],
             "clients": [{
                 "client_id": "client-00000000-0000-0000-0000-000000000001",
+                "client_number": 12,
+                "label": "C-swift-otter",
                 "session_id": "session-00000000-0000-0000-0000-000000000001",
                 "attached_at": "1970-01-01T00:20:34Z",
                 "viewport_size": { "column_count": 120, "row_count": 40 },
