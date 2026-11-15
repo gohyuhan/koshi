@@ -168,12 +168,15 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
             focused_pane_id: Some(pane_id),
             active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: Some(CommandId::from_uuid(Uuid::from_u128(5))),
+            last_settled_lock_command_id: Some(CommandId::from_uuid(Uuid::from_u128(5))),
             last_applied_floating_pane_move_command_id: Some(CommandId::from_uuid(
                 Uuid::from_u128(6),
             )),
             last_applied_placement_command_id: Some(CommandId::from_uuid(Uuid::from_u128(7))),
             is_mouse_selection_enabled: false,
+            typed_pane_id: Some(pane_id),
+            input_pane_moved_by_others_count: 8,
+            dropped_input_request_count: 9,
         },
     }
 }
@@ -542,11 +545,14 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",
                 "active_tab_focused_pane_id": "00000000-0000-0000-0000-000000000004",
                 "lock_mode": "Normal",
-                "last_applied_lock_command_id": "00000000-0000-0000-0000-000000000005",
+                "last_settled_lock_command_id": "00000000-0000-0000-0000-000000000005",
                 "last_applied_floating_pane_move_command_id":
                     "00000000-0000-0000-0000-000000000006",
                 "last_applied_placement_command_id": "00000000-0000-0000-0000-000000000007",
-                "is_mouse_selection_enabled": false
+                "is_mouse_selection_enabled": false,
+                "typed_pane_id": "00000000-0000-0000-0000-000000000004",
+                "input_pane_moved_by_others_count": 8,
+                "dropped_input_request_count": 9
             }
         })
     );

@@ -237,6 +237,18 @@ pub enum GraphicAttributeError {
     Failure,
 }
 
+/// One complete host-terminal event and the input tag of the bytes that held
+/// its first byte ([`Parser::process_input_bytes`]). Example: a paste whose
+/// `ESC [ 200 ~` came in bytes tagged `1` and whose end marker came in bytes
+/// tagged `3` carries `1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaggedEvent {
+    /// The event.
+    pub event: Event,
+    /// The input tag passed with the bytes that held the event's first byte.
+    pub input_tag: u64,
+}
+
 /// One complete host-terminal event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {

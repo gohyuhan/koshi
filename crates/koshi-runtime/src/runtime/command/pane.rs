@@ -3,6 +3,7 @@
 //! shared pane-removal bookkeeping.
 
 use super::*;
+use koshi_ipc::protocol::FiredAction;
 
 /// The least exit code, read as an unsigned 32-bit number, that is a Windows
 /// NTSTATUS of error severity: `0xC0000000`, whose top two bits, the severity
@@ -1367,14 +1368,18 @@ impl Server {
     /// `expected_placed_tab_layout`
     /// ([`Self::validate_expected_placed_tab_layout`]).
     ///
+    /// A key confirmation typed against a frame older than the last move of
+    /// the client's input by others ([`Self::is_input_stale`]) is refused with
+    /// [`RejectReason::ViewChanged`] before any check.
+    ///
     /// An applied placement records `command_id` as the client's last applied
     /// placement ([`Client::set_last_applied_placement_command_id`]). A
     /// refused placement changes nothing, and a
     /// [`CommandRejected`](koshi_ipc::event::SessionEvent::CommandRejected)
-    /// naming `command_id`, `fired_action`, the reason and the hint is
+    /// naming `command_id`, the fired action, the reason and the hint is
     /// delivered to the client ([`Self::send_command_rejection`]). `fired_action`
-    /// is the action the client's key fired to confirm, or `None` for a mouse
-    /// drop.
+    /// is the action the client's key fired to confirm, with the move count of
+    /// the frame the key was typed against, or `None` for a mouse drop.
     pub(crate) fn confirm_pane_placement(
         &mut self,
         client_id: ClientId,
@@ -1382,7 +1387,7 @@ impl Server {
         source_pane_id: PaneId,
         tiled_placement_target: TiledPlacementTarget,
         expected_placed_tab_layout: &PlacedTabLayout,
-        fired_action: Option<ActionReference>,
+        fired_action: Option<FiredAction>,
     ) -> CommandResult {
         let command_source = CommandSource::from_key_binding(client_id);
         let place_pane_args = PlacePaneArgs {
@@ -1394,14 +1399,24 @@ impl Server {
             command_source.clone(),
             Command::PlacePane(place_pane_args.clone()),
         );
-        let outcome = self.validate_command(&envelope).and_then(|()| {
-            self.apply_place_pane(
-                command_id,
-                &command_source,
-                &place_pane_args,
-                Some(expected_placed_tab_layout),
+        let is_stale_key_confirmation = fired_action.as_ref().is_some_and(|fired_action| {
+            self.is_input_stale(
+                client_id,
+                fired_action.painted_input_pane_moved_by_others_count,
             )
         });
+        let outcome = if is_stale_key_confirmation {
+            Err(Rejection::from_reason(RejectReason::ViewChanged))
+        } else {
+            self.validate_command(&envelope).and_then(|()| {
+                self.apply_place_pane(
+                    command_id,
+                    &command_source,
+                    &place_pane_args,
+                    Some(expected_placed_tab_layout),
+                )
+            })
+        };
         match outcome {
             Ok(command_result) => {
                 if let Some(client) = self.get_client_mut(client_id) {
@@ -1413,7 +1428,7 @@ impl Server {
                 self.send_command_rejection(
                     client_id,
                     command_id,
-                    fired_action,
+                    fired_action.map(|fired_action| fired_action.action_reference),
                     rejection.reason,
                     rejection.help.clone(),
                 );

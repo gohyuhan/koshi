@@ -111,6 +111,7 @@ fn attach_test_client_with_pane_area(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         },
     );

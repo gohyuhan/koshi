@@ -9,13 +9,26 @@ struct ProbeEventSource {
 }
 
 impl EventSource for ProbeEventSource {
-    fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
-        self.terminal_event_read_results
+    /// The next scripted result, each event tagged with the move count
+    /// `input_read_clock` holds at this call.
+    fn try_read_event(
+        &mut self,
+        _timeout_duration: Option<Duration>,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<Option<TaggedEvent>> {
+        let terminal_event_read_result = self
+            .terminal_event_read_results
             .pop_front()
-            .unwrap_or(Ok(None))
+            .unwrap_or(Ok(None));
+        terminal_event_read_result.map(|terminal_event| {
+            terminal_event.map(|event| TaggedEvent {
+                event,
+                input_tag: input_read_clock.get_painted_input_pane_moved_by_others_count(),
+            })
+        })
     }
 
-    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+    fn remove_next_parsed_event(&mut self) -> Option<TaggedEvent> {
         None
     }
 }
@@ -30,9 +43,48 @@ fn build_terminal_key_event(character: char) -> Event {
 fn build_terminal_event_reader(
     terminal_event_read_results: Vec<io::Result<Option<Event>>>,
 ) -> InputReader<ProbeEventSource> {
-    InputReader::from_event_source(ProbeEventSource {
-        terminal_event_read_results: terminal_event_read_results.into(),
-    })
+    InputReader::from_event_source(
+        ProbeEventSource {
+            terminal_event_read_results: terminal_event_read_results.into(),
+        },
+        Arc::default(),
+    )
+}
+
+#[test]
+fn an_event_read_after_a_paint_carries_the_move_count_the_clock_holds_then() {
+    let input_read_clock = Arc::new(InputReadClock::default());
+    let mut input_reader = InputReader::from_event_source(
+        ProbeEventSource {
+            terminal_event_read_results: VecDeque::from([
+                Ok(Some(build_terminal_key_event('a'))),
+                Ok(Some(build_terminal_key_event('b'))),
+            ]),
+        },
+        Arc::clone(&input_read_clock),
+    );
+
+    let first_read_events = input_reader
+        .read_events_of_next_terminal_read()
+        .expect("the first read succeeds");
+    input_read_clock.set_painted_input_pane_moved_by_others_count(3);
+    let second_read_events = input_reader
+        .read_events_of_next_terminal_read()
+        .expect("the second read succeeds");
+
+    assert_eq!(
+        (first_read_events, second_read_events),
+        (
+            vec![TaggedEvent {
+                event: build_terminal_key_event('a'),
+                input_tag: 0,
+            }],
+            vec![TaggedEvent {
+                event: build_terminal_key_event('b'),
+                input_tag: 3,
+            }],
+        )
+    );
 }
 
 #[test]

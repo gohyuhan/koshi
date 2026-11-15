@@ -35,8 +35,9 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 use std::time::{Duration, Instant};
 
-use koshi_client::input::KeyOutcome;
+use koshi_client::input::{InputReadStamp, KeyOutcome};
 use koshi_client::Client as ViewerClient;
+use koshi_ipc::protocol::FiredAction;
 use koshi_pty::error::PtyError;
 
 use crate::server::Server;
@@ -60,11 +61,11 @@ impl Server {
     fn handle_bound_action(
         &mut self,
         client_id: ClientId,
-        bound_action: BoundAction,
+        fired_action: FiredAction,
         new_pane_direction: Direction,
     ) {
         let Ok(dispatch_plan) = resolve_action(
-            &bound_action.action_reference,
+            &fired_action.action_reference,
             &ActionRegistry::new(),
             new_pane_direction,
         ) else {
@@ -79,6 +80,15 @@ impl Server {
             let _ = self.dispatch(command_envelope);
         }
         self.mark_changed_views();
+    }
+}
+
+/// The stamp of a read at `read_at` against a screen whose frame carries the
+/// move count `0`.
+fn build_input_read_stamp(read_at: Instant) -> InputReadStamp {
+    InputReadStamp {
+        read_at,
+        painted_input_pane_moved_by_others_count: 0,
     }
 }
 
@@ -114,10 +124,10 @@ fn apply_key_press(
     current_time: Instant,
 ) {
     let client_id = viewer.get_client_id();
-    match viewer.resolve_key(key_chord, current_time) {
-        KeyOutcome::Fire(bound_action) => {
+    match viewer.resolve_key(key_chord, build_input_read_stamp(current_time)) {
+        KeyOutcome::Fire(fired_action) => {
             let new_pane_direction = viewer.get_client_config().layout.new_pane_direction;
-            server.handle_bound_action(client_id, bound_action, new_pane_direction);
+            server.handle_bound_action(client_id, fired_action, new_pane_direction);
         }
         KeyOutcome::PassThrough(passthrough_key_chord) => {
             server.handle_key_inputs(
@@ -140,9 +150,9 @@ fn expire_pending_key_sequence(
     viewer: &mut ViewerClient,
     current_time: Instant,
 ) {
-    if let Some(bound_action) = viewer.expire_key_sequence(current_time) {
+    if let Some(fired_action) = viewer.expire_key_sequence(current_time) {
         let new_pane_direction = viewer.get_client_config().layout.new_pane_direction;
-        server.handle_bound_action(viewer.get_client_id(), bound_action, new_pane_direction);
+        server.handle_bound_action(viewer.get_client_id(), fired_action, new_pane_direction);
     }
     if let Some(render_snapshot) = server.build_snapshot(viewer.get_client_id()) {
         viewer.apply_render_snapshot(&render_snapshot);
@@ -2249,7 +2259,7 @@ fn one_viewer_open_sequence_is_invisible_to_another_viewer() {
     assert_eq!(
         second_viewer.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'n'),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
         KeyOutcome::PassThrough(build_key_chord(BindingModifierFlags::NONE, 'n'))
     );
@@ -2693,9 +2703,10 @@ fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
     // chord is not written to the pane either.
     server.handle_bound_action(
         client_id,
-        BoundAction {
+        FiredAction {
             action_reference: ActionReference::from_core_action_name("no-such-action")
                 .expect("valid core action name"),
+            painted_input_pane_moved_by_others_count: 0,
         },
         Direction::Right,
     );

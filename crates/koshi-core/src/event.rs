@@ -450,6 +450,13 @@ pub enum RejectReason {
     /// A command that acts on an attached client found no client attached to
     /// the session.
     NoClientAttached,
+    /// A key binding fired against a frame older than the last move of the
+    /// client's input to another pane that the client's own connection did
+    /// not make. Examples: another client closed that pane, the CLI moved the
+    /// client's focus, or the pane's program exited. On a new connection, the
+    /// move counts when the pane the client's screen showed no longer takes
+    /// its input.
+    ViewChanged,
 }
 
 impl std::fmt::Display for RejectReason {
@@ -467,6 +474,7 @@ impl std::fmt::Display for RejectReason {
             RejectReason::NoClientAttached => {
                 formatter.write_str("no client is attached to the session")
             }
+            RejectReason::ViewChanged => formatter.write_str("your view changed as you typed"),
         }
     }
 }

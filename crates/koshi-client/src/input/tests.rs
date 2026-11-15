@@ -38,10 +38,11 @@ use crate::mouse::tests::{
 };
 use crate::mouse::MouseAction;
 use crate::tests::{
-    apply_frame_keeping_view, build_core_bound_action, build_expected_confirm_placement,
-    build_solved_placement_snapshot, build_test_client, build_test_placement_snapshot,
-    build_whole_tab_insertion_target, float_placement_source_pane, get_destination_pane_id,
-    hold_placement_snapshot, NO_ROOM_TAB_SIZE,
+    apply_frame_keeping_view, build_core_bound_action, build_core_fired_action,
+    build_expected_confirm_placement, build_input_read_stamp, build_solved_placement_snapshot,
+    build_test_client, build_test_placement_snapshot, build_whole_tab_insertion_target,
+    float_placement_source_pane, get_destination_pane_id, hold_placement_snapshot,
+    NO_ROOM_TAB_SIZE,
 };
 use crate::{Client, FloatingPaneTray, PlacementMode, PlacementModeLifetime};
 
@@ -110,7 +111,7 @@ fn an_unbound_key_passes_through_in_normal_mode() {
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'a'),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
         KeyOutcome::PassThrough(build_key_chord(BindingModifierFlags::NONE, 'a'))
     );
@@ -124,7 +125,7 @@ fn a_prefix_chord_opens_a_sequence_and_types_nothing() {
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::CTRL, 'p'),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
         KeyOutcome::Pending
     );
@@ -142,18 +143,18 @@ fn completing_a_sequence_fires_its_binding_and_closes_it() {
     let current_time = Instant::now();
     client.resolve_key(
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
-        current_time,
+        build_input_read_stamp(current_time),
     );
 
     let key_outcome = client.resolve_key(
         build_key_chord(BindingModifierFlags::NONE, 'n'),
-        current_time,
+        build_input_read_stamp(current_time),
     );
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("`<C-p> n` fires new-pane, got {key_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("new-pane").expect("valid name")
     );
     assert_eq!(
@@ -170,13 +171,13 @@ fn a_key_that_continues_nothing_is_swallowed_and_the_sequence_stands() {
     let current_time = Instant::now();
     client.resolve_key(
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
-        current_time,
+        build_input_read_stamp(current_time),
     );
 
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'z'),
-            current_time,
+            build_input_read_stamp(current_time),
         ),
         KeyOutcome::Pending,
         "not PassThrough — the pane must not see it"
@@ -196,11 +197,11 @@ fn escape_leaves_an_open_sequence_without_typing_it() {
     let current_time = Instant::now();
     client.resolve_key(
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
-        current_time,
+        build_input_read_stamp(current_time),
     );
 
     assert_eq!(
-        client.resolve_key(ESCAPE_KEY_CHORD, current_time),
+        client.resolve_key(ESCAPE_KEY_CHORD, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
     assert_eq!(
@@ -215,12 +216,15 @@ fn the_unlock_chord_escapes_locked_mode_ahead_of_the_keymap() {
     let mut client = build_test_client();
     client.set_lock_mode(LockMode::Locked);
 
-    let key_outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let key_outcome = client.resolve_key(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        build_input_read_stamp(Instant::now()),
+    );
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("the reserved unlock always fires, got {key_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("valid name")
     );
 }
@@ -249,13 +253,16 @@ fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
         &ActionRegistry::new(),
     );
 
-    let key_outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
+    let key_outcome = client.resolve_key(
+        KeybindingsConfig::RESERVED_UNLOCK,
+        build_input_read_stamp(Instant::now()),
+    );
 
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("the reserved unlock always fires, got {key_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("valid name")
     );
 }
@@ -276,16 +283,20 @@ fn placement_submode_owns_the_locked_keyboard_and_restores_locked_mode() {
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
     assert_eq!(
-        client.resolve_key(client.keymap_catalog.get_unlock_chord(), Instant::now()),
+        client.resolve_key(
+            client.keymap_catalog.get_unlock_chord(),
+            build_input_read_stamp(Instant::now())
+        ),
         KeyOutcome::Discard,
         "the placement keymap has priority over the locked keymap"
     );
-    let KeyOutcome::Fire(bound_action) = client.resolve_key(ESCAPE_KEY_CHORD, Instant::now())
+    let KeyOutcome::Fire(fired_action) =
+        client.resolve_key(ESCAPE_KEY_CHORD, build_input_read_stamp(Instant::now()))
     else {
         panic!("the default placement cancel binding must fire");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("cancel-pane-placement").expect("valid name")
     );
     assert_eq!(
@@ -517,7 +528,7 @@ fn locked_mode_still_passes_keys_it_does_not_bind() {
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'a'),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
         KeyOutcome::PassThrough(build_key_chord(BindingModifierFlags::NONE, 'a'))
     );
@@ -753,7 +764,7 @@ fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again() {
         .get_pending_placement_command_id()
         .expect("Enter recorded a pending placement command");
 
-    client.reject_placement_command(command_id);
+    client.reject_sent_command(command_id);
 
     assert!(!client.is_placement_confirmation_pending());
     assert_eq!(
@@ -932,12 +943,12 @@ fn locked_mode_passes_ctrl_p_and_the_next_key_to_the_pane() {
         let next_key_chord = build_key_chord(BindingModifierFlags::NONE, next_key_character);
 
         assert_eq!(
-            client.resolve_key(ctrl_p_key_chord, Instant::now()),
+            client.resolve_key(ctrl_p_key_chord, build_input_read_stamp(Instant::now())),
             KeyOutcome::PassThrough(ctrl_p_key_chord)
         );
         assert_eq!(client.get_pending_key_sequence(), None);
         assert_eq!(
-            client.resolve_key(next_key_chord, Instant::now()),
+            client.resolve_key(next_key_chord, build_input_read_stamp(Instant::now())),
             KeyOutcome::PassThrough(next_key_chord)
         );
         assert_eq!(client.get_pending_key_sequence(), None);
@@ -989,12 +1000,12 @@ fn a_user_bound_locked_opener_opens_placement_and_keeps_the_client_locked() {
     client.set_lock_mode(LockMode::Locked);
 
     assert_eq!(
-        client.resolve_key(ctrl_p_key_chord, Instant::now()),
+        client.resolve_key(ctrl_p_key_chord, build_input_read_stamp(Instant::now())),
         KeyOutcome::Pending
     );
     assert_eq!(
-        client.resolve_key(m_key_chord, Instant::now()),
-        KeyOutcome::Fire(build_core_bound_action("begin-pane-placement"))
+        client.resolve_key(m_key_chord, build_input_read_stamp(Instant::now())),
+        KeyOutcome::Fire(build_core_fired_action("begin-pane-placement"))
     );
     assert_eq!(
         client.apply_client_action(ClientActionKind::BeginPanePlacement, None),
@@ -1011,8 +1022,8 @@ fn a_user_bound_locked_opener_opens_placement_and_keeps_the_client_locked() {
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
 
     assert_eq!(
-        client.resolve_key(ESCAPE_KEY_CHORD, Instant::now()),
-        KeyOutcome::Fire(build_core_bound_action("cancel-pane-placement"))
+        client.resolve_key(ESCAPE_KEY_CHORD, build_input_read_stamp(Instant::now())),
+        KeyOutcome::Fire(build_core_fired_action("cancel-pane-placement"))
     );
     assert_eq!(
         client.apply_client_action(ClientActionKind::CancelPanePlacement, None),
@@ -1038,7 +1049,7 @@ fn a_modal_mode_owns_the_keyboard_and_discards_what_it_does_not_bind() {
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'a'),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
         KeyOutcome::Discard,
         "a modal layer never leaks a key to the pane"
@@ -1051,7 +1062,7 @@ fn changing_mode_drops_an_open_sequence() {
     let mut client = build_test_client();
     client.resolve_key(
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
-        Instant::now(),
+        build_input_read_stamp(Instant::now()),
     );
     assert_eq!(
         client.get_pending_key_sequence(),
@@ -1076,7 +1087,7 @@ fn a_prefix_only_sequence_wakes_the_loop_once_to_show_its_hint() {
     let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(prefix_chord, current_time),
+        client.resolve_key(prefix_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
     assert!(client.is_continuation_hint_hidden());
@@ -1125,21 +1136,21 @@ fn a_shortcut_completed_before_the_which_key_delay_ends_leaves_no_hint_deadline(
     let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
     let current_time = Instant::now();
-    client.resolve_key(prefix_chord, current_time);
+    client.resolve_key(prefix_chord, build_input_read_stamp(current_time));
 
     let completed_at = current_time + which_key_delay - Duration::from_millis(1);
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'n'),
-            completed_at
+            build_input_read_stamp(completed_at)
         ),
-        KeyOutcome::Fire(build_core_bound_action("new-pane"))
+        KeyOutcome::Fire(build_core_fired_action("new-pane"))
     );
     assert!(!client.is_continuation_hint_hidden());
     assert_eq!(client.compute_next_key_wakeup(completed_at), None);
 
     let reopened_at = current_time + Duration::from_secs(1);
-    client.resolve_key(prefix_chord, reopened_at);
+    client.resolve_key(prefix_chord, build_input_read_stamp(reopened_at));
     assert!(client.is_continuation_hint_hidden());
     assert_eq!(
         client.compute_next_key_wakeup(reopened_at),
@@ -1153,12 +1164,12 @@ fn escape_during_the_which_key_delay_drops_the_sequence_and_its_hint_deadline() 
     let current_time = Instant::now();
     client.resolve_key(
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
-        current_time,
+        build_input_read_stamp(current_time),
     );
 
     let escaped_at = current_time + Duration::from_millis(100);
     assert_eq!(
-        client.resolve_key(ESCAPE_KEY_CHORD, escaped_at),
+        client.resolve_key(ESCAPE_KEY_CHORD, build_input_read_stamp(escaped_at)),
         KeyOutcome::Pending
     );
 
@@ -1173,7 +1184,7 @@ fn a_mode_change_during_the_which_key_delay_drops_the_hint_deadline() {
     let current_time = Instant::now();
     client.resolve_key(
         build_key_chord(BindingModifierFlags::CTRL, 'p'),
-        current_time,
+        build_input_read_stamp(current_time),
     );
 
     client.set_lock_mode(LockMode::Locked);
@@ -1203,11 +1214,14 @@ fn a_chord_typed_during_the_which_key_delay_keeps_the_first_chords_hint_deadline
     );
     let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let current_time = Instant::now();
-    client.resolve_key(ctrl_y_chord, current_time);
+    client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
 
     let z_typed_at = current_time + Duration::from_millis(100);
     assert_eq!(
-        client.resolve_key(build_key_chord(BindingModifierFlags::NONE, 'z'), z_typed_at),
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::NONE, 'z'),
+            build_input_read_stamp(z_typed_at)
+        ),
         KeyOutcome::Pending
     );
     assert_eq!(
@@ -1216,7 +1230,10 @@ fn a_chord_typed_during_the_which_key_delay_keeps_the_first_chords_hint_deadline
     );
 
     let a_typed_at = current_time + Duration::from_millis(200);
-    assert_eq!(client.resolve_key(a_chord, a_typed_at), KeyOutcome::Pending);
+    assert_eq!(
+        client.resolve_key(a_chord, build_input_read_stamp(a_typed_at)),
+        KeyOutcome::Pending
+    );
     assert!(client.is_continuation_hint_hidden());
     assert_eq!(
         client.compute_next_key_wakeup(a_typed_at),
@@ -1256,12 +1273,15 @@ fn a_chord_typed_after_the_hint_shows_keeps_it_shown_with_no_new_delay() {
     );
     let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let current_time = Instant::now();
-    client.resolve_key(ctrl_y_chord, current_time);
+    client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
     client.expire_key_sequence(current_time + which_key_delay);
     assert!(!client.is_continuation_hint_hidden());
 
     let a_typed_at = current_time + Duration::from_millis(400);
-    assert_eq!(client.resolve_key(a_chord, a_typed_at), KeyOutcome::Pending);
+    assert_eq!(
+        client.resolve_key(a_chord, build_input_read_stamp(a_typed_at)),
+        KeyOutcome::Pending
+    );
 
     assert!(!client.is_continuation_hint_hidden());
     assert_eq!(
@@ -1294,7 +1314,7 @@ fn a_which_key_delay_of_zero_shows_the_hint_with_the_first_chord() {
     let current_time = Instant::now();
 
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
 
@@ -1326,7 +1346,7 @@ fn an_ambiguity_deadline_before_the_which_key_delay_fires_with_no_hint_shown() {
         &build_keybindings_config_with_timing(500, 800),
     );
     let current_time = Instant::now();
-    client.resolve_key(ctrl_y_chord, current_time);
+    client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
     assert_eq!(
         client.compute_next_key_wakeup(current_time),
         Some(Duration::from_millis(500))
@@ -1335,7 +1355,7 @@ fn an_ambiguity_deadline_before_the_which_key_delay_fires_with_no_hint_shown() {
     let ambiguity_deadline = current_time + Duration::from_millis(500);
     assert_eq!(
         client.expire_key_sequence(ambiguity_deadline),
-        Some(build_core_bound_action("quit"))
+        Some(build_core_fired_action("quit"))
     );
 
     assert_eq!(client.get_pending_key_sequence(), None);
@@ -1372,9 +1392,12 @@ fn a_prefix_re_opened_by_an_ambiguity_deadline_keeps_the_first_chords_hint_deadl
         &build_keybindings_config_with_timing(500, 800),
     );
     let current_time = Instant::now();
-    client.resolve_key(ctrl_y_chord, current_time);
+    client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
     let a_typed_at = current_time + Duration::from_millis(100);
-    assert_eq!(client.resolve_key(a_chord, a_typed_at), KeyOutcome::Pending);
+    assert_eq!(
+        client.resolve_key(a_chord, build_input_read_stamp(a_typed_at)),
+        KeyOutcome::Pending
+    );
     assert_eq!(
         client.compute_next_key_wakeup(a_typed_at),
         Some(Duration::from_millis(500))
@@ -1383,7 +1406,7 @@ fn a_prefix_re_opened_by_an_ambiguity_deadline_keeps_the_first_chords_hint_deadl
     let ambiguity_deadline = current_time + Duration::from_millis(600);
     assert_eq!(
         client.expire_key_sequence(ambiguity_deadline),
-        Some(build_core_bound_action("focus-pane-left"))
+        Some(build_core_fired_action("focus-pane-left"))
     );
     assert_eq!(
         client.get_pending_key_sequence(),
@@ -1424,7 +1447,7 @@ fn a_locked_mode_prefix_waits_the_which_key_delay_and_the_unlock_chord_drops_it(
     let current_time = Instant::now();
 
     assert_eq!(
-        client.resolve_key(space_chord, current_time),
+        client.resolve_key(space_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
     assert!(client.is_continuation_hint_hidden());
@@ -1434,9 +1457,12 @@ fn a_locked_mode_prefix_waits_the_which_key_delay_and_the_unlock_chord_drops_it(
     );
 
     let unlocked_at = current_time + Duration::from_millis(100);
-    let key_outcome = client.resolve_key(client.keymap_catalog.get_unlock_chord(), unlocked_at);
+    let key_outcome = client.resolve_key(
+        client.keymap_catalog.get_unlock_chord(),
+        build_input_read_stamp(unlocked_at),
+    );
 
-    assert_eq!(key_outcome, KeyOutcome::Fire(build_unlock_bound_action()));
+    assert_eq!(key_outcome, KeyOutcome::Fire(build_unlock_fired_action(0)));
     assert_eq!(client.get_pending_key_sequence(), None);
     assert!(!client.is_continuation_hint_hidden());
     assert_eq!(client.compute_next_key_wakeup(unlocked_at), None);
@@ -1464,8 +1490,8 @@ fn two_viewers_judge_the_which_key_delay_each_on_their_own_keymap() {
     );
     let current_time = Instant::now();
 
-    delayed_client.resolve_key(ctrl_y_chord, current_time);
-    immediate_client.resolve_key(ctrl_y_chord, current_time);
+    delayed_client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
+    immediate_client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
 
     assert!(delayed_client.is_continuation_hint_hidden());
     assert_eq!(
@@ -1496,16 +1522,16 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::CTRL, 'p'),
-            current_time,
+            build_input_read_stamp(current_time),
         ),
         KeyOutcome::Pending
     );
 
-    let key_outcome = client.resolve_key(left_chord, current_time);
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let key_outcome = client.resolve_key(left_chord, build_input_read_stamp(current_time));
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("`<C-p> <Left>` fires focus-pane-left, got {key_outcome:?}");
     };
-    assert_eq!(bound_action.action_reference, focus_left_action);
+    assert_eq!(fired_action.action_reference, focus_left_action);
     assert_eq!(
         client
             .get_pending_key_sequence()
@@ -1519,11 +1545,131 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
         "the re-opened prefix arms no ambiguity deadline and keeps the hint deadline of `<C-p>`"
     );
 
-    let key_outcome = client.resolve_key(left_chord, current_time);
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let key_outcome = client.resolve_key(left_chord, build_input_read_stamp(current_time));
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("the bare `<Left>` fires focus-pane-left again, got {key_outcome:?}");
     };
-    assert_eq!(bound_action.action_reference, focus_left_action);
+    assert_eq!(fired_action.action_reference, focus_left_action);
+}
+
+/// The read of `read_at` against a screen whose frame carries the move count
+/// `painted_input_pane_moved_by_others_count`.
+fn build_tagged_input_read_stamp(
+    read_at: Instant,
+    painted_input_pane_moved_by_others_count: u64,
+) -> InputReadStamp {
+    InputReadStamp {
+        read_at,
+        painted_input_pane_moved_by_others_count,
+    }
+}
+
+/// `<C-y>` is read against move count `2` and `a` against `5`: `<C-y> a`
+/// fires `core:new-tab` tagged `2`.
+#[test]
+fn a_sequence_typed_across_a_screen_change_fires_with_the_tag_of_its_first_key() {
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let a_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    client.keymap_catalog = build_keymap_for_mode(
+        "normal",
+        &[(
+            KeySequence::from_first_and_rest(ctrl_y_chord, vec![a_chord]),
+            "new-tab",
+        )],
+    );
+    let current_time = Instant::now();
+    assert_eq!(
+        client.resolve_key(ctrl_y_chord, build_tagged_input_read_stamp(current_time, 2)),
+        KeyOutcome::Pending
+    );
+
+    let key_outcome = client.resolve_key(a_chord, build_tagged_input_read_stamp(current_time, 5));
+
+    assert_eq!(
+        key_outcome,
+        KeyOutcome::Fire(FiredAction {
+            action_reference: ActionReference::from_core_action_name("new-tab")
+                .expect("valid name"),
+            painted_input_pane_moved_by_others_count: 2,
+        })
+    );
+}
+
+/// `<C-y>` binds `core:quit`, opens `<C-y> a`, and is read against move count
+/// `2`. Its ambiguity deadline fires `core:quit` tagged `2`.
+#[test]
+fn an_ambiguity_deadline_fires_the_binding_with_the_tag_of_its_first_key() {
+    let mut client = build_test_client();
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    client.keymap_catalog = build_keymap_for_modes(
+        &[(
+            "normal",
+            &[
+                (KeySequence::from(ctrl_y_chord), "quit"),
+                (
+                    KeySequence::from_first_and_rest(
+                        ctrl_y_chord,
+                        vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
+                    ),
+                    "new-tab",
+                ),
+            ],
+        )],
+        &build_keybindings_config_with_timing(500, 800),
+    );
+    let current_time = Instant::now();
+    assert_eq!(
+        client.resolve_key(ctrl_y_chord, build_tagged_input_read_stamp(current_time, 2)),
+        KeyOutcome::Pending
+    );
+
+    assert_eq!(
+        client.expire_key_sequence(current_time + Duration::from_millis(500)),
+        Some(FiredAction {
+            action_reference: ActionReference::from_core_action_name("quit").expect("valid name"),
+            painted_input_pane_moved_by_others_count: 2,
+        })
+    );
+}
+
+/// `<C-p>` is read against move count `1`, `<Left>` against `4` and the next
+/// `<Left>` against `6`. The first `<Left>` fires `core:focus-pane-left`
+/// tagged `1` and opens `<C-p>` again tagged `4`; the second fires it tagged
+/// `4`.
+#[test]
+fn a_re_opened_prefix_fires_with_the_tag_of_the_key_that_re_opened_it() {
+    let mut client = build_test_client();
+    let current_time = Instant::now();
+    let left_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left));
+    let focus_left_action =
+        ActionReference::from_core_action_name("focus-pane-left").expect("valid name");
+    assert_eq!(
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::CTRL, 'p'),
+            build_tagged_input_read_stamp(current_time, 1),
+        ),
+        KeyOutcome::Pending
+    );
+
+    let first_key_outcome =
+        client.resolve_key(left_chord, build_tagged_input_read_stamp(current_time, 4));
+    let second_key_outcome =
+        client.resolve_key(left_chord, build_tagged_input_read_stamp(current_time, 6));
+
+    assert_eq!(
+        (first_key_outcome, second_key_outcome),
+        (
+            KeyOutcome::Fire(FiredAction {
+                action_reference: focus_left_action.clone(),
+                painted_input_pane_moved_by_others_count: 1,
+            }),
+            KeyOutcome::Fire(FiredAction {
+                action_reference: focus_left_action,
+                painted_input_pane_moved_by_others_count: 4,
+            }),
+        )
+    );
 }
 
 #[test]
@@ -1562,7 +1708,7 @@ fn a_re_opened_prefix_stays_open_through_continuous_keys_and_closes_on_one_that_
     let ctrl_p_sequence = KeySequence::from(ctrl_p_chord);
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(ctrl_p_chord, current_time),
+        client.resolve_key(ctrl_p_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
 
@@ -1573,8 +1719,8 @@ fn a_re_opened_prefix_stays_open_through_continuous_keys_and_closes_on_one_that_
     ] {
         let typed_at = current_time + Duration::from_millis(typed_after_ms);
         assert_eq!(
-            client.resolve_key(chord, typed_at),
-            KeyOutcome::Fire(build_core_bound_action(action_name))
+            client.resolve_key(chord, build_input_read_stamp(typed_at)),
+            KeyOutcome::Fire(build_core_fired_action(action_name))
         );
         assert_eq!(client.get_pending_key_sequence(), Some(&ctrl_p_sequence));
         assert_eq!(
@@ -1589,12 +1735,12 @@ fn a_re_opened_prefix_stays_open_through_continuous_keys_and_closes_on_one_that_
     assert!(!client.is_continuation_hint_hidden());
 
     assert_eq!(
-        client.resolve_key(n_chord, past_every_deadline),
-        KeyOutcome::Fire(build_core_bound_action("new-pane"))
+        client.resolve_key(n_chord, build_input_read_stamp(past_every_deadline)),
+        KeyOutcome::Fire(build_core_fired_action("new-pane"))
     );
     assert_eq!(client.get_pending_key_sequence(), None);
     assert_eq!(
-        client.resolve_key(a_chord, past_every_deadline),
+        client.resolve_key(a_chord, build_input_read_stamp(past_every_deadline)),
         KeyOutcome::PassThrough(a_chord)
     );
 }
@@ -1613,15 +1759,16 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
     );
 
     assert_eq!(
-        client.resolve_key(leader_chord, Instant::now()),
+        client.resolve_key(leader_chord, build_input_read_stamp(Instant::now())),
         KeyOutcome::Pending
     );
-    let normal_mode_outcome = client.resolve_key(right_chord, Instant::now());
-    let KeyOutcome::Fire(bound_action) = normal_mode_outcome else {
+    let normal_mode_outcome =
+        client.resolve_key(right_chord, build_input_read_stamp(Instant::now()));
+    let KeyOutcome::Fire(fired_action) = normal_mode_outcome else {
         panic!("the custom normal-mode arrow binding must fire, got {normal_mode_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("quit").expect("valid name")
     );
 
@@ -1635,7 +1782,7 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
     });
 
     assert_eq!(
-        client.resolve_key(right_chord, Instant::now()),
+        client.resolve_key(right_chord, build_input_read_stamp(Instant::now())),
         KeyOutcome::Discard,
         "the active pane keymap is checked instead of the normal keymap"
     );
@@ -1657,8 +1804,8 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
         &KeybindingsConfig::default(),
     );
     assert_eq!(
-        client.resolve_key(right_chord, Instant::now()),
-        KeyOutcome::Fire(build_core_bound_action("cancel-pane-placement"))
+        client.resolve_key(right_chord, build_input_read_stamp(Instant::now())),
+        KeyOutcome::Fire(build_core_fired_action("cancel-pane-placement"))
     );
 }
 
@@ -1673,13 +1820,13 @@ fn a_one_chord_binding_of_a_continuous_action_opens_no_prefix() {
         &[(KeySequence::from(ctrl_y_chord), "focus-pane-left")],
     );
 
-    let key_outcome = client.resolve_key(ctrl_y_chord, Instant::now());
+    let key_outcome = client.resolve_key(ctrl_y_chord, build_input_read_stamp(Instant::now()));
 
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("`<C-y>` fires focus-pane-left, got {key_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("focus-pane-left").expect("valid name")
     );
     assert_eq!(client.get_pending_key_sequence(), None);
@@ -1694,7 +1841,7 @@ fn an_input_event_read_and_not_yet_taken_holds_back_the_timer_judgement() {
         .expect("no input event is on its way");
     assert!(first_judged_after <= first_judge_time && first_judge_time <= Instant::now());
 
-    let read_at = input_read_clock.stamp_input_read(Instant::now());
+    let read_at = input_read_clock.stamp_input_read(Instant::now(), 0).read_at;
 
     assert!(input_read_clock.has_untaken_input());
     assert_eq!(input_read_clock.find_input_judge_time(), None);
@@ -1714,15 +1861,19 @@ fn each_input_stamp_is_greater_than_the_one_before() {
     let input_read_clock = InputReadClock::default();
     let clock_reading = Instant::now();
 
-    let first_read_at = input_read_clock.stamp_input_read(clock_reading);
-    let same_reading_read_at = input_read_clock.stamp_input_read(clock_reading);
-    let earlier_reading_read_at = input_read_clock.stamp_input_read(
-        clock_reading
-            .checked_sub(Duration::from_secs(1))
-            .expect("the clock reads past one second"),
-    );
-    let next_second_reading_read_at =
-        input_read_clock.stamp_input_read(clock_reading + Duration::from_secs(1));
+    let first_read_at = input_read_clock.stamp_input_read(clock_reading, 0).read_at;
+    let same_reading_read_at = input_read_clock.stamp_input_read(clock_reading, 0).read_at;
+    let earlier_reading_read_at = input_read_clock
+        .stamp_input_read(
+            clock_reading
+                .checked_sub(Duration::from_secs(1))
+                .expect("the clock reads past one second"),
+            0,
+        )
+        .read_at;
+    let next_second_reading_read_at = input_read_clock
+        .stamp_input_read(clock_reading + Duration::from_secs(1), 0)
+        .read_at;
 
     assert_eq!(first_read_at, clock_reading);
     assert_eq!(
@@ -1759,13 +1910,14 @@ fn an_open_deadline_asks_for_no_wakeup_while_an_input_event_is_on_its_way() {
     let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
 
     let read_at = client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
 
     assert_eq!(client.compute_next_key_wakeup(current_time), None);
 
@@ -1802,7 +1954,7 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
     let current_time = Instant::now();
 
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
     assert_eq!(
@@ -1855,7 +2007,7 @@ fn setting_the_mode_the_viewer_is_already_in_leaves_an_open_sequence_alone() {
     // viewer is already in leaves the chords it is holding where they are.
     let mut client = build_test_client();
     let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
-    client.resolve_key(prefix_chord, Instant::now());
+    client.resolve_key(prefix_chord, build_input_read_stamp(Instant::now()));
 
     client.set_lock_mode(LockMode::Normal);
 
@@ -1885,17 +2037,20 @@ fn the_unlock_chord_takes_a_sequence_open_in_locked_mode_with_it() {
     client.set_lock_mode(LockMode::Locked);
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(prefix_chord, current_time),
+        client.resolve_key(prefix_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
 
-    let key_outcome = client.resolve_key(client.keymap_catalog.get_unlock_chord(), current_time);
+    let key_outcome = client.resolve_key(
+        client.keymap_catalog.get_unlock_chord(),
+        build_input_read_stamp(current_time),
+    );
 
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("the reserved unlock always fires, got {key_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("valid name")
     );
     assert_eq!(
@@ -1925,7 +2080,7 @@ fn a_deadline_already_past_asks_the_loop_to_wake_at_once() {
     let chord_timeout = client.keymap_catalog.get_chord_timeout();
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
 
@@ -1958,7 +2113,7 @@ fn a_keymap_that_retired_the_binding_drops_the_waiting_sequence_instead_of_firin
     let chord_timeout = client.keymap_catalog.get_chord_timeout();
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
 
@@ -1994,11 +2149,11 @@ fn a_three_chord_binding_fires_only_on_its_third_chord() {
     let current_time = Instant::now();
 
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
     assert_eq!(
-        client.resolve_key(first_following_chord, current_time),
+        client.resolve_key(first_following_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
     assert_eq!(
@@ -2010,13 +2165,14 @@ fn a_three_chord_binding_fires_only_on_its_third_chord() {
         "both chords are held, in the order they were typed"
     );
 
-    let key_outcome = client.resolve_key(second_following_chord, current_time);
+    let key_outcome =
+        client.resolve_key(second_following_chord, build_input_read_stamp(current_time));
 
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("`<C-y> a b` fires quit, got {key_outcome:?}");
     };
     assert_eq!(
-        bound_action.action_reference,
+        fired_action.action_reference,
         ActionReference::from_core_action_name("quit").expect("valid name")
     );
     assert_eq!(client.get_pending_key_sequence(), None);
@@ -2043,15 +2199,16 @@ fn a_continuous_three_chord_binding_re_opens_its_two_chord_prefix() {
         )],
     );
     let current_time = Instant::now();
-    client.resolve_key(ctrl_y_chord, current_time);
-    client.resolve_key(first_following_chord, current_time);
+    client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time));
+    client.resolve_key(first_following_chord, build_input_read_stamp(current_time));
 
-    let key_outcome = client.resolve_key(second_following_chord, current_time);
+    let key_outcome =
+        client.resolve_key(second_following_chord, build_input_read_stamp(current_time));
 
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("`<C-y> a b` fires focus-pane-left, got {key_outcome:?}");
     };
-    assert_eq!(bound_action.action_reference, focus_left_action);
+    assert_eq!(fired_action.action_reference, focus_left_action);
     assert_eq!(
         client.get_pending_key_sequence(),
         Some(&KeySequence::from_first_and_rest(
@@ -2066,12 +2223,13 @@ fn a_continuous_three_chord_binding_re_opens_its_two_chord_prefix() {
         "the re-opened prefix arms no ambiguity deadline and keeps the hint deadline of `<C-y>`"
     );
 
-    let key_outcome = client.resolve_key(second_following_chord, current_time);
+    let key_outcome =
+        client.resolve_key(second_following_chord, build_input_read_stamp(current_time));
 
-    let KeyOutcome::Fire(bound_action) = key_outcome else {
+    let KeyOutcome::Fire(fired_action) = key_outcome else {
         panic!("the bare `b` fires focus-pane-left again, got {key_outcome:?}");
     };
-    assert_eq!(bound_action.action_reference, focus_left_action);
+    assert_eq!(fired_action.action_reference, focus_left_action);
 }
 
 // --- The move chooser and floating pane move mode ---------------------------
@@ -2174,6 +2332,7 @@ fn begin_pane_placement_opens_the_move_chooser_while_an_unpinned_floating_pane_i
         sequence: KeySequence::from(build_key_chord(BindingModifierFlags::CTRL, 'p')),
         ambiguity_deadline: None,
         continuation_hint_hidden_until: None,
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     assert_eq!(
@@ -2426,32 +2585,32 @@ fn the_move_modes_resolve_their_own_keys_and_discard_the_rest() {
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'a'),
-            current_time
+            build_input_read_stamp(current_time)
         ),
         KeyOutcome::Discard
     );
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 't'),
-            current_time
+            build_input_read_stamp(current_time)
         ),
-        KeyOutcome::Fire(build_core_bound_action("begin-tiled-pane-placement"))
+        KeyOutcome::Fire(build_core_fired_action("begin-tiled-pane-placement"))
     );
 
     client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame));
     assert_eq!(
         client.resolve_key(
             build_key_chord(BindingModifierFlags::NONE, 'a'),
-            current_time
+            build_input_read_stamp(current_time)
         ),
         KeyOutcome::Discard
     );
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Right)),
-            current_time
+            build_input_read_stamp(current_time)
         ),
-        KeyOutcome::Fire(build_core_bound_action("move-floating-pane-right"))
+        KeyOutcome::Fire(build_core_fired_action("move-floating-pane-right"))
     );
 }
 
@@ -2906,7 +3065,7 @@ fn enter_sends_exactly_one_move_to_the_cell_the_arrows_reached() {
         "a second Enter sends nothing"
     );
 
-    client.reject_placement_command(command_id);
+    client.reject_sent_command(command_id);
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
 }
 
@@ -2987,7 +3146,7 @@ fn a_rejected_floating_pane_move_keeps_the_mode_on_with_either_stay_setting() {
             Some(Point { column: 10, row: 5 })
         );
 
-        client.reject_placement_command(command_id);
+        client.reject_sent_command(command_id);
 
         assert_eq!(
             client.pane_move_mode,
@@ -3265,9 +3424,9 @@ fn escape_ends_floating_pane_move_mode_and_drops_the_draft() {
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
-        KeyOutcome::Fire(build_core_bound_action("cancel-floating-pane-move"))
+        KeyOutcome::Fire(build_core_fired_action("cancel-floating-pane-move"))
     );
     assert_eq!(
         client.apply_client_action(ClientActionKind::CancelFloatingPaneMove, Some(&mouse_frame)),

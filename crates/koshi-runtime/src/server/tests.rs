@@ -605,7 +605,7 @@ fn submit_command_dispatches_against_live_state() {
 #[test]
 fn a_command_event_with_no_wire_form_reaches_no_subscriber() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let command_id = CommandId::new();
 
     let command_result = server.submit_command(CommandEnvelope::from_parts(
@@ -630,7 +630,7 @@ fn a_command_event_with_no_wire_form_reaches_no_subscriber() {
 #[test]
 fn publish_events_delivers_out_of_command_events_to_subscribers() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let published_events = vec![Event::Quit(QuitCause::Requested)];
 
     server.publish_events(&published_events);
@@ -668,7 +668,7 @@ fn publish_events_remembers_out_of_command_events_in_the_recent_events_ring() {
 fn subscribing_records_which_client_the_subscriber_views() {
     let (mut server, client_id) = boot_server();
 
-    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     assert_eq!(
         server
@@ -683,7 +683,7 @@ fn subscribing_records_which_client_the_subscriber_views() {
 #[test]
 fn a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     drop(delivery_receiver);
 
@@ -697,7 +697,7 @@ fn a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
 fn a_session_post_to_a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
     let (mut server, client_id) = boot_server();
     let session_id = *server.list_sessions().keys().next().expect("session");
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     drop(delivery_receiver);
 
@@ -714,7 +714,7 @@ fn a_session_post_to_a_subscriber_whose_receiver_is_gone_loses_its_recorded_clie
 #[test]
 fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     assert_eq!(
@@ -759,7 +759,7 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
         Some(PaneArea::Starving),
         None,
     );
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     assert_eq!(
@@ -812,7 +812,7 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
 #[test]
 fn resyncing_with_nobody_paused_delivers_nothing() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
 
     server.resync_lagged(Instant::now());
@@ -831,7 +831,7 @@ fn resyncing_with_nobody_paused_delivers_nothing() {
 #[test]
 fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
 
@@ -883,7 +883,7 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
 #[test]
 fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
     let (mut server, client_id) = boot_server();
-    let (kept_receiver, _) = server.subscribe(client_id, 60);
+    let (kept_receiver, _) = server.subscribe(client_id, 60, None);
     let kept_subscriber_id = server.subscriptions[0].subscriber_id;
     // Straight off the bus, so nothing records which client it views.
     let (orphan_subscriber_id, orphan_receiver, _) = server.event_bus.subscribe();
@@ -925,8 +925,8 @@ fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
 #[test]
 fn a_gone_receiver_costs_only_its_own_recorded_client() {
     let (mut server, client_id) = boot_server();
-    let (kept_receiver, _) = server.subscribe(client_id, 60);
-    let (gone_receiver, _) = server.subscribe(client_id, 60);
+    let (kept_receiver, _) = server.subscribe(client_id, 60, None);
+    let (gone_receiver, _) = server.subscribe(client_id, 60, None);
     let kept_subscriber_id = server.subscriptions[0].subscriber_id;
     let gone_subscriber_id = server.subscriptions[1].subscriber_id;
     drop(gone_receiver);
@@ -970,7 +970,7 @@ fn a_paused_subscriber_that_views_no_client_is_unsubscribed() {
 fn a_paused_subscriber_whose_client_is_gone_is_unsubscribed() {
     let (mut server, _client_id) = boot_server();
     // No session holds this id, so no frame can ever be built for it.
-    let (delivery_receiver, _) = server.subscribe(ClientId::new(), 60);
+    let (delivery_receiver, _) = server.subscribe(ClientId::new(), 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     assert_eq!(
@@ -994,8 +994,8 @@ fn pushing_frames_serves_every_client() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_client_through_server(&mut server, local_client_id, REMOTE_VIEWPORT_SIZE, None);
-    let (local_receiver, _) = server.subscribe(local_client_id, 60);
-    let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
+    let (local_receiver, _) = server.subscribe(local_client_id, 60, None);
+    let (remote_receiver, _) = server.subscribe(remote_client_id, 60, None);
     let local_frame = server.build_snapshot(local_client_id).expect("frame");
     let remote_frame = server.build_snapshot(remote_client_id).expect("frame");
     assert_eq!(
@@ -1022,7 +1022,7 @@ fn pushing_frames_serves_every_client() {
 #[test]
 fn a_host_write_queues_its_wake_ahead_of_the_next_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60, None);
     // An OSC 52 copy of "hello", as `copy_to_clipboard` queues it.
     assert!(server.queue_host_write(client_id, &HostWrite::from_clipboard_copy("c", b"hello")));
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
@@ -1048,7 +1048,7 @@ fn a_host_write_for_a_client_with_no_subscriber_is_dropped() {
 
     assert!(!server.queue_host_write(client_id, &HostWrite::from_clipboard_copy("c", b"hello")));
 
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     assert_eq!(server.take_host_writes(client_id, &delivery_receiver), None);
 }
 
@@ -1057,7 +1057,7 @@ fn a_detach_leaves_the_waiting_bytes_to_the_connection_writer_and_adds_none() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_client_through_server(&mut server, local_client_id, TEST_VIEWPORT_SIZE, None);
-    let (delivery_receiver, writer_handoff) = server.subscribe(remote_client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(remote_client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     assert!(server.queue_host_write(
         remote_client_id,
@@ -1093,7 +1093,7 @@ fn pushing_frames_serves_no_client_that_detached() {
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_client_through_server(&mut server, local_client_id, TEST_VIEWPORT_SIZE, None);
-    let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
+    let (remote_receiver, _) = server.subscribe(remote_client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
 
     // The detach takes the subscription with the client record, so the push
@@ -1112,8 +1112,8 @@ fn pushing_frames_serves_no_client_that_detached() {
 #[test]
 fn a_frame_for_a_gone_receiver_costs_that_subscription_its_recorded_client() {
     let (mut server, client_id) = boot_server();
-    let (kept_receiver, _) = server.subscribe(client_id, 60);
-    let (gone_receiver, _) = server.subscribe(client_id, 60);
+    let (kept_receiver, _) = server.subscribe(client_id, 60, None);
+    let (gone_receiver, _) = server.subscribe(client_id, 60, None);
     let kept_subscriber_id = server.subscriptions[0].subscriber_id;
     let gone_subscriber_id = server.subscriptions[1].subscriber_id;
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
@@ -1136,7 +1136,7 @@ fn a_frame_for_a_gone_receiver_costs_that_subscription_its_recorded_client() {
 #[test]
 fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     // Free one slot and spend it on the resync frame: the subscriber is live
@@ -1181,7 +1181,7 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
 #[test]
 fn a_paused_subscriber_whose_view_changed_sets_no_wakeup() {
     let (mut server, client_id) = boot_server();
-    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
     pause_subscribers(&mut server);
     let current_time = Instant::now();
 
@@ -1237,8 +1237,8 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
     let (mut server, local_client_id) = boot_server();
     let remote_client_id =
         attach_client_through_server(&mut server, local_client_id, REMOTE_VIEWPORT_SIZE, None);
-    let (local_receiver, local_writer_handoff) = server.subscribe(local_client_id, 60);
-    let (remote_receiver, remote_writer_handoff) = server.subscribe(remote_client_id, 60);
+    let (local_receiver, local_writer_handoff) = server.subscribe(local_client_id, 60, None);
+    let (remote_receiver, remote_writer_handoff) = server.subscribe(remote_client_id, 60, None);
     let placement_delivery = Delivery::PanePlacementCommitted(fill_subscriber_queues(&mut server));
     // The first frames find both queues full: both frames are dropped, and
     // both subscribers are owed a frame.
@@ -1285,7 +1285,7 @@ fn freed_slots_on_two_full_queues_give_each_client_one_frame_and_owe_nothing_mor
 #[test]
 fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60, None);
     let pane_placement_committed = fill_subscriber_queues(&mut server);
     let placement_delivery = Delivery::PanePlacementCommitted(pane_placement_committed.clone());
     let frame_time = Instant::now();
@@ -1310,7 +1310,7 @@ fn a_freed_slot_taken_before_the_frame_owes_the_subscriber_a_frame_again() {
 #[test]
 fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     let frame_time = Instant::now();
@@ -1343,7 +1343,7 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
 #[test]
 fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_mark() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60, None);
     let placement_delivery = Delivery::PanePlacementCommitted(fill_subscriber_queues(&mut server));
     let frame_time = Instant::now();
     server.push_frames(frame_time);
@@ -1369,7 +1369,7 @@ fn a_render_offers_a_subscriber_owed_a_frame_nothing_until_its_writer_takes_the_
 #[test]
 fn a_paused_subscriber_owed_a_frame_is_not_resynced_until_its_writer_takes_the_mark() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, writer_handoff) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     server.resync_lagged(Instant::now());
@@ -1394,8 +1394,8 @@ fn a_push_queues_nothing_for_a_gone_client_and_drops_a_gone_receivers_subscripti
     let (mut server, client_id) = boot_server();
     // No session holds this id, so no frame can ever be built for it.
     let unknown_client_id = ClientId::new();
-    let (unknown_client_receiver, _) = server.subscribe(unknown_client_id, 60);
-    let (gone_receiver, _) = server.subscribe(client_id, 60);
+    let (unknown_client_receiver, _) = server.subscribe(unknown_client_id, 60, None);
+    let (gone_receiver, _) = server.subscribe(client_id, 60, None);
     let unknown_client_subscriber_id = server.subscriptions[0].subscriber_id;
     let gone_subscriber_id = server.subscriptions[1].subscriber_id;
     drop(gone_receiver);
@@ -1728,6 +1728,7 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
             None,
             60,
             None,
+            None,
         )
         .expect("the session hands the record back");
 
@@ -1763,6 +1764,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             None,
             60,
             None,
+            None,
         )
         .expect("the session mints a client");
     assert_eq!(starving_attachment.pane_area, Some(PaneArea::Starving));
@@ -1778,6 +1780,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session mints a client");
@@ -1801,6 +1804,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session mints a client instead of refusing");
@@ -1834,6 +1838,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             None,
             60,
             None,
+            None,
         )
         .expect("the first attach takes the record");
     assert_eq!(held_attachment.client_id, client_id);
@@ -1849,6 +1854,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the second attach mints a client instead of refusing");
@@ -1910,6 +1916,7 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session mints a client");
@@ -2007,6 +2014,7 @@ fn attach_from_origin_with_token(
             client_origin,
             granted_identity,
             60,
+            None,
             None,
         )
         .expect("the session mints a client")
@@ -2283,6 +2291,7 @@ fn a_client_awaiting_its_reconnect_keeps_its_index_from_fresh_clients_and_takes_
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session hands the record back");
@@ -2998,6 +3007,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         None,
         60,
         None,
+        None,
     );
 
     assert!(refused_attachment.is_none(), "no session is left to join");
@@ -3115,6 +3125,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the record is handed back");
@@ -3467,6 +3478,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             None,
             60,
             None,
+            None,
         )
         .expect("the session mints a client");
     let foreign_token_attachment = resumed_server
@@ -3480,6 +3492,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             ClientOrigin::Remote,
             None,
             60,
+            None,
             None,
         )
         .expect("the session mints a client");
@@ -3506,6 +3519,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session hands the record back");
@@ -3546,6 +3560,7 @@ fn after_a_swap_a_carried_client_with_no_token_hash_is_not_handed_back_by_its_id
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session mints a client");
@@ -3679,6 +3694,7 @@ fn a_carried_client_whose_tab_is_gone_is_taken_over_by_its_token_and_keeps_its_v
             None,
             60,
             None,
+            None,
         )
         .expect("the session mints a client");
 
@@ -3717,6 +3733,7 @@ fn a_token_proven_claim_on_a_client_a_connection_is_streaming_for_takes_that_cli
             None,
             60,
             None,
+            None,
         )
         .expect("the session mints a client");
 
@@ -3734,9 +3751,9 @@ fn a_token_proven_claim_on_a_client_a_connection_is_streaming_for_takes_that_cli
 #[test]
 fn a_session_switch_reaches_every_subscriber_that_views_the_client() {
     let (mut server, client_id) = boot_server();
-    let (first_receiver, _) = server.subscribe(client_id, 60);
-    let (second_receiver, _) = server.subscribe(client_id, 60);
-    let (onlooker_receiver, _) = server.subscribe(ClientId::new(), 60);
+    let (first_receiver, _) = server.subscribe(client_id, 60, None);
+    let (second_receiver, _) = server.subscribe(client_id, 60, None);
+    let (onlooker_receiver, _) = server.subscribe(ClientId::new(), 60, None);
     let target_session_id = SessionId::new();
 
     assert!(server.send_switch(client_id, target_session_id, Some(1001)));
@@ -3762,7 +3779,7 @@ fn a_session_switch_reaches_every_subscriber_that_views_the_client() {
 #[test]
 fn a_session_switch_for_a_client_no_subscriber_views_is_held_by_nobody() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     assert!(!server.send_switch(ClientId::new(), SessionId::new(), None));
 
@@ -3775,7 +3792,7 @@ fn a_session_switch_for_a_client_no_subscriber_views_is_held_by_nobody() {
 #[test]
 fn a_session_switch_offered_to_a_paused_subscriber_is_held_by_nobody() {
     let (mut server, client_id) = boot_server();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     let _backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
@@ -4429,8 +4446,8 @@ fn a_session_post_reaches_every_attached_client_once_and_stays_in_the_session_qu
     let session_id = *server.list_sessions().keys().next().expect("session");
     let second_client_id =
         attach_client_through_server(&mut server, first_client_id, TEST_VIEWPORT_SIZE, None);
-    let (first_delivery_receiver, _) = server.subscribe(first_client_id, 60);
-    let (second_delivery_receiver, _) = server.subscribe(second_client_id, 60);
+    let (first_delivery_receiver, _) = server.subscribe(first_client_id, 60, None);
+    let (second_delivery_receiver, _) = server.subscribe(second_client_id, 60, None);
 
     server.post_session_notification(
         session_id,
@@ -4477,8 +4494,8 @@ fn a_killed_pane_the_session_survives_posts_one_error_to_each_attached_client() 
     let second_client_id =
         attach_client_through_server(&mut server, first_client_id, TEST_VIEWPORT_SIZE, None);
     let split_pane_id = split_booted_pane(&mut server, first_client_id, root_pane_id);
-    let (first_delivery_receiver, _) = server.subscribe(first_client_id, 60);
-    let (second_delivery_receiver, _) = server.subscribe(second_client_id, 60);
+    let (first_delivery_receiver, _) = server.subscribe(first_client_id, 60, None);
+    let (second_delivery_receiver, _) = server.subscribe(second_client_id, 60, None);
 
     let exit_events = server.handle_child_exit(split_pane_id, ExitStatus::Signaled(9));
     server.publish_events(&exit_events);
@@ -4502,7 +4519,7 @@ fn a_killed_pane_the_session_survives_posts_one_error_to_each_attached_client() 
 fn a_post_to_a_session_this_process_does_not_hold_changes_nothing() {
     let (mut server, client_id) = boot_server();
     let session_id = *server.list_sessions().keys().next().expect("session");
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let queue_before = server.list_sessions()[&session_id]
         .notification_queue
         .clone();
@@ -4520,7 +4537,7 @@ fn a_post_to_a_session_this_process_does_not_hold_changes_nothing() {
 fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
     let (mut server, client_id) = boot_server();
     let session_id = *server.list_sessions().keys().next().expect("session");
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let subscriber_id = server.subscriptions[0].subscriber_id;
     pause_subscribers(&mut server);
     server.post_session_notification(

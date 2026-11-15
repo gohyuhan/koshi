@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{
     build_server_with_fake_pty_backend, create_session_with_attached_client, TEST_VIEWPORT_SIZE,
 };
-use koshi_client::input::KeyOutcome;
+use koshi_client::input::{InputReadStamp, KeyOutcome};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
@@ -33,7 +33,7 @@ fn bootstrap_opens_one_shell_and_its_first_subscriber_gets_a_frame_at_once() {
     assert_eq!(render_snapshot.pane_snapshots.len(), 1);
 
     // A new subscriber is owed its first frame, which is due immediately.
-    let (_delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60);
+    let (_delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60, None);
     assert_eq!(
         server.compute_next_render_wakeup(Instant::now()),
         Some(Duration::ZERO)
@@ -96,7 +96,11 @@ fn typed_keys_write_to_the_focused_pane() {
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
         let key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, key);
-        match viewer.resolve_key(key_chord, Instant::now()) {
+        let input_read_stamp = InputReadStamp {
+            read_at: Instant::now(),
+            painted_input_pane_moved_by_others_count: 0,
+        };
+        match viewer.resolve_key(key_chord, input_read_stamp) {
             KeyOutcome::PassThrough(passthrough_key_chord) => {
                 server.handle_key_inputs(
                     client_id,

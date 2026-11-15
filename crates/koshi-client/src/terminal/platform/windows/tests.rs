@@ -129,18 +129,20 @@ fn count_input_records(terminal_device: &TerminalDevice) -> u32 {
     input_record_count
 }
 
-/// Run one `try_read_event` of `event_source` with `timeout_duration` on its
-/// own thread, and return its result and the source. A read still running
+/// Run one `try_read_event` of `event_source` with `timeout_duration` and
+/// `input_read_clock` on its own thread, and return its result and the source. A read still running
 /// after `BLOCKED_READ_LIMIT_DURATION` fails the test, after an `x` key record
 /// is written that ends the read.
 fn read_event_on_thread(
     terminal_device: &TerminalDevice,
     mut event_source: EventSource,
     timeout_duration: Duration,
-) -> (io::Result<Option<Event>>, EventSource) {
+    input_read_clock: &Arc<InputReadClock>,
+) -> (io::Result<Option<TaggedEvent>>, EventSource) {
+    let input_read_clock = Arc::clone(input_read_clock);
     let (read_result_sender, read_result_receiver) = mpsc::channel();
     thread::spawn(move || {
-        let read_result = event_source.try_read_event(Some(timeout_duration));
+        let read_result = event_source.try_read_event(Some(timeout_duration), &input_read_clock);
         let _ = read_result_sender.send((read_result, event_source));
     });
     match read_result_receiver.recv_timeout(BLOCKED_READ_LIMIT_DURATION) {
@@ -155,10 +157,10 @@ fn read_event_on_thread(
     }
 }
 
-/// The one event `terminal_bytes` parse to.
-fn parse_terminal_bytes(terminal_bytes: &[u8]) -> Event {
+/// The one event `terminal_bytes` parse to, tagged with the move count `0`.
+fn parse_terminal_bytes(terminal_bytes: &[u8]) -> TaggedEvent {
     let mut terminal_input_parser = Parser::default();
-    terminal_input_parser.process_input_bytes(terminal_bytes);
+    terminal_input_parser.process_input_bytes(terminal_bytes, 0);
     terminal_input_parser.finish_pending_input();
     terminal_input_parser
         .remove_next_pending_event()
@@ -198,8 +200,12 @@ fn typed_ahead_records_that_give_no_character_are_dropped_and_the_read_waits_out
         build_key_record(false, VK_RETURN, u16::from(b'\r'), 0),
     ]);
 
-    let (read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, EMPTY_READ_TIMEOUT_DURATION);
+    let (read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        EMPTY_READ_TIMEOUT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(read_result.expect("the read succeeds"), None);
     assert_eq!(count_input_records(&terminal_device), 0);
@@ -211,8 +217,12 @@ fn a_focus_record_in_raw_mode_is_dropped_and_the_read_waits_out_its_timeout() {
     let (terminal_device, event_source) = open_raw_console(&[]);
     write_input_records(&terminal_device, &[build_focus_record()]);
 
-    let (read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, EMPTY_READ_TIMEOUT_DURATION);
+    let (read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        EMPTY_READ_TIMEOUT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(read_result.expect("the read succeeds"), None);
     assert_eq!(count_input_records(&terminal_device), 0);
@@ -229,10 +239,18 @@ fn a_key_record_behind_dropped_records_reads_as_its_key_and_its_release_reads_no
         build_key_record(false, VK_SHIFT, 0, 0),
     ]);
 
-    let (first_read_result, event_source) =
-        read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
-    let (second_read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, EMPTY_READ_TIMEOUT_DURATION);
+    let (first_read_result, event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        BLOCKED_READ_LIMIT_DURATION,
+        &Arc::default(),
+    );
+    let (second_read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        EMPTY_READ_TIMEOUT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(
         first_read_result.expect("the first read succeeds"),
@@ -248,8 +266,12 @@ fn a_character_on_a_typed_ahead_alt_release_reads_as_that_character() {
     let (terminal_device, event_source) =
         open_raw_console(&[build_key_record(false, VK_MENU, 0xE9, 0)]);
 
-    let (read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
+    let (read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        BLOCKED_READ_LIMIT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(
         read_result.expect("the read succeeds"),
@@ -269,8 +291,12 @@ fn a_typed_ahead_press_of_the_key_that_types_nul_reads_as_a_nul_byte() {
         build_nul_key_control_key_state(nul_key_scan),
     )]);
 
-    let (read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
+    let (read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        BLOCKED_READ_LIMIT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(
         read_result.expect("the read succeeds"),
@@ -311,8 +337,12 @@ fn typed_ahead_records_that_differ_from_the_press_that_types_nul_are_dropped() {
         ),
     ]);
 
-    let (read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, EMPTY_READ_TIMEOUT_DURATION);
+    let (read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        EMPTY_READ_TIMEOUT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(read_result.expect("the read succeeds"), None);
     assert_eq!(count_input_records(&terminal_device), 0);
@@ -330,8 +360,12 @@ fn a_typed_surrogate_pair_reads_as_one_character() {
         ],
     );
 
-    let (read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
+    let (read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        BLOCKED_READ_LIMIT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(
         read_result.expect("the read succeeds"),
@@ -339,28 +373,43 @@ fn a_typed_surrogate_pair_reads_as_one_character() {
     );
 }
 
+/// The first console read ends with the high surrogate `0xD83D` while the
+/// screen shows move count `0`. A paint sets the count to `1` before the read
+/// that brings `0xDE00` and `b`. The emoji carries `0` and `b` carries `1`.
 #[test]
-fn a_surrogate_pair_that_one_read_splits_reads_as_one_character() {
+fn a_surrogate_pair_that_one_read_splits_reads_as_one_character_with_the_move_count_of_its_high_surrogate(
+) {
     let _console_input_guard = lock_console_input();
     let (terminal_device, mut event_source) = open_raw_console(&[]);
+    let input_read_clock = Arc::new(InputReadClock::default());
     let mut typed_records =
         vec![build_typed_unit_record(u16::from(b'a')); TERMINAL_INPUT_UNIT_COUNT - 1];
     typed_records.extend([
         build_typed_unit_record(0xD83D),
         build_typed_unit_record(0xDE00),
+        build_typed_unit_record(u16::from(b'b')),
     ]);
     write_input_records(&terminal_device, &typed_records);
 
     let mut read_events = Vec::new();
-    for _ in 0..TERMINAL_INPUT_UNIT_COUNT {
-        let (read_result, returned_event_source) =
-            read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
+    for _ in 0..=TERMINAL_INPUT_UNIT_COUNT {
+        let (read_result, returned_event_source) = read_event_on_thread(
+            &terminal_device,
+            event_source,
+            BLOCKED_READ_LIMIT_DURATION,
+            &input_read_clock,
+        );
         event_source = returned_event_source;
         read_events.push(read_result.expect("the read succeeds"));
+        input_read_clock.set_painted_input_pane_moved_by_others_count(1);
     }
 
     let mut expected_events = vec![Some(parse_terminal_bytes(b"a")); TERMINAL_INPUT_UNIT_COUNT - 1];
     expected_events.push(Some(parse_terminal_bytes("\u{1F600}".as_bytes())));
+    expected_events.push(Some(TaggedEvent {
+        input_tag: 1,
+        ..parse_terminal_bytes(b"b")
+    }));
     assert_eq!(read_events, expected_events);
     assert_eq!(count_input_records(&terminal_device), 0);
 }
@@ -373,10 +422,18 @@ fn a_typed_ahead_unpaired_high_surrogate_reads_as_the_replacement_character() {
         build_typed_unit_record(u16::from(b'a')),
     ]);
 
-    let (first_read_result, event_source) =
-        read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
-    let (second_read_result, _event_source) =
-        read_event_on_thread(&terminal_device, event_source, BLOCKED_READ_LIMIT_DURATION);
+    let (first_read_result, event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        BLOCKED_READ_LIMIT_DURATION,
+        &Arc::default(),
+    );
+    let (second_read_result, _event_source) = read_event_on_thread(
+        &terminal_device,
+        event_source,
+        BLOCKED_READ_LIMIT_DURATION,
+        &Arc::default(),
+    );
 
     assert_eq!(
         first_read_result.expect("the first read succeeds"),

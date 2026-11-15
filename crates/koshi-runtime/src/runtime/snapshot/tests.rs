@@ -250,7 +250,7 @@ fn build_snapshot_carries_the_clients_lock_mode_and_mouse_select() {
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(render_snapshot.client_snapshot.lock_mode, LockMode::Normal);
     assert_eq!(
-        render_snapshot.client_snapshot.last_applied_lock_command_id,
+        render_snapshot.client_snapshot.last_settled_lock_command_id,
         None
     );
     assert!(!render_snapshot.client_snapshot.is_mouse_selection_enabled);
@@ -258,13 +258,13 @@ fn build_snapshot_carries_the_clients_lock_mode_and_mouse_select() {
     let lock_command_id = CommandId::new();
     let client = server.get_client_mut(client_id).expect("client");
     client.update_lock_mode(LockMode::Locked);
-    client.set_last_applied_lock_command_id(lock_command_id);
+    client.set_last_settled_lock_command_id(lock_command_id);
     client.toggle_mouse_selection();
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(render_snapshot.client_snapshot.lock_mode, LockMode::Locked);
     assert_eq!(
-        render_snapshot.client_snapshot.last_applied_lock_command_id,
+        render_snapshot.client_snapshot.last_settled_lock_command_id,
         Some(lock_command_id)
     );
     assert!(render_snapshot.client_snapshot.is_mouse_selection_enabled);

@@ -154,9 +154,9 @@ fn build_render_snapshot_with_images(
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,
             active_tab_focused_pane_id: painted_frame.client_snapshot.active_tab_focused_pane_id,
             lock_mode: painted_frame.client_snapshot.lock_mode,
-            last_applied_lock_command_id: painted_frame
+            last_settled_lock_command_id: painted_frame
                 .client_snapshot
-                .last_applied_lock_command_id,
+                .last_settled_lock_command_id,
             last_applied_floating_pane_move_command_id: painted_frame
                 .client_snapshot
                 .last_applied_floating_pane_move_command_id,
@@ -164,6 +164,11 @@ fn build_render_snapshot_with_images(
                 .client_snapshot
                 .last_applied_placement_command_id,
             is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
+            typed_pane_id: painted_frame.client_snapshot.typed_pane_id,
+            input_pane_moved_by_others_count: painted_frame
+                .client_snapshot
+                .input_pane_moved_by_others_count,
+            dropped_input_request_count: painted_frame.client_snapshot.dropped_input_request_count,
         },
         placement_preview,
     }

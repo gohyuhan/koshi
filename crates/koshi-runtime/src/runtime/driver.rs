@@ -11,7 +11,10 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use koshi_core::command::{Command, CommandResult, CommandSource, FocusPaneArgs, FocusTarget};
+use koshi_core::command::{
+    Command, CommandResult, CommandSource, FocusPaneArgs, FocusTarget, LockModeArgs,
+    ToggleLockModeArgs,
+};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::process::KillPolicy;
@@ -149,7 +152,13 @@ impl Server {
     /// is a terminal hangup: it breaks the loop and leaves teardown on the
     /// graceful path. An explicit quit travels through
     /// [`Command::KillSession`].
+    ///
+    /// Every event that continues the loop ends by recording the view changes
+    /// it made (`Server::record_view_changes`), with the
+    /// client whose own connection carried it
+    /// ([`RuntimeEvent::find_sending_client_id`]).
     pub fn handle_runtime_event(&mut self, runtime_event: RuntimeEvent) -> ControlFlow<()> {
+        let sending_client_id = runtime_event.find_sending_client_id();
         match runtime_event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
             // The output itself waits in the queue; the pane gets its turns in
@@ -167,13 +176,18 @@ impl Server {
             // An attached client's viewer already read these events: its
             // keymap bound nothing to them, or no chord could name them. The
             // pane write reads each whole event: the receiving pane's keyboard
-            // flags decide which of its fields reach that pane.
+            // flags decide which of its fields reach that pane. Events typed
+            // against a frame older than the last move of the client's input
+            // pane by others reach no pane (`drop_stale_input`).
             RuntimeEvent::ClientKeyboard {
                 client_id,
                 key_inputs,
+                painted_input_pane_moved_by_others_count,
             } => {
                 self.allow_client_frame_now(client_id);
-                self.handle_key_inputs(client_id, &key_inputs);
+                if !self.drop_stale_input(client_id, painted_input_pane_moved_by_others_count) {
+                    self.handle_key_inputs(client_id, &key_inputs);
+                }
             }
             // An attached client's viewer already read this mouse event against
             // the frame it painted: the round names every pane it touches. The
@@ -216,12 +230,23 @@ impl Server {
             RuntimeEvent::OuterTerminalFocusLost { client_id } => {
                 tracing::debug!(%client_id, "dropping an outer-terminal focus event");
             }
-            RuntimeEvent::HostPaste {
+            // The viewer reads a raw paste against its input mode and sends it
+            // as `ClientPaste`. A raw paste arriving here belongs to no
+            // attached viewer, and is dropped.
+            RuntimeEvent::HostPaste { client_id, .. } => {
+                tracing::debug!(%client_id, "dropping a paste no attached viewer read");
+            }
+            // A paste typed against a frame older than the last move of the
+            // client's input pane by others reaches no pane, as keys do.
+            RuntimeEvent::ClientPaste {
                 client_id,
                 pasted_text,
+                painted_input_pane_moved_by_others_count,
             } => {
                 self.allow_client_frame_now(client_id);
-                self.handle_host_paste(client_id, &pasted_text);
+                if !self.drop_stale_input(client_id, painted_input_pane_moved_by_others_count) {
+                    self.handle_host_paste(client_id, &pasted_text);
+                }
             }
             RuntimeEvent::ClientDetached {
                 client_id,
@@ -260,7 +285,12 @@ impl Server {
             // A rejected command from a key binding goes back to that client
             // alone, naming the action its key fired. A command whose target
             // is a direction or the next or previous floating pane, and that
-            // found none, goes back as nothing.
+            // found none, goes back as nothing. A command from a key binding
+            // typed against a frame older than the last move of the client's
+            // input pane by others does not run, and goes back rejected with
+            // `RejectReason::ViewChanged`. A rejected lock command from a key
+            // binding that names no other client becomes that client's last
+            // settled lock command, which its next frame carries.
             RuntimeEvent::Ipc {
                 command_envelope,
                 fired_action,
@@ -284,7 +314,29 @@ impl Server {
                         ..
                     })
                 );
-                let command_result = self.submit_command(*command_envelope);
+                let is_own_lock_command = match &command_envelope.command {
+                    Command::SetLockMode(LockModeArgs { client_id, .. })
+                    | Command::ToggleLockMode(ToggleLockModeArgs { client_id }) => {
+                        client_id.is_none() || *client_id == key_binding_client_id
+                    }
+                    _ => false,
+                };
+                let is_stale_key_binding_command = match (key_binding_client_id, &fired_action) {
+                    (Some(client_id), Some(fired_action)) => self.is_input_stale(
+                        client_id,
+                        fired_action.painted_input_pane_moved_by_others_count,
+                    ),
+                    _ => false,
+                };
+                let command_result = if is_stale_key_binding_command {
+                    CommandResult::Rejected {
+                        command_id: command_envelope.command_id,
+                        reason: RejectReason::ViewChanged,
+                        help: None,
+                    }
+                } else {
+                    self.submit_command(*command_envelope)
+                };
                 if let (
                     Some(client_id),
                     CommandResult::Rejected {
@@ -294,18 +346,23 @@ impl Server {
                     },
                 ) = (key_binding_client_id, &command_result)
                 {
+                    if is_own_lock_command {
+                        if let Some(client) = self.get_client_mut(client_id) {
+                            client.set_last_settled_lock_command_id(*command_id);
+                        }
+                    }
                     if !(has_directional_target && *reason == RejectReason::TargetNotFound) {
                         self.send_command_rejection(
                             client_id,
                             *command_id,
-                            fired_action,
+                            fired_action.map(|fired_action| fired_action.action_reference),
                             *reason,
                             help.clone(),
                         );
                     }
                 }
                 // A closed reply channel means the connection thread is gone.
-                // The command has already applied and stays applied.
+                // A command that applied stays applied.
                 let _ = response_sender.send(command_result);
             }
             RuntimeEvent::IpcAttach {
@@ -319,6 +376,7 @@ impl Server {
                 granted_identity,
                 max_frames_per_second,
                 placement_preview_target,
+                painted_input_view,
                 response_sender,
             } => {
                 // The client and its subscription are registered together here:
@@ -335,6 +393,7 @@ impl Server {
                     granted_identity.as_deref(),
                     max_frames_per_second,
                     placement_preview_target,
+                    painted_input_view,
                 ));
             }
             RuntimeEvent::IpcDiscovery { response_sender } => {
@@ -416,6 +475,7 @@ impl Server {
             // `push_due_frames`, at the subscriber's pace.
             RuntimeEvent::QueueRoomFreed => {}
         }
+        self.record_view_changes(sending_client_id);
         ControlFlow::Continue(())
     }
 

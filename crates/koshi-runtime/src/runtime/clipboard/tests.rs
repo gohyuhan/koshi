@@ -157,7 +157,7 @@ fn an_empty_bracketed_paste_is_just_the_two_markers() {
 fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     server.copy_to_clipboard(client_id, "hello");
 
@@ -173,7 +173,7 @@ fn copying_queues_the_osc_52_sequence_for_the_clients_outer_terminal() {
 fn a_second_copy_to_one_client_replaces_the_first_while_it_waits() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     server.copy_to_clipboard(client_id, "one");
     server.copy_to_clipboard(client_id, "two");
@@ -188,7 +188,7 @@ fn a_second_copy_to_one_client_replaces_the_first_while_it_waits() {
 fn a_copy_that_the_waiting_host_writes_refuse_is_skipped_and_they_stay_whole() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let waiting_copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
     assert!(server.queue_host_write(
         client_id,
@@ -207,7 +207,7 @@ fn a_copy_that_the_waiting_host_writes_refuse_is_skipped_and_they_stay_whole() {
 fn copying_an_empty_selection_queues_the_empty_sequence() {
     let mut server = build_test_runtime();
     let client_id = ClientId::new();
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     server.copy_to_clipboard(client_id, "");
 
@@ -222,8 +222,8 @@ fn each_client_takes_only_the_sequence_its_own_copy_queued() {
     let mut server = build_test_runtime();
     let client_with_first_copy = ClientId::new();
     let client_with_second_copy = ClientId::new();
-    let (first_receiver, _) = server.subscribe(client_with_first_copy, 60);
-    let (second_receiver, _) = server.subscribe(client_with_second_copy, 60);
+    let (first_receiver, _) = server.subscribe(client_with_first_copy, 60, None);
+    let (second_receiver, _) = server.subscribe(client_with_second_copy, 60, None);
 
     server.copy_to_clipboard(client_with_first_copy, "one");
     server.copy_to_clipboard(client_with_second_copy, "two");
@@ -294,8 +294,8 @@ fn build_clipboard_routing_fixture(
         None,
         None,
     );
-    let (local_receiver, _) = server.subscribe(local_client_id, 60);
-    let (remote_receiver, _) = server.subscribe(remote_client_id, 60);
+    let (local_receiver, _) = server.subscribe(local_client_id, 60, None);
+    let (remote_receiver, _) = server.subscribe(remote_client_id, 60, None);
     ClipboardRoutingFixture {
         server,
         pane_id,

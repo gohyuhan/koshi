@@ -3,6 +3,7 @@
 use super::*;
 use crate::attach::is_signal_ignored;
 use crate::attach::tests::set_signal_actions;
+use crate::input::InputReadClock;
 use koshi_input::host::{KeyCode, KeyEvent, Modifiers};
 use std::os::fd::{FromRawFd, OwnedFd};
 
@@ -25,7 +26,8 @@ fn a_waker_interrupts_a_blocked_source() {
     let (mut event_source, _terminal_input_writer) = build_terminal_event_source();
     event_source.create_waker().wake().expect("wake write");
     let io_error =
-        reader::EventSource::try_read_event(&mut event_source, None).expect_err("interrupted read");
+        reader::EventSource::try_read_event(&mut event_source, None, &InputReadClock::default())
+            .expect_err("interrupted read");
     assert_eq!(io_error.kind(), io::ErrorKind::Interrupted);
 }
 
@@ -38,7 +40,8 @@ fn a_waker_wins_when_terminal_input_is_also_ready() {
     event_source.create_waker().wake().expect("wake write");
 
     let io_error =
-        reader::EventSource::try_read_event(&mut event_source, None).expect_err("interrupted read");
+        reader::EventSource::try_read_event(&mut event_source, None, &InputReadClock::default())
+            .expect_err("interrupted read");
 
     assert_eq!(io_error.kind(), io::ErrorKind::Interrupted);
 }
@@ -49,11 +52,14 @@ fn a_standalone_escape_resolves_after_the_sequence_deadline() {
     terminal_input_writer
         .write_all(b"\x1b")
         .expect("terminal input");
-    let parsed_terminal_event =
-        reader::EventSource::try_read_event(&mut event_source, Some(Duration::from_millis(100)))
-            .expect("event read");
+    let parsed_terminal_event = reader::EventSource::try_read_event(
+        &mut event_source,
+        Some(Duration::from_millis(100)),
+        &InputReadClock::default(),
+    )
+    .expect("event read");
     assert_eq!(
-        parsed_terminal_event,
+        parsed_terminal_event.map(|tagged_event| tagged_event.event),
         Some(Event::Key(KeyEvent::from_key_code_and_modifiers(
             KeyCode::Escape,
             Modifiers::NONE
@@ -68,27 +74,33 @@ fn an_expired_unterminated_osc_stays_pending_until_its_terminator() {
         .write_all(b"\x1b]0;title")
         .expect("terminal input");
     event_source
-        .process_terminal_input_bytes()
+        .process_terminal_input_bytes(&InputReadClock::default())
         .expect("OSC input");
     assert_eq!(event_source.input_sequence_started_at, None);
     assert!(event_source.terminal_input_parser.has_pending_input());
 
     event_source.input_sequence_started_at =
         Some(Instant::now() - ESCAPE_SEQUENCE_TIMEOUT_DURATION);
-    let parsed_terminal_event =
-        reader::EventSource::try_read_event(&mut event_source, Some(Duration::ZERO))
-            .expect("timer check");
+    let parsed_terminal_event = reader::EventSource::try_read_event(
+        &mut event_source,
+        Some(Duration::ZERO),
+        &InputReadClock::default(),
+    )
+    .expect("timer check");
     assert_eq!(parsed_terminal_event, None);
     assert!(event_source.terminal_input_parser.has_pending_input());
 
     terminal_input_writer
         .write_all(b"\x1b\\x")
         .expect("terminal input after OSC");
-    let parsed_terminal_event =
-        reader::EventSource::try_read_event(&mut event_source, Some(Duration::from_millis(100)))
-            .expect("event after OSC");
+    let parsed_terminal_event = reader::EventSource::try_read_event(
+        &mut event_source,
+        Some(Duration::from_millis(100)),
+        &InputReadClock::default(),
+    )
+    .expect("event after OSC");
     assert_eq!(
-        parsed_terminal_event,
+        parsed_terminal_event.map(|tagged_event| tagged_event.event),
         Some(Event::Key(KeyEvent::from_key_code_and_modifiers(
             KeyCode::Char('x'),
             Modifiers::NONE
@@ -103,7 +115,7 @@ fn control_string_progress_does_not_arm_an_inactivity_deadline() {
         .write_all(b"\x1b]0;")
         .expect("terminal input");
     event_source
-        .process_terminal_input_bytes()
+        .process_terminal_input_bytes(&InputReadClock::default())
         .expect("OSC opening");
     assert_eq!(event_source.input_sequence_started_at, None);
     assert!(event_source.terminal_input_parser.has_pending_input());
@@ -112,19 +124,65 @@ fn control_string_progress_does_not_arm_an_inactivity_deadline() {
         .write_all(b"title")
         .expect("terminal input");
     event_source
-        .process_terminal_input_bytes()
+        .process_terminal_input_bytes(&InputReadClock::default())
         .expect("OSC body");
     assert_eq!(event_source.input_sequence_started_at, None);
     assert!(event_source.terminal_input_parser.has_pending_input());
+}
+
+/// A paste starts in a read made while the screen showed move count `0`, and
+/// ends in a read made after a paint set it to `1`, in front of the key `x`.
+/// The paste carries `0` and `x` carries `1`.
+#[test]
+fn a_paste_across_two_reads_carries_the_move_count_of_the_read_that_held_its_start() {
+    let (mut event_source, mut terminal_input_writer) = build_terminal_event_source();
+    let input_read_clock = InputReadClock::default();
+    terminal_input_writer
+        .write_all(b"\x1b[200~ab")
+        .expect("paste start");
+    event_source
+        .process_terminal_input_bytes(&input_read_clock)
+        .expect("first read");
+    input_read_clock.set_painted_input_pane_moved_by_others_count(1);
+    terminal_input_writer
+        .write_all(b"cd\x1b[201~x")
+        .expect("paste end and key");
+    event_source
+        .process_terminal_input_bytes(&input_read_clock)
+        .expect("second read");
+
+    let parsed_terminal_events: Vec<TaggedEvent> =
+        std::iter::from_fn(|| reader::EventSource::remove_next_parsed_event(&mut event_source))
+            .collect();
+
+    assert_eq!(
+        parsed_terminal_events,
+        vec![
+            TaggedEvent {
+                event: Event::Paste(String::from("abcd")),
+                input_tag: 0,
+            },
+            TaggedEvent {
+                event: Event::Key(KeyEvent::from_key_code_and_modifiers(
+                    KeyCode::Char('x'),
+                    Modifiers::NONE
+                )),
+                input_tag: 1,
+            },
+        ]
+    );
 }
 
 #[test]
 fn closed_terminal_input_returns_end_of_file() {
     let (mut event_source, terminal_input_writer) = build_terminal_event_source();
     drop(terminal_input_writer);
-    let io_error =
-        reader::EventSource::try_read_event(&mut event_source, Some(Duration::from_millis(10)))
-            .expect_err("closed input");
+    let io_error = reader::EventSource::try_read_event(
+        &mut event_source,
+        Some(Duration::from_millis(10)),
+        &InputReadClock::default(),
+    )
+    .expect_err("closed input");
     assert_eq!(io_error.kind(), io::ErrorKind::UnexpectedEof);
 }
 

@@ -62,6 +62,7 @@ use koshi_core::{
     ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId},
 };
 use koshi_ipc::placement::PanePlacementPreviewTarget;
+use koshi_ipc::protocol::PaintedInputView;
 use koshi_layout::placement::PlacedTabLayout;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::placement::{PlacedPreview, PlacementPreviewError};
@@ -92,6 +93,12 @@ pub(crate) fn compute_core_pane_area(viewport_size: Size) -> PaneArea {
 
 /// How long the pointer must remain over a placement tab before it is previewed.
 pub(crate) const PLACEMENT_TAB_HOVER_DELAY_DURATION: Duration = Duration::from_millis(200);
+
+/// The warning a viewer posts to its own notification queue for each key or
+/// paste request the session dropped: each one typed against a frame older
+/// than the last move of the viewer's input pane by others.
+pub(crate) const DROPPED_INPUT_NOTIFICATION_TEXT: &str =
+    "Keys not sent: your view changed as you typed";
 
 /// The viewer-owned state for one placement interaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,13 +355,17 @@ pub struct Client {
     /// The newest lock command this viewer sent, or holds to send, whose lock
     /// mode [`lock_mode`](Self::lock_mode) shows before the session runs it.
     /// While it is set, a painted frame that does not name it as the last
-    /// applied lock command leaves `lock_mode` as it is. `None` when no lock
+    /// settled lock command leaves `lock_mode` as it is. `None` when no lock
     /// command waits.
     pending_lock_command_id: Option<CommandId>,
     /// Whether this viewer grabs the mouse for text selection. It decides what
     /// a press means before anything is sent. The session keeps its own copy,
     /// which the frame carries for the mode indicator and the hint bar's label.
     is_mouse_selection_enabled: bool,
+    /// The input fields of the newest frame this viewer wrote to its terminal,
+    /// on any connection of this attachment, which the screen shows until the
+    /// next frame is written. `None` before the first frame.
+    painted_input_view: Option<PaintedInputView>,
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
     pending_key_sequence: Option<PendingKeySequence>,
@@ -475,6 +486,7 @@ impl Client {
             lock_mode: LockMode::Normal,
             pending_lock_command_id: None,
             is_mouse_selection_enabled: false,
+            painted_input_view: None,
             pending_key_sequence: None,
             input_read_clock: Arc::default(),
             last_mouse_press: None,
@@ -639,8 +651,8 @@ impl Client {
     /// floating pane move by naming it (`settle_floating_pane_move`), the
     /// active tab with its focused pane and tab list, the lock mode, the
     /// tab-strip peek, whether mouse-select is on, and the placement preview
-    /// (`update_placement_preview`). A tab-strip peek
-    /// made on another tab is dropped. The settled placement, the active tab,
+    /// (`update_placement_preview`). A tab-strip peek made on another tab is
+    /// dropped. The settled placement, the active tab,
     /// the lock mode, mouse-select, and an unavailable preview can end pane
     /// placement mode or clear its target. The settled move can end floating
     /// pane move mode, and a lock mode or mouse-select change ends the move
@@ -652,11 +664,11 @@ impl Client {
     /// `update_placement_preview` describe.
     ///
     /// The lock mode is taken only when no lock command is pending, or when
-    /// the snapshot names the pending one as the last applied lock command;
-    /// the pending command is then cleared. Example: after `<C-l>` sends lock
-    /// command `A` and shows `Locked`, a snapshot with `Normal` that names no
-    /// lock command leaves `Locked`, and the next snapshot that names `A` sets
-    /// its own lock mode.
+    /// the snapshot names the pending one as the last settled lock command,
+    /// which the session ran or refused; the pending command is then cleared.
+    /// Example: after `<C-l>` sends lock command `A` and shows `Locked`, a
+    /// snapshot with `Normal` that names no lock command leaves `Locked`, and
+    /// the next snapshot that names `A` sets its own lock mode.
     pub fn apply_render_snapshot(&mut self, render_snapshot: &RenderSnapshot) {
         self.settle_placement_command(
             render_snapshot
@@ -682,7 +694,7 @@ impl Client {
         );
         let is_lock_command_pending = self.pending_lock_command_id.is_some()
             && self.pending_lock_command_id
-                != render_snapshot.client_snapshot.last_applied_lock_command_id;
+                != render_snapshot.client_snapshot.last_settled_lock_command_id;
         if !is_lock_command_pending {
             self.pending_lock_command_id = None;
             self.set_lock_mode(render_snapshot.client_snapshot.lock_mode);
@@ -694,6 +706,57 @@ impl Client {
         self.update_placement_preview(
             render_snapshot.placement_preview.as_ref(),
             is_placement_reconciled,
+        );
+    }
+
+    /// The input fields of the newest frame this viewer wrote to its terminal,
+    /// which the screen still shows: what an attach after a lost connection
+    /// names. `None` before the first frame.
+    pub(crate) fn get_painted_input_view(&self) -> Option<PaintedInputView> {
+        self.painted_input_view
+    }
+
+    /// Record `painted_input_view`, the input fields of a frame just written
+    /// to the terminal at `created_at`. The input read clock takes its move
+    /// count, which each read after this call carries
+    /// ([`InputReadClock::set_painted_input_pane_moved_by_others_count`]).
+    /// One `Warning` from koshi, [`DROPPED_INPUT_NOTIFICATION_TEXT`], is posted
+    /// for each request its dropped count rises by over the last recorded
+    /// frame's, `0` before the first
+    /// ([`post_core_notification`](Self::post_core_notification)). A count
+    /// that does not rise posts nothing, and a rise above `u32::MAX` posts
+    /// `u32::MAX`.
+    ///
+    /// Example: a frame with dropped count `5` after a frame with dropped
+    /// count `0` posts one entry with `repeat_count` 5.
+    pub(crate) fn record_painted_input_view(
+        &mut self,
+        painted_input_view: PaintedInputView,
+        created_at: SystemTime,
+    ) {
+        let last_dropped_input_request_count = self
+            .painted_input_view
+            .map_or(0, |last_painted_input_view| {
+                last_painted_input_view.dropped_input_request_count
+            });
+        let new_dropped_request_count = painted_input_view
+            .dropped_input_request_count
+            .saturating_sub(last_dropped_input_request_count);
+        self.painted_input_view = Some(painted_input_view);
+        self.input_read_clock
+            .set_painted_input_pane_moved_by_others_count(
+                painted_input_view.input_pane_moved_by_others_count,
+            );
+        let Some(post_count) =
+            NonZeroU32::new(u32::try_from(new_dropped_request_count).unwrap_or(u32::MAX))
+        else {
+            return;
+        };
+        self.post_core_notification(
+            NotificationSeverity::Warning,
+            DROPPED_INPUT_NOTIFICATION_TEXT,
+            post_count,
+            created_at,
         );
     }
 
@@ -1282,14 +1345,18 @@ impl Client {
     /// Drop the command `command_id` names, which the session rejected: a sent
     /// floating pane move
     /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), or
-    /// the pending placement confirmation. After a rejected confirmation, pane
+    /// the pending placement confirmation. A rejected lock command settles
+    /// when a frame names it
+    /// ([`apply_render_snapshot`](Self::apply_render_snapshot)).
+    ///
+    /// After a rejected confirmation, pane
     /// placement mode that lasts until Esc stays on with the preview it holds,
     /// and selects the whole destination tab
     /// ([`select_whole_tab_insertion_target`](Self::select_whole_tab_insertion_target));
     /// a mode that lasts until its drag ends closes. A held preview that is
     /// unavailable then ends the mode. Changes nothing when `command_id` names
     /// none of them.
-    pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) {
+    pub(crate) fn reject_sent_command(&mut self, command_id: CommandId) {
         if self.reject_floating_pane_move(command_id) {
             return;
         }

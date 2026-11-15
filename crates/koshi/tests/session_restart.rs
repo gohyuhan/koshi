@@ -372,6 +372,7 @@ impl AttachedClientStream {
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         };
         send_committed_request(&mut connection, attach_request);

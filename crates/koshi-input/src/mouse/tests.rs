@@ -8,9 +8,12 @@ use koshi_core::geometry::Point;
 /// Decode one SGR mouse sequence through the host parser boundary.
 fn decode_mouse_bytes(mouse_bytes: &[u8]) -> Option<MouseInput> {
     let mut parser = Parser::default();
-    parser.process_input_bytes(mouse_bytes);
+    parser.process_input_bytes(mouse_bytes, 0);
     parser.finish_pending_input();
-    let Some(Event::Mouse(mouse_event)) = parser.remove_next_pending_event() else {
+    let Some(Event::Mouse(mouse_event)) = parser
+        .remove_next_pending_event()
+        .map(|tagged_event| tagged_event.event)
+    else {
         panic!("expected one mouse event from {mouse_bytes:?}");
     };
     assert_eq!(parser.remove_next_pending_event(), None);

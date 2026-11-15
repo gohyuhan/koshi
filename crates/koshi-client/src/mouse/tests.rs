@@ -42,10 +42,10 @@ use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::input::KeyOutcome;
 use crate::tests::{
-    apply_frame_keeping_view, build_core_bound_action, build_expected_confirm_placement,
-    build_floating_pane_slot, build_one_pane_floating_pane_slot, build_test_client,
-    build_test_placement_snapshot, get_source_tab_snapshot_mut, hold_placement_snapshot,
-    NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
+    apply_frame_keeping_view, build_core_fired_action, build_expected_confirm_placement,
+    build_floating_pane_slot, build_input_read_stamp, build_one_pane_floating_pane_slot,
+    build_test_client, build_test_placement_snapshot, get_source_tab_snapshot_mut,
+    hold_placement_snapshot, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{Client, PlacementMode, PlacementModeLifetime};
 
@@ -166,10 +166,13 @@ pub(crate) fn build_mouse_frame(
             focused_pane_id,
             active_tab_focused_pane_id: focused_pane_id,
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
         viewer_chrome: ViewerChrome::default(),
@@ -2901,7 +2904,8 @@ fn a_drag_held_past_the_edge_asks_for_no_wakeup_while_an_input_event_is_on_its_w
 
     let read_at = client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
 
     assert_eq!(client.compute_next_mouse_wakeup(drag_time), None);
 
@@ -3278,7 +3282,7 @@ fn a_handle_drag_drop_the_session_accepts_leaves_the_client_in_its_base_mode() {
         assert_eq!(client.get_lock_mode(), base_lock_mode);
         assert_eq!(client.get_active_input_mode(), base_lock_mode);
         assert_eq!(
-            client.resolve_key(typed_key_chord, Instant::now()),
+            client.resolve_key(typed_key_chord, build_input_read_stamp(Instant::now())),
             KeyOutcome::PassThrough(typed_key_chord)
         );
     }
@@ -3330,7 +3334,7 @@ fn a_mouse_drop_the_session_accepts_keeps_pane_placement_mode_opened_by_a_key() 
     assert!(!client.is_placement_confirmation_pending());
     let typed_key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('e'));
     assert_eq!(
-        client.resolve_key(typed_key_chord, Instant::now()),
+        client.resolve_key(typed_key_chord, build_input_read_stamp(Instant::now())),
         KeyOutcome::Discard
     );
 }
@@ -6242,7 +6246,7 @@ fn escape_during_a_handle_drag_drops_the_move() {
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
-            advance_time_by_seconds(current_time, 2),
+            build_input_read_stamp(advance_time_by_seconds(current_time, 2)),
         ),
         KeyOutcome::Discard
     );
@@ -6281,7 +6285,7 @@ fn escape_during_a_handle_drag_also_drops_an_open_key_sequence() {
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            advance_time_by_seconds(current_time, 2),
+            build_input_read_stamp(advance_time_by_seconds(current_time, 2)),
         ),
         KeyOutcome::Pending
     );
@@ -6289,7 +6293,7 @@ fn escape_during_a_handle_drag_also_drops_an_open_key_sequence() {
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
-            advance_time_by_seconds(current_time, 3),
+            build_input_read_stamp(advance_time_by_seconds(current_time, 3)),
         ),
         KeyOutcome::Discard
     );
@@ -8851,7 +8855,7 @@ fn escape_during_a_handle_drag_in_floating_pane_move_mode_ends_only_the_drag() {
     );
 
     assert_eq!(
-        client.resolve_key(escape_chord, current_time),
+        client.resolve_key(escape_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Discard
     );
     assert_eq!(client.left_button_gesture, None);
@@ -8860,8 +8864,8 @@ fn escape_during_a_handle_drag_in_floating_pane_move_mode_ends_only_the_drag() {
         build_floating_pane_move_mode(floating_slot_pane_id, None, None)
     );
     assert_eq!(
-        client.resolve_key(escape_chord, current_time),
-        KeyOutcome::Fire(build_core_bound_action("cancel-floating-pane-move"))
+        client.resolve_key(escape_chord, build_input_read_stamp(current_time)),
+        KeyOutcome::Fire(build_core_fired_action("cancel-floating-pane-move"))
     );
 }
 

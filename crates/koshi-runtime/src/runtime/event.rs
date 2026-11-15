@@ -32,7 +32,9 @@ use koshi_core::{
 };
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
-use koshi_ipc::protocol::{ClientActionRefusal, ConnectionToken, IpcResult, WireMouseAction};
+use koshi_ipc::protocol::{
+    ClientActionRefusal, ConnectionToken, FiredAction, IpcResult, PaintedInputView, WireMouseAction,
+};
 use koshi_layout::placement::PlacedTabLayout;
 
 use crate::runtime::bus::WriterHandoff;
@@ -123,6 +125,9 @@ pub enum RuntimeEvent {
         /// The keyboard events the client read from its terminal, oldest
         /// first.
         key_inputs: Vec<KeyInput>,
+        /// The `input_pane_moved_by_others_count` of the newest frame the
+        /// client wrote to its terminal before it read the input's first byte.
+        painted_input_pane_moved_by_others_count: u64,
     },
     /// One round of mouse actions an attached client's viewer decided for one
     /// host mouse event, in the order the session must run them.
@@ -158,12 +163,25 @@ pub enum RuntimeEvent {
     },
     /// Text the client's outer terminal pasted — the OS paste key pressed in
     /// the terminal koshi runs in, delivered whole. No character of it fires a
-    /// keybinding.
+    /// keybinding. The viewer reads it and sends it to the session as a
+    /// `Paste` request, which arrives as [`ClientPaste`](Self::ClientPaste).
+    /// The session drops a `HostPaste` that reaches it.
     HostPaste {
         /// Client whose terminal pasted.
         client_id: ClientId,
         /// The pasted text, exactly as the outer terminal delivered it.
         pasted_text: String,
+    },
+    /// Text an attached client's viewer read as one paste from its terminal,
+    /// for the pane it is typing into. No character of it fires a keybinding.
+    ClientPaste {
+        /// Client whose terminal pasted.
+        client_id: ClientId,
+        /// The pasted text, exactly as the outer terminal delivered it.
+        pasted_text: String,
+        /// The `input_pane_moved_by_others_count` of the newest frame the
+        /// client wrote to its terminal before it read the input's first byte.
+        painted_input_pane_moved_by_others_count: u64,
     },
     /// A command delivered over the IPC socket, from external or in-session
     /// CLI. Carries the reply sender the connection thread waits on: the
@@ -173,8 +191,9 @@ pub enum RuntimeEvent {
         /// The command as it arrived over the socket.
         command_envelope: Box<CommandEnvelope>,
         /// The action the attached client's key fired to build the command,
-        /// as its request named it, or `None`.
-        fired_action: Option<ActionReference>,
+        /// with the move count of the frame the key was typed against, as its
+        /// request named them, or `None`.
+        fired_action: Option<FiredAction>,
         /// Where the dispatcher sends the command's result.
         response_sender: Sender<CommandResult>,
     },
@@ -257,6 +276,10 @@ pub enum RuntimeEvent {
         /// The placement target the client previews from its first frame on
         /// (`Server::set_pane_placement_preview`), or `None`.
         placement_preview_target: Option<PanePlacementPreviewTarget>,
+        /// The input fields of the newest frame the caller painted on an
+        /// earlier connection, or `None` on a first attach. They start the
+        /// client's input counts (`Server::subscribe`).
+        painted_input_view: Option<PaintedInputView>,
         /// Where the dispatcher sends what it minted.
         response_sender: Sender<Option<AttachAccepted>>,
     },
@@ -300,9 +323,10 @@ pub enum RuntimeEvent {
         placement_target: TiledPlacementTarget,
         /// The destination tab as the client draws it after the placement.
         expected_placed_tab_layout: Box<PlacedTabLayout>,
-        /// The action the client's key fired to confirm, or `None` when a
-        /// mouse drop confirmed.
-        fired_action: Option<ActionReference>,
+        /// The action the client's key fired to confirm, with the move count
+        /// of the frame the key was typed against, or `None` when a mouse
+        /// drop confirmed.
+        fired_action: Option<FiredAction>,
     },
     /// A restart request whose restart check passed on the thread that asks:
     /// the caller asks this process to replace its own image with the binary at
@@ -383,6 +407,58 @@ pub enum RuntimeEvent {
     /// lets a frame go. A paused subscriber takes its resync snapshot on the same
     /// pass instead.
     QueueRoomFreed,
+}
+
+impl RuntimeEvent {
+    /// The attached client whose own connection carried this event: the client
+    /// a key, paste, mouse round, resize, cell size, outer terminal focus
+    /// loss, placement request, action answer or detach names, and the client
+    /// a command from a key binding or a mouse event names as its source.
+    /// `None` for every other event, such as a pane's output, a command or
+    /// request from the CLI, an attach, a clipboard copy, and the session's
+    /// own timers.
+    ///
+    /// Example: `koshi focus-pane --client <bob>` arrives as an
+    /// [`Ipc`](Self::Ipc) event with a CLI source, and names no sending client.
+    #[must_use]
+    pub fn find_sending_client_id(&self) -> Option<ClientId> {
+        match self {
+            RuntimeEvent::Resize { client_id, .. }
+            | RuntimeEvent::CellSize { client_id, .. }
+            | RuntimeEvent::ClientDetached { client_id, .. }
+            | RuntimeEvent::KeyInput { client_id, .. }
+            | RuntimeEvent::ClientKeyboard { client_id, .. }
+            | RuntimeEvent::ClientMouse { client_id, .. }
+            | RuntimeEvent::MouseInput { client_id, .. }
+            | RuntimeEvent::OuterTerminalFocusLost { client_id }
+            | RuntimeEvent::HostPaste { client_id, .. }
+            | RuntimeEvent::ClientPaste { client_id, .. }
+            | RuntimeEvent::ClientActionAnswer { client_id, .. }
+            | RuntimeEvent::SetPanePlacementPreview { client_id, .. }
+            | RuntimeEvent::ConfirmPanePlacement { client_id, .. } => Some(*client_id),
+            RuntimeEvent::Ipc {
+                command_envelope, ..
+            } => match command_envelope.command_source {
+                CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } => {
+                    Some(client_id)
+                }
+                CommandSource::InSessionCli { .. } | CommandSource::ExternalCli { .. } => None,
+            },
+            RuntimeEvent::PtyReadable { .. }
+            | RuntimeEvent::Quit
+            | RuntimeEvent::IpcClientAction { .. }
+            | RuntimeEvent::IpcAttach { .. }
+            | RuntimeEvent::IpcDiscovery { .. }
+            | RuntimeEvent::IpcLayout { .. }
+            | RuntimeEvent::IpcRestart { .. }
+            | RuntimeEvent::IpcClipboardCopyPart { .. }
+            | RuntimeEvent::IpcPrepare { .. }
+            | RuntimeEvent::IpcClipboardCopyPrepare { .. }
+            | RuntimeEvent::IpcClipboardCopy { .. }
+            | RuntimeEvent::DropUnclaimedClients { .. }
+            | RuntimeEvent::QueueRoomFreed => None,
+        }
+    }
 }
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client

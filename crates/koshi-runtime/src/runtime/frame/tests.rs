@@ -241,10 +241,13 @@ pub(crate) fn build_render_snapshot(
             focused_pane_id: Some(content_pane_id),
             active_tab_focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
-            last_applied_lock_command_id: Some(CommandId::new()),
+            last_settled_lock_command_id: Some(CommandId::new()),
             last_applied_floating_pane_move_command_id: Some(CommandId::new()),
             is_mouse_selection_enabled: true,
+            typed_pane_id: None,
             last_applied_placement_command_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         placement_preview: None,
     }
@@ -736,6 +739,11 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
     render_snapshot
         .client_snapshot
         .last_applied_placement_command_id = Some(CommandId::new());
+    render_snapshot.client_snapshot.typed_pane_id = Some(focused_pane_id);
+    render_snapshot
+        .client_snapshot
+        .input_pane_moved_by_others_count = 4;
+    render_snapshot.client_snapshot.dropped_input_request_count = 5;
 
     let painted_frame = build_wire_frame(&render_snapshot);
 
@@ -860,9 +868,9 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
             focused_pane_id: Some(focused_pane_id),
             active_tab_focused_pane_id: Some(empty_pane_id),
             lock_mode: LockMode::Locked,
-            last_applied_lock_command_id: render_snapshot
+            last_settled_lock_command_id: render_snapshot
                 .client_snapshot
-                .last_applied_lock_command_id,
+                .last_settled_lock_command_id,
             last_applied_floating_pane_move_command_id: render_snapshot
                 .client_snapshot
                 .last_applied_floating_pane_move_command_id,
@@ -870,6 +878,9 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
                 .client_snapshot
                 .last_applied_placement_command_id,
             is_mouse_selection_enabled: true,
+            typed_pane_id: Some(focused_pane_id),
+            input_pane_moved_by_others_count: 4,
+            dropped_input_request_count: 5,
         }
     );
 }

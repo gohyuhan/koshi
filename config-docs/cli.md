@@ -774,6 +774,32 @@ views tab `build`. `koshi new-pane --direction right --client client-3c4d…`,
 typed outside koshi, splits the pane that `client-3c4d…` focuses in `build`.
 `client-3c4d…` then focuses the new pane, and `client-1a2b…` stays on `logs`.
 
+### Keys and the pane your screen shows
+
+Keys, pastes and keybindings go only to the pane that takes your input on the
+screen you see. Another client can close that pane, `koshi focus-pane
+--client <id>` can move your focus, and the program in the pane can exit. If
+one of these moves your input after your screen last showed it, koshi drops
+what you typed against the old screen. It shows the warning `Keys not sent:
+your view changed as you typed`, and drops that follow each other show as one
+warning with a count. A keybinding typed against the old screen does not run,
+and shows `<action>: your view changed as you typed`, such as
+`core:close-pane: your view changed as you typed`. A move that your own keys
+or clicks make drops nothing.
+
+koshi judges each key and paste against the newest screen that koshi wrote to
+your terminal before it read the key. A paste that arrives in several pieces
+is judged against the screen of its first piece. A keybinding of several keys,
+such as `<C-p> x`, is judged against the screen of its first key. koshi never
+waits for your terminal to answer. A key that koshi reads after it wrote the
+new screen goes to the new pane, also when you typed it before your terminal
+drew that screen, or before you noticed the change.
+
+Example: you type `ls` in pane 3, and another client closes pane 3 before your
+screen shows the change. Your input moves to pane 4, and the `ls` is dropped.
+After your screen shows pane 4 taking your input, the next key you type goes
+to pane 4.
+
 ### Floating panes
 
 `koshi new-pane --floating` and `koshi run --floating -- <COMMAND>...` open a

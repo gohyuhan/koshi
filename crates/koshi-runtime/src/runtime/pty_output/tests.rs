@@ -128,7 +128,7 @@ fn build_viewed_pane_server(
     let client_id = client.get_client_id();
     attach_client_record(&mut session, client);
     runtime.session_by_id.insert(session.session_id, session);
-    let (delivery_receiver, _) = runtime.subscribe(client_id, 60);
+    let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
     runtime.push_due_frames(first_frame_time);
     assert_eq!(
         delivery_receiver.try_recv(),
@@ -390,8 +390,8 @@ fn build_floating_pane_viewers_server(
         .expect("web is attached")
         .focus_floating_pane(floating_pane.get_floating_pane_id()));
     runtime.session_by_id.insert(session.session_id, session);
-    let db_deliveries = runtime.subscribe(db_client_id, 60);
-    let web_deliveries = runtime.subscribe(web_client_id, 60);
+    let db_deliveries = runtime.subscribe(db_client_id, 60, None);
+    let web_deliveries = runtime.subscribe(web_client_id, 60, None);
     runtime.push_due_frames(first_frame_time);
     (
         runtime,
@@ -487,7 +487,7 @@ fn a_change_of_a_floating_panes_title_marks_the_view_of_the_client_that_minimize
     runtime
         .session_by_id
         .insert(other_session.session_id, other_session);
-    let _other_deliveries = runtime.subscribe(other_client_id, 60);
+    let _other_deliveries = runtime.subscribe(other_client_id, 60, None);
     runtime.push_due_frames(first_frame_time);
     // Each row: the pane, its output, and whether the view of `db`, which
     // minimized the floating pane, changes. The floating pane starts on the
@@ -679,7 +679,7 @@ fn list_recorded_command_events(runtime: &Server) -> Vec<(String, Option<PaneId>
 fn shell_markers_publish_command_events_in_order() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60, None);
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;D;137\x07");
 
@@ -697,7 +697,7 @@ fn shell_markers_publish_command_events_in_order() {
 fn duplicate_shell_starts_publish_one_command_pair() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60, None);
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
 
@@ -715,7 +715,7 @@ fn duplicate_shell_starts_publish_one_command_pair() {
 fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60, None);
 
     runtime.handle_pty_output(pane_id, b"\x1b]133;D;1\x07plain output");
 
@@ -728,7 +728,7 @@ fn command_lifecycle_state_is_independent_per_pane() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let first_pane_id = insert_test_terminal_engine(&mut runtime);
     let second_pane_id = insert_test_terminal_engine(&mut runtime);
-    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60);
+    let (delivery_receiver, _) = runtime.subscribe(ClientId::new(), 60, None);
 
     runtime.handle_pty_output(first_pane_id, b"\x1b]133;C\x07");
     runtime.handle_pty_output(second_pane_id, b"\x1b]133;C\x07");

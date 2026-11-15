@@ -294,9 +294,11 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
         IpcRequestKind::Keyboard {
             key_inputs: vec![build_control_c_key_input()],
+            painted_input_pane_moved_by_others_count: 0,
         },
         IpcRequestKind::Resize {
             viewport_size: Size {
@@ -312,6 +314,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         },
         IpcRequestKind::Paste {
             pasted_text: "hello\nworld".to_string(),
+            painted_input_pane_moved_by_others_count: 0,
         },
         IpcRequestKind::Mouse(list_every_mouse_action()),
         IpcRequestKind::SubmitCommand {
@@ -747,22 +750,27 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
 }
 
 #[test]
-fn a_command_a_key_fired_carries_the_action_and_a_request_without_it_is_refused() {
+fn a_command_a_key_fired_carries_the_action_and_its_painted_count_and_a_request_without_it_is_refused(
+) {
     let ipc_request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::SubmitCommand {
             command_envelope: Box::new(build_test_command_envelope()),
-            fired_action: Some(
-                ActionReference::from_core_action_name("new-pane")
+            fired_action: Some(FiredAction {
+                action_reference: ActionReference::from_core_action_name("new-pane")
                     .expect("the action name is valid"),
-            ),
+                painted_input_pane_moved_by_others_count: 3,
+            }),
         },
     };
     let mut encoded_request = serde_json::to_value(&ipc_request).expect("request encodes");
 
     assert_eq!(
         encoded_request["request_kind"]["SubmitCommand"]["fired_action"],
-        json!("core:new-pane")
+        json!({
+            "action_reference": "core:new-pane",
+            "painted_input_pane_moved_by_others_count": 3
+        })
     );
     assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
 
@@ -951,6 +959,11 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: Some(PaintedInputView {
+                typed_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+                input_pane_moved_by_others_count: 4,
+                dropped_input_request_count: 2,
+            }),
         },
     };
 
@@ -965,7 +978,12 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": null,
-                    "placement_preview_target": null
+                    "placement_preview_target": null,
+                    "painted_input_view": {
+                        "typed_pane_id": "00000000-0000-0000-0000-000000000001",
+                        "input_pane_moved_by_others_count": 4,
+                        "dropped_input_request_count": 2
+                    }
                 }
             }
         })
@@ -1020,6 +1038,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
     assert_eq!(
@@ -1035,7 +1054,8 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                     "resume_token": null,
                     "pane_area": null,
                     "graphics_capabilities": { "supports_kitty": true, "supports_iterm": false, "supports_sixel": false },
-                    "placement_preview_target": null
+                    "placement_preview_target": null,
+                    "painted_input_view": null
                 }
             }
         })
@@ -1049,7 +1069,8 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                 "max_frames_per_second": 60,
                 "resume_client_id": null,
                 "resume_token": null,
-                "pane_area": null
+                "pane_area": null,
+                "painted_input_view": null
             }
         }
     }))
@@ -1075,6 +1096,7 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         }
     );
@@ -1327,6 +1349,7 @@ fn attach_request_round_trips() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -1352,6 +1375,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
     let resize_request = IpcRequest {
@@ -1375,7 +1399,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
     );
     assert_eq!(
         serde_json::from_str::<IpcRequest>(
-            r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60}}}"#,
+            r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"painted_input_view":null}}}"#,
         )
         .expect("an attach naming only its viewport decodes"),
         IpcRequest {
@@ -1390,6 +1414,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_omitted_optional_fields(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         }
     );
@@ -1429,6 +1454,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -1452,6 +1478,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -1474,7 +1501,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
     // An attach written with `resume_client_id` and without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"resume_client_id":"00000000-0000-0000-0000-000000000001"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"painted_input_view":null,"resume_client_id":"00000000-0000-0000-0000-000000000001"}}}"#,
     )
     .expect("an attach without the resume token field decodes");
 
@@ -1495,6 +1522,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         }
     );
@@ -1546,6 +1574,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -1560,7 +1589,8 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": { "Reported": { "column_count": 100, "row_count": 30 } },
-                    "placement_preview_target": null
+                    "placement_preview_target": null,
+                    "painted_input_view": null
                 }
             }
         })
@@ -1585,6 +1615,7 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -1599,7 +1630,8 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
                     "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": "Starving",
-                    "placement_preview_target": null
+                    "placement_preview_target": null,
+                    "painted_input_view": null
                 }
             }
         })
@@ -1750,7 +1782,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
     // An `origin` inside the `Attach` payload is ignored. The decoded request
     // holds the viewport size and nothing of it.
     let attach_request_with_origin: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"origin":"Remote"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"painted_input_view":null,"origin":"Remote"}}}"#,
     )
     .expect("an attach carrying an extra field still decodes");
 
@@ -1771,6 +1803,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         }
     );
@@ -1781,12 +1814,12 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
     // A field inside the `Attach` payload that this build does not have is
     // ignored. The decoded request holds the viewport size and nothing of it.
     let attach_request_with_tier: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"tier":"admin"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"painted_input_view":null,"tier":"admin"}}}"#,
     )
     .expect("an attach carrying an extra field still decodes");
 
     let attach_request_without_tier: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"max_frames_per_second":60,"painted_input_view":null}}}"#,
     )
     .expect("the same attach without the extra field decodes");
 
@@ -1805,6 +1838,7 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -1824,6 +1858,7 @@ fn keyboard_request_round_trips() {
         request_id: 5,
         request_kind: IpcRequestKind::Keyboard {
             key_inputs: vec![build_control_c_key_input(), build_control_c_key_input()],
+            painted_input_pane_moved_by_others_count: 0,
         },
     };
 
@@ -1831,9 +1866,10 @@ fn keyboard_request_round_trips() {
 }
 
 #[test]
-fn a_keyboard_request_names_its_events_key_inputs_on_the_wire() {
+fn a_keyboard_request_names_its_events_key_inputs_and_painted_count_on_the_wire() {
     let request_kind = IpcRequestKind::Keyboard {
         key_inputs: vec![build_control_c_key_input()],
+        painted_input_pane_moved_by_others_count: 7,
     };
 
     assert_eq!(
@@ -1841,9 +1877,49 @@ fn a_keyboard_request_names_its_events_key_inputs_on_the_wire() {
         json!({
             "Keyboard": {
                 "key_inputs": [serde_json::to_value(build_control_c_key_input())
-                    .expect("key input encodes")]
+                    .expect("key input encodes")],
+                "painted_input_pane_moved_by_others_count": 7
             }
         })
+    );
+}
+
+#[test]
+fn a_keyboard_or_paste_request_without_its_painted_count_is_refused() {
+    let keyboard_json = json!({
+        "Keyboard": {
+            "key_inputs": [serde_json::to_value(build_control_c_key_input())
+                .expect("key input encodes")]
+        }
+    });
+    let paste_json = json!({ "Paste": { "pasted_text": "ls" } });
+
+    for request_json in [keyboard_json, paste_json] {
+        let decode_error = serde_json::from_value::<IpcRequestKind>(request_json)
+            .expect_err("a request without its painted count decoded instead of failing");
+        assert_eq!(
+            decode_error.to_string(),
+            "missing field `painted_input_pane_moved_by_others_count`"
+        );
+    }
+}
+
+#[test]
+fn an_attach_without_its_painted_input_view_is_refused() {
+    let attach_json = json!({
+        "Attach": {
+            "viewport_size": { "column_count": 80, "row_count": 24 },
+            "max_frames_per_second": 60,
+            "placement_preview_target": null
+        }
+    });
+
+    let decode_error = serde_json::from_value::<IpcRequestKind>(attach_json)
+        .expect_err("an attach without its painted typed pane decoded instead of failing");
+
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `painted_input_view`"
     );
 }
 
@@ -1861,6 +1937,7 @@ fn a_keyboard_request_carries_every_reported_field() {
                 associated_text: "e\u{301}".to_string(),
                 modifier_flags: all_modifier_flags,
             }],
+            painted_input_pane_moved_by_others_count: 0,
         },
     };
 
@@ -2069,6 +2146,7 @@ fn paste_request_round_trips_its_text_whole() {
         request_id: 8,
         request_kind: IpcRequestKind::Paste {
             pasted_text: "hello\nworld\u{1b}[A\ttab \u{0} 日本語 🐚".to_string(),
+            painted_input_pane_moved_by_others_count: 0,
         },
     };
 
@@ -2139,6 +2217,7 @@ fn attach_carries_a_link_timeout_only_when_it_has_one() {
             link_timeout_ms,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
     let attach_with_timeout = build_attach(Some(30_000));
@@ -2565,10 +2644,11 @@ fn build_test_confirm_pane_placement() -> IpcRequestKind {
             },
             layout_solve: koshi_layout::solver::LayoutSolve::default(),
         },
-        fired_action: Some(
-            ActionReference::from_core_action_name("confirm-pane-placement")
+        fired_action: Some(FiredAction {
+            action_reference: ActionReference::from_core_action_name("confirm-pane-placement")
                 .expect("the action name is valid"),
-        ),
+            painted_input_pane_moved_by_others_count: 3,
+        }),
     }
 }
 
@@ -2628,7 +2708,10 @@ fn a_placement_confirm_uses_the_declared_wire_field_names_and_round_trips() {
     );
     assert_eq!(
         encoded_json["ConfirmPanePlacement"]["fired_action"],
-        json!("core:confirm-pane-placement")
+        json!({
+            "action_reference": "core:confirm-pane-placement",
+            "painted_input_pane_moved_by_others_count": 3
+        })
     );
     assert_eq!(
         serde_json::from_value::<IpcRequestKind>(encoded_json).expect("the confirm decodes"),

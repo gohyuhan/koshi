@@ -167,6 +167,7 @@ fn migrate_format_four_then_an_attach_with_no_token_is_the_client_an_external_ne
             None,
             60,
             None,
+            None,
         )
         .expect("the resumed session accepts the attach");
     let command_envelope = CommandEnvelope::from_parts(
@@ -570,6 +571,7 @@ fn migrate_format_five_gives_a_client_sharing_an_index_a_free_one_that_its_recon
                 None,
                 60,
                 None,
+                None,
             )
             .expect("the session hands the record back");
         assert_eq!(attachment.client_id, client_id);
@@ -631,6 +633,7 @@ fn migrate_format_five_reads_each_local_client_as_another_account_until_its_clai
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the session hands the record back");
@@ -3773,6 +3776,7 @@ fn a_profile_session_carried_before_any_attach_keeps_its_starting_tab_and_pane()
             ClientOrigin::Local { is_same_user: true },
             None,
             60,
+            None,
             None,
         )
         .expect("the resumed session accepts the attach");

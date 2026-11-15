@@ -666,6 +666,25 @@ impl SessionViewChanges {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Add `next_view_changes` to these changes: each set gains the other's
+    /// members, and each flag is set when either is set. Example: tab `1`
+    /// changed, then the tab bar changed, merge into tab `1` changed with the
+    /// tab bar changed.
+    pub fn merge_view_changes(&mut self, next_view_changes: SessionViewChanges) {
+        let SessionViewChanges {
+            layout_changed_tab_ids,
+            changed_client_ids,
+            is_tab_bar_changed,
+            is_floating_set_changed,
+            is_pane_sizing_changed,
+        } = next_view_changes;
+        self.layout_changed_tab_ids.extend(layout_changed_tab_ids);
+        self.changed_client_ids.extend(changed_client_ids);
+        self.is_tab_bar_changed |= is_tab_bar_changed;
+        self.is_floating_set_changed |= is_floating_set_changed;
+        self.is_pane_sizing_changed |= is_pane_sizing_changed;
+    }
 }
 
 /// One running session: the aggregate root owning the tabs, the floating

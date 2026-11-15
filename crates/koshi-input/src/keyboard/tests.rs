@@ -1403,9 +1403,10 @@ fn the_host_and_stored_modifier_bitmaps_use_the_same_bit_for_the_same_modifier()
 /// [`encode_key_chord`] for the bytes, in order.
 fn encode_terminal_input_for_pane(terminal_input_bytes: &[u8]) -> Vec<u8> {
     let mut host_input_parser = crate::host::Parser::default();
-    host_input_parser.process_input_bytes(terminal_input_bytes);
+    host_input_parser.process_input_bytes(terminal_input_bytes, 0);
     let mut pane_bytes = Vec::new();
-    while let Some(host_event) = host_input_parser.remove_next_pending_event() {
+    while let Some(tagged_event) = host_input_parser.remove_next_pending_event() {
+        let host_event = tagged_event.event;
         let crate::host::Event::Key(host_key_event) = host_event else {
             continue;
         };
@@ -2124,8 +2125,9 @@ fn typed_bytes_encode_to_the_same_pane_bytes_at_every_read_split() {
         let mut terminal_input_parser = Parser::default();
         let mut pane_bytes = Vec::new();
         for read_bytes in [&typed_bytes[..split_index], &typed_bytes[split_index..]] {
-            terminal_input_parser.process_input_bytes(read_bytes);
-            while let Some(terminal_event) = terminal_input_parser.remove_next_pending_event() {
+            terminal_input_parser.process_input_bytes(read_bytes, 0);
+            while let Some(tagged_event) = terminal_input_parser.remove_next_pending_event() {
+                let terminal_event = tagged_event.event;
                 let Event::Key(host_key_event) = terminal_event else {
                     panic!("typed bytes parse to keys only, not {terminal_event:?}");
                 };

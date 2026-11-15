@@ -2,8 +2,9 @@
 //!
 //! Tests verify the server-set identity (origin, label, color), client
 //! state tracking (focus, viewport, lock mode, zoom, scrollback view,
-//! highlights, floating pane views) and registry operations (attach, detach,
-//! lookup, mutation).
+//! highlights, floating pane views, the pane that takes the client's input
+//! and the input requests the session dropped) and registry operations
+//! (attach, detach, lookup, mutation).
 
 use super::*;
 
@@ -3225,7 +3226,7 @@ fn scroll_selection_lock_and_command_updates_record_a_view_change_only_for_a_rea
     let select = |client: &mut Client| client.set_selection(pane_id, build_test_selection());
     let lock = |client: &mut Client| client.update_lock_mode(LockMode::Locked);
     let record_lock_command =
-        |client: &mut Client| client.set_last_applied_lock_command_id(command_id);
+        |client: &mut Client| client.set_last_settled_lock_command_id(command_id);
     let record_move_command =
         |client: &mut Client| client.set_last_applied_floating_pane_move_command_id(command_id);
     let record_placement_command =
@@ -3424,4 +3425,155 @@ fn a_floating_pane_zoom_of_a_floating_pane_the_client_holds_no_view_of_changes_n
 
     assert_eq!(client.get_floating_pane_view(floating_pane_id), None);
     assert_eq!(client.list_floating_pane_views(), HashMap::new());
+}
+
+/// Pane 3 is recorded first, with no move counted. Others move the input to
+/// pane 4, then nothing moves it, then a resize suppresses it, then the
+/// client moves it back to pane 3 itself, then others move it to pane 4
+/// again: the count reads `0, 1, 1, 2, 2, 3`.
+#[test]
+fn update_checked_typed_pane_counts_only_a_new_pane_that_others_moved_the_input_to() {
+    let mut client = build_test_client(TabId::new());
+    let third_pane_id = PaneId::new();
+    let fourth_pane_id = PaneId::new();
+    let mut moved_by_others_counts = Vec::new();
+
+    for (typed_pane_id, is_moved_by_others) in [
+        (Some(third_pane_id), false),
+        (Some(fourth_pane_id), true),
+        (Some(fourth_pane_id), true),
+        (None, true),
+        (Some(third_pane_id), false),
+        (Some(fourth_pane_id), true),
+    ] {
+        client.update_checked_typed_pane(typed_pane_id, is_moved_by_others);
+        moved_by_others_counts.push(client.get_input_pane_moved_by_others_count());
+    }
+
+    assert_eq!(moved_by_others_counts, vec![0, 1, 1, 2, 2, 3]);
+}
+
+#[test]
+fn update_checked_typed_pane_records_no_view_change() {
+    let pane_id = PaneId::new();
+
+    assert!(!is_view_change_recorded(
+        TabId::new(),
+        |_| {},
+        |client| {
+            client.update_checked_typed_pane(Some(pane_id), true);
+        }
+    ));
+}
+
+/// Each dropped request adds one and marks the view changed, a second drop
+/// right after the first included.
+#[test]
+fn record_dropped_input_request_counts_each_drop_and_records_a_view_change() {
+    let record_drop = |client: &mut Client| client.record_dropped_input_request();
+    let mut client = build_test_client(TabId::new());
+
+    record_drop(&mut client);
+    record_drop(&mut client);
+
+    assert_eq!(client.get_dropped_input_request_count(), 2);
+    assert!(is_view_change_recorded(TabId::new(), |_| {}, record_drop));
+    assert!(is_view_change_recorded(
+        TabId::new(),
+        record_drop,
+        record_drop
+    ));
+}
+
+/// A client with one counted move and one dropped request encodes neither
+/// count nor its checked pane. The decoded client reads `0` for both, and
+/// its first check of pane 4, the pane checked before encoding, counts a
+/// move.
+#[test]
+fn a_decoded_client_starts_with_no_checked_pane_and_both_input_counts_at_zero() {
+    let mut client = build_test_client(TabId::new());
+    let third_pane_id = PaneId::new();
+    let fourth_pane_id = PaneId::new();
+    client.update_checked_typed_pane(Some(third_pane_id), false);
+    client.update_checked_typed_pane(Some(fourth_pane_id), true);
+    client.record_dropped_input_request();
+
+    let encoded_client_json: serde_json::Value =
+        serde_json::to_value(&client).expect("the client encodes");
+    let encoded_client_object = encoded_client_json
+        .as_object()
+        .expect("a client encodes as a json object");
+    assert_eq!(encoded_client_object.get("checked_typed_pane_id"), None);
+    assert_eq!(
+        encoded_client_object.get("input_pane_moved_by_others_count"),
+        None
+    );
+    assert_eq!(
+        encoded_client_object.get("dropped_input_request_count"),
+        None
+    );
+    let mut decoded_client: Client =
+        serde_json::from_value(encoded_client_json).expect("the client decodes");
+
+    assert_eq!(decoded_client.get_input_pane_moved_by_others_count(), 0);
+    assert_eq!(decoded_client.get_dropped_input_request_count(), 0);
+    decoded_client.update_checked_typed_pane(Some(fourth_pane_id), true);
+    assert_eq!(decoded_client.get_input_pane_moved_by_others_count(), 1);
+}
+
+/// A client whose last connection counted two moves and one drop starts a
+/// new connection on pane 4 with the counts `7` and `3`: both counts read
+/// those values, pane 4 is the checked pane, and a check of pane 4 counts no
+/// move.
+#[test]
+fn start_connection_input_counts_sets_both_counts_and_the_checked_pane() {
+    let fourth_pane_id = PaneId::new();
+    let mut client = build_test_client(TabId::new());
+    client.update_checked_typed_pane(Some(PaneId::new()), true);
+    client.update_checked_typed_pane(Some(PaneId::new()), true);
+    client.record_dropped_input_request();
+
+    client.start_connection_input_counts(Some(fourth_pane_id), 7, 3);
+    client.update_checked_typed_pane(Some(fourth_pane_id), true);
+
+    assert_eq!(
+        (
+            client.get_checked_typed_pane_id(),
+            client.get_input_pane_moved_by_others_count(),
+            client.get_dropped_input_request_count()
+        ),
+        (Some(fourth_pane_id), 7, 3)
+    );
+}
+
+/// A connection that starts both counts at `u64::MAX` keeps them at
+/// `u64::MAX` through one more move and one more drop.
+#[test]
+fn both_input_counts_stay_at_u64_max_through_a_move_and_a_drop() {
+    let mut client = build_test_client(TabId::new());
+    client.start_connection_input_counts(Some(PaneId::new()), u64::MAX, u64::MAX);
+
+    client.update_checked_typed_pane(Some(PaneId::new()), true);
+    client.record_dropped_input_request();
+
+    assert_eq!(
+        (
+            client.get_input_pane_moved_by_others_count(),
+            client.get_dropped_input_request_count()
+        ),
+        (u64::MAX, u64::MAX)
+    );
+}
+
+#[test]
+fn start_connection_input_counts_records_no_view_change() {
+    let pane_id = PaneId::new();
+
+    assert!(!is_view_change_recorded(
+        TabId::new(),
+        |_| {},
+        |client| {
+            client.start_connection_input_counts(Some(pane_id), 1, 0);
+        }
+    ));
 }

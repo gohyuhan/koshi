@@ -26,7 +26,8 @@ use koshi_image::{AnimationFrame, FrameDelay, LoopPolicy};
 use koshi_ipc::image_chunk::IMAGE_CHUNK_FRAME_HEAD_BYTE_COUNT;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    GraphicsCapabilities, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    FiredAction, GraphicsCapabilities, IpcRequest, PaintedInputView, WireMouseAction,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::ReceivedFrame;
 use koshi_layout::mode::LayoutMode;
@@ -255,10 +256,13 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             focused_pane_id: Some(pane_id),
             active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
+            typed_pane_id: None,
             last_applied_placement_command_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         placement_preview: None,
     }
@@ -1295,6 +1299,7 @@ fn build_attach_request(
             link_timeout_ms,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     }
 }
@@ -1338,6 +1343,7 @@ fn attach_test_client_with_graphics(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         },
     );
@@ -1359,7 +1365,8 @@ fn attach_test_client_with_graphics(
 }
 
 #[test]
-fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
+fn an_attach_forwards_its_initial_cell_measurement_and_painted_input_view_before_the_session_reply()
+{
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-cell-size");
@@ -1380,6 +1387,11 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     let _: IpcResponse = connection.recv().expect("hello reply");
     let measured_cell_size =
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
+    let painted_input_view = PaintedInputView {
+        typed_pane_id: Some(PaneId::new()),
+        input_pane_moved_by_others_count: 4,
+        dropped_input_request_count: 2,
+    };
     send_prepare_request(
         &mut connection,
         IpcRequest {
@@ -1394,6 +1406,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: Some(painted_input_view),
             },
         },
     );
@@ -1402,6 +1415,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
 
     let RuntimeEvent::IpcAttach {
         cell_size,
+        painted_input_view: forwarded_painted_input_view,
         response_sender,
         ..
     } = inbox_receiver
@@ -1410,7 +1424,10 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     else {
         panic!("expected IpcAttach");
     };
-    assert_eq!(cell_size, Some(measured_cell_size));
+    assert_eq!(
+        (cell_size, forwarded_painted_input_view),
+        (Some(measured_cell_size), Some(painted_input_view))
+    );
     let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
     response_sender
         .send(Some(build_attach_accepted(
@@ -3446,12 +3463,14 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(typed_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send the keyboard request");
     let RuntimeEvent::ClientKeyboard {
         client_id: received_client_id,
         key_inputs: received_key_inputs,
+        ..
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("the keyboard request reached the dispatcher")
@@ -3498,6 +3517,7 @@ fn an_attached_connection_carries_every_field_of_the_key_input() {
                         Key::Char('é'),
                     )),
                 ],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send the keyboard request");
@@ -3505,6 +3525,7 @@ fn an_attached_connection_carries_every_field_of_the_key_input() {
     let RuntimeEvent::ClientKeyboard {
         client_id: received_client_id,
         key_inputs: received_key_inputs,
+        ..
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("the keyboard request reached the dispatcher")
@@ -3761,20 +3782,25 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         row_count: 40,
     };
     let command_envelope = build_test_command_envelope();
-    let fired_action =
-        ActionReference::from_core_action_name("new-tab").expect("the action name is valid");
+    let fired_action = FiredAction {
+        action_reference: ActionReference::from_core_action_name("new-tab")
+            .expect("the action name is valid"),
+        painted_input_pane_moved_by_others_count: 2,
+    };
 
     connection
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
+                painted_input_pane_moved_by_others_count: 4,
             },
         })
         .expect("send key press");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
         key_inputs,
+        painted_input_pane_moved_by_others_count: keyboard_painted_count,
     } = received_runtime_events.recv().expect("key press event")
     else {
         panic!("expected ClientKeyboard");
@@ -3784,6 +3810,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         key_inputs,
         vec![build_key_input_for_chord(pressed_key_chord)]
     );
+    assert_eq!(keyboard_painted_count, 4);
 
     connection
         .send(&IpcRequest {
@@ -3875,18 +3902,21 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
             request_id: 7,
             request_kind: IpcRequestKind::Paste {
                 pasted_text: String::from("hello\nworld"),
+                painted_input_pane_moved_by_others_count: 5,
             },
         })
         .expect("send paste");
-    let RuntimeEvent::HostPaste {
+    let RuntimeEvent::ClientPaste {
         client_id: paste_client_id,
         pasted_text,
+        painted_input_pane_moved_by_others_count: paste_painted_count,
     } = received_runtime_events.recv().expect("paste event")
     else {
-        panic!("expected HostPaste");
+        panic!("expected ClientPaste");
     };
     assert_eq!(paste_client_id, client_id);
     assert_eq!(pasted_text, "hello\nworld");
+    assert_eq!(paste_painted_count, 5);
 
     // A kind the reading half does not forward ends it, which detaches.
     connection
@@ -3942,6 +3972,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
             request_id: 4,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send key press");
@@ -3951,6 +3982,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
         key_inputs,
+        ..
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press event")
@@ -3982,6 +4014,7 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send key press");
@@ -3991,6 +4024,7 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
         key_inputs,
+        ..
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press event")
@@ -4021,6 +4055,7 @@ fn a_keyboard_request_before_an_attach_closes_the_connection() {
                     BindingModifierFlags::CTRL,
                     Key::Char('t'),
                 ))],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send the keyboard request");
@@ -4858,12 +4893,14 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send key press");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
         key_inputs,
+        ..
     } = received_runtime_events.recv().expect("key press event")
     else {
         panic!("expected ClientKeyboard");
@@ -4880,6 +4917,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
             request_id: 4,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(pressed_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send key press");
@@ -5484,6 +5522,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
                 request_id: 3 + chord_index as u64,
                 request_kind: IpcRequestKind::Keyboard {
                     key_inputs: vec![build_key_input_for_chord(*typed_key_chord)],
+                    painted_input_pane_moved_by_others_count: 0,
                 },
             })
             .expect("send the key press");
@@ -5499,6 +5538,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
         let RuntimeEvent::ClientKeyboard {
             client_id: keyboard_client_id,
             key_inputs,
+            ..
         } = received_runtime_events
             .recv_timeout(Duration::from_secs(5))
             .expect("key press event")
@@ -5712,12 +5752,14 @@ fn rotating_the_token_hands_requests_to_the_dispatcher_again_after_they_were_ref
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(typed_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send the key press");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
         key_inputs,
+        ..
     } = received_runtime_events
         .recv_timeout(Duration::from_secs(5))
         .expect("key press")
@@ -5898,12 +5940,14 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
             request_id: 3,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(taken_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send the key press the session takes");
     let RuntimeEvent::ClientKeyboard {
         client_id: keyboard_client_id,
         key_inputs,
+        ..
     } = received_runtime_events.recv().expect("key press event")
     else {
         panic!("expected ClientKeyboard");
@@ -5924,6 +5968,7 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
             request_id: 4,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(refused_key_chord)],
+                painted_input_pane_moved_by_others_count: 0,
             },
         })
         .expect("send the key press the session refuses");
@@ -6081,10 +6126,11 @@ fn a_command_line_submit_naming_a_fired_action_reaches_the_runtime_without_it() 
             request_id: 2,
             request_kind: IpcRequestKind::Prepare(Box::new(IpcRequestKind::SubmitCommand {
                 command_envelope: Box::new(build_test_command_envelope()),
-                fired_action: Some(
-                    ActionReference::from_core_action_name("new-tab")
+                fired_action: Some(FiredAction {
+                    action_reference: ActionReference::from_core_action_name("new-tab")
                         .expect("the action name is valid"),
-                ),
+                    painted_input_pane_moved_by_others_count: 0,
+                }),
             })),
         })
         .expect("send the Prepare");
@@ -7684,6 +7730,7 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
                 link_timeout_ms: Some(link_timeout_ms),
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         };
 
@@ -7742,6 +7789,7 @@ fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_k
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_input_view: None,
         },
     };
 
@@ -7826,6 +7874,7 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
                 link_timeout_ms: None,
                 max_frames_per_second,
                 placement_preview_target: None,
+                painted_input_view: None,
             },
         };
 
