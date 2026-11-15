@@ -504,8 +504,9 @@ and `label` after its id. No two clients attached to one session have the
 same number. The session gives each new client the lowest number from `1` up
 that no attached client holds. Example: if clients `1` and `3` are attached,
 the next client gets `2`, and the client after it gets `4`. If a terminal
-reconnects with its saved view, it gets its old number back while no attached
-client holds that number. Clients of two different sessions can have the same
+reconnects with its saved view, it gets its old number and its old label back
+while no attached client holds each one. Example: `bob-2` drops and dials
+again after `bob` has left, and it is still `bob-2`. Clients of two different sessions can have the same
 number. The label is the name the session gave the client at attach:
 
 1. A client of the account that runs the session, on this machine, is `host`.

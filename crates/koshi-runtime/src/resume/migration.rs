@@ -12,6 +12,7 @@ use serde_json::{Map, Number, Value};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId};
+use koshi_core::naming::{generate_name, NameKind};
 use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSeverity};
 use koshi_session::session::state::{compute_floating_layout_size, Session};
 use koshi_storage::error::StorageError;
@@ -1305,7 +1306,8 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 ///    `focus_history: [<u>]` and `zoomed_pane_id: null`.
 ///    `shown_floating_pane_ids` and `focused_floating_pane_id` keep their
 ///    values.
-/// 4. Each saved view gains `color_index: 0`.
+/// 4. Each saved view gains `color_index: 0` and a generated
+///    `C-<adjective>-<noun>` `label` ([`generate_name`]).
 /// 5. The client records of each session hold distinct `color_index` values,
 ///    as [`assign_unique_color_indexes_five_to_six`] states.
 /// 6. Each client record's `origin` of `"Local"` becomes
@@ -1372,8 +1374,12 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
                 record_path,
             )?;
             migrate_floating_pane_views_five_to_six(saved_view, &saved_view_path)?;
-            get_json_object(saved_view, &saved_view_path)?
-                .insert("color_index".to_string(), serde_json::json!(0));
+            let saved_view_fields = get_json_object(saved_view, &saved_view_path)?;
+            saved_view_fields.insert("color_index".to_string(), serde_json::json!(0));
+            saved_view_fields.insert(
+                "label".to_string(),
+                serde_json::json!(generate_name(NameKind::Client, |_| false)),
+            );
             Ok(())
         },
     )

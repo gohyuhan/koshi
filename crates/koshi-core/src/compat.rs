@@ -259,8 +259,9 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// to `255`. No two clients of one session hold the same `color_index`: of
 /// the format 5 clients of one session that share an index, the one with the
 /// lowest client id keeps it, and each other one takes the lowest index that
-/// no client of that session holds. Each saved view holds `color_index`, the
-/// index its client held, and a saved view of format 5 takes `0`. A client's
+/// no client of that session holds. Each saved view holds `color_index` and
+/// `label`, the index and label its client held. A saved view of format 5
+/// takes `0` and a generated `C-<adjective>-<noun>` label. A client's
 /// `Local` origin carries `is_same_user`, and a format 5 client whose origin
 /// is `Local` takes `is_same_user: false` until its connection comes back and
 /// sets the value it reports. A session

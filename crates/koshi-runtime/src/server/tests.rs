@@ -1457,18 +1457,20 @@ fn get_booted_parts(server: &Server, client_id: ClientId) -> (SessionId, TabId, 
     (session_id, tab_id, pane_id)
 }
 
-/// The view a client of a booted session files: `color_index`,
+/// The view a client of a booted session files: `color_index`, `label`,
 /// `booted_tab_id` active with `root_pane_id` focused, no zoom,
 /// `scroll_offset_by_pane_id` as its scroll positions, and no floating pane
 /// view.
 fn build_booted_saved_view(
     color_index: u32,
+    label: &str,
     booted_tab_id: TabId,
     root_pane_id: PaneId,
     scroll_offset_by_pane_id: HashMap<PaneId, usize>,
 ) -> SavedView {
     SavedView {
         color_index,
+        label: label.to_string(),
         active_tab_id: booted_tab_id,
         focus_history_by_tab_id: HashMap::from([(booted_tab_id, vec![root_pane_id])]),
         zoomed_pane_id_by_tab_id: HashMap::new(),
@@ -1975,6 +1977,25 @@ fn attach_with_token(
     resume_token: Option<ConnectionToken>,
     attached_at: SystemTime,
 ) -> AttachAccepted {
+    attach_from_origin_with_token(
+        server,
+        resume_token,
+        ClientOrigin::Local { is_same_user: true },
+        None,
+        attached_at,
+    )
+}
+
+/// Attach through [`Server::handle_ipc_attach`] as a connection from
+/// `client_origin` carrying `granted_identity`, presenting `resume_token` and
+/// no client id, at `attached_at`.
+fn attach_from_origin_with_token(
+    server: &mut Server,
+    resume_token: Option<ConnectionToken>,
+    client_origin: ClientOrigin,
+    granted_identity: Option<&str>,
+    attached_at: SystemTime,
+) -> AttachAccepted {
     server
         .handle_ipc_attach(
             None,
@@ -1983,8 +2004,8 @@ fn attach_with_token(
             None,
             None,
             attached_at,
-            ClientOrigin::Local { is_same_user: true },
-            None,
+            client_origin,
+            granted_identity,
             60,
             None,
         )
@@ -2019,6 +2040,16 @@ fn get_client_color_index(server: &Server, client_id: ClientId) -> u32 {
         .and_then(|session| session.clients.get_client_by_id(client_id))
         .expect("the client is attached")
         .get_color_index()
+}
+
+/// The label of `client_id` in the session that holds it.
+fn get_client_label(server: &Server, client_id: ClientId) -> String {
+    server
+        .get_session_for_client(client_id)
+        .and_then(|session| session.clients.get_client_by_id(client_id))
+        .expect("the client is attached")
+        .get_label()
+        .to_string()
 }
 
 #[test]
@@ -2067,9 +2098,10 @@ fn three_hundred_attached_clients_each_hold_an_index_no_other_client_holds() {
 }
 
 #[test]
-fn a_re_attach_keeps_its_index_whatever_saved_index_it_names() {
+fn a_re_attach_keeps_its_index_and_label_whatever_saved_view_it_names() {
     let (mut server, booted_client_id) = boot_server();
-    let (session_id, booted_tab_id, _root_pane_id) = get_booted_parts(&server, booted_client_id);
+    let (session_id, booted_tab_id, root_pane_id) = get_booted_parts(&server, booted_client_id);
+    let saved_view = build_booted_saved_view(7, "bob", booted_tab_id, root_pane_id, HashMap::new());
 
     let _ = server.handle_client_attach(
         session_id,
@@ -2081,10 +2113,11 @@ fn a_re_attach_keeps_its_index_whatever_saved_index_it_names() {
         SystemTime::now(),
         ClientOrigin::Local { is_same_user: true },
         None,
-        Some(7),
+        Some(&saved_view),
     );
 
     assert_eq!(get_client_color_index(&server, booted_client_id), 0);
+    assert_eq!(get_client_label(&server, booted_client_id), "host");
 }
 
 #[test]
@@ -2135,6 +2168,72 @@ fn a_token_whose_index_another_client_took_gets_the_lowest_free_index() {
     );
 }
 
+/// `bob` and `bob-2` attach with the grant `bob`, `bob` leaves, and `bob-2`'s
+/// link drops: its view is filed, then its record goes. Its redial with the
+/// token comes back as `bob-2`, not as the free `bob`.
+#[test]
+fn a_token_takes_back_the_label_its_client_held_while_no_attached_client_holds_it() {
+    let (mut server, _booted_client_id) = boot_server();
+    let now = SystemTime::now();
+    let first_bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let dropped_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    assert_eq!(
+        get_client_label(&server, dropped_attachment.client_id),
+        "bob-2"
+    );
+    let _ = server.handle_client_detach(first_bob_attachment.client_id);
+    server.save_client_view(dropped_attachment.client_id, now);
+    let _ = server.handle_client_detach(dropped_attachment.client_id);
+
+    let redialed_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(dropped_attachment.resume_token),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        get_client_label(&server, redialed_attachment.client_id),
+        "bob-2"
+    );
+}
+
+/// While `bob-2` is away, a new client with the grant `bob` takes the free
+/// `bob-2`. The returning `bob-2` finds its label held and takes `bob-3`.
+#[test]
+fn a_token_whose_label_another_client_took_gets_the_label_its_grant_gives() {
+    let (mut server, _booted_client_id) = boot_server();
+    let now = SystemTime::now();
+    let _first_bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let dropped_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    server.save_client_view(dropped_attachment.client_id, now);
+    let _ = server.handle_client_detach(dropped_attachment.client_id);
+    let taking_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+
+    let returning_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(dropped_attachment.resume_token),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        get_client_label(&server, taking_attachment.client_id),
+        "bob-2"
+    );
+    assert_eq!(
+        get_client_label(&server, returning_attachment.client_id),
+        "bob-3"
+    );
+}
+
 #[test]
 fn a_token_naming_a_client_still_attached_hands_its_index_to_the_client_that_replaces_it() {
     let (mut server, booted_client_id) = boot_server();
@@ -2153,6 +2252,10 @@ fn a_token_naming_a_client_still_attached_hands_its_index_to_the_client_that_rep
     assert_eq!(
         get_client_color_index(&server, replacing_attachment.client_id),
         2
+    );
+    assert_eq!(
+        get_client_label(&server, replacing_attachment.client_id),
+        "host-3"
     );
 }
 
@@ -2832,6 +2935,7 @@ fn a_client_the_restart_grace_still_holds_files_no_view_and_keeps_its_token() {
         server.saved_view_store.take_saved_view(&resume_token, now),
         Some(build_booted_saved_view(
             0,
+            "host",
             booted_tab_id,
             root_pane_id,
             HashMap::from([(root_pane_id, 500)])
@@ -2903,6 +3007,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
             .take_saved_view(&leaving_attachment.resume_token, now),
         Some(build_booted_saved_view(
             1,
+            "host-2",
             booted_tab_id,
             root_pane_id,
             HashMap::from([(root_pane_id, 42)])
@@ -2965,6 +3070,7 @@ fn a_client_the_session_no_longer_holds_files_no_view_and_drops_its_token() {
             .take_saved_view(&next_attachment.resume_token, now),
         Some(build_booted_saved_view(
             1,
+            "host-2",
             booted_tab_id,
             root_pane_id,
             HashMap::from([(root_pane_id, 500)])
@@ -4152,6 +4258,7 @@ fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_c
             .take_saved_view(&attachment.resume_token, detached_at),
         Some(build_booted_saved_view(
             1,
+            "host-2",
             booted_tab_id,
             root_pane_id,
             HashMap::new()
@@ -4186,6 +4293,7 @@ fn a_client_that_does_not_return_ends_its_session_under_auto_close_and_still_fil
             .take_saved_view(&attachment.resume_token, detached_at),
         Some(build_booted_saved_view(
             1,
+            "host-2",
             booted_tab_id,
             root_pane_id,
             HashMap::new()

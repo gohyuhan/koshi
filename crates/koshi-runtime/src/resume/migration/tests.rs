@@ -987,7 +987,7 @@ fn step_four_names_the_missing_or_misshapen_field() {
 }
 
 #[test]
-fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its_history_and_each_local_origin_an_unknown_account(
+fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its_history_and_a_generated_label_and_each_local_origin_an_unknown_account(
 ) {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
@@ -1049,6 +1049,18 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its
 
     migrate_resume_five_to_six(&mut resume_body).expect("step 5 converts the body");
 
+    let migrated_label = resume_body["saved_view_store"]["saved_view_records"][0]["saved_view"]
+        .as_object_mut()
+        .expect("the migrated saved view is an object")
+        .remove("label")
+        .expect("step 5 gives the saved view a label");
+    let migrated_label = migrated_label.as_str().expect("the label is a string");
+    let migrated_label_parts: Vec<&str> = migrated_label.split('-').collect();
+    assert_eq!(
+        (migrated_label_parts.len(), migrated_label_parts[0]),
+        (3, "C"),
+        "a generated C-<adjective>-<noun>, got {migrated_label}"
+    );
     assert_eq!(
         resume_body,
         serde_json::json!({

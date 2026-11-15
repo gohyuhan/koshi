@@ -80,8 +80,8 @@ impl Server {
     /// `resume_client_id` claim has no view filed under it: a client's view is
     /// filed only once its record goes. A view that comes back puts the client on the
     /// tab it names while the session holds that tab, gives the client the
-    /// `color_index` it names while no attached client holds that index
-    /// ([`Self::handle_client_attach`]), and then
+    /// `color_index` and the label it names while no attached client holds
+    /// each one ([`Self::handle_client_attach`]), and then
     /// restores the rest of the view onto the freshly minted client
     /// ([`Self::restore_saved_view`]). The token
     /// is consumed by this one attach: presenting it again restores nothing. A
@@ -137,8 +137,9 @@ impl Server {
     /// target.
     ///
     /// `client_origin` and `granted_identity` describe the connection, as
-    /// [`Self::handle_client_attach`] reads them: a freshly minted client takes
-    /// its label from them, and a client record taken back keeps its label.
+    /// [`Self::handle_client_attach`] reads them: a freshly minted client with
+    /// no saved view, or whose saved label another client holds, takes its
+    /// label from them, and a client record taken back keeps its label.
     // Carries the whole of one attach request: what it claims back (`resume_client_id`,
     // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`,
     // `cell_size`, `placement_preview_target`), who the connection carries
@@ -228,7 +229,7 @@ impl Server {
             attached_at,
             client_origin,
             granted_identity,
-            saved_view.as_ref().map(|saved_view| saved_view.color_index),
+            saved_view.as_ref(),
         ));
         if let Some(saved_view) = saved_view {
             emitted_events.extend(self.restore_saved_view(
@@ -377,14 +378,19 @@ impl Server {
     /// attached is a re-attach: its view updates in place, keeping its per-tab
     /// focus, zoom, scrollback offsets, selections, floating view, lock mode,
     /// mouse selection mode, label and `color_index`, and the tab it moves off of
-    /// reflows too. A fresh id is registered anew with the label
-    /// [`resolve_client_label`] gives for `client_origin` and
-    /// `granted_identity`, which no client in the session already holds, and a
+    /// reflows too. A fresh id is registered anew with a label and a
     /// `color_index` that no attached client holds:
-    /// `saved_color_index` while no attached client holds it, else the lowest
-    /// index no attached client holds. Example: with indexes `0` and `2` held
-    /// and no saved index, the fresh id takes `1`; with `0` to `11` held, it
-    /// takes `12`; with `saved_color_index` `5` and `5` free, it takes `5`.
+    ///
+    /// - the label is the label of `saved_view` while no attached client holds
+    ///   it, else the label [`resolve_client_label`] gives for `client_origin`
+    ///   and `granted_identity`;
+    /// - the index is the `color_index` of `saved_view` while no attached
+    ///   client holds it, else the lowest index no attached client holds.
+    ///
+    /// Example: with indexes `0` and `2` held and no saved view, the fresh id
+    /// takes `1`; with `0` to `11` held, it takes `12`; with a saved view
+    /// holding `5` and `bob-2`, and both free, it takes `5` and `bob-2`. With
+    /// `bob-2` held, a remote client whose grant is `bob` takes `bob-3`.
     ///
     /// A fresh id also takes the session's starting lock: a session seeded from
     /// a profile carrying `lock` registers its first client in
@@ -422,8 +428,8 @@ impl Server {
     // Carries the whole of one attach: where it lands (`session_id`,
     // `client_id`, `active_tab_id`), the view it arrives with (`viewport_size`,
     // `pane_area`, `cell_size`), where it came from (`attached_at`,
-    // `client_origin`, `granted_identity`), and the index its saved view held
-    // (`saved_color_index`).
+    // `client_origin`, `granted_identity`), and the view it left behind
+    // (`saved_view`).
     #[allow(clippy::too_many_arguments)]
     pub fn handle_client_attach(
         &mut self,
@@ -436,7 +442,7 @@ impl Server {
         attached_at: SystemTime,
         client_origin: ClientOrigin,
         granted_identity: Option<&str>,
-        saved_color_index: Option<u32>,
+        saved_view: Option<&SavedView>,
     ) -> Vec<Event> {
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = Vec::new();
@@ -500,17 +506,22 @@ impl Server {
                 .list_attached_clients()
                 .map(Client::get_label)
                 .collect();
-            let label = resolve_client_label(client_origin, granted_identity, |candidate_label| {
-                held_labels.contains(candidate_label)
-            });
+            let label = match saved_view {
+                Some(saved_view) if !held_labels.contains(saved_view.label.as_str()) => {
+                    saved_view.label.clone()
+                }
+                _ => resolve_client_label(client_origin, granted_identity, |candidate_label| {
+                    held_labels.contains(candidate_label)
+                }),
+            };
             let held_color_indexes: HashSet<u32> = session
                 .clients
                 .list_attached_clients()
                 .map(|client| client.get_color_index())
                 .collect();
-            let color_index = match saved_color_index {
-                Some(saved_color_index) if !held_color_indexes.contains(&saved_color_index) => {
-                    saved_color_index
+            let color_index = match saved_view {
+                Some(saved_view) if !held_color_indexes.contains(&saved_view.color_index) => {
+                    saved_view.color_index
                 }
                 _ => (0..)
                     .find(|candidate_color_index| {

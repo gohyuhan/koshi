@@ -344,6 +344,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
         saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(101)),
         Some(SavedView {
             color_index: 1,
+            label: "C-calm-otter".to_string(),
             active_tab_id: tab_id,
             focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),

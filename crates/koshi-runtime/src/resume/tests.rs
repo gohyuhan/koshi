@@ -484,13 +484,25 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
         Some(first_client_id)
     );
     let first_tab_pane_ids: [PaneId; 3] = [3, 6, 7].map(parse_format_five_id);
-    assert_eq!(
-        resumed_server.saved_view_store.take_saved_view(
+    let migrated_saved_view = resumed_server
+        .saved_view_store
+        .take_saved_view(
             &ConnectionToken::from_secret("format-five-second-client-token"),
             SystemTime::UNIX_EPOCH + Duration::from_secs(101),
-        ),
-        Some(SavedView {
+        )
+        .expect("the format-five view comes back");
+    let migrated_label_parts: Vec<&str> = migrated_saved_view.label.split('-').collect();
+    assert_eq!(
+        (migrated_label_parts.len(), migrated_label_parts[0]),
+        (3, "C"),
+        "a format-five view takes a generated C-<adjective>-<noun>, got {}",
+        migrated_saved_view.label
+    );
+    assert_eq!(
+        migrated_saved_view,
+        SavedView {
             color_index: 0,
+            label: migrated_saved_view.label.clone(),
             active_tab_id: first_tab_id,
             focus_history_by_tab_id: HashMap::from([(
                 first_tab_id,
@@ -519,7 +531,7 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
                 ),
             ]),
             shown_floating_pane_ids: vec![cells_floating_pane_id],
-        })
+        }
     );
 }
 
@@ -3507,6 +3519,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
         read_saved_view_store.take_saved_view(&filed_resume_token, filed_at),
         Some(SavedView {
             color_index: 300,
+            label: "C-swift-otter".to_string(),
             active_tab_id: filed_tab_id,
             focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
