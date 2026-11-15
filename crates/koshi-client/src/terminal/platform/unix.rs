@@ -9,12 +9,13 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use koshi_input::host::{Event, Parser, WindowSize};
+use koshi_input::host::{Event, Parser, TaggedEvent, WindowSize};
 use rustix::termios::{self, Termios};
 
 use super::{
     choose_shorter_timeout_duration, ESCAPE_SEQUENCE_TIMEOUT_DURATION, OUTPUT_BUFFER_BYTE_COUNT,
 };
+use crate::input::InputReadClock;
 use crate::terminal::{limit_window_size, reader};
 
 const TERMINAL_INPUT_BYTE_COUNT: usize = 4_096;
@@ -182,7 +183,7 @@ impl EventSource {
         }
     }
 
-    fn pop_parsed_terminal_event(&mut self) -> Option<Event> {
+    fn pop_parsed_terminal_event(&mut self) -> Option<TaggedEvent> {
         let parsed_terminal_event = self.terminal_input_parser.remove_next_pending_event();
         if !self.terminal_input_parser.needs_input_sequence_timeout() {
             self.input_sequence_started_at = None;
@@ -190,7 +191,12 @@ impl EventSource {
         parsed_terminal_event
     }
 
-    fn process_terminal_input_bytes(&mut self) -> io::Result<()> {
+    /// Read the waiting terminal bytes into the parser, tagged with the move
+    /// count `input_read_clock` holds once the read returns.
+    fn process_terminal_input_bytes(
+        &mut self,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<()> {
         let mut terminal_input_bytes = [0_u8; TERMINAL_INPUT_BYTE_COUNT];
         let terminal_input_byte_count =
             read_with_interrupt_retry(&mut self.terminal_input_stream, &mut terminal_input_bytes)?;
@@ -200,8 +206,10 @@ impl EventSource {
                 "terminal input reached end-of-file",
             ));
         }
-        self.terminal_input_parser
-            .process_input_bytes(&terminal_input_bytes[..terminal_input_byte_count]);
+        self.terminal_input_parser.process_input_bytes(
+            &terminal_input_bytes[..terminal_input_byte_count],
+            input_read_clock.get_painted_input_pane_moved_by_others_count(),
+        );
         self.input_sequence_started_at = self
             .terminal_input_parser
             .needs_input_sequence_timeout()
@@ -209,10 +217,16 @@ impl EventSource {
         Ok(())
     }
 
-    fn build_window_resize_event(&self) -> io::Result<Event> {
-        Ok(Event::WindowResized(read_terminal_window_size(
-            &self.terminal_size_stream,
-        )?))
+    /// The terminal's window size as a resize event, tagged with the move
+    /// count `input_read_clock` holds.
+    fn build_window_resize_event(
+        &self,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<TaggedEvent> {
+        Ok(TaggedEvent {
+            event: Event::WindowResized(read_terminal_window_size(&self.terminal_size_stream)?),
+            input_tag: input_read_clock.get_painted_input_pane_moved_by_others_count(),
+        })
     }
 }
 
@@ -220,7 +234,11 @@ impl EventSource {
 mod tests;
 
 impl reader::EventSource for EventSource {
-    fn try_read_event(&mut self, timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
+    fn try_read_event(
+        &mut self,
+        timeout_duration: Option<Duration>,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<Option<TaggedEvent>> {
         let event_wait_deadline_instant =
             timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
         loop {
@@ -259,10 +277,10 @@ impl reader::EventSource for EventSource {
             }
             if is_resize_pipe_ready {
                 drain_pipe(&self.resize_pipe)?;
-                return self.build_window_resize_event().map(Some);
+                return self.build_window_resize_event(input_read_clock).map(Some);
             }
             if is_terminal_input_ready {
-                self.process_terminal_input_bytes()?;
+                self.process_terminal_input_bytes(input_read_clock)?;
                 continue;
             }
             if self
@@ -283,7 +301,7 @@ impl reader::EventSource for EventSource {
         }
     }
 
-    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+    fn remove_next_parsed_event(&mut self) -> Option<TaggedEvent> {
         self.pop_parsed_terminal_event()
     }
 }

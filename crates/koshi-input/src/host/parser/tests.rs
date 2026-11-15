@@ -3,9 +3,16 @@
 use super::*;
 
 fn drain_pending_events(parser: &mut Parser) -> Vec<Event> {
+    drain_tagged_events(parser)
+        .into_iter()
+        .map(|tagged_event| tagged_event.event)
+        .collect()
+}
+
+fn drain_tagged_events(parser: &mut Parser) -> Vec<TaggedEvent> {
     let mut drained_events = Vec::new();
-    while let Some(pending_event) = parser.remove_next_pending_event() {
-        drained_events.push(pending_event);
+    while let Some(tagged_event) = parser.remove_next_pending_event() {
+        drained_events.push(tagged_event);
     }
     drained_events
 }
@@ -14,17 +21,127 @@ fn build_key_event(key_code: KeyCode, modifiers: Modifiers) -> Event {
     Event::Key(KeyEvent::from_key_code_and_modifiers(key_code, modifiers))
 }
 
+/// Split `terminal_input_bytes` at every byte, pass the first part with input
+/// tag `1` and the rest with tag `2`, and assert one `expected_event` tagged
+/// `1`, or `2` when the first part is empty.
 fn assert_event_at_every_split(terminal_input_bytes: &[u8], expected_event: Event) {
     for split_byte_count in 0..=terminal_input_bytes.len() {
         let mut parser = Parser::default();
-        parser.process_input_bytes(&terminal_input_bytes[..split_byte_count]);
-        parser.process_input_bytes(&terminal_input_bytes[split_byte_count..]);
+        parser.process_input_bytes(&terminal_input_bytes[..split_byte_count], 1);
+        parser.process_input_bytes(&terminal_input_bytes[split_byte_count..], 2);
+        let expected_input_tag = if split_byte_count == 0 { 2 } else { 1 };
         assert_eq!(
-            drain_pending_events(&mut parser),
-            std::slice::from_ref(&expected_event),
+            drain_tagged_events(&mut parser),
+            vec![TaggedEvent {
+                event: expected_event.clone(),
+                input_tag: expected_input_tag,
+            }],
             "split_byte_count {split_byte_count}"
         );
     }
+}
+
+/// `input_tag` paired with `event`.
+fn build_tagged_event(event: Event, input_tag: u64) -> TaggedEvent {
+    TaggedEvent { event, input_tag }
+}
+
+#[test]
+fn a_paste_across_three_chunks_carries_the_tag_of_its_first_chunk() {
+    let mut parser = Parser::default();
+
+    parser.process_input_bytes(b"\x1b[200~ab", 1);
+    parser.process_input_bytes(b"cd", 2);
+    parser.process_input_bytes(b"ef\x1b[201~x", 3);
+
+    assert_eq!(
+        drain_tagged_events(&mut parser),
+        vec![
+            build_tagged_event(Event::Paste(String::from("abcdef")), 1),
+            build_tagged_event(build_key_event(KeyCode::Char('x'), Modifiers::NONE), 3),
+        ]
+    );
+}
+
+#[test]
+fn a_control_sequence_cut_off_by_escape_starts_the_next_event_in_the_chunk_of_that_escape() {
+    let mut parser = Parser::default();
+
+    parser.process_input_bytes(b"\x1b[1;", 1);
+    parser.process_input_bytes(b"\x1b[A", 2);
+
+    assert_eq!(
+        drain_tagged_events(&mut parser),
+        vec![build_tagged_event(
+            build_key_event(KeyCode::Up, Modifiers::NONE),
+            2
+        )]
+    );
+}
+
+#[test]
+fn an_escape_resolved_by_the_timeout_carries_the_tag_of_its_own_chunk() {
+    let mut parser = Parser::default();
+    parser.process_input_bytes(b"\x1b", 1);
+    parser.process_input_bytes(b"", 5);
+
+    parser.finish_pending_input();
+
+    assert_eq!(
+        drain_tagged_events(&mut parser),
+        vec![build_tagged_event(
+            build_key_event(KeyCode::Escape, Modifiers::NONE),
+            1
+        )]
+    );
+}
+
+#[test]
+fn a_character_after_a_broken_utf8_lead_carries_the_tag_of_its_own_chunk() {
+    let mut parser = Parser::default();
+
+    parser.process_input_bytes(&[0xc3], 1);
+    parser.process_input_bytes(b"a", 2);
+
+    assert_eq!(
+        drain_tagged_events(&mut parser),
+        vec![build_tagged_event(
+            build_key_event(KeyCode::Char('a'), Modifiers::NONE),
+            2
+        )]
+    );
+}
+
+#[test]
+fn two_escapes_in_two_chunks_carry_one_tag_each() {
+    let mut parser = Parser::default();
+
+    parser.process_input_bytes(b"\x1b", 1);
+    parser.process_input_bytes(b"\x1b[A", 2);
+
+    assert_eq!(
+        drain_tagged_events(&mut parser),
+        vec![
+            build_tagged_event(build_key_event(KeyCode::Escape, Modifiers::NONE), 1),
+            build_tagged_event(build_key_event(KeyCode::Up, Modifiers::NONE), 2),
+        ]
+    );
+}
+
+#[test]
+fn an_alt_key_split_after_its_escape_carries_the_tag_of_the_escape() {
+    let mut parser = Parser::default();
+
+    parser.process_input_bytes(b"\x1b", 1);
+    parser.process_input_bytes(b"x", 2);
+
+    assert_eq!(
+        drain_tagged_events(&mut parser),
+        vec![build_tagged_event(
+            build_key_event(KeyCode::Char('x'), Modifiers::ALT),
+            1
+        )]
+    );
 }
 
 #[test]
@@ -49,13 +166,13 @@ fn invalid_cell_pixel_reports_are_not_input() {
         b"\x1b[6;20t",
     ] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(terminal_input_bytes);
+        parser.process_input_bytes(terminal_input_bytes, 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             [],
             "{terminal_input_bytes:?}"
         );
-        parser.process_input_bytes(b"a");
+        parser.process_input_bytes(b"a", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             [build_key_event(KeyCode::Char('a'), Modifiers::NONE)]
@@ -66,7 +183,7 @@ fn invalid_cell_pixel_reports_are_not_input() {
 #[test]
 fn text_and_control_bytes_decode_exactly() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"aA\xc3\xa9\x01\x1c\r\t\x7f\0");
+    parser.process_input_bytes(b"aA\xc3\xa9\x01\x1c\r\t\x7f\0", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -88,10 +205,10 @@ fn text_and_control_bytes_decode_exactly() {
 fn fragmented_utf8_and_escape_sequences_keep_their_bytes() {
     let mut parser = Parser::default();
     for byte in "🐈".as_bytes() {
-        parser.process_input_bytes(&[*byte]);
+        parser.process_input_bytes(&[*byte], 0);
     }
     for byte in b"\x1b[97;5u" {
-        parser.process_input_bytes(&[*byte]);
+        parser.process_input_bytes(&[*byte], 0);
     }
     assert_eq!(
         drain_pending_events(&mut parser),
@@ -105,12 +222,12 @@ fn fragmented_utf8_and_escape_sequences_keep_their_bytes() {
 #[test]
 fn incomplete_utf8_does_not_use_the_escape_sequence_timeout() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(&[0xc3]);
+    parser.process_input_bytes(&[0xc3], 0);
 
     assert!(parser.has_pending_input());
     assert!(!parser.needs_input_sequence_timeout());
 
-    parser.process_input_bytes(&[0xa9]);
+    parser.process_input_bytes(&[0xa9], 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![build_key_event(KeyCode::Char('é'), Modifiers::NONE)]
@@ -121,10 +238,10 @@ fn incomplete_utf8_does_not_use_the_escape_sequence_timeout() {
 #[test]
 fn escape_timeout_and_alt_input_are_distinct() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b");
+    parser.process_input_bytes(b"\x1b", 0);
     assert!(parser.has_pending_input());
     parser.finish_pending_input();
-    parser.process_input_bytes(b"\x1bx\x1bH\x1b\xc3\xa9\x1b_");
+    parser.process_input_bytes(b"\x1bx\x1bH\x1b\xc3\xa9\x1b_", 0);
     parser.finish_pending_input();
     assert_eq!(
         drain_pending_events(&mut parser),
@@ -168,7 +285,7 @@ fn legacy_named_keys_and_modifiers_decode_exactly() {
     ];
     for (terminal_input_bytes, expected_event) in legacy_key_cases {
         let mut parser = Parser::default();
-        parser.process_input_bytes(terminal_input_bytes);
+        parser.process_input_bytes(terminal_input_bytes, 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![expected_event],
@@ -182,7 +299,7 @@ fn kitty_keys_keep_event_kind_and_all_eight_modifiers() {
     let mut parser = Parser::default();
     // 255 is 1 + 254, so every modifier but Shift is held; 256 is 1 + 255, so
     // all eight are.
-    parser.process_input_bytes(b"\x1b[97;255:2u\x1b[97;5:3u\x1b[97;256u");
+    parser.process_input_bytes(b"\x1b[97;255:2u\x1b[97;5:3u\x1b[97;256u", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -230,7 +347,10 @@ fn kitty_keys_keep_event_kind_and_all_eight_modifiers() {
 #[test]
 fn kitty_shifted_and_functional_keys_decode_exactly() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[49:33;2u\x1b[57376u\x1b[57387;3u\x1b[57388u\x1b[57414u");
+    parser.process_input_bytes(
+        b"\x1b[49:33;2u\x1b[57376u\x1b[57387;3u\x1b[57388u\x1b[57414u",
+        0,
+    );
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -271,7 +391,7 @@ fn kitty_shifted_keys_survive_every_byte_split() {
 #[test]
 fn malformed_keyboard_sequences_are_dropped_and_parsing_recovers() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[97;5:9u\x1b[999999999999999999999u\x1b[1;5Ax");
+    parser.process_input_bytes(b"\x1b[97;5:9u\x1b[999999999999999999999u\x1b[1;5Ax", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -296,7 +416,7 @@ fn every_sgr_mouse_action_has_zero_based_coordinates() {
     ];
     for (mouse_button_code, mouse_event_kind) in sgr_mouse_action_cases {
         let mut parser = Parser::default();
-        parser.process_input_bytes(format!("\x1b[<{mouse_button_code};11;4M").as_bytes());
+        parser.process_input_bytes(format!("\x1b[<{mouse_button_code};11;4M").as_bytes(), 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![Event::Mouse(MouseEvent {
@@ -313,7 +433,7 @@ fn every_sgr_mouse_action_has_zero_based_coordinates() {
 #[test]
 fn sgr_release_modifiers_and_full_coordinates_decode_exactly() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[<29;65535;65535m");
+    parser.process_input_bytes(b"\x1b[<29;65535;65535m", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![Event::Mouse(MouseEvent {
@@ -328,7 +448,7 @@ fn sgr_release_modifiers_and_full_coordinates_decode_exactly() {
 #[test]
 fn x10_and_rxvt_mouse_forms_decode_exactly() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[M *%\x1b[32;11;4M");
+    parser.process_input_bytes(b"\x1b[M *%\x1b[32;11;4M", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -357,7 +477,7 @@ fn mouse_forms_reject_coordinates_before_the_first_cell() {
     ];
     for terminal_input_bytes in malformed_mouse_sequence_cases {
         let mut parser = Parser::default();
-        parser.process_input_bytes(terminal_input_bytes);
+        parser.process_input_bytes(terminal_input_bytes, 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -369,8 +489,8 @@ fn mouse_forms_reject_coordinates_before_the_first_cell() {
 #[test]
 fn bracketed_paste_keeps_partial_markers_and_invalid_utf8() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[200~one\x1b[20");
-    parser.process_input_bytes(b"x\xff\x1b[201~");
+    parser.process_input_bytes(b"\x1b[200~one\x1b[20", 0);
+    parser.process_input_bytes(b"x\xff\x1b[201~", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![Event::Paste("one\x1b[20x�".to_string())]
@@ -380,9 +500,9 @@ fn bracketed_paste_keeps_partial_markers_and_invalid_utf8() {
 #[test]
 fn oversized_paste_is_discarded_and_the_next_key_survives() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[200~");
-    parser.process_input_bytes(&vec![b'x'; MAX_PASTE_BYTE_COUNT + 1]);
-    parser.process_input_bytes(b"\x1b[201~z");
+    parser.process_input_bytes(b"\x1b[200~", 0);
+    parser.process_input_bytes(&vec![b'x'; MAX_PASTE_BYTE_COUNT + 1], 0);
+    parser.process_input_bytes(b"\x1b[201~z", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![build_key_event(KeyCode::Char('z'), Modifiers::NONE)]
@@ -392,7 +512,10 @@ fn oversized_paste_is_discarded_and_the_next_key_survives() {
 #[test]
 fn device_and_kitty_answers_decode_exactly() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[?1;2c\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;EINVAL:bad size\x1b\\");
+    parser.process_input_bytes(
+        b"\x1b[?1;2c\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;EINVAL:bad size\x1b\\",
+        0,
+    );
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -428,8 +551,8 @@ fn malformed_primary_device_attributes_are_dropped_and_next_key_survives() {
         b"\x1b[?1;2:c",
     ] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(terminal_input_bytes);
-        parser.process_input_bytes(b"x");
+        parser.process_input_bytes(terminal_input_bytes, 0);
+        parser.process_input_bytes(b"x", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -489,8 +612,8 @@ fn malformed_sixel_attribute_replies_are_dropped_and_next_key_survives() {
         b"\x1b[?1;0;4294967296S",
     ] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(terminal_input_bytes);
-        parser.process_input_bytes(b"x");
+        parser.process_input_bytes(terminal_input_bytes, 0);
+        parser.process_input_bytes(b"x", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -514,7 +637,7 @@ fn iterm_capability_replies_support_bel_st_and_c1_st_at_every_split() {
 #[test]
 fn iterm_capability_replies_do_not_leak_into_keys_or_paste() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"x\x1b]1337;Capabilities=F\x07y\x1b[200~paste\x1b[201~z");
+    parser.process_input_bytes(b"x\x1b]1337;Capabilities=F\x07y\x1b[200~paste\x1b[201~z", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -531,8 +654,8 @@ fn iterm_capability_replies_do_not_leak_into_keys_or_paste() {
 fn cancelled_and_unrelated_osc_sequences_are_discarded_and_recover() {
     for cancellation in [0x18, 0x1a] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(b"\x1b]1337;Capabilities=F");
-        parser.process_input_bytes(&[cancellation, b'x']);
+        parser.process_input_bytes(b"\x1b]1337;Capabilities=F", 0);
+        parser.process_input_bytes(&[cancellation, b'x'], 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -541,9 +664,9 @@ fn cancelled_and_unrelated_osc_sequences_are_discarded_and_recover() {
     }
     for terminator in [b"\x07".as_slice(), b"\x1b\\", b"\x9c"] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(b"\x1b]0;window title");
-        parser.process_input_bytes(terminator);
-        parser.process_input_bytes(b"x");
+        parser.process_input_bytes(b"\x1b]0;window title", 0);
+        parser.process_input_bytes(terminator, 0);
+        parser.process_input_bytes(b"x", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -557,12 +680,12 @@ fn oversized_osc_is_discarded_until_terminator_and_next_key_survives() {
     let mut terminal_input_bytes = b"\x1b]1337;Capabilities=".to_vec();
     terminal_input_bytes.extend(std::iter::repeat_n(b'x', MAX_CONTROL_STRING_BYTE_COUNT + 1));
     let mut parser = Parser::default();
-    parser.process_input_bytes(&terminal_input_bytes);
+    parser.process_input_bytes(&terminal_input_bytes, 0);
     assert!(parser.has_pending_input());
     assert!(!parser.needs_input_sequence_timeout());
     parser.finish_pending_input();
     assert!(parser.has_pending_input());
-    parser.process_input_bytes(b"\x07z");
+    parser.process_input_bytes(b"\x07z", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![build_key_event(KeyCode::Char('z'), Modifiers::NONE)]
@@ -575,12 +698,12 @@ fn oversized_apc_and_dcs_stay_pending_until_their_string_terminator() {
         let mut terminal_input_bytes = prefix.to_vec();
         terminal_input_bytes.extend(std::iter::repeat_n(b'x', MAX_CONTROL_STRING_BYTE_COUNT + 1));
         let mut parser = Parser::default();
-        parser.process_input_bytes(&terminal_input_bytes);
+        parser.process_input_bytes(&terminal_input_bytes, 0);
         assert!(parser.has_pending_input(), "prefix {prefix:?}");
         assert!(!parser.needs_input_sequence_timeout(), "prefix {prefix:?}");
         parser.finish_pending_input();
         assert!(parser.has_pending_input(), "prefix {prefix:?}");
-        parser.process_input_bytes(b"\x1b\\z");
+        parser.process_input_bytes(b"\x1b\\z", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('z'), Modifiers::NONE)],
@@ -592,10 +715,10 @@ fn oversized_apc_and_dcs_stay_pending_until_their_string_terminator() {
 #[test]
 fn malformed_and_oversized_control_strings_recover_at_their_terminator() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b]0;ignored\x07\x1bPignored\x1b\\");
-    parser.process_input_bytes(b"\x1b_Gi=31;");
-    parser.process_input_bytes(&vec![b'x'; MAX_CONTROL_STRING_BYTE_COUNT]);
-    parser.process_input_bytes(b"\x1b\\q");
+    parser.process_input_bytes(b"\x1b]0;ignored\x07\x1bPignored\x1b\\", 0);
+    parser.process_input_bytes(b"\x1b_Gi=31;", 0);
+    parser.process_input_bytes(&vec![b'x'; MAX_CONTROL_STRING_BYTE_COUNT], 0);
+    parser.process_input_bytes(b"\x1b\\q", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![build_key_event(KeyCode::Char('q'), Modifiers::NONE)]
@@ -614,7 +737,7 @@ fn identified_control_strings_survive_finish_pending_until_their_terminator() {
     ];
     for (terminal_input_bytes, terminator) in identified_control_sequence_cases {
         let mut parser = Parser::default();
-        parser.process_input_bytes(&terminal_input_bytes);
+        parser.process_input_bytes(&terminal_input_bytes, 0);
 
         assert!(parser.has_pending_input(), "{terminal_input_bytes:?}");
         assert!(
@@ -623,8 +746,8 @@ fn identified_control_strings_survive_finish_pending_until_their_terminator() {
         );
         parser.finish_pending_input();
         assert!(parser.has_pending_input(), "{terminal_input_bytes:?}");
-        parser.process_input_bytes(terminator);
-        parser.process_input_bytes(b"x");
+        parser.process_input_bytes(terminator, 0);
+        parser.process_input_bytes(b"x", 0);
 
         let expected_event = if terminal_input_bytes.starts_with(b"\x1b_G") {
             vec![
@@ -650,7 +773,7 @@ fn identified_control_strings_survive_finish_pending_until_their_terminator() {
 fn ambiguous_key_prefixes_still_use_the_sequence_timeout() {
     for terminal_input_bytes in [b"\x1b".as_slice(), b"\x1bO", b"\x1b[", b"\x1b[M", b"\x1b_"] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(terminal_input_bytes);
+        parser.process_input_bytes(terminal_input_bytes, 0);
         assert!(parser.has_pending_input(), "{terminal_input_bytes:?}");
         assert!(
             parser.needs_input_sequence_timeout(),
@@ -658,7 +781,7 @@ fn ambiguous_key_prefixes_still_use_the_sequence_timeout() {
         );
         parser.finish_pending_input();
         assert!(!parser.has_pending_input(), "{terminal_input_bytes:?}");
-        parser.process_input_bytes(b"x");
+        parser.process_input_bytes(b"x", 0);
         let expected_event = match terminal_input_bytes {
             b"\x1b" => vec![
                 build_key_event(KeyCode::Escape, Modifiers::NONE),
@@ -683,8 +806,8 @@ fn capability_reply_survives_timeout_and_cancellation_without_key_leak() {
     let prefix = b"\x1b]1337;Capabilities=F";
     for split_byte_count in 0..=prefix.len() {
         let mut parser = Parser::default();
-        parser.process_input_bytes(&prefix[..split_byte_count]);
-        parser.process_input_bytes(&prefix[split_byte_count..]);
+        parser.process_input_bytes(&prefix[..split_byte_count], 0);
+        parser.process_input_bytes(&prefix[split_byte_count..], 0);
         assert!(
             parser.has_pending_input(),
             "split_byte_count {split_byte_count}"
@@ -698,7 +821,7 @@ fn capability_reply_survives_timeout_and_cancellation_without_key_leak() {
             parser.has_pending_input(),
             "split_byte_count {split_byte_count}"
         );
-        parser.process_input_bytes(b"\x1b\\x");
+        parser.process_input_bytes(b"\x1b\\x", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![
@@ -712,10 +835,10 @@ fn capability_reply_survives_timeout_and_cancellation_without_key_leak() {
     for cancellation in [0x18, 0x1a] {
         for split_byte_count in 0..=prefix.len() {
             let mut parser = Parser::default();
-            parser.process_input_bytes(&prefix[..split_byte_count]);
-            parser.process_input_bytes(&prefix[split_byte_count..]);
+            parser.process_input_bytes(&prefix[..split_byte_count], 0);
+            parser.process_input_bytes(&prefix[split_byte_count..], 0);
             parser.finish_pending_input();
-            parser.process_input_bytes(&[cancellation, b'x']);
+            parser.process_input_bytes(&[cancellation, b'x'], 0);
             assert_eq!(
                 drain_pending_events(&mut parser),
                 vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -730,12 +853,12 @@ fn cancelled_apc_and_dcs_strings_stay_silent_and_recover() {
     for prefix in [b"\x1b_Gi=31;OK".as_slice(), b"\x1bPignored"] {
         for cancellation in [0x18, 0x1a] {
             let mut parser = Parser::default();
-            parser.process_input_bytes(prefix);
+            parser.process_input_bytes(prefix, 0);
             assert!(parser.has_pending_input(), "prefix {prefix:?}");
             assert!(!parser.needs_input_sequence_timeout(), "prefix {prefix:?}");
             parser.finish_pending_input();
             assert!(parser.has_pending_input(), "prefix {prefix:?}");
-            parser.process_input_bytes(&[cancellation, b'x']);
+            parser.process_input_bytes(&[cancellation, b'x'], 0);
             assert_eq!(
                 drain_pending_events(&mut parser),
                 vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -750,8 +873,8 @@ fn private_csi_reply_survives_timeout_until_its_final_byte() {
     let prefix = b"\x1b[?2;0;";
     for split_byte_count in 0..=prefix.len() {
         let mut parser = Parser::default();
-        parser.process_input_bytes(&prefix[..split_byte_count]);
-        parser.process_input_bytes(&prefix[split_byte_count..]);
+        parser.process_input_bytes(&prefix[..split_byte_count], 0);
+        parser.process_input_bytes(&prefix[split_byte_count..], 0);
         assert!(
             parser.has_pending_input(),
             "split_byte_count {split_byte_count}"
@@ -765,7 +888,7 @@ fn private_csi_reply_survives_timeout_until_its_final_byte() {
             parser.has_pending_input(),
             "split_byte_count {split_byte_count}"
         );
-        parser.process_input_bytes(b"0;0Sx");
+        parser.process_input_bytes(b"0;0Sx", 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![
@@ -781,10 +904,10 @@ fn private_csi_reply_survives_timeout_until_its_final_byte() {
 fn private_csi_reply_cancellation_discards_its_suffix() {
     for cancellation in [0x18, 0x1a] {
         let mut parser = Parser::default();
-        parser.process_input_bytes(b"\x1b[?2;0;");
+        parser.process_input_bytes(b"\x1b[?2;0;", 0);
         assert!(!parser.needs_input_sequence_timeout());
         parser.finish_pending_input();
-        parser.process_input_bytes(&[cancellation, b'x']);
+        parser.process_input_bytes(&[cancellation, b'x'], 0);
         assert_eq!(
             drain_pending_events(&mut parser),
             vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)],
@@ -796,9 +919,9 @@ fn private_csi_reply_cancellation_discards_its_suffix() {
 #[test]
 fn private_csi_reply_escape_starts_the_next_control_string() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[?2;0;");
+    parser.process_input_bytes(b"\x1b[?2;0;", 0);
     parser.finish_pending_input();
-    parser.process_input_bytes(b"\x1b]0;title\x07x");
+    parser.process_input_bytes(b"\x1b]0;title\x07x", 0);
 
     assert_eq!(
         drain_pending_events(&mut parser),
@@ -809,9 +932,9 @@ fn private_csi_reply_escape_starts_the_next_control_string() {
 #[test]
 fn oversized_csi_recovers_after_its_final_byte() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[");
-    parser.process_input_bytes(&[b'1'; MAX_CSI_BYTE_COUNT]);
-    parser.process_input_bytes(b"Ax");
+    parser.process_input_bytes(b"\x1b[", 0);
+    parser.process_input_bytes(&[b'1'; MAX_CSI_BYTE_COUNT], 0);
+    parser.process_input_bytes(b"Ax", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![build_key_event(KeyCode::Char('x'), Modifiers::NONE)]
@@ -821,7 +944,7 @@ fn oversized_csi_recovers_after_its_final_byte() {
 #[test]
 fn focus_and_non_kitty_apc_input_decode_without_cross_talk() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(b"\x1b[I\x1b[O\x1b_x");
+    parser.process_input_bytes(b"\x1b[I\x1b[O\x1b_x", 0);
     assert_eq!(
         drain_pending_events(&mut parser),
         vec![
@@ -836,7 +959,7 @@ fn focus_and_non_kitty_apc_input_decode_without_cross_talk() {
 #[test]
 fn invalid_utf8_does_not_consume_the_next_ascii_key() {
     let mut parser = Parser::default();
-    parser.process_input_bytes(&[0xf0, b'x']);
+    parser.process_input_bytes(&[0xf0, b'x'], 0);
     parser.finish_pending_input();
     assert_eq!(
         drain_pending_events(&mut parser),
@@ -849,7 +972,7 @@ fn invalid_utf8_does_not_consume_the_next_ascii_key() {
 /// The one event these bytes parse into, or a panic naming what came out.
 fn parse_one_event(terminal_input_bytes: &[u8]) -> Event {
     let mut parser = Parser::default();
-    parser.process_input_bytes(terminal_input_bytes);
+    parser.process_input_bytes(terminal_input_bytes, 0);
     let parsed_events = drain_pending_events(&mut parser);
     assert_eq!(parsed_events.len(), 1, "{parsed_events:?}");
     parsed_events.into_iter().next().expect("one event")
@@ -858,7 +981,7 @@ fn parse_one_event(terminal_input_bytes: &[u8]) -> Event {
 /// The events these bytes parse into.
 fn parse_events(terminal_input_bytes: &[u8]) -> Vec<Event> {
     let mut parser = Parser::default();
-    parser.process_input_bytes(terminal_input_bytes);
+    parser.process_input_bytes(terminal_input_bytes, 0);
     drain_pending_events(&mut parser)
 }
 

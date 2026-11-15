@@ -33,7 +33,7 @@ use koshi_core::{
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{
-    ClientActionRefusal, ConnectionToken, FiredAction, IpcResult, PaintedTypedPane, WireMouseAction,
+    ClientActionRefusal, ConnectionToken, FiredAction, IpcResult, PaintedInputView, WireMouseAction,
 };
 use koshi_layout::placement::PlacedTabLayout;
 
@@ -125,8 +125,8 @@ pub enum RuntimeEvent {
         /// The keyboard events the client read from its terminal, oldest
         /// first.
         key_inputs: Vec<KeyInput>,
-        /// The `input_pane_moved_by_others_count` of the last frame the
-        /// client drew on its connection.
+        /// The `input_pane_moved_by_others_count` of the newest frame the
+        /// client wrote to its terminal before it read the input's first byte.
         painted_input_pane_moved_by_others_count: u64,
     },
     /// One round of mouse actions an attached client's viewer decided for one
@@ -179,8 +179,8 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// The pasted text, exactly as the outer terminal delivered it.
         pasted_text: String,
-        /// The `input_pane_moved_by_others_count` of the last frame the
-        /// client drew on its connection.
+        /// The `input_pane_moved_by_others_count` of the newest frame the
+        /// client wrote to its terminal before it read the input's first byte.
         painted_input_pane_moved_by_others_count: u64,
     },
     /// A command delivered over the IPC socket, from external or in-session
@@ -276,10 +276,10 @@ pub enum RuntimeEvent {
         /// The placement target the client previews from its first frame on
         /// (`Server::set_pane_placement_preview`), or `None`.
         placement_preview_target: Option<PanePlacementPreviewTarget>,
-        /// The typed pane of the newest frame the caller painted on an earlier
-        /// connection, or `None` on a first attach. It starts the client's
-        /// moved-by-others count (`Server::subscribe`).
-        painted_typed_pane: Option<PaintedTypedPane>,
+        /// The input fields of the newest frame the caller painted on an
+        /// earlier connection, or `None` on a first attach. They start the
+        /// client's input counts (`Server::subscribe`).
+        painted_input_view: Option<PaintedInputView>,
         /// Where the dispatcher sends what it minted.
         response_sender: Sender<Option<AttachAccepted>>,
     },
@@ -323,9 +323,10 @@ pub enum RuntimeEvent {
         placement_target: TiledPlacementTarget,
         /// The destination tab as the client draws it after the placement.
         expected_placed_tab_layout: Box<PlacedTabLayout>,
-        /// The action the client's key fired to confirm, or `None` when a
-        /// mouse drop confirmed.
-        fired_action: Option<ActionReference>,
+        /// The action the client's key fired to confirm, with the move count
+        /// of the frame the key was typed against, or `None` when a mouse
+        /// drop confirmed.
+        fired_action: Option<FiredAction>,
     },
     /// A restart request whose restart check passed on the thread that asks:
     /// the caller asks this process to replace its own image with the binary at

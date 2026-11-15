@@ -32,7 +32,7 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
-use koshi_ipc::protocol::PaintedTypedPane;
+use koshi_ipc::protocol::PaintedInputView;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events::RecentEventRing;
@@ -714,10 +714,14 @@ impl Server {
     ///
     /// Starts the input counts of the client's new connection
     /// ([`Client::start_connection_input_counts`]): the pane that takes
-    /// `client_id`'s input becomes the checked pane, and the moved-by-others
-    /// count starts at `1` when `painted_typed_pane` names another pane, and
-    /// at `0` otherwise. A first attach passes `None`, which starts it at
-    /// `0`.
+    /// `client_id`'s input becomes the checked pane. The moved-by-others count
+    /// starts at the count `painted_input_view` names, plus `1` when its typed
+    /// pane is another pane, and the dropped count starts at its dropped
+    /// count. A first attach passes `None`, which starts both at `0`.
+    ///
+    /// Example: `painted_input_view` names pane 3, a move count of `4` and
+    /// `2` dropped requests, and pane 4 takes the input: the counts start at
+    /// `5` and `2`.
     ///
     /// # Panics
     /// When `max_frames_per_second` is `0`.
@@ -725,15 +729,27 @@ impl Server {
         &mut self,
         client_id: ClientId,
         max_frames_per_second: u16,
-        painted_typed_pane: Option<PaintedTypedPane>,
+        painted_input_view: Option<PaintedInputView>,
     ) -> (DeliveryReceiver, Arc<WriterHandoff>) {
         let typed_pane_id = self.find_typed_pane(client_id);
-        let is_typed_pane_changed_since_painted_frame = painted_typed_pane
-            .is_some_and(|painted_typed_pane| painted_typed_pane.typed_pane_id != typed_pane_id);
+        let (input_pane_moved_by_others_count, dropped_input_request_count) =
+            match painted_input_view {
+                Some(painted_input_view) => {
+                    let is_typed_pane_changed = painted_input_view.typed_pane_id != typed_pane_id;
+                    (
+                        painted_input_view
+                            .input_pane_moved_by_others_count
+                            .saturating_add(u64::from(is_typed_pane_changed)),
+                        painted_input_view.dropped_input_request_count,
+                    )
+                }
+                None => (0, 0),
+            };
         if let Some(client) = self.get_client_mut(client_id) {
             client.start_connection_input_counts(
                 typed_pane_id,
-                is_typed_pane_changed_since_painted_frame,
+                input_pane_moved_by_others_count,
+                dropped_input_request_count,
             );
         }
         let (subscriber_id, delivery_receiver, writer_handoff) = self.event_bus.subscribe();

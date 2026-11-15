@@ -67,7 +67,7 @@ use koshi_ipc::frame::{
 };
 use koshi_ipc::protocol::{
     ConnectionToken, FiredAction, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult,
-    PaintedTypedPane, ProcessImageId,
+    PaintedInputView, ProcessImageId,
 };
 use koshi_ipc::remote_wire::RemoteClientFrame;
 use koshi_ipc::router::{
@@ -102,9 +102,9 @@ use crate::floating_pane_tray::tests::{build_client_with_open_tray, build_tray_m
 use crate::input::tests::{build_client_viewing, build_keymap_for_modes};
 use crate::mouse::tests::build_plain_mouse_pane;
 use crate::tests::{
-    build_core_bound_action, build_one_pane_floating_pane_slot, build_test_client,
-    create_session_with_attached_client, float_placement_source_pane, get_source_tab_snapshot_mut,
-    NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
+    build_core_bound_action, build_core_fired_action, build_input_read_stamp,
+    build_one_pane_floating_pane_slot, build_test_client, create_session_with_attached_client,
+    float_placement_source_pane, get_source_tab_snapshot_mut, NO_ROOM_TAB_SIZE, TEST_VIEWPORT_SIZE,
 };
 use crate::{FloatingPaneMoveSelection, PaneMoveMode, PlacementMode, PlacementModeLifetime};
 use koshi_core::ids::FloatingPaneId;
@@ -189,13 +189,20 @@ fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
 
 /// [`handle_terminal_input_event`] with a fresh terminal query state, no
 /// painted frame and no held mouse actions, for `runtime_event` read at
-/// `read_at`, an event that does not fire the quit binding.
+/// `read_at` against the frame `client` painted last, an event that does not
+/// fire the quit binding.
 fn process_runtime_input(
     client: &mut Client,
     uplink: &mut Uplink,
     runtime_event: RuntimeEvent,
     read_at: Instant,
 ) {
+    let read_stamp = InputReadStamp {
+        read_at,
+        painted_input_pane_moved_by_others_count: client
+            .get_input_read_clock()
+            .get_painted_input_pane_moved_by_others_count(),
+    };
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
     assert_eq!(
         handle_terminal_input_event(
@@ -205,7 +212,7 @@ fn process_runtime_input(
             None,
             TerminalInput {
                 runtime_events: vec![runtime_event],
-                read_at,
+                read_stamp,
             },
             &mut Vec::new(),
             &mut Vec::new(),
@@ -219,7 +226,7 @@ fn process_runtime_input(
 fn build_input_incoming(runtime_event: RuntimeEvent, read_at: Instant) -> Incoming {
     Incoming::Input(Box::new(TerminalInput {
         runtime_events: vec![runtime_event],
-        read_at,
+        read_stamp: build_input_read_stamp(read_at),
     }))
 }
 
@@ -281,7 +288,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             focused_pane_id: None,
             active_tab_focused_pane_id: None,
             lock_mode,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
@@ -1512,7 +1519,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
 }
 
 #[test]
-fn a_remote_join_names_its_placement_target_and_painted_typed_pane_and_pings_every_third_of_the_link_timeout_until_answered(
+fn a_remote_join_names_its_placement_target_and_painted_input_view_and_pings_every_third_of_the_link_timeout_until_answered(
 ) {
     let (client_connection, serving_connection) = connect_test_socket_pair();
     let (client_frame_reader, client_frame_writer) = client_connection.split();
@@ -1524,8 +1531,10 @@ fn a_remote_join_names_its_placement_target_and_painted_typed_pane_and_pings_eve
         source_pane_id: PaneId::new(),
         destination_tab_id: TabId::new(),
     };
-    let painted_typed_pane = PaintedTypedPane {
+    let painted_input_view = PaintedInputView {
         typed_pane_id: Some(PaneId::new()),
+        input_pane_moved_by_others_count: 4,
+        dropped_input_request_count: 2,
     };
     let (join_result_sender, join_result_receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -1542,7 +1551,7 @@ fn a_remote_join_names_its_placement_target_and_painted_typed_pane_and_pings_eve
             TEXT_ONLY_ATTACH_SETTINGS,
             None,
             Some(placement_preview_target),
-            Some(painted_typed_pane),
+            Some(painted_input_view),
             MIN_LINK_TIMEOUT_MS,
         );
         let _ = join_result_sender.send(join_result.map(|joined_session| {
@@ -1625,7 +1634,7 @@ fn a_remote_join_names_its_placement_target_and_painted_typed_pane_and_pings_eve
     let IpcRequestKind::Attach {
         link_timeout_ms,
         placement_preview_target: attached_placement_preview_target,
-        painted_typed_pane: attached_painted_typed_pane,
+        painted_input_view: attached_painted_input_view,
         ..
     } = *prepared_kind
     else {
@@ -1635,12 +1644,12 @@ fn a_remote_join_names_its_placement_target_and_painted_typed_pane_and_pings_eve
         (
             link_timeout_ms,
             attached_placement_preview_target,
-            attached_painted_typed_pane
+            attached_painted_input_view
         ),
         (
             Some(MIN_LINK_TIMEOUT_MS),
             Some(placement_preview_target),
-            Some(painted_typed_pane)
+            Some(painted_input_view)
         )
     );
     let join_ping = IpcRequest {
@@ -1727,7 +1736,7 @@ fn coming_back_after_a_restart_presents_the_resume_token_and_keeps_the_one_it_mi
             link_timeout_ms: None,
             max_frames_per_second: DEFAULT_MAX_FRAMES_PER_SECOND,
             placement_preview_target: None,
-            painted_typed_pane: None,
+            painted_input_view: None,
         }),
         "the restart path claims the client record with its token and reports this terminal's capability"
     );
@@ -2008,6 +2017,7 @@ fn a_viewer_whose_restarted_session_refuses_the_join_ends_with_that_refusal() {
         session_id,
         ClientId::new(),
         build_test_client(),
+        &mut build_test_screen(),
     );
 
     assert_eq!(
@@ -2075,6 +2085,7 @@ fn a_viewer_whose_restarted_session_mints_a_new_client_goes_on_as_that_client() 
         session_id,
         client_id,
         build_test_client(),
+        &mut build_test_screen(),
     );
 
     assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
@@ -2126,6 +2137,7 @@ fn a_viewer_in_pane_placement_mode_names_its_placement_target_in_the_attach_afte
         session_id,
         client_id,
         client,
+        &mut build_test_screen(),
     );
 
     assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
@@ -2147,36 +2159,36 @@ fn a_viewer_in_pane_placement_mode_names_its_placement_target_in_the_attach_afte
 }
 
 /// A viewer whose newest painted frame showed pane 3 taking its input, with
-/// input pane move count `4`, names pane 3 in the attach after a restart. On
-/// the new connection its painted move count reads `0`, and the typed pane
-/// its screen shows stays pane 3.
+/// input pane move count `4` and dropped count `2`, names that view in the
+/// attach after a restart. The new connection paints no frame, so the viewer
+/// keeps that view and its reads carry the move count `4`.
 #[test]
-fn a_viewer_names_the_typed_pane_of_its_newest_painted_frame_in_the_attach_after_a_restart() {
+fn a_viewer_names_the_input_view_of_its_newest_painted_frame_in_the_attach_after_a_restart() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let recorded_attach_request =
         spawn_restarted_session(runtime_directory.path(), session_id, None, Ok(client_id));
-    let third_pane_id = PaneId::new();
+    let painted_input_view = PaintedInputView {
+        typed_pane_id: Some(PaneId::new()),
+        input_pane_moved_by_others_count: 4,
+        dropped_input_request_count: 2,
+    };
     let mut client = build_test_client();
-    let mut painted_snapshot =
-        crate::tests::build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
-    painted_snapshot.client_snapshot.typed_pane_id = Some(third_pane_id);
-    painted_snapshot
-        .client_snapshot
-        .input_pane_moved_by_others_count = 4;
-    client.apply_render_snapshot(&painted_snapshot);
+    client.record_painted_input_view(painted_input_view, SystemTime::UNIX_EPOCH);
 
     let (attachment_ending, client) = run_local_attachment_through_restart(
         runtime_directory.path(),
         session_id,
         client_id,
         client,
+        &mut build_test_screen(),
     );
 
     assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
     let IpcRequestKind::Attach {
-        painted_typed_pane, ..
+        painted_input_view: attached_painted_input_view,
+        ..
     } = recorded_attach_request
         .lock()
         .expect("the slot outlives every panic")
@@ -2185,18 +2197,69 @@ fn a_viewer_names_the_typed_pane_of_its_newest_painted_frame_in_the_attach_after
     else {
         panic!("the recorded request is an attach");
     };
+    assert_eq!(attached_painted_input_view, Some(painted_input_view));
+    assert_eq!(client.get_painted_input_view(), Some(painted_input_view));
     assert_eq!(
-        painted_typed_pane,
-        Some(PaintedTypedPane {
-            typed_pane_id: Some(third_pane_id)
-        })
+        client
+            .get_input_read_clock()
+            .get_painted_input_pane_moved_by_others_count(),
+        4
     );
+}
+
+/// A paint is rejected, and the frame with move count `5` and dropped count
+/// `3` still waits to be painted when the session restarts. The viewer never
+/// paints it: the attach names no painted view, the viewer records none, and
+/// no dropped-keys warning posts.
+#[test]
+fn a_frame_left_unpainted_when_the_session_restarts_is_never_painted() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let recorded_attach_request =
+        spawn_restarted_session(runtime_directory.path(), session_id, None, Ok(client_id));
+    let mut client = build_test_client();
+    let mut screen = build_failing_screen();
+    let mut unpainted_frame = build_test_painted_frame();
+    unpainted_frame
+        .client_snapshot
+        .input_pane_moved_by_others_count = 5;
+    unpainted_frame.client_snapshot.dropped_input_request_count = 3;
+    screen.paint_driver.backend.should_fail_draw = true;
     assert_eq!(
-        (
-            client.get_painted_input_pane_moved_by_others_count(),
-            client.get_painted_typed_pane()
-        ),
-        (0, painted_typed_pane)
+        screen.draw_painted_frame(&mut client, Box::new(unpainted_frame)),
+        None,
+        "the backend rejects the frame"
+    );
+    screen.paint_driver.backend.should_fail_draw = false;
+
+    let (attachment_ending, client) = run_local_attachment_through_restart(
+        runtime_directory.path(),
+        session_id,
+        client_id,
+        client,
+        &mut screen,
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
+    let IpcRequestKind::Attach {
+        painted_input_view, ..
+    } = recorded_attach_request
+        .lock()
+        .expect("the slot outlives every panic")
+        .clone()
+        .expect("the viewer joined the restarted session")
+    else {
+        panic!("the recorded request is an attach");
+    };
+    assert_eq!(painted_input_view, None);
+    assert_eq!(client.get_painted_input_view(), None);
+    assert_eq!(
+        client
+            .get_notification_history()
+            .list_merged_entries()
+            .count(),
+        0
     );
 }
 
@@ -2402,6 +2465,7 @@ fn a_viewer_whose_restarted_session_refuses_its_protocol_version_ends_as_a_resta
         session_id,
         client_id,
         build_test_client(),
+        &mut build_test_screen(),
     );
 
     assert_eq!(
@@ -2416,18 +2480,19 @@ fn a_viewer_whose_restarted_session_refuses_its_protocol_version_ends_as_a_resta
 }
 
 /// Run one attachment of `session_id` on this machine as `client_id` whose first
-/// frame is `Restarting`, and hand back how it ended and the viewer it ran.
+/// frame is `Restarting`, drawing on `screen`, and hand back how it ended and
+/// the viewer it ran.
 ///
 /// The viewer comes back on the socket a [`spawn_restarted_session`] stand-in
 /// advertises in `runtime_directory`.
-fn run_local_attachment_through_restart(
+fn run_local_attachment_through_restart<B: Backend>(
     runtime_directory: &Path,
     session_id: SessionId,
     client_id: ClientId,
     mut client: Client,
+    screen: &mut Screen<B>,
 ) -> (AttachmentEnding, Client) {
     client.set_client_id(client_id);
-    let mut screen = build_test_screen();
     let (request_sender, _request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
@@ -2446,7 +2511,7 @@ fn run_local_attachment_through_restart(
         ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
         Some(ConnectionToken::from_secret(PREVIOUS_RESUME_TOKEN)),
         &mut client,
-        &mut screen,
+        screen,
         &mut uplink,
         TEXT_ONLY_ATTACH_SETTINGS,
         &mut cell_size_query,
@@ -2905,7 +2970,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
             active_tab_focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
@@ -3803,7 +3868,7 @@ fn a_click_then_a_key_in_one_pass_reach_the_session_in_that_order() {
                 Some(&mouse_frame),
                 TerminalInput {
                     runtime_events: vec![runtime_event],
-                    read_at: Instant::now(),
+                    read_stamp: build_input_read_stamp(Instant::now()),
                 },
                 &mut sent_border_moves,
                 &mut pending_mouse_actions,
@@ -3902,7 +3967,7 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
                     client_id,
                     mouse_input: build_mouse_press(handle_cell),
                 }],
-                read_at: Instant::now(),
+                read_stamp: build_input_read_stamp(Instant::now()),
             },
             &mut sent_border_moves,
             &mut pending_mouse_actions,
@@ -5576,7 +5641,7 @@ fn a_terminal_resize_reports_its_measured_cell_size() {
                 pane_area: None,
                 cell_size: Some(measured_cell_size),
             },
-            Instant::now(),
+            build_input_read_stamp(Instant::now()),
             &mut Vec::new(),
         ),
         ControlFlow::Continue(())
@@ -5634,17 +5699,20 @@ fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
 }
 
 /// The newest painted frame carries input pane move count `3`: a key the
-/// keymap does not bind and a paste each go up tagged `3`.
+/// keymap does not bind and a paste, read after that paint, each go up
+/// tagged `3`.
 #[test]
 fn a_typed_key_and_a_paste_go_up_tagged_with_the_painted_move_count() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut painted_snapshot =
-        crate::tests::build_render_snapshot(client_id, LockMode::Normal, false);
-    painted_snapshot
-        .client_snapshot
-        .input_pane_moved_by_others_count = 3;
-    client.apply_render_snapshot(&painted_snapshot);
+    client.record_painted_input_view(
+        PaintedInputView {
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 3,
+            dropped_input_request_count: 0,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
     let mut control_socket = build_test_control_socket();
 
     process_runtime_input(
@@ -5695,6 +5763,64 @@ fn a_typed_key_and_a_paste_go_up_tagged_with_the_painted_move_count() {
                 painted_input_pane_moved_by_others_count: 3,
             },
         ]
+    );
+}
+
+/// The input thread reads `a` while the screen shows a frame with move count
+/// `0`. The loop then paints a frame with move count `3` before it takes the
+/// read: `a` goes up tagged `0`.
+#[test]
+fn a_key_read_before_a_paint_and_taken_after_it_keeps_the_move_count_it_was_read_against() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let painted_count_at_read = client
+        .get_input_read_clock()
+        .get_painted_input_pane_moved_by_others_count();
+    let read_stamp = client
+        .get_input_read_clock()
+        .stamp_input_read(Instant::now(), painted_count_at_read);
+    client.record_painted_input_view(
+        PaintedInputView {
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 3,
+            dropped_input_request_count: 0,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
+    let mut control_socket = build_test_control_socket();
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+
+    assert_eq!(
+        handle_terminal_input_event(
+            &mut client,
+            &mut control_socket.uplink,
+            &mut cell_size_query,
+            None,
+            TerminalInput {
+                runtime_events: vec![RuntimeEvent::KeyInput {
+                    client_id,
+                    key_input: crate::tests::build_key_input_for_chord(build_plain_chord('a')),
+                }],
+                read_stamp,
+            },
+            &mut Vec::new(),
+            &mut Vec::new(),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the key");
+    assert_eq!(
+        request.request_kind,
+        IpcRequestKind::Keyboard {
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a'
+            ))],
+            painted_input_pane_moved_by_others_count: 0,
+        }
     );
 }
 
@@ -6112,7 +6238,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             focused_pane_id: Some(pane_id),
             active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
@@ -6218,7 +6344,10 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
 
     let sequence_opener_chord = get_sequence_opener(&client);
     assert_eq!(
-        client.resolve_key(sequence_opener_chord, Instant::now()),
+        client.resolve_key(
+            sequence_opener_chord,
+            build_input_read_stamp(Instant::now())
+        ),
         KeyOutcome::Pending
     );
 
@@ -7051,7 +7180,10 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
             source_pane_id: confirmed_source_pane_id,
             placement_target,
             expected_placed_tab_layout: *expected_placed_tab_layout,
-            fired_action: Some(build_test_action_reference("confirm-pane-placement")),
+            fired_action: Some(FiredAction {
+                action_reference: build_test_action_reference("confirm-pane-placement"),
+                painted_input_pane_moved_by_others_count: 0,
+            }),
         }
     );
     assert!(client.is_placement_confirmation_pending());
@@ -7117,7 +7249,7 @@ fn mouse_pickup_previews_and_focuses_the_dragged_pane() {
                     client_id,
                     mouse_input: build_mouse_press(placement_handle_position),
                 }],
-                read_at: Instant::now(),
+                read_stamp: build_input_read_stamp(Instant::now()),
             },
             &mut Vec::new(),
             &mut pending_mouse_actions,
@@ -7369,9 +7501,10 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         PlacementModeLifetime::UntilDragEnds => 4,
     };
     let expected_fired_action = match placement_mode_lifetime {
-        PlacementModeLifetime::UntilCancelled => {
-            Some(build_test_action_reference("confirm-pane-placement"))
-        }
+        PlacementModeLifetime::UntilCancelled => Some(FiredAction {
+            action_reference: build_test_action_reference("confirm-pane-placement"),
+            painted_input_pane_moved_by_others_count: 0,
+        }),
         PlacementModeLifetime::UntilDragEnds => None,
     };
 
@@ -8150,7 +8283,7 @@ fn a_prefix_key_draws_its_breadcrumb_once_when_its_hint_deadline_passes() {
     let sequence_opener_chord = get_sequence_opener(&client);
     let key_read_at = Instant::now();
     assert_eq!(
-        client.resolve_key(sequence_opener_chord, key_read_at),
+        client.resolve_key(sequence_opener_chord, build_input_read_stamp(key_read_at)),
         KeyOutcome::Pending
     );
     assert_eq!(
@@ -8246,7 +8379,7 @@ fn a_shortcut_completed_within_the_which_key_delay_draws_no_breadcrumb() {
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            key_read_at
+            build_input_read_stamp(key_read_at)
         ),
         KeyOutcome::Pending
     );
@@ -8259,9 +8392,9 @@ fn a_shortcut_completed_within_the_which_key_delay_draws_no_breadcrumb() {
     assert_eq!(
         client.resolve_key(
             build_plain_chord('n'),
-            key_read_at + which_key_delay - Duration::from_millis(1)
+            build_input_read_stamp(key_read_at + which_key_delay - Duration::from_millis(1))
         ),
-        KeyOutcome::Fire(build_core_bound_action("new-pane"))
+        KeyOutcome::Fire(build_core_fired_action("new-pane"))
     );
     assert_eq!(
         client.expire_key_sequence(key_read_at + which_key_delay),
@@ -8789,7 +8922,7 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints_at_its_hint_deadline() {
     let key_read_at = Instant::now();
 
     assert_eq!(
-        client.resolve_key(sequence_opener_chord, key_read_at),
+        client.resolve_key(sequence_opener_chord, build_input_read_stamp(key_read_at)),
         KeyOutcome::Pending
     );
     let paint_during_which_key_delay = ViewerPaint::from_client(
@@ -9234,22 +9367,37 @@ fn redials_go_out_on_the_widening_schedule_and_stop_inside_the_window() {
 fn a_restart_hold_takes_inputs_up_to_its_count_and_paste_caps() {
     let mut input_hold = InputHold::default();
     for _ in 0..MAX_HELD_INPUT_COUNT {
-        assert!(input_hold.hold_input(HeldInput::Keyboard(vec![
-            crate::tests::build_key_input_for_chord(build_plain_chord('a'))
-        ])));
+        assert!(input_hold.hold_input(HeldInput::Keyboard {
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a'
+            ))],
+            painted_input_pane_moved_by_others_count: 0
+        }));
     }
-    assert!(!input_hold.hold_input(HeldInput::Keyboard(vec![
-        crate::tests::build_key_input_for_chord(build_plain_chord('b'))
-    ])));
+    assert!(!input_hold.hold_input(HeldInput::Keyboard {
+        key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+            'b'
+        ))],
+        painted_input_pane_moved_by_others_count: 0
+    }));
     assert_eq!(input_hold.held_inputs.len(), MAX_HELD_INPUT_COUNT);
 
     let mut paste_hold = InputHold::default();
     let frame_of_text = "x".repeat(MAX_FRAME_BYTE_COUNT as usize);
-    assert!(paste_hold.hold_input(HeldInput::Paste(frame_of_text.clone())));
-    assert!(!paste_hold.hold_input(HeldInput::Paste(String::from("y"))));
+    assert!(paste_hold.hold_input(HeldInput::Paste {
+        pasted_text: frame_of_text.clone(),
+        painted_input_pane_moved_by_others_count: 0
+    }));
+    assert!(!paste_hold.hold_input(HeldInput::Paste {
+        pasted_text: String::from("y"),
+        painted_input_pane_moved_by_others_count: 0
+    }));
     assert_eq!(
         paste_hold.held_inputs,
-        vec![HeldInput::Paste(frame_of_text)]
+        vec![HeldInput::Paste {
+            pasted_text: frame_of_text,
+            painted_input_pane_moved_by_others_count: 0
+        }]
     );
     assert_eq!(
         paste_hold.held_paste_byte_count,
@@ -9266,12 +9414,21 @@ fn an_overflowing_restart_hold_drops_everything_typed_during_that_restart() {
     for _ in 0..=MAX_HELD_INPUT_COUNT {
         link_recovery.hold_input(
             &mut client,
-            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-                build_plain_chord('a'),
-            )]),
+            HeldInput::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'a',
+                ))],
+                painted_input_pane_moved_by_others_count: 0,
+            },
         );
     }
-    link_recovery.hold_input(&mut client, HeldInput::Paste(String::from("after")));
+    link_recovery.hold_input(
+        &mut client,
+        HeldInput::Paste {
+            pasted_text: String::from("after"),
+            painted_input_pane_moved_by_others_count: 0,
+        },
+    );
 
     let LinkRecovery::RestartRejoin { input_hold } = link_recovery else {
         panic!("holding never changes the recovery");
@@ -9293,7 +9450,13 @@ fn a_restart_during_pane_placement_holds_nothing() {
     let mut restart_recovery = LinkRecovery::RestartRejoin {
         input_hold: Some(InputHold::default()),
     };
-    restart_recovery.hold_input(&mut client, HeldInput::Paste(String::from("typed")));
+    restart_recovery.hold_input(
+        &mut client,
+        HeldInput::Paste {
+            pasted_text: String::from("typed"),
+            painted_input_pane_moved_by_others_count: 0,
+        },
+    );
     let LinkRecovery::RestartRejoin { input_hold } = restart_recovery else {
         panic!("holding never changes the recovery");
     };
@@ -9329,7 +9492,13 @@ fn a_restart_during_a_local_mode_holds_nothing() {
             input_hold: Some(InputHold::default()),
         };
 
-        restart_recovery.hold_input(&mut client, HeldInput::Paste(String::from("typed")));
+        restart_recovery.hold_input(
+            &mut client,
+            HeldInput::Paste {
+                pasted_text: String::from("typed"),
+                painted_input_pane_moved_by_others_count: 0,
+            },
+        );
 
         let LinkRecovery::RestartRejoin { input_hold } = restart_recovery else {
             panic!("holding never changes the recovery");
@@ -9624,7 +9793,9 @@ fn while_reconnecting_an_open_sequence_shows_its_hint_once_its_hint_deadline_pas
     let key_read_at =
         compute_instant_before_now(viewer.client.keymap_catalog.get_which_key_delay());
     assert_eq!(
-        viewer.client.resolve_key(prefix_chord, key_read_at),
+        viewer
+            .client
+            .resolve_key(prefix_chord, build_input_read_stamp(key_read_at)),
         KeyOutcome::Pending
     );
     assert!(viewer.client.is_continuation_hint_hidden());
@@ -9659,7 +9830,7 @@ fn a_quit_on_an_ambiguous_prefix_leaves_when_its_deadline_passes_while_reconnect
     assert_eq!(
         viewer
             .client
-            .resolve_key(pane_group_chord, chord_pressed_at),
+            .resolve_key(pane_group_chord, build_input_read_stamp(chord_pressed_at)),
         KeyOutcome::Pending,
         "the quit chord opens longer pane bindings too"
     );
@@ -9890,28 +10061,40 @@ fn keys_and_pastes_during_a_restart_are_held_in_order_for_the_restarted_session(
     assert_eq!(
         held_inputs,
         vec![
-            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-                build_plain_chord('a')
-            )]),
-            HeldInput::Paste(String::from("pasted")),
-            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-                build_plain_chord('b')
-            )]),
+            HeldInput::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'a'
+                ))],
+                painted_input_pane_moved_by_others_count: 0
+            },
+            HeldInput::Paste {
+                pasted_text: String::from("pasted"),
+                painted_input_pane_moved_by_others_count: 0
+            },
+            HeldInput::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'b'
+                ))],
+                painted_input_pane_moved_by_others_count: 0
+            },
         ]
     );
 }
 
-/// The newest painted frame carries input pane move count `3`: the held key,
-/// key-fired command and paste go up in order, each tagged `3`.
+/// A key read against move count `2`, a binding fired against `3` and a paste
+/// read against `4` are held, and the newest painted frame carries `7`: they go
+/// up in order, tagged `2`, `3` and `4`.
 #[test]
-fn held_inputs_go_up_in_the_order_they_were_typed_tagged_with_the_painted_move_count() {
+fn held_inputs_go_up_in_the_order_they_were_typed_each_with_the_tag_of_its_read() {
     let mut client = build_test_client();
-    let mut painted_snapshot =
-        crate::tests::build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
-    painted_snapshot
-        .client_snapshot
-        .input_pane_moved_by_others_count = 3;
-    client.apply_render_snapshot(&painted_snapshot);
+    client.record_painted_input_view(
+        PaintedInputView {
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 7,
+            dropped_input_request_count: 0,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
 
@@ -9919,16 +10102,25 @@ fn held_inputs_go_up_in_the_order_they_were_typed_tagged_with_the_painted_move_c
         &mut client,
         &mut uplink,
         vec![
-            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-                build_plain_chord('a'),
-            )]),
+            HeldInput::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'a',
+                ))],
+                painted_input_pane_moved_by_others_count: 2,
+            },
             HeldInput::FiredBinding {
                 dispatch_plan: DispatchPlan::Command(Box::new(Command::NewTab(
                     NewTabArgs::default(),
                 ))),
-                fired_action: build_test_action_reference("new-tab"),
+                fired_action: FiredAction {
+                    action_reference: build_test_action_reference("new-tab"),
+                    painted_input_pane_moved_by_others_count: 3,
+                },
             },
-            HeldInput::Paste(String::from("pasted")),
+            HeldInput::Paste {
+                pasted_text: String::from("pasted"),
+                painted_input_pane_moved_by_others_count: 4,
+            },
         ],
     );
 
@@ -9940,7 +10132,7 @@ fn held_inputs_go_up_in_the_order_they_were_typed_tagged_with_the_painted_move_c
             key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
                 'a'
             ))],
-            painted_input_pane_moved_by_others_count: 3,
+            painted_input_pane_moved_by_others_count: 2,
         }
     );
     let IpcRequestKind::SubmitCommand {
@@ -9965,7 +10157,7 @@ fn held_inputs_go_up_in_the_order_they_were_typed_tagged_with_the_painted_move_c
         sent_requests[2].request_kind,
         IpcRequestKind::Paste {
             pasted_text: String::from("pasted"),
-            painted_input_pane_moved_by_others_count: 3,
+            painted_input_pane_moved_by_others_count: 4,
         }
     );
 }
@@ -10122,7 +10314,7 @@ fn a_toggle_lock_binding_goes_up_as_the_lock_mode_it_sets() {
     let mut client = build_test_client();
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
-    let toggle_lock_binding = build_core_bound_action("toggle-lock");
+    let toggle_lock_binding = build_core_fired_action("toggle-lock");
 
     assert_eq!(
         uplink.submit_bound_action(&mut client, toggle_lock_binding.clone(), None),
@@ -10172,7 +10364,7 @@ fn the_minimize_all_binding_sends_the_session_toggle_and_keeps_the_tray_open() {
     assert_eq!(
         uplink.submit_bound_action(
             &mut client,
-            build_core_bound_action("toggle-minimize-all-floating-panes"),
+            build_core_fired_action("toggle-minimize-all-floating-panes"),
             Some(&mouse_frame),
         ),
         ControlFlow::Continue(())
@@ -10230,7 +10422,7 @@ fn two_presses_on_the_painted_tray_button_in_one_read_open_the_tray_and_close_it
                             mouse_input: build_mouse_press(button_cell),
                         })
                         .collect(),
-                    read_at: Instant::now(),
+                    read_stamp: build_input_read_stamp(Instant::now()),
                 },
                 &mut Vec::new(),
                 &mut pending_mouse_actions,
@@ -10282,7 +10474,10 @@ fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
         lock_command_id: first_lock_command_id,
         lock_mode: LockMode::Locked,
         fired_action: lock_fired_action,
-    }, HeldInput::Keyboard(locked_tab_key_inputs), HeldInput::LockCommand {
+    }, HeldInput::Keyboard {
+        key_inputs: locked_tab_key_inputs,
+        painted_input_pane_moved_by_others_count: 0,
+    }, HeldInput::LockCommand {
         lock_command_id: second_lock_command_id,
         lock_mode: LockMode::Normal,
         fired_action: unlock_fired_action,
@@ -10293,12 +10488,9 @@ fn lock_keys_during_a_restart_switch_the_mode_the_next_key_resolves_in() {
     else {
         panic!("lock, Tab, unlock and Tab are held as they resolved, not {held_inputs:?}");
     };
-    assert_eq!(*lock_fired_action, build_test_action_reference("lock"));
-    assert_eq!(*unlock_fired_action, build_test_action_reference("unlock"));
-    assert_eq!(
-        *next_tab_fired_action,
-        build_test_action_reference("next-tab")
-    );
+    assert_eq!(*lock_fired_action, build_core_fired_action("lock"));
+    assert_eq!(*unlock_fired_action, build_core_fired_action("unlock"));
+    assert_eq!(*next_tab_fired_action, build_core_fired_action("next-tab"));
     assert_ne!(first_lock_command_id, second_lock_command_id);
     assert_eq!(
         *locked_tab_key_inputs,
@@ -10349,7 +10541,7 @@ fn a_binding_the_action_table_refuses_is_held_as_nothing() {
     let mut link_recovery = LinkRecovery::RestartRejoin {
         input_hold: Some(InputHold::default()),
     };
-    let unregistered_binding = build_core_bound_action("no-such-action");
+    let unregistered_binding = build_core_fired_action("no-such-action");
 
     assert_eq!(
         hold_fired_binding(
@@ -10370,6 +10562,145 @@ fn a_binding_the_action_table_refuses_is_held_as_nothing() {
     );
 }
 
+/// While a restarted session is awaited, the newest painted frame carries move
+/// count `1`. A `core:toggle-lock` binding and a notification center binding,
+/// both typed against move count `0`, are held as nothing, leave the lock mode
+/// `Normal`, and each post `<action>: your view changed as you typed`. The
+/// same `core:toggle-lock` binding typed against move count `1` is held, and
+/// switches the lock mode to `Locked`.
+#[test]
+fn a_binding_typed_against_an_older_painted_frame_during_a_restart_is_held_as_nothing_and_warns() {
+    let mut client = build_test_client();
+    client.record_painted_input_view(
+        PaintedInputView {
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 1,
+            dropped_input_request_count: 0,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
+    let (request_sender, request_receiver) = mpsc::channel();
+    let uplink = build_test_uplink(request_sender);
+    let mut link_recovery = LinkRecovery::RestartRejoin {
+        input_hold: Some(InputHold::default()),
+    };
+
+    let stale_lock_flow = hold_fired_binding(
+        &mut link_recovery,
+        &mut client,
+        &uplink,
+        build_core_fired_action("toggle-lock"),
+    );
+    let stale_center_flow = hold_fired_binding(
+        &mut link_recovery,
+        &mut client,
+        &uplink,
+        build_core_fired_action("toggle-notification-center"),
+    );
+
+    assert_eq!(
+        (stale_lock_flow, stale_center_flow),
+        (ControlFlow::Continue(()), ControlFlow::Continue(()))
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+    let LinkRecovery::RestartRejoin {
+        input_hold: Some(input_hold),
+    } = &link_recovery
+    else {
+        panic!("holding never changes the recovery or ends the hold");
+    };
+    assert_eq!(input_hold.held_inputs, Vec::new());
+    let posted_texts: Vec<String> = client
+        .get_notification_history()
+        .list_merged_entries()
+        .map(|notification_entry| notification_entry.text.clone())
+        .collect();
+    assert_eq!(
+        posted_texts,
+        vec![
+            String::from("core:toggle-lock: your view changed as you typed"),
+            String::from("core:toggle-notification-center: your view changed as you typed"),
+        ]
+    );
+
+    let current_lock_binding = FiredAction {
+        painted_input_pane_moved_by_others_count: 1,
+        ..build_core_fired_action("toggle-lock")
+    };
+    let current_lock_flow = hold_fired_binding(
+        &mut link_recovery,
+        &mut client,
+        &uplink,
+        current_lock_binding.clone(),
+    );
+
+    assert_eq!(current_lock_flow, ControlFlow::Continue(()));
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    let LinkRecovery::RestartRejoin {
+        input_hold: Some(input_hold),
+    } = link_recovery
+    else {
+        panic!("holding never changes the recovery or ends the hold");
+    };
+    let [HeldInput::LockCommand {
+        lock_command_id,
+        lock_mode: LockMode::Locked,
+        fired_action,
+    }] = input_hold.held_inputs.as_slice()
+    else {
+        panic!("the current lock binding is held as its lock command");
+    };
+    assert_eq!(*fired_action, current_lock_binding);
+    assert_eq!(client.get_pending_lock_command_id(), Some(*lock_command_id));
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+/// The newest painted frame carries move count `1`. A `core:toggle-lock`
+/// binding typed against move count `0` leaves the lock mode `Normal` with no
+/// lock command pending, sends nothing, and posts
+/// `core:toggle-lock: your view changed as you typed`.
+#[test]
+fn a_lock_binding_typed_against_an_older_painted_frame_keeps_the_lock_mode_and_warns() {
+    let mut client = build_test_client();
+    client.record_painted_input_view(
+        PaintedInputView {
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 1,
+            dropped_input_request_count: 0,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    assert_eq!(
+        uplink.submit_bound_action(&mut client, build_core_fired_action("toggle-lock"), None),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(client.get_lock_mode(), LockMode::Normal);
+    assert_eq!(client.get_pending_lock_command_id(), None);
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+    let posted_texts: Vec<String> = client
+        .get_notification_history()
+        .list_merged_entries()
+        .map(|notification_entry| notification_entry.text.clone())
+        .collect();
+    assert_eq!(
+        posted_texts,
+        vec![String::from(
+            "core:toggle-lock: your view changed as you typed"
+        )]
+    );
+}
+
 #[test]
 fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_command() {
     let mut client = build_test_client();
@@ -10384,7 +10715,7 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
         HeldInput::LockCommand {
             lock_command_id: held_unlock_command_id,
             lock_mode: LockMode::Normal,
-            fired_action: build_test_action_reference("unlock"),
+            fired_action: build_core_fired_action("unlock"),
         },
     );
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
@@ -10398,7 +10729,7 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
         HeldInput::LockCommand {
             lock_command_id: held_lock_command_id,
             lock_mode: LockMode::Locked,
-            fired_action: build_test_action_reference("lock"),
+            fired_action: build_core_fired_action("lock"),
         },
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -10410,9 +10741,12 @@ fn an_overflowing_hold_puts_back_the_lock_mode_from_before_its_first_lock_comman
     for _ in 0..MAX_HELD_INPUT_COUNT - 1 {
         link_recovery.hold_input(
             &mut client,
-            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-                build_plain_chord('a'),
-            )]),
+            HeldInput::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'a',
+                ))],
+                painted_input_pane_moved_by_others_count: 0,
+            },
         );
     }
 
@@ -10435,9 +10769,12 @@ fn a_restart_rejoin_closes_the_open_center_and_holds_the_keys_typed_after_it() {
     let mut link_recovery = LinkRecovery::RestartRejoin {
         input_hold: Some(InputHold::default()),
     };
-    let typed_key_input = HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-        build_plain_chord('a'),
-    )]);
+    let typed_key_input = HeldInput::Keyboard {
+        key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+            'a',
+        ))],
+        painted_input_pane_moved_by_others_count: 0,
+    };
 
     link_recovery.hold_input(&mut client, typed_key_input.clone());
 
@@ -10462,7 +10799,7 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
     client.apply_lock_command(CommandId::new(), LockMode::Normal);
     let open_sequence_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
     assert_eq!(
-        client.resolve_key(open_sequence_chord, Instant::now()),
+        client.resolve_key(open_sequence_chord, build_input_read_stamp(Instant::now())),
         KeyOutcome::Pending
     );
     let first_lock_command_id = CommandId::new();
@@ -10475,15 +10812,16 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
             HeldInput::LockCommand {
                 lock_command_id: first_lock_command_id,
                 lock_mode: LockMode::Locked,
-                fired_action: build_test_action_reference("lock"),
+                fired_action: build_core_fired_action("lock"),
             },
-            HeldInput::Keyboard(vec![crate::tests::build_key_input_for_chord(
-                build_tab_chord(),
-            )]),
+            HeldInput::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_tab_chord())],
+                painted_input_pane_moved_by_others_count: 0,
+            },
             HeldInput::LockCommand {
                 lock_command_id: second_lock_command_id,
                 lock_mode: LockMode::Normal,
-                fired_action: build_test_action_reference("unlock"),
+                fired_action: build_core_fired_action("unlock"),
             },
         ],
     );
@@ -10729,7 +11067,7 @@ fn quitting_with_a_link_writes_the_quit_and_leaves_without_the_sessions_answer()
                 client_id,
                 key_input: crate::tests::build_key_input_for_chord(build_quit_chord()),
             },
-            Instant::now(),
+            build_input_read_stamp(Instant::now()),
             &mut Vec::new(),
         ),
         ControlFlow::Break(())
@@ -11146,7 +11484,7 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
         input_sender
             .try_send(TerminalInput {
                 runtime_events: vec![RuntimeEvent::Quit],
-                read_at,
+                read_stamp: build_input_read_stamp(read_at),
             })
             .expect("an input event inside the queue limit fits");
     }
@@ -11162,12 +11500,12 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
             pane_area: None,
             cell_size: None,
         }],
-        read_at,
+        read_stamp: build_input_read_stamp(read_at),
     });
 
     let Err(mpsc::TrySendError::Full(TerminalInput {
         runtime_events: rejected_runtime_events,
-        read_at: rejected_read_at,
+        read_stamp: rejected_read_stamp,
     })) = rejected_send_result
     else {
         panic!("the input event past the queue limit was not returned as full");
@@ -11187,7 +11525,7 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
     assert_eq!(*viewport_size, resized_viewport_size);
     assert_eq!(*pane_area, None);
     assert_eq!(*cell_size, None);
-    assert_eq!(rejected_read_at, read_at);
+    assert_eq!(rejected_read_stamp, build_input_read_stamp(read_at));
     for _ in 0..INCOMING_QUEUE_CAPACITY {
         let terminal_input = input_receiver
             .try_recv()
@@ -11195,7 +11533,7 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
         let [RuntimeEvent::Quit] = terminal_input.runtime_events.as_slice() else {
             panic!("the input queue contained another event");
         };
-        assert_eq!(terminal_input.read_at, read_at);
+        assert_eq!(terminal_input.read_stamp, build_input_read_stamp(read_at));
     }
     assert_eq!(
         input_receiver.try_recv().err(),
@@ -13311,15 +13649,16 @@ fn a_pass_leaves_an_expired_deadline_alone_while_a_key_read_before_it_is_on_its_
         Some(100),
     );
     assert_eq!(
-        client.resolve_key(build_ctrl_y_chord(), Instant::now()),
+        client.resolve_key(build_ctrl_y_chord(), build_input_read_stamp(Instant::now())),
         KeyOutcome::Pending
     );
     let resize_read_at = client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
     client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0);
     thread::sleep(Duration::from_millis(150));
     let resized_viewport_size = Size {
         column_count: 100,
@@ -13379,13 +13718,14 @@ fn while_reconnecting_a_key_read_before_the_deadline_continues_the_sequence_afte
     assert_eq!(
         viewer
             .client
-            .resolve_key(build_ctrl_y_chord(), Instant::now()),
+            .resolve_key(build_ctrl_y_chord(), build_input_read_stamp(Instant::now())),
         KeyOutcome::Pending
     );
     let a_key_read_at = viewer
         .client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
     thread::sleep(Duration::from_millis(150));
     viewer.queue_incoming_event(build_input_incoming(
         RuntimeEvent::KeyInput {
@@ -13437,13 +13777,14 @@ fn while_reconnecting_a_key_read_after_the_deadline_fires_the_open_binding_first
     assert_eq!(
         viewer
             .client
-            .resolve_key(build_ctrl_y_chord(), ctrl_y_read_at),
+            .resolve_key(build_ctrl_y_chord(), build_input_read_stamp(ctrl_y_read_at)),
         KeyOutcome::Pending
     );
     let a_key_read_at = viewer
         .client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
     viewer.queue_incoming_event(build_input_incoming(
         RuntimeEvent::KeyInput {
             client_id,
@@ -13475,7 +13816,8 @@ fn a_key_the_loop_takes_lets_the_deadline_it_opens_wake_the_loop() {
     let which_key_delay = client.keymap_catalog.get_which_key_delay();
     let ctrl_y_read_at = client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
     let (request_sender, _request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
 
@@ -13519,7 +13861,8 @@ fn while_reconnecting_a_deadline_a_taken_key_opened_fires_once_it_passes() {
     let ctrl_y_read_at = viewer
         .client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
     thread::sleep(Duration::from_millis(150));
     viewer.queue_incoming_event(build_input_incoming(
         RuntimeEvent::KeyInput {
@@ -13644,7 +13987,7 @@ fn a_mouse_event_read_after_the_ambiguity_deadline_sends_the_earlier_round_then_
                 Some(&mouse_frame),
                 TerminalInput {
                     runtime_events: vec![runtime_event],
-                    read_at,
+                    read_stamp: build_input_read_stamp(read_at),
                 },
                 &mut sent_border_moves,
                 &mut pending_mouse_actions,
@@ -13726,7 +14069,7 @@ fn an_edge_scroll_step_due_before_a_key_was_read_goes_up_before_the_key() {
                     client_id,
                     key_input: crate::tests::build_key_input_for_chord(build_plain_chord('x')),
                 }],
-                read_at: scroll_due_time,
+                read_stamp: build_input_read_stamp(scroll_due_time),
             },
             &mut Vec::new(),
             &mut Vec::new(),
@@ -13822,7 +14165,7 @@ fn while_reconnecting_a_paste_read_after_the_deadline_is_held_after_the_binding_
     assert_eq!(
         viewer
             .client
-            .resolve_key(build_ctrl_y_chord(), ctrl_y_read_at),
+            .resolve_key(build_ctrl_y_chord(), build_input_read_stamp(ctrl_y_read_at)),
         KeyOutcome::Pending
     );
     // The paste is stamped on the clock: the stretch judges no deadline at the
@@ -13830,7 +14173,8 @@ fn while_reconnecting_a_paste_read_after_the_deadline_is_held_after_the_binding_
     let paste_read_at = viewer
         .client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
     viewer.queue_incoming_event(build_input_incoming(
         RuntimeEvent::HostPaste {
             client_id,
@@ -13861,9 +14205,12 @@ fn while_reconnecting_a_paste_read_after_the_deadline_is_held_after_the_binding_
                 dispatch_plan: DispatchPlan::Command(Box::new(Command::NewTab(
                     NewTabArgs::default(),
                 ))),
-                fired_action: build_test_action_reference("new-tab"),
+                fired_action: build_core_fired_action("new-tab"),
             },
-            HeldInput::Paste(String::from("pasted")),
+            HeldInput::Paste {
+                pasted_text: String::from("pasted"),
+                painted_input_pane_moved_by_others_count: 0
+            },
         ]
     );
 }
@@ -13912,7 +14259,7 @@ fn a_tab_hover_in_placement_mode_starts_when_the_pointer_was_read_over_the_tab()
                         modifier_flags: BindingModifierFlags::NONE,
                     },
                 }],
-                read_at: motion_read_at,
+                read_stamp: build_input_read_stamp(motion_read_at),
             },
             &mut Vec::new(),
             &mut Vec::new(),
@@ -13953,7 +14300,7 @@ fn two_presses_read_further_apart_than_a_double_click_stay_single_clicks_however
                         client_id,
                         mouse_input: build_mouse_press(get_content_cell(&mouse_frame, 0)),
                     }],
-                    read_at: press_read_at,
+                    read_stamp: build_input_read_stamp(press_read_at),
                 },
                 &mut sent_border_moves,
                 &mut pending_mouse_actions,
@@ -14617,7 +14964,7 @@ fn list_requests_for_one_read(
             None,
             TerminalInput {
                 runtime_events,
-                read_at: Instant::now(),
+                read_stamp: build_input_read_stamp(Instant::now()),
             },
             &mut Vec::new(),
             &mut Vec::new(),
@@ -14814,9 +15161,10 @@ fn each_read_of_keys_for_the_pane_reaches_it_in_one_write_at_every_split() {
         let mut key_read_count = 0;
 
         for read_bytes in [&typed_bytes[..split_index], &typed_bytes[split_index..]] {
-            terminal_input_parser.process_input_bytes(read_bytes);
+            terminal_input_parser.process_input_bytes(read_bytes, 0);
             let mut runtime_events = Vec::new();
-            while let Some(terminal_event) = terminal_input_parser.remove_next_pending_event() {
+            while let Some(tagged_event) = terminal_input_parser.remove_next_pending_event() {
+                let terminal_event = tagged_event.event;
                 let Event::Key(host_key_event) = terminal_event else {
                     panic!("typed text parses to keys only, not {terminal_event:?}");
                 };
@@ -14837,7 +15185,7 @@ fn each_read_of_keys_for_the_pane_reaches_it_in_one_write_at_every_split() {
                     None,
                     TerminalInput {
                         runtime_events,
-                        read_at: Instant::now(),
+                        read_stamp: build_input_read_stamp(Instant::now()),
                     },
                     &mut Vec::new(),
                     &mut Vec::new(),
@@ -14875,7 +15223,7 @@ fn a_restart_holds_the_pane_keys_of_one_read_as_one_input() {
     ];
     viewer.queue_incoming_event(Incoming::Input(Box::new(TerminalInput {
         runtime_events,
-        read_at: Instant::now(),
+        read_stamp: build_input_read_stamp(Instant::now()),
     })));
     let (joined_answer, _session_connection) = build_joined_answer(client_id);
     viewer.queue_incoming_event(joined_answer);
@@ -14896,9 +15244,18 @@ fn a_restart_holds_the_pane_keys_of_one_read_as_one_input() {
     assert_eq!(
         held_inputs,
         vec![
-            HeldInput::Keyboard(build_key_inputs_for_text("ab")),
-            HeldInput::Paste(String::from("pasted")),
-            HeldInput::Keyboard(build_key_inputs_for_text("c")),
+            HeldInput::Keyboard {
+                key_inputs: build_key_inputs_for_text("ab"),
+                painted_input_pane_moved_by_others_count: 0
+            },
+            HeldInput::Paste {
+                pasted_text: String::from("pasted"),
+                painted_input_pane_moved_by_others_count: 0
+            },
+            HeldInput::Keyboard {
+                key_inputs: build_key_inputs_for_text("c"),
+                painted_input_pane_moved_by_others_count: 0
+            },
         ]
     );
 }
@@ -14907,12 +15264,21 @@ fn a_restart_holds_the_pane_keys_of_one_read_as_one_input() {
 fn a_restart_hold_counts_each_key_of_a_read() {
     let mut input_hold = InputHold::default();
     for _ in 0..MAX_HELD_INPUT_COUNT - 1 {
-        assert!(input_hold.hold_input(HeldInput::Paste(String::from("p"))));
+        assert!(input_hold.hold_input(HeldInput::Paste {
+            pasted_text: String::from("p"),
+            painted_input_pane_moved_by_others_count: 0
+        }));
     }
 
-    assert!(!input_hold.hold_input(HeldInput::Keyboard(build_key_inputs_for_text("ab"))));
+    assert!(!input_hold.hold_input(HeldInput::Keyboard {
+        key_inputs: build_key_inputs_for_text("ab"),
+        painted_input_pane_moved_by_others_count: 0
+    }));
     assert_eq!(input_hold.held_input_count, MAX_HELD_INPUT_COUNT - 1);
-    assert!(input_hold.hold_input(HeldInput::Keyboard(build_key_inputs_for_text("a"))));
+    assert!(input_hold.hold_input(HeldInput::Keyboard {
+        key_inputs: build_key_inputs_for_text("a"),
+        painted_input_pane_moved_by_others_count: 0
+    }));
     assert_eq!(input_hold.held_input_count, MAX_HELD_INPUT_COUNT);
     assert_eq!(input_hold.held_inputs.len(), MAX_HELD_INPUT_COUNT);
 }
@@ -15611,7 +15977,7 @@ fn the_notification_center_binding_opens_the_center_and_sends_no_request() {
     assert_eq!(
         uplink.submit_bound_action(
             &mut client,
-            build_core_bound_action("toggle-notification-center"),
+            build_core_fired_action("toggle-notification-center"),
             Some(&mouse_frame),
         ),
         ControlFlow::Continue(())
@@ -15655,7 +16021,7 @@ fn a_command_binding_fired_in_the_center_closes_it_and_sends_its_command() {
     assert_eq!(
         uplink.submit_bound_action(
             &mut client,
-            build_core_bound_action("toggle-notification-center"),
+            build_core_fired_action("toggle-notification-center"),
             Some(&mouse_frame),
         ),
         ControlFlow::Continue(())
@@ -15664,7 +16030,7 @@ fn a_command_binding_fired_in_the_center_closes_it_and_sends_its_command() {
     assert_eq!(
         uplink.submit_bound_action(
             &mut client,
-            build_core_bound_action("next-tab"),
+            build_core_fired_action("next-tab"),
             Some(&mouse_frame),
         ),
         ControlFlow::Continue(())
@@ -15692,7 +16058,7 @@ fn a_lock_binding_that_keeps_the_mode_closes_the_center() {
     assert_eq!(
         uplink.submit_bound_action(
             &mut client,
-            build_core_bound_action("toggle-notification-center"),
+            build_core_fired_action("toggle-notification-center"),
             Some(&mouse_frame),
         ),
         ControlFlow::Continue(())
@@ -15701,7 +16067,7 @@ fn a_lock_binding_that_keeps_the_mode_closes_the_center() {
     assert_eq!(
         uplink.submit_bound_action(
             &mut client,
-            build_core_bound_action("unlock"),
+            build_core_fired_action("unlock"),
             Some(&mouse_frame),
         ),
         ControlFlow::Continue(())
@@ -15739,16 +16105,18 @@ fn a_continuous_command_fired_in_the_center_drops_the_prefix_it_rearmed() {
     let mut uplink = build_test_uplink(request_sender);
     let current_time = Instant::now();
     assert_eq!(
-        client.resolve_key(ctrl_y_chord, current_time),
+        client.resolve_key(ctrl_y_chord, build_input_read_stamp(current_time)),
         KeyOutcome::Pending
     );
-    let KeyOutcome::Fire(bound_action) = client.resolve_key(h_chord, current_time) else {
+    let KeyOutcome::Fire(fired_action) =
+        client.resolve_key(h_chord, build_input_read_stamp(current_time))
+    else {
         panic!("<C-y> h fires core:focus-pane-left in the center");
     };
     let rearmed_prefix = client.get_pending_key_sequence().cloned();
 
     assert_eq!(
-        uplink.submit_bound_action(&mut client, bound_action, Some(&mouse_frame)),
+        uplink.submit_bound_action(&mut client, fired_action, Some(&mouse_frame)),
         ControlFlow::Continue(())
     );
 
@@ -15804,7 +16172,7 @@ fn press_once(
                     client_id,
                     mouse_input: build_mouse_press(screen_point),
                 }],
-                read_at,
+                read_stamp: build_input_read_stamp(read_at),
             },
             &mut Vec::new(),
             &mut pending_mouse_actions,
@@ -16342,14 +16710,15 @@ fn a_requested_close_of_a_center_that_is_closed_answers_ok_and_changes_nothing()
 }
 
 /// A viewer that shows `Locked` while it waits for its `<C-l>` lock command
-/// reads a `Resync`: it waits for no lock command after it.
+/// reads a `Resync`: it still shows `Locked` and waits for that command.
 #[test]
-fn a_resync_forgets_the_lock_command_the_viewer_waits_for() {
+fn a_resync_keeps_the_lock_command_the_viewer_waits_for() {
     let session_id = SessionId::new();
     let attached_notification_queue =
         NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
     let mut client = build_test_client();
-    client.apply_lock_command(CommandId::new(), LockMode::Locked);
+    let lock_command_id = CommandId::new();
+    client.apply_lock_command(lock_command_id, LockMode::Locked);
 
     let client = run_client_attachment_over_notification_events(
         client,
@@ -16363,20 +16732,44 @@ fn a_resync_forgets_the_lock_command_the_viewer_waits_for() {
         })],
     );
 
-    assert_eq!(client.get_pending_lock_command_id(), None);
+    assert_eq!(
+        (client.get_lock_mode(), client.get_pending_lock_command_id()),
+        (LockMode::Locked, Some(lock_command_id))
+    );
 }
 
-/// A committed frame whose dropped request count rose from `0` to `2` posts
-/// the dropped-keys warning, repeated twice.
+/// A committed frame with typed pane 3, move count `4` and a dropped request
+/// count that rose from `0` to `2` becomes the painted input view, sets the
+/// read tag to `4`, and posts the dropped-keys warning, repeated twice.
 #[test]
-fn a_committed_frame_whose_dropped_request_count_rose_posts_the_dropped_keys_warning() {
+fn a_committed_frame_records_its_input_view_and_posts_the_dropped_keys_warning() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
+    let third_pane_id = PaneId::new();
     let mut render_snapshot =
         crate::tests::build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
+    render_snapshot.client_snapshot.typed_pane_id = Some(third_pane_id);
+    render_snapshot
+        .client_snapshot
+        .input_pane_moved_by_others_count = 4;
     render_snapshot.client_snapshot.dropped_input_request_count = 2;
 
     commit_test_snapshot(&mut client, &mut screen, &render_snapshot, Instant::now());
+
+    assert_eq!(
+        client.get_painted_input_view(),
+        Some(PaintedInputView {
+            typed_pane_id: Some(third_pane_id),
+            input_pane_moved_by_others_count: 4,
+            dropped_input_request_count: 2,
+        })
+    );
+    assert_eq!(
+        client
+            .get_input_read_clock()
+            .get_painted_input_pane_moved_by_others_count(),
+        4
+    );
 
     let posted_warnings: Vec<(String, u32)> = client
         .get_notification_history()
@@ -16392,4 +16785,74 @@ fn a_committed_frame_whose_dropped_request_count_rose_posts_the_dropped_keys_war
         posted_warnings,
         vec![(crate::DROPPED_INPUT_NOTIFICATION_TEXT.to_owned(), 2)]
     );
+}
+
+/// The newest painted frame carries move count `1`. A notification center
+/// binding and a session command binding, both typed against move count `0`,
+/// run nothing, send nothing, and each post `<action>: your view changed as
+/// you typed`. The same notification center binding typed against move count
+/// `1` opens the center.
+#[test]
+fn a_binding_typed_against_an_older_painted_frame_runs_nothing_and_warns() {
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.record_painted_input_view(
+        PaintedInputView {
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 1,
+            dropped_input_request_count: 0,
+        },
+        SystemTime::UNIX_EPOCH,
+    );
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    let stale_center_flow = uplink.submit_bound_action(
+        &mut client,
+        build_core_fired_action("toggle-notification-center"),
+        Some(&mouse_frame),
+    );
+    let stale_command_flow = uplink.submit_bound_action(
+        &mut client,
+        build_core_fired_action("next-tab"),
+        Some(&mouse_frame),
+    );
+
+    assert_eq!(
+        (stale_center_flow, stale_command_flow),
+        (ControlFlow::Continue(()), ControlFlow::Continue(()))
+    );
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(
+        request_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
+    let posted_texts: Vec<String> = client
+        .get_notification_history()
+        .list_merged_entries()
+        .map(|notification_entry| notification_entry.text.clone())
+        .collect();
+    assert_eq!(
+        posted_texts,
+        vec![
+            String::from("core:toggle-notification-center: your view changed as you typed"),
+            String::from("core:next-tab: your view changed as you typed"),
+        ]
+    );
+
+    let current_center_flow = uplink.submit_bound_action(
+        &mut client,
+        FiredAction {
+            painted_input_pane_moved_by_others_count: 1,
+            ..build_core_fired_action("toggle-notification-center")
+        },
+        Some(&mouse_frame),
+    );
+
+    assert_eq!(current_center_flow, ControlFlow::Continue(()));
+    assert!(client
+        .get_notification_history()
+        .is_notification_center_open());
 }

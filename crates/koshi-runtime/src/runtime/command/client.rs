@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use koshi_core::client::resolve_client_label;
 use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
-use koshi_ipc::protocol::{ConnectionToken, PaintedTypedPane};
+use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
 
 use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
@@ -136,8 +136,8 @@ impl Server {
     /// The client's first frame carries the target's preview. `None` names no
     /// target.
     ///
-    /// `painted_typed_pane` starts the client's input counts at the
-    /// subscription ([`subscribe`](Self::subscribe)): the typed pane of the
+    /// `painted_input_view` starts the client's input counts at the
+    /// subscription ([`subscribe`](Self::subscribe)): the input fields of the
     /// newest frame the caller painted on an earlier connection, or `None` on
     /// a first attach.
     ///
@@ -147,7 +147,7 @@ impl Server {
     /// label from them, and a client record taken back keeps its label.
     // Carries the whole of one attach request: what it claims back (`resume_client_id`,
     // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`,
-    // `cell_size`, `placement_preview_target`, `painted_typed_pane`), who the
+    // `cell_size`, `placement_preview_target`, `painted_input_view`), who the
     // connection carries (`client_origin`, `granted_identity`), and how the
     // connection is served (`attached_at`, `max_frames_per_second`).
     #[allow(clippy::too_many_arguments)]
@@ -163,7 +163,7 @@ impl Server {
         granted_identity: Option<&str>,
         max_frames_per_second: u16,
         placement_preview_target: Option<PanePlacementPreviewTarget>,
-        painted_typed_pane: Option<PaintedTypedPane>,
+        painted_input_view: Option<PaintedInputView>,
     ) -> Option<AttachAccepted> {
         let session = self.get_sole_session()?;
         let session_id = session.session_id;
@@ -249,7 +249,7 @@ impl Server {
         self.set_pane_placement_preview(client_id, placement_preview_target);
 
         let (deliveries, writer_handoff) =
-            self.subscribe(client_id, max_frames_per_second, painted_typed_pane);
+            self.subscribe(client_id, max_frames_per_second, painted_input_view);
         let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
             .session_by_id
@@ -926,7 +926,7 @@ impl Server {
     ///
     /// A command whose source is [`CommandSource::KeyBinding`] naming the
     /// target client came from that client's own connection: the client
-    /// records `command_id` as its last applied lock command, also when the
+    /// records `command_id` as its last settled lock command, also when the
     /// mode stays as it was. A command from any other source changes only the
     /// mode.
     fn set_lock_mode(
@@ -940,7 +940,7 @@ impl Server {
             self.resolve_acting_client_mut(command_source, explicit_client_id)?;
 
         if *command_source == CommandSource::from_key_binding(client_id) {
-            client.set_last_applied_lock_command_id(command_id);
+            client.set_last_settled_lock_command_id(command_id);
         }
         let current_lock_mode = client.get_lock_mode();
         let next_lock_mode = resolve_lock_mode(current_lock_mode);

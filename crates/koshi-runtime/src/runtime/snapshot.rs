@@ -312,11 +312,11 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
 
 /// The viewer state of `client` that a frame carries: its id, index, viewport
 /// size, active tab, the pane that takes its input, its focused pane in the
-/// active tab, lock mode, last applied lock command, floating pane move and
-/// pane placement, whether mouse-select is on, the pane a keystroke types into
-/// as the last check recorded it, how many times others moved its input to
-/// another pane, and how many of its key and paste requests the session
-/// dropped.
+/// active tab, lock mode, last settled lock command, last applied floating
+/// pane move and pane placement, whether mouse-select is on, the pane a
+/// keystroke types into as the last check recorded it, how many times others
+/// moved its input to another pane, and how many of its key and paste
+/// requests the session dropped.
 fn build_client_snapshot(client: &Client) -> ClientSnapshot {
     ClientSnapshot {
         client_id: client.get_client_id(),
@@ -326,7 +326,7 @@ fn build_client_snapshot(client: &Client) -> ClientSnapshot {
         focused_pane_id: client.get_active_focused_pane_id(),
         active_tab_focused_pane_id: client.get_focused_pane_id(client.get_active_tab_id()),
         lock_mode: client.get_lock_mode(),
-        last_applied_lock_command_id: client.get_last_applied_lock_command_id(),
+        last_settled_lock_command_id: client.get_last_settled_lock_command_id(),
         last_applied_floating_pane_move_command_id: client
             .get_last_applied_floating_pane_move_command_id(),
         last_applied_placement_command_id: client.get_last_applied_placement_command_id(),

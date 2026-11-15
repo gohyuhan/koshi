@@ -1241,7 +1241,7 @@ fn serve_connection(
                 link_timeout_ms,
                 max_frames_per_second,
                 placement_preview_target,
-                painted_typed_pane,
+                painted_input_view,
             } => {
                 // A connection that ends before its first request after this
                 // attach reports its client as returning when it came from
@@ -1265,7 +1265,7 @@ fn serve_connection(
                         granted_identity: handshake.get_granted_identity().map(str::to_string),
                         max_frames_per_second,
                         placement_preview_target,
-                        painted_typed_pane,
+                        painted_input_view,
                         response_sender,
                     },
                 );

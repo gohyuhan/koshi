@@ -411,6 +411,11 @@ pub struct PendingKeySequence {
     /// chord. `None` once the hint bar shows the sequence. Example: `<C-p>`
     /// pressed at `t` with a delay of 300 ms holds `Some(t + 300 ms)`.
     pub continuation_hint_hidden_until: Option<Instant>,
+    /// The move count of the frame on the screen when the sequence's first
+    /// chord was read (`input_pane_moved_by_others_count`), which the binding
+    /// it fires carries. A prefix opened again after a continuous binding
+    /// fired carries the count of the read that fired it.
+    pub painted_input_pane_moved_by_others_count: u64,
 }
 
 /// The modifier keys the outer terminal reported with one keyboard event,

@@ -23,7 +23,7 @@ use ratatui::style::Modifier;
 use ratatui::widgets::Widget;
 
 use crate::attach::ViewerPaint;
-use crate::input::InputReadClock;
+use crate::input::{InputReadClock, InputReadStamp};
 use crate::{is_focused_pane_floating, Client};
 use koshi_config::conflict::ConflictSeverity;
 use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
@@ -922,6 +922,9 @@ pub(crate) struct TerminalOwner {
     /// Parsed input source shared with the input thread. `None` when both
     /// standard streams are redirected and no terminal work is needed.
     reader: Option<InputReader>,
+    /// The read times of this terminal's input and the move count of the
+    /// frame on its screen, which tags each event `reader` reads.
+    input_read_clock: Arc<InputReadClock>,
     /// Wakes the input reader when this attachment ends. It is present exactly
     /// when `reader` is present.
     waker: Option<PlatformWaker>,
@@ -947,11 +950,13 @@ impl TerminalOwner {
     pub(crate) fn open_terminal_owner(supports_native_images: bool) -> Result<Self, String> {
         let is_input_terminal = io::stdin().is_terminal();
         let is_output_terminal = io::stdout().is_terminal();
+        let input_read_clock = Arc::new(InputReadClock::default());
         let (graphics_support, initial_cell_size, terminal, reader, waker) =
             if needs_terminal_device(is_input_terminal, is_output_terminal) {
                 let (mut terminal, event_source) = TerminalDevice::open_terminal_device()
                     .map_err(|open_error| format!("could not open the terminal: {open_error}"))?;
-                let mut reader = InputReader::from_event_source(event_source);
+                let mut reader =
+                    InputReader::from_event_source(event_source, Arc::clone(&input_read_clock));
                 let terminal_probe = if supports_native_images {
                     resolve_graphics_support_for_output(is_output_terminal, || {
                         run_with_raw_mode(
@@ -999,6 +1004,7 @@ impl TerminalOwner {
             is_output_terminal,
             terminal: Arc::new(Mutex::new(terminal)),
             reader,
+            input_read_clock,
             waker,
             is_shutdown_requested: Arc::new(AtomicBool::new(false)),
             has_active_application_modes: Arc::new(AtomicBool::new(false)),
@@ -1006,6 +1012,12 @@ impl TerminalOwner {
             input_thread: None,
             is_activated: false,
         })
+    }
+
+    /// The read times of this terminal's input and the move count of the frame
+    /// on its screen, shared with its input thread.
+    pub(crate) fn get_input_read_clock(&self) -> Arc<InputReadClock> {
+        Arc::clone(&self.input_read_clock)
     }
 
     /// Return the native graphics support proved by the terminal probe.
@@ -1048,13 +1060,12 @@ impl TerminalOwner {
     /// Enable terminal modes and start input delivery after Attach succeeds.
     ///
     /// The input thread sends the events of each read of the terminal on
-    /// `terminal_input_sender` as one [`TerminalInput`], stamped on
-    /// `input_read_clock`.
+    /// `terminal_input_sender` as [`TerminalInput`]s stamped on this owner's
+    /// input read clock ([`run_terminal_input`]).
     pub(crate) fn activate_terminal(
         &mut self,
         terminal_input_sender: mpsc::SyncSender<TerminalInput>,
         client_id: ClientId,
-        input_read_clock: Arc<InputReadClock>,
         should_read_input: bool,
     ) -> Result<(), String> {
         if self.is_activated {
@@ -1089,6 +1100,7 @@ impl TerminalOwner {
             .take()
             .ok_or_else(|| "terminal input reader is unavailable".to_string())?;
         let is_shutdown_requested = Arc::clone(&self.is_shutdown_requested);
+        let input_read_clock = Arc::clone(&self.input_read_clock);
         let panic_input_sender = terminal_input_sender.clone();
         self.input_thread = Some(
             thread::Builder::new()
@@ -1106,7 +1118,10 @@ impl TerminalOwner {
                     if input_thread_result.is_err() {
                         let _ = panic_input_sender.send(TerminalInput {
                             runtime_events: vec![RuntimeEvent::Quit],
-                            read_at: input_read_clock.stamp_input_read(Instant::now()),
+                            read_stamp: input_read_clock.stamp_input_read(
+                                Instant::now(),
+                                input_read_clock.get_painted_input_pane_moved_by_others_count(),
+                            ),
                         });
                     }
                 })
@@ -1539,10 +1554,15 @@ fn write_fallback_terminal_cleanup(
 }
 
 /// Read semantic terminal events until shutdown or input failure, and send
-/// the events of each read of the terminal on `terminal_input_sender` as one
-/// [`TerminalInput`], with the stamp `input_read_clock` gives that read. A read
-/// whose events all convert to nothing sends nothing. An input failure sends
-/// a [`TerminalInput`] that holds [`RuntimeEvent::Quit`] alone, and ends.
+/// them on `terminal_input_sender`. The events of each read of the terminal go
+/// in order, as one [`TerminalInput`] per run of events that carry the same
+/// move count, each stamped by `input_read_clock` with that count and with the
+/// one time the read returned. Example: a read that ends a paste begun in a
+/// read tagged `0`, then holds the key `x` tagged `1`, sends the paste stamped
+/// `0`, then `x` stamped `1`, `1 ns` after the paste. A read whose
+/// events all convert to nothing sends nothing. An input failure sends a
+/// [`TerminalInput`] that holds [`RuntimeEvent::Quit`] alone, stamped with the
+/// clock's move count, and ends.
 fn run_terminal_input<EventSourceType: reader::EventSource>(
     input_reader: &mut InputReader<EventSourceType>,
     terminal_input_sender: &mpsc::SyncSender<TerminalInput>,
@@ -1551,11 +1571,14 @@ fn run_terminal_input<EventSourceType: reader::EventSource>(
     is_shutdown_requested: &AtomicBool,
 ) {
     while !is_shutdown_requested.load(Ordering::Acquire) {
-        let runtime_events: Vec<RuntimeEvent> =
+        let tagged_runtime_events: Vec<(RuntimeEvent, u64)> =
             match input_reader.read_events_of_next_terminal_read() {
-                Ok(host_events) => host_events
+                Ok(tagged_events) => tagged_events
                     .into_iter()
-                    .filter_map(|host_event| build_terminal_runtime_event(client_id, host_event))
+                    .filter_map(|tagged_event| {
+                        build_terminal_runtime_event(client_id, tagged_event.event)
+                            .map(|runtime_event| (runtime_event, tagged_event.input_tag))
+                    })
                     .collect(),
                 Err(input_read_error)
                     if input_read_error.kind() == io::ErrorKind::Interrupted
@@ -1568,26 +1591,40 @@ fn run_terminal_input<EventSourceType: reader::EventSource>(
                 }
                 Err(input_read_error) => {
                     tracing::warn!(%input_read_error, "could not read terminal input");
-                    vec![RuntimeEvent::Quit]
+                    vec![(
+                        RuntimeEvent::Quit,
+                        input_read_clock.get_painted_input_pane_moved_by_others_count(),
+                    )]
                 }
             };
-        if runtime_events.is_empty() {
-            continue;
+        let is_hangup = matches!(tagged_runtime_events.as_slice(), [(RuntimeEvent::Quit, _)]);
+        let read_at = Instant::now();
+        let mut tagged_runtime_events = tagged_runtime_events.into_iter().peekable();
+        while let Some((first_runtime_event, input_tag)) = tagged_runtime_events.next() {
+            let mut runtime_events = vec![first_runtime_event];
+            while let Some((runtime_event, _)) =
+                tagged_runtime_events.next_if(|(_, next_input_tag)| *next_input_tag == input_tag)
+            {
+                runtime_events.push(runtime_event);
+            }
+            let terminal_input = TerminalInput {
+                runtime_events,
+                read_stamp: input_read_clock.stamp_input_read(read_at, input_tag),
+            };
+            if terminal_input_sender.send(terminal_input).is_err() {
+                return;
+            }
         }
-        let is_hangup = matches!(runtime_events.as_slice(), [RuntimeEvent::Quit]);
-        let terminal_input = TerminalInput {
-            runtime_events,
-            read_at: input_read_clock.stamp_input_read(Instant::now()),
-        };
-        if terminal_input_sender.send(terminal_input).is_err() || is_hangup {
+        if is_hangup {
             break;
         }
     }
 }
 
-/// The events of one read of this terminal and the instant it was read: the
-/// events its input thread parsed from that read, or this terminal hanging up
-/// as a read failure, a termination signal, or a console close reports it.
+/// Events of one read of this terminal whose first bytes came in reads tagged
+/// with one move count, and their stamp: events the input thread parsed, or
+/// this terminal hanging up as a read failure, a termination signal, or a
+/// console close reports it.
 #[derive(Debug)]
 pub(crate) struct TerminalInput {
     /// The events, oldest first: keys, mouse events, a paste, a resize, a cell
@@ -1595,11 +1632,13 @@ pub(crate) struct TerminalInput {
     /// Typing `é-` that the terminal sends in one read is the two keys `é`
     /// and `-`.
     pub(crate) runtime_events: Vec<RuntimeEvent>,
-    /// When the input thread read the events, as
-    /// [`InputReadClock::stamp_input_read`] stamped that read, or when a
-    /// hangup report arrived. The attach loop runs every input timer due at
-    /// this instant before it handles the events, and ends at a hangup.
-    pub(crate) read_at: Instant,
+    /// When the input thread read the events, and the move count of the frame
+    /// on the screen when it read their first bytes, as
+    /// [`InputReadClock::stamp_input_read`] stamped them, or when a hangup
+    /// report arrived. The attach loop runs every input timer due at `read_at`
+    /// before it handles the events, and ends at a hangup. Each key, paste and
+    /// binding of the events carries the move count.
+    pub(crate) read_stamp: InputReadStamp,
 }
 
 /// Convert one host-terminal event into the runtime event the viewer consumes.

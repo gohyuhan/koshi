@@ -385,7 +385,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             focused_pane_id: Some(content_pane_id),
             active_tab_focused_pane_id: Some(content_pane_id),
             lock_mode: LockMode::Locked,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: true,
@@ -468,7 +468,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         .active_tab_focused_pane_id = Some(empty_pane_id);
     expected_render_snapshot
         .client_snapshot
-        .last_applied_lock_command_id = Some(CommandId::new());
+        .last_settled_lock_command_id = Some(CommandId::new());
     expected_render_snapshot
         .client_snapshot
         .last_applied_floating_pane_move_command_id = Some(CommandId::new());

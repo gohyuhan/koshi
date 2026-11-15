@@ -102,7 +102,7 @@ use koshi_core::notification::NotificationQueueOwner;
 use koshi_core::process::PtySize;
 use koshi_core::selection::{GridPosition, Selection, SelectionKind};
 use koshi_input::host::{
-    GraphicAttributeError, GraphicAttributeReply, KeyCode, KittyGraphicsReply,
+    GraphicAttributeError, GraphicAttributeReply, KeyCode, KittyGraphicsReply, TaggedEvent,
 };
 use koshi_ipc::protocol::WireMouseAction;
 use koshi_layout::edit::split_leaf;
@@ -149,32 +149,56 @@ struct ProbeSource {
 }
 
 impl reader::EventSource for ProbeSource {
-    fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
-        Ok(self.pending_events.pop_front())
+    fn try_read_event(
+        &mut self,
+        _timeout_duration: Option<Duration>,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<Option<TaggedEvent>> {
+        Ok(self.pending_events.pop_front().map(|event| TaggedEvent {
+            event,
+            input_tag: input_read_clock.get_painted_input_pane_moved_by_others_count(),
+        }))
     }
 
-    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+    fn remove_next_parsed_event(&mut self) -> Option<TaggedEvent> {
         None
     }
 }
 
 fn build_probe_reader(probe_events: impl IntoIterator<Item = Event>) -> InputReader<ProbeSource> {
-    InputReader::from_event_source(ProbeSource {
-        pending_events: probe_events.into_iter().collect(),
-    })
+    InputReader::from_event_source(
+        ProbeSource {
+            pending_events: probe_events.into_iter().collect(),
+        },
+        Arc::default(),
+    )
 }
 
 /// A terminal whose input returns `pending_reads` in order, the events of one
 /// read at a time, then fails.
 struct ScriptedInputSource {
-    pending_reads: VecDeque<Vec<Event>>,
-    parsed_events: VecDeque<Event>,
+    pending_reads: VecDeque<Vec<TaggedEvent>>,
+    parsed_events: VecDeque<TaggedEvent>,
 }
 
 impl ScriptedInputSource {
     /// A terminal that returns the events of each of `pending_reads` from one
-    /// read.
+    /// read, each tagged with the move count `0`.
     fn from_reads(pending_reads: impl IntoIterator<Item = Vec<Event>>) -> Self {
+        Self::from_tagged_reads(pending_reads.into_iter().map(|read_events| {
+            read_events
+                .into_iter()
+                .map(|event| TaggedEvent {
+                    event,
+                    input_tag: 0,
+                })
+                .collect()
+        }))
+    }
+
+    /// A terminal that returns the tagged events of each of `pending_reads`
+    /// from one read.
+    fn from_tagged_reads(pending_reads: impl IntoIterator<Item = Vec<TaggedEvent>>) -> Self {
         Self {
             pending_reads: pending_reads.into_iter().collect(),
             parsed_events: VecDeque::new(),
@@ -183,7 +207,11 @@ impl ScriptedInputSource {
 }
 
 impl reader::EventSource for ScriptedInputSource {
-    fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
+    fn try_read_event(
+        &mut self,
+        _timeout_duration: Option<Duration>,
+        _input_read_clock: &InputReadClock,
+    ) -> io::Result<Option<TaggedEvent>> {
         if let Some(parsed_event) = self.parsed_events.pop_front() {
             return Ok(Some(parsed_event));
         }
@@ -196,7 +224,7 @@ impl reader::EventSource for ScriptedInputSource {
         }
     }
 
-    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+    fn remove_next_parsed_event(&mut self) -> Option<TaggedEvent> {
         self.parsed_events.pop_front()
     }
 }
@@ -3165,15 +3193,16 @@ fn a_reader_returns_the_events_of_one_read_together_and_a_buffered_event_alone()
     let key_b = Event::Key(KeyCode::Char('b').into());
     let key_c = Event::Key(KeyCode::Char('c').into());
     let key_e_acute = Event::Key(KeyCode::Char('é').into());
-    let mut input_reader = InputReader::from_event_source(ScriptedInputSource::from_reads([
-        vec![key_a.clone(), Event::FocusIn, key_b.clone()],
-        vec![key_c.clone(), key_e_acute.clone()],
-    ]));
+    let mut input_reader = InputReader::from_event_source(
+        ScriptedInputSource::from_reads([
+            vec![key_a.clone(), Event::FocusIn, key_b.clone()],
+            vec![key_c.clone(), key_e_acute.clone()],
+        ]),
+        Arc::default(),
+    );
 
     assert!(input_reader
-        .wait_for_event(Some(Duration::from_millis(1)), |terminal_event| {
-            *terminal_event == Event::FocusIn
-        })
+        .wait_for_event(None, |terminal_event| *terminal_event == Event::FocusIn)
         .expect("the wait reads the first read"));
 
     let mut terminal_reads = Vec::new();
@@ -3181,7 +3210,10 @@ fn a_reader_returns_the_events_of_one_read_together_and_a_buffered_event_alone()
         terminal_reads.push(
             input_reader
                 .read_events_of_next_terminal_read()
-                .expect("a scripted read"),
+                .expect("a scripted read")
+                .into_iter()
+                .map(|tagged_event| tagged_event.event)
+                .collect::<Vec<Event>>(),
         );
     }
     assert_eq!(
@@ -3198,16 +3230,19 @@ fn a_reader_returns_the_events_of_one_read_together_and_a_buffered_event_alone()
 #[test]
 fn the_input_thread_sends_the_events_of_one_read_as_one_input() {
     let client_id = ClientId::new();
-    let mut input_reader = InputReader::from_event_source(ScriptedInputSource::from_reads([
-        vec![
-            Event::Key(KeyCode::Char('a').into()),
-            Event::Key(KeyCode::Char('é').into()),
-            Event::FocusIn,
-            Event::Paste(String::from("p")),
-        ],
-        vec![Event::FocusIn],
-        vec![Event::Key(KeyCode::Char('b').into())],
-    ]));
+    let mut input_reader = InputReader::from_event_source(
+        ScriptedInputSource::from_reads([
+            vec![
+                Event::Key(KeyCode::Char('a').into()),
+                Event::Key(KeyCode::Char('é').into()),
+                Event::FocusIn,
+                Event::Paste(String::from("p")),
+            ],
+            vec![Event::FocusIn],
+            vec![Event::Key(KeyCode::Char('b').into())],
+        ]),
+        Arc::default(),
+    );
     let (terminal_input_sender, terminal_input_receiver) = mpsc::sync_channel(16);
 
     run_terminal_input(
@@ -3254,12 +3289,15 @@ fn the_input_thread_sends_the_events_of_one_read_as_one_input() {
 #[test]
 fn the_input_thread_sends_each_read_with_a_stamp_greater_than_the_one_before() {
     let client_id = ClientId::new();
-    let mut input_reader = InputReader::from_event_source(ScriptedInputSource::from_reads([
-        vec![Event::Key(KeyCode::Char('a').into())],
-        vec![Event::FocusIn],
-        vec![Event::Paste(String::from("p"))],
-        vec![Event::FocusOut],
-    ]));
+    let mut input_reader = InputReader::from_event_source(
+        ScriptedInputSource::from_reads([
+            vec![Event::Key(KeyCode::Char('a').into())],
+            vec![Event::FocusIn],
+            vec![Event::Paste(String::from("p"))],
+            vec![Event::FocusOut],
+        ]),
+        Arc::default(),
+    );
     let (terminal_input_sender, terminal_input_receiver) = mpsc::sync_channel(16);
     let input_read_clock = InputReadClock::default();
 
@@ -3302,16 +3340,84 @@ fn the_input_thread_sends_each_read_with_a_stamp_greater_than_the_one_before() {
     let [RuntimeEvent::Quit] = quit_input.runtime_events.as_slice() else {
         panic!("the failed read is the hangup, got {quit_input:?}");
     };
-    assert!(key_input.read_at < paste_input.read_at);
-    assert!(paste_input.read_at < focus_lost_input.read_at);
-    assert!(focus_lost_input.read_at < quit_input.read_at);
-    input_read_clock.note_input_taken(focus_lost_input.read_at);
+    assert!(key_input.read_stamp.read_at < paste_input.read_stamp.read_at);
+    assert!(paste_input.read_stamp.read_at < focus_lost_input.read_stamp.read_at);
+    assert!(focus_lost_input.read_stamp.read_at < quit_input.read_stamp.read_at);
+    input_read_clock.note_input_taken(focus_lost_input.read_stamp.read_at);
     assert!(
         input_read_clock.has_untaken_input(),
         "the hangup is still on its way"
     );
-    input_read_clock.note_input_taken(quit_input.read_at);
+    input_read_clock.note_input_taken(quit_input.read_stamp.read_at);
     assert!(!input_read_clock.has_untaken_input());
+}
+
+/// A read ends a paste whose start came in a read tagged `0`, and holds the
+/// key `x` read after the move count rose to `1`. The input thread sends the
+/// paste stamped `0`, then `x` stamped `1` one nanosecond after the paste's
+/// read time, then the hangup.
+#[test]
+fn the_input_thread_sends_a_paste_begun_before_the_move_count_rose_apart_from_the_key_read_after_it(
+) {
+    let client_id = ClientId::new();
+    let mut input_reader = InputReader::from_event_source(
+        ScriptedInputSource::from_tagged_reads([vec![
+            TaggedEvent {
+                event: Event::Paste(String::from("p")),
+                input_tag: 0,
+            },
+            TaggedEvent {
+                event: Event::Key(KeyCode::Char('x').into()),
+                input_tag: 1,
+            },
+        ]]),
+        Arc::default(),
+    );
+    let (terminal_input_sender, terminal_input_receiver) = mpsc::sync_channel(16);
+
+    run_terminal_input(
+        &mut input_reader,
+        &terminal_input_sender,
+        client_id,
+        &InputReadClock::default(),
+        &AtomicBool::new(false),
+    );
+
+    let terminal_inputs: Vec<TerminalInput> = terminal_input_receiver.try_iter().collect();
+    let [paste_input, key_input, quit_input] = terminal_inputs.as_slice() else {
+        panic!("expected the paste, the key and a hangup, got {terminal_inputs:?}");
+    };
+    let [RuntimeEvent::HostPaste { pasted_text, .. }] = paste_input.runtime_events.as_slice()
+    else {
+        panic!("the first input is the paste alone, got {paste_input:?}");
+    };
+    assert_eq!(pasted_text, "p");
+    let [RuntimeEvent::KeyInput {
+        key_input: x_key_input,
+        ..
+    }] = key_input.runtime_events.as_slice()
+    else {
+        panic!("the second input is the key alone, got {key_input:?}");
+    };
+    assert_eq!(*x_key_input, decode_key_event(KeyCode::Char('x').into()));
+    let [RuntimeEvent::Quit] = quit_input.runtime_events.as_slice() else {
+        panic!("the failed read is the hangup, got {quit_input:?}");
+    };
+    assert_eq!(
+        (
+            paste_input
+                .read_stamp
+                .painted_input_pane_moved_by_others_count,
+            key_input
+                .read_stamp
+                .painted_input_pane_moved_by_others_count,
+        ),
+        (0, 1)
+    );
+    assert_eq!(
+        key_input.read_stamp.read_at,
+        paste_input.read_stamp.read_at + Duration::from_nanos(1)
+    );
 }
 
 #[test]
@@ -3667,8 +3773,11 @@ fn ordinary_typing_reaches_the_runtime_as_the_character_typed() {
     // The plain bytes of `å` reach the runtime as the chord `å` with no
     // modifiers.
     let mut parser = koshi_input::host::Parser::default();
-    parser.process_input_bytes("å".as_bytes());
-    let host_event = parser.remove_next_pending_event().expect("one key event");
+    parser.process_input_bytes("å".as_bytes(), 0);
+    let host_event = parser
+        .remove_next_pending_event()
+        .expect("one key event")
+        .event;
 
     let runtime_event = build_terminal_runtime_event(ClientId::new(), host_event)
         .expect("a typed character is input");
@@ -3692,8 +3801,11 @@ fn a_release_reaches_the_runtime_and_resolves_no_binding() {
     // A key release reaches the runtime as a `KeyInput`. The release has no
     // binding chord.
     let mut parser = koshi_input::host::Parser::default();
-    parser.process_input_bytes(b"\x1b[97;1:3u");
-    let host_event = parser.remove_next_pending_event().expect("one key event");
+    parser.process_input_bytes(b"\x1b[97;1:3u", 0);
+    let host_event = parser
+        .remove_next_pending_event()
+        .expect("one key event")
+        .event;
 
     let runtime_event = build_terminal_runtime_event(ClientId::new(), host_event)
         .expect("a release is still an event");
@@ -3712,8 +3824,11 @@ fn every_captured_field_survives_the_runtime_boundary() {
     // Alternate keys, associated text and the lock modifiers reach the
     // runtime.
     let mut parser = koshi_input::host::Parser::default();
-    parser.process_input_bytes(b"\x1b[39:34:113;130:2;34u");
-    let host_event = parser.remove_next_pending_event().expect("one key event");
+    parser.process_input_bytes(b"\x1b[39:34:113;130:2;34u", 0);
+    let host_event = parser
+        .remove_next_pending_event()
+        .expect("one key event")
+        .event;
 
     let runtime_event =
         build_terminal_runtime_event(ClientId::new(), host_event).expect("a key is input");

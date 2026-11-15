@@ -3226,7 +3226,7 @@ fn scroll_selection_lock_and_command_updates_record_a_view_change_only_for_a_rea
     let select = |client: &mut Client| client.set_selection(pane_id, build_test_selection());
     let lock = |client: &mut Client| client.update_lock_mode(LockMode::Locked);
     let record_lock_command =
-        |client: &mut Client| client.set_last_applied_lock_command_id(command_id);
+        |client: &mut Client| client.set_last_settled_lock_command_id(command_id);
     let record_move_command =
         |client: &mut Client| client.set_last_applied_floating_pane_move_command_id(command_id);
     let record_placement_command =
@@ -3522,34 +3522,47 @@ fn a_decoded_client_starts_with_no_checked_pane_and_both_input_counts_at_zero() 
 }
 
 /// A client whose last connection counted two moves and one drop starts a
-/// new connection on pane 4: both counts read `0`, or the moved count reads
-/// `1` when pane 4 is not the pane the viewer's screen showed. Pane 4 is
-/// the checked pane, and a check of pane 4 counts no move.
+/// new connection on pane 4 with the counts `7` and `3`: both counts read
+/// those values, pane 4 is the checked pane, and a check of pane 4 counts no
+/// move.
 #[test]
-fn start_connection_input_counts_clears_the_drops_and_counts_one_move_only_for_a_changed_pane() {
+fn start_connection_input_counts_sets_both_counts_and_the_checked_pane() {
     let fourth_pane_id = PaneId::new();
-    let mut counts_by_is_changed = Vec::new();
+    let mut client = build_test_client(TabId::new());
+    client.update_checked_typed_pane(Some(PaneId::new()), true);
+    client.update_checked_typed_pane(Some(PaneId::new()), true);
+    client.record_dropped_input_request();
 
-    for is_typed_pane_changed_since_painted_frame in [false, true] {
-        let mut client = build_test_client(TabId::new());
-        client.update_checked_typed_pane(Some(PaneId::new()), true);
-        client.update_checked_typed_pane(Some(PaneId::new()), true);
-        client.record_dropped_input_request();
+    client.start_connection_input_counts(Some(fourth_pane_id), 7, 3);
+    client.update_checked_typed_pane(Some(fourth_pane_id), true);
 
-        client.start_connection_input_counts(
-            Some(fourth_pane_id),
-            is_typed_pane_changed_since_painted_frame,
-        );
-        client.update_checked_typed_pane(Some(fourth_pane_id), true);
-
-        assert_eq!(client.get_checked_typed_pane_id(), Some(fourth_pane_id));
-        counts_by_is_changed.push((
+    assert_eq!(
+        (
+            client.get_checked_typed_pane_id(),
             client.get_input_pane_moved_by_others_count(),
-            client.get_dropped_input_request_count(),
-        ));
-    }
+            client.get_dropped_input_request_count()
+        ),
+        (Some(fourth_pane_id), 7, 3)
+    );
+}
 
-    assert_eq!(counts_by_is_changed, vec![(0, 0), (1, 0)]);
+/// A connection that starts both counts at `u64::MAX` keeps them at
+/// `u64::MAX` through one more move and one more drop.
+#[test]
+fn both_input_counts_stay_at_u64_max_through_a_move_and_a_drop() {
+    let mut client = build_test_client(TabId::new());
+    client.start_connection_input_counts(Some(PaneId::new()), u64::MAX, u64::MAX);
+
+    client.update_checked_typed_pane(Some(PaneId::new()), true);
+    client.record_dropped_input_request();
+
+    assert_eq!(
+        (
+            client.get_input_pane_moved_by_others_count(),
+            client.get_dropped_input_request_count()
+        ),
+        (u64::MAX, u64::MAX)
+    );
 }
 
 #[test]
@@ -3560,7 +3573,7 @@ fn start_connection_input_counts_records_no_view_change() {
         TabId::new(),
         |_| {},
         |client| {
-            client.start_connection_input_counts(Some(pane_id), true);
+            client.start_connection_input_counts(Some(pane_id), 1, 0);
         }
     ));
 }

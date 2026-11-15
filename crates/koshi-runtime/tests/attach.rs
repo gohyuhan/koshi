@@ -39,7 +39,8 @@ use koshi_ipc::placement::{
     PanePlacementPreview, PanePlacementPreviewTarget, PanePlacementSnapshot, PanePlacementSource,
 };
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
+    ConnectionToken, FiredAction, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
+    WireMouseAction,
 };
 use koshi_ipc::transport::Connection;
 use koshi_layout::mode::LayoutMode;
@@ -111,7 +112,7 @@ fn attach_test_client_with_resume_token(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
-                painted_typed_pane: None,
+                painted_input_view: None,
             },
         },
     );
@@ -328,12 +329,12 @@ fn the_frame_that_shows_a_viewers_lock_names_the_lock_command_it_sent() {
         .split_last()
         .expect("the run ends with the locked frame");
     assert_eq!(
-        locked_client_snapshot.last_applied_lock_command_id,
+        locked_client_snapshot.last_settled_lock_command_id,
         Some(lock_command_id)
     );
     for earlier_client_snapshot in earlier_client_snapshots {
         assert_eq!(earlier_client_snapshot.lock_mode, LockMode::Normal);
-        assert_eq!(earlier_client_snapshot.last_applied_lock_command_id, None);
+        assert_eq!(earlier_client_snapshot.last_settled_lock_command_id, None);
     }
 }
 
@@ -355,7 +356,7 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
                             "Attach": {
                                 "viewport_size": { "column_count": 80, "row_count": 24 },
                                 "max_frames_per_second": 60,
-                                "painted_typed_pane": null,
+                                "painted_input_view": null,
                                 "tier": "admin"
                             }
                         }
@@ -1488,19 +1489,25 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                 other_client_id,
                 4,
             );
-            let (mut viewer_connection, _) = read_session_frames_until_painted_frame(
-                viewer_connection,
-                move |received_painted_frame| {
-                    received_painted_frame
-                        .painted_frame
-                        .session_snapshot
-                        .active_tab_snapshot
-                        .layout_area
-                        .pane_slots
-                        .len()
-                        == 3
-                },
-            );
+            let (mut viewer_connection, three_pane_session_frames) =
+                read_session_frames_until_painted_frame(
+                    viewer_connection,
+                    move |received_painted_frame| {
+                        received_painted_frame
+                            .painted_frame
+                            .session_snapshot
+                            .active_tab_snapshot
+                            .layout_area
+                            .pane_slots
+                            .len()
+                            == 3
+                    },
+                );
+            let painted_input_pane_moved_by_others_count =
+                get_last_painted_frame(&three_pane_session_frames)
+                    .painted_frame
+                    .client_snapshot
+                    .input_pane_moved_by_others_count;
             let placement_command_id = CommandId::new();
             viewer_connection
                 .ipc_connection
@@ -1511,7 +1518,10 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
                         source_pane_id,
                         placement_target,
                         expected_placed_tab_layout: earlier_placed_tab_layout,
-                        fired_action: Some(confirm_action.clone()),
+                        fired_action: Some(FiredAction {
+                            action_reference: confirm_action.clone(),
+                            painted_input_pane_moved_by_others_count,
+                        }),
                     },
                 })
                 .expect("send the pane swap built on the earlier layout");

@@ -37,7 +37,7 @@ use crate::mouse::tests::{
     build_plain_mouse_pane, build_render_snapshot_from_mouse_frame,
 };
 use crate::mouse::WheelDecision;
-use crate::tests::build_core_bound_action;
+use crate::tests::{build_core_bound_action, build_core_fired_action, build_input_read_stamp};
 use crate::PaneMoveMode;
 
 /// A frame of one focused tiled pane and one floating pane per entry of
@@ -586,7 +586,7 @@ fn a_left_click_on_the_button_opens_the_tray_and_drops_an_open_sequence() {
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-            Instant::now()
+            build_input_read_stamp(Instant::now())
         ),
         KeyOutcome::Pending
     );
@@ -1147,27 +1147,27 @@ fn the_tray_mode_resolves_its_own_keys_and_discards_the_rest() {
     for (key_chord, expected_key_outcome) in [
         (
             build_named_key_chord(NamedKey::Enter),
-            KeyOutcome::Fire(build_core_bound_action("activate-selected-tray-tile")),
+            KeyOutcome::Fire(build_core_fired_action("activate-selected-tray-tile")),
         ),
         (
             build_named_key_chord(NamedKey::Right),
-            KeyOutcome::Fire(build_core_bound_action("select-tray-tile-right")),
+            KeyOutcome::Fire(build_core_fired_action("select-tray-tile-right")),
         ),
         (
             build_plain_chord('a'),
-            KeyOutcome::Fire(build_core_bound_action(
+            KeyOutcome::Fire(build_core_fired_action(
                 "toggle-minimize-all-floating-panes",
             )),
         ),
         (
             build_named_key_chord(NamedKey::Esc),
-            KeyOutcome::Fire(build_core_bound_action("close-floating-pane-tray")),
+            KeyOutcome::Fire(build_core_fired_action("close-floating-pane-tray")),
         ),
         (build_named_key_chord(NamedKey::Space), KeyOutcome::Discard),
         (build_plain_chord('q'), KeyOutcome::Discard),
     ] {
         assert_eq!(
-            client.resolve_key(key_chord, current_time),
+            client.resolve_key(key_chord, build_input_read_stamp(current_time)),
             expected_key_outcome,
             "{key_chord:?}"
         );
@@ -1208,8 +1208,11 @@ fn a_tile_activation_bound_to_x_fires_from_x() {
     client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
 
     assert_eq!(
-        client.resolve_key(build_plain_chord('x'), Instant::now()),
-        KeyOutcome::Fire(build_core_bound_action("activate-selected-tray-tile"))
+        client.resolve_key(
+            build_plain_chord('x'),
+            build_input_read_stamp(Instant::now())
+        ),
+        KeyOutcome::Fire(build_core_fired_action("activate-selected-tray-tile"))
     );
     assert_eq!(
         find_submitted_command(client.apply_client_action(

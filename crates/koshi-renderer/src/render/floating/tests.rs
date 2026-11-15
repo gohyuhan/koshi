@@ -126,7 +126,7 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
             focused_pane_id: Some(tiled_pane_id),
             active_tab_focused_pane_id: Some(tiled_pane_id),
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
             typed_pane_id: None,

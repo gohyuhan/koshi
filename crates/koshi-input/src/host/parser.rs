@@ -3,7 +3,8 @@
 //! The parser emits complete events and retains incomplete UTF-8, control, and
 //! paste sequences while waiting for more bytes. `finish_pending_input` resolves
 //! timeout-eligible prefixes and discards other incomplete input. For example,
-//! `ESC [ 1 ; 5 C` becomes a Right key with Control held.
+//! `ESC [ 1 ; 5 C` becomes a Right key with Control held. Each event carries
+//! the input tag passed with the bytes that held its first byte.
 
 use std::collections::VecDeque;
 
@@ -11,7 +12,7 @@ use koshi_core::key::TEXT_ONLY_KEY_CODEPOINT;
 
 use super::{
     Event, GraphicAttributeError, GraphicAttributeReply, KeyCode, KeyEvent, KeyEventKind,
-    KittyGraphicsReply, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+    KittyGraphicsReply, Modifiers, MouseButton, MouseEvent, MouseEventKind, TaggedEvent,
 };
 
 const ESCAPE_BYTE: u8 = 0x1b;
@@ -27,8 +28,13 @@ pub struct Parser {
     control_sequence: Vec<u8>,
     paste_bytes: Vec<u8>,
     paste_marker_match_length: usize,
-    pending_events: VecDeque<Event>,
+    pending_events: VecDeque<TaggedEvent>,
     is_alt_held: bool,
+    /// The input tag of the bytes being parsed.
+    current_input_tag: u64,
+    /// The input tag of the bytes that held the first byte of the event being
+    /// parsed.
+    event_start_input_tag: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,14 +65,23 @@ impl Default for Parser {
             paste_marker_match_length: 0,
             pending_events: VecDeque::with_capacity(32),
             is_alt_held: false,
+            current_input_tag: 0,
+            event_start_input_tag: 0,
         }
     }
 }
 
 impl Parser {
-    /// Parse every byte in `input_bytes` and queue complete events.
-    pub fn process_input_bytes(&mut self, input_bytes: &[u8]) {
+    /// Parse every byte in `input_bytes` and queue complete events. Each event
+    /// carries the `input_tag` of the call that passed its first byte. Example:
+    /// `ESC` passed with tag `1`, then `[ A` passed with tag `2`, queue one Up
+    /// key tagged `1`.
+    pub fn process_input_bytes(&mut self, input_bytes: &[u8], input_tag: u64) {
+        self.current_input_tag = input_tag;
         for &input_byte in input_bytes {
+            if self.parser_state == ParserState::Ground {
+                self.event_start_input_tag = input_tag;
+            }
             self.process_input_byte(input_byte);
         }
     }
@@ -115,8 +130,8 @@ impl Parser {
         )
     }
 
-    /// Remove the oldest complete event.
-    pub fn remove_next_pending_event(&mut self) -> Option<Event> {
+    /// Remove the oldest complete event with its input tag.
+    pub fn remove_next_pending_event(&mut self) -> Option<TaggedEvent> {
         self.pending_events.pop_front()
     }
 
@@ -263,10 +278,10 @@ impl Parser {
         }
         if is_csi_final(input_byte) {
             let parsed_event = parse_csi(&self.control_sequence);
-            self.reset_input_parser();
             if let Some(parsed_event) = parsed_event {
-                self.pending_events.push_back(parsed_event);
+                self.queue_event(parsed_event);
             }
+            self.reset_input_parser();
         } else if self.control_sequence.len() >= MAX_CSI_BYTE_COUNT {
             self.control_sequence.clear();
             self.parser_state = ParserState::DiscardCsi;
@@ -277,10 +292,10 @@ impl Parser {
         self.control_sequence.push(input_byte);
         if self.control_sequence.len() == 4 {
             let parsed_event = parse_x10_mouse(&self.control_sequence);
-            self.reset_input_parser();
             if let Some(parsed_event) = parsed_event {
-                self.pending_events.push_back(parsed_event);
+                self.queue_event(parsed_event);
             }
+            self.reset_input_parser();
         }
     }
 
@@ -309,11 +324,10 @@ impl Parser {
                 self.control_sequence.len() - 2
             };
             let parsed_event = parse_kitty_reply(&self.control_sequence[..payload_byte_count]);
-            self.reset_input_parser();
             if let Some(parsed_event) = parsed_event {
-                self.pending_events
-                    .push_back(Event::KittyGraphicsReply(parsed_event));
+                self.queue_event(Event::KittyGraphicsReply(parsed_event));
             }
+            self.reset_input_parser();
         } else if self.control_sequence.len() >= MAX_CONTROL_STRING_BYTE_COUNT {
             let is_escape_seen = input_byte == ESCAPE_BYTE;
             self.control_sequence.clear();
@@ -333,10 +347,10 @@ impl Parser {
                 self.control_sequence.len()
             };
             let parsed_event = parse_osc(&self.control_sequence[..payload_byte_count]);
-            self.reset_input_parser();
             if let Some(parsed_event) = parsed_event {
-                self.pending_events.push_back(parsed_event);
+                self.queue_event(parsed_event);
             }
+            self.reset_input_parser();
             return;
         }
         if self.control_sequence.len() >= MAX_CONTROL_STRING_BYTE_COUNT {
@@ -385,7 +399,7 @@ impl Parser {
             if self.paste_marker_match_length == PASTE_END_SEQUENCE_BYTES.len() {
                 if !should_discard {
                     let paste_bytes = std::mem::take(&mut self.paste_bytes);
-                    self.pending_events.push_back(Event::Paste(
+                    self.queue_event(Event::Paste(
                         String::from_utf8_lossy(&paste_bytes).into_owned(),
                     ));
                 }
@@ -420,6 +434,7 @@ impl Parser {
             self.control_sequence.clear();
             self.parser_state = ParserState::Ground;
             self.is_alt_held = false;
+            self.event_start_input_tag = self.current_input_tag;
             self.process_ground_byte(input_byte);
             return;
         }
@@ -452,18 +467,30 @@ impl Parser {
             modifiers |= Modifiers::ALT;
             self.is_alt_held = false;
         }
-        self.pending_events
-            .push_back(Event::Key(KeyEvent::from_key_code_and_modifiers(
-                key_code, modifiers,
-            )));
+        self.queue_event(Event::Key(KeyEvent::from_key_code_and_modifiers(
+            key_code, modifiers,
+        )));
     }
 
+    /// Queue `event` with the input tag of the bytes that held its first byte,
+    /// and give the next event the input tag of the current bytes.
+    fn queue_event(&mut self, event: Event) {
+        self.pending_events.push_back(TaggedEvent {
+            event,
+            input_tag: self.event_start_input_tag,
+        });
+        self.event_start_input_tag = self.current_input_tag;
+    }
+
+    /// Drop the sequence being parsed, and give the next event the input tag of
+    /// the current bytes.
     fn reset_input_parser(&mut self) {
         self.parser_state = ParserState::Ground;
         self.control_sequence.clear();
         self.paste_bytes.clear();
         self.paste_marker_match_length = 0;
         self.is_alt_held = false;
+        self.event_start_input_tag = self.current_input_tag;
     }
 }
 

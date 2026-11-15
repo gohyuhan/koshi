@@ -33,7 +33,7 @@ use crate::mouse::tests::{
     build_left_mouse_press, build_mouse_event, build_mouse_frame, build_plain_mouse_pane,
     build_render_snapshot_from_mouse_frame,
 };
-use crate::tests::{build_core_bound_action, TEST_VIEWPORT_SIZE};
+use crate::tests::{build_core_fired_action, build_input_read_stamp, TEST_VIEWPORT_SIZE};
 use crate::{LinkStatus, PaneMoveMode, PlacementInputAction};
 
 /// A cell of the open center's body below its cards.
@@ -245,18 +245,18 @@ fn the_keys_of_the_open_center_fire_its_actions() {
         KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('n')),
     ]
     .into_iter()
-    .map(|key_chord| client.resolve_key(key_chord, current_time))
+    .map(|key_chord| client.resolve_key(key_chord, build_input_read_stamp(current_time)))
     .collect();
 
     assert_eq!(
         key_outcomes,
         vec![
-            KeyOutcome::Fire(build_core_bound_action("close-notification-center")),
-            KeyOutcome::Fire(build_core_bound_action("clear-notifications")),
-            KeyOutcome::Fire(build_core_bound_action("dismiss-selected-notification")),
-            KeyOutcome::Fire(build_core_bound_action("select-newer-notification")),
-            KeyOutcome::Fire(build_core_bound_action("select-older-notification")),
-            KeyOutcome::Fire(build_core_bound_action("toggle-notification-center")),
+            KeyOutcome::Fire(build_core_fired_action("close-notification-center")),
+            KeyOutcome::Fire(build_core_fired_action("clear-notifications")),
+            KeyOutcome::Fire(build_core_fired_action("dismiss-selected-notification")),
+            KeyOutcome::Fire(build_core_fired_action("select-newer-notification")),
+            KeyOutcome::Fire(build_core_fired_action("select-older-notification")),
+            KeyOutcome::Fire(build_core_fired_action("toggle-notification-center")),
         ]
     );
 }
@@ -569,6 +569,7 @@ fn a_press_off_the_open_center_drops_the_sequence_the_center_opened() {
         sequence: open_key_sequence,
         ambiguity_deadline: None,
         continuation_hint_hidden_until: None,
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     client
@@ -589,6 +590,7 @@ fn a_press_on_the_center_keeps_an_open_sequence_of_its_mode() {
         sequence: open_key_sequence.clone(),
         ambiguity_deadline: None,
         continuation_hint_hidden_until: None,
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     client.handle_notification_center_mouse(build_left_mouse_press(CENTER_BODY_CELL), &mouse_frame);

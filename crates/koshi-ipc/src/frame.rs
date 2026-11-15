@@ -638,9 +638,9 @@ pub struct FrameClient {
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,
     /// The last lock command that the client's own connection sent and the
-    /// session ran before it built this frame. `None` before the session runs
-    /// one, and again after the session restarts.
-    pub last_applied_lock_command_id: Option<CommandId>,
+    /// session ran or refused before it built this frame. `None` before the
+    /// session settles one, and again after the session restarts.
+    pub last_settled_lock_command_id: Option<CommandId>,
     /// The last floating pane move that the client's own connection sent, from
     /// its mouse or a key binding, and the session ran before it built this
     /// frame. `None` before the session runs one, and again after the session
@@ -660,18 +660,21 @@ pub struct FrameClient {
     /// that pane is suppressed for want of space or hidden behind a zoomed
     /// pane.
     pub typed_pane_id: Option<PaneId>,
-    /// How many times on this connection something other than the client's
-    /// own connection moved the client's input to another pane, or to no
-    /// pane: another client, the CLI, or a pane's child exiting. It starts at
-    /// `1` on an attach whose
-    /// [`PaintedTypedPane`](crate::protocol::PaintedTypedPane) names another
-    /// pane than `typed_pane_id`, and at `0` otherwise. The client tags each
-    /// key, paste and key-fired command with the count of the last frame it
-    /// drew.
+    /// How many times something other than the client's own connection moved
+    /// the client's input to another pane, or to no pane: another client, the
+    /// CLI, or a pane's child exiting. A first attach starts it at `0`. An
+    /// attach that names a
+    /// [`PaintedInputView`](crate::protocol::PaintedInputView) starts it at
+    /// that view's count, plus `1` when the view's typed pane is not
+    /// `typed_pane_id`. The client tags each key, paste and key-fired command
+    /// with the count of the newest frame it wrote to its terminal before it
+    /// read the first byte of that input.
     pub input_pane_moved_by_others_count: u64,
-    /// How many key and paste requests of this connection the session
-    /// dropped: each request whose tag was below
-    /// `input_pane_moved_by_others_count`.
+    /// How many key and paste requests the session dropped: each request
+    /// whose tag was below `input_pane_moved_by_others_count`. A first attach
+    /// starts it at `0`, and an attach that names a
+    /// [`PaintedInputView`](crate::protocol::PaintedInputView) starts it at
+    /// that view's dropped count.
     pub dropped_input_request_count: u64,
 }
 

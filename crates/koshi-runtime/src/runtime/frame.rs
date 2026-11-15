@@ -126,7 +126,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
             focused_pane_id: client_snapshot.focused_pane_id,
             active_tab_focused_pane_id: client_snapshot.active_tab_focused_pane_id,
             lock_mode: client_snapshot.lock_mode,
-            last_applied_lock_command_id: client_snapshot.last_applied_lock_command_id,
+            last_settled_lock_command_id: client_snapshot.last_settled_lock_command_id,
             last_applied_floating_pane_move_command_id: client_snapshot
                 .last_applied_floating_pane_move_command_id,
             last_applied_placement_command_id: client_snapshot.last_applied_placement_command_id,

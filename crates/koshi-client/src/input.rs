@@ -50,6 +50,7 @@ use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey, PendingKeySequence,
 };
 use koshi_core::lock::LockMode;
+use koshi_ipc::protocol::FiredAction;
 use koshi_layout::neighbor::select_directional_neighbor;
 use koshi_layout::placement::{
     find_stack_target_pane_id, is_same_tab_placement_noop as is_layout_placement_noop,
@@ -151,14 +152,21 @@ pub(crate) fn find_requested_client_action_modes(
     }
 }
 
-/// The read times of this terminal's input events, shared by its input thread
-/// and the attach loop under one lock.
+/// The read times of this terminal's input events, and the move count of the
+/// frame on its screen, shared by its input thread and the attach loop under
+/// one lock.
 ///
 /// The input thread stamps the events of each read of the terminal it sends,
 /// keys, mouse events, a paste, a resize or a focus loss
 /// ([`stamp_input_read`](Self::stamp_input_read)), and the loop records each
 /// read it takes off its channel ([`note_input_taken`](Self::note_input_taken)).
-/// A read stamped and not yet taken is on its way to the loop.
+/// A read stamped and not yet taken is on its way to the loop. The loop sets
+/// the move count after each frame it writes to the terminal
+/// ([`set_painted_input_pane_moved_by_others_count`](Self::set_painted_input_pane_moved_by_others_count)).
+/// The terminal reader reads that count at each read of the terminal, and an
+/// event carries the count of the read that held its first byte. A key that
+/// the terminal sent before it drew the frame, and that the input thread reads
+/// after the loop set the frame's count, carries the frame's count.
 ///
 /// Example: the input thread reads `a` 400 ms after `<C-y>` opened a sequence
 /// whose deadline is 500 ms out, and the loop is still drawing a frame at
@@ -170,11 +178,24 @@ pub(crate) struct InputReadClock {
 }
 
 /// The stamp of the last read the input thread sent, and of the last one the
-/// loop took. `None` before the first one.
+/// loop took, `None` before the first one, and the move count of the frame on
+/// the screen, `0` before the first frame.
 #[derive(Debug, Default)]
 struct InputReadTimes {
     last_read_at: Option<Instant>,
     last_taken_read_at: Option<Instant>,
+    painted_input_pane_moved_by_others_count: u64,
+}
+
+/// What the input thread records for one read of the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputReadStamp {
+    /// When the input thread read the events.
+    pub read_at: Instant,
+    /// The `input_pane_moved_by_others_count` of the frame on the screen when
+    /// the input thread read the events' first byte: the tag each key, paste
+    /// and binding of the events carries.
+    pub painted_input_pane_moved_by_others_count: u64,
 }
 
 impl InputReadTimes {
@@ -190,12 +211,17 @@ impl InputReadTimes {
 }
 
 impl InputReadClock {
-    /// Stamp the events of one read the input thread made at `current_time`,
-    /// and return the stamp: `current_time`, or one nanosecond past the
-    /// previous stamp when `current_time` is at or before it. Each stamp is
-    /// greater than the one before it. Example: two reads at the same clock
-    /// reading `t` get `t` and `t + 1 ns`.
-    pub(crate) fn stamp_input_read(&self, current_time: Instant) -> Instant {
+    /// Stamp events the input thread sends at `current_time`, which started in
+    /// a read of the terminal tagged `painted_input_pane_moved_by_others_count`,
+    /// and return the stamp. Its `read_at` is `current_time`, or one
+    /// nanosecond past the previous stamp when `current_time` is at or before
+    /// it, so each stamp comes after the one before it. Example: two stamps at
+    /// the same clock reading `t` get `t` and `t + 1 ns`.
+    pub(crate) fn stamp_input_read(
+        &self,
+        current_time: Instant,
+        painted_input_pane_moved_by_others_count: u64,
+    ) -> InputReadStamp {
         let mut input_read_times = self.lock_input_read_times();
         let read_at = match input_read_times.last_read_at {
             Some(last_read_at) if current_time <= last_read_at => {
@@ -204,7 +230,28 @@ impl InputReadClock {
             _ => current_time,
         };
         input_read_times.last_read_at = Some(read_at);
-        read_at
+        InputReadStamp {
+            read_at,
+            painted_input_pane_moved_by_others_count,
+        }
+    }
+
+    /// Record `painted_input_pane_moved_by_others_count`, the move count of
+    /// the frame the loop just wrote to the terminal. Each read of the
+    /// terminal after this call is tagged with it.
+    pub(crate) fn set_painted_input_pane_moved_by_others_count(
+        &self,
+        painted_input_pane_moved_by_others_count: u64,
+    ) {
+        self.lock_input_read_times()
+            .painted_input_pane_moved_by_others_count = painted_input_pane_moved_by_others_count;
+    }
+
+    /// The move count of the frame on the screen, as the loop set it last, `0`
+    /// before the first frame.
+    pub(crate) fn get_painted_input_pane_moved_by_others_count(&self) -> u64 {
+        self.lock_input_read_times()
+            .painted_input_pane_moved_by_others_count
     }
 
     /// Record that the loop took the read stamped `read_at` off its channel.
@@ -249,9 +296,11 @@ const ESCAPE_KEY_CHORD: KeyChord =
 /// leave the viewer; the other two are settled where the key was typed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyOutcome {
-    /// A binding completed. The attachment resolves the name against its
-    /// action table and dispatches the resulting session or viewer action.
-    Fire(BoundAction),
+    /// A binding completed. The attachment resolves the action against its
+    /// action table and dispatches the resulting session or viewer action. The
+    /// action carries the move count of the frame on the screen when the
+    /// binding's first chord was read.
+    Fire(FiredAction),
     /// The chord opened or continued a multi-chord sequence, a held sequence
     /// swallowed a key that continues nothing, or an `Esc` closed one. The hint
     /// bar changes only when it shows the sequence before or after the chord
@@ -439,7 +488,8 @@ impl Client {
     /// Switch to `lock_mode`, the mode that lock command `lock_command_id`
     /// sets, before the session runs that command, and wait for it: painted
     /// frames leave the lock mode as it is until one names `lock_command_id`
-    /// as the last applied lock command. The switch is
+    /// as the last settled lock command, the last one the session ran or
+    /// refused. The switch is
     /// [`set_lock_mode`](Self::set_lock_mode). An open notification center
     /// closes ([`close_notification_center`](Self::close_notification_center)),
     /// also when `lock_mode` is the mode already on.
@@ -1350,11 +1400,18 @@ impl Client {
     /// Escape while a floating pane's grab handle is held drops that move and
     /// any open key sequence, and yields `Discard`.
     ///
-    /// A sequence `chord` opens hides its hint until `current_time` plus the
-    /// keymap's which-key delay, or not at all when the delay is zero. A
-    /// sequence `chord` continues keeps the hint deadline of its first chord,
-    /// or keeps showing its hint.
-    pub fn resolve_key(&mut self, chord: KeyChord, current_time: Instant) -> KeyOutcome {
+    /// `input_read_stamp` is the read that brought `chord`. A sequence `chord`
+    /// opens hides its hint until the read's `read_at` plus the keymap's
+    /// which-key delay, or not at all when the delay is zero. A sequence
+    /// `chord` continues keeps the hint deadline of its first chord, or keeps
+    /// showing its hint.
+    ///
+    /// A fired binding carries the move count of the read of its first chord:
+    /// the open sequence's count, or this read's count when no sequence was
+    /// open. Example: `<C-p>` read at count `0` opens a sequence, and `x` read
+    /// at count `1` fires `core:close-pane` carrying `0`.
+    pub fn resolve_key(&mut self, chord: KeyChord, input_read_stamp: InputReadStamp) -> KeyOutcome {
+        let current_time = input_read_stamp.read_at;
         if chord == ESCAPE_KEY_CHORD && self.cancel_floating_pane_move_drag() {
             self.pending_key_sequence = None;
             return KeyOutcome::Discard;
@@ -1367,8 +1424,17 @@ impl Client {
         // and the placement keymap resolves the chord.
         if active_input_mode == LockMode::Locked && chord == self.keymap_catalog.get_unlock_chord()
         {
-            return KeyOutcome::Fire(build_unlock_bound_action());
+            return KeyOutcome::Fire(build_unlock_fired_action(
+                input_read_stamp.painted_input_pane_moved_by_others_count,
+            ));
         }
+
+        // The move count a binding this chord fires carries: the open
+        // sequence's, or this read's.
+        let painted_input_pane_moved_by_others_count = match open_key_sequence.as_ref() {
+            Some(open_key_sequence) => open_key_sequence.painted_input_pane_moved_by_others_count,
+            None => input_read_stamp.painted_input_pane_moved_by_others_count,
+        };
 
         // The hint deadline of the open sequence, or of a sequence this chord
         // opens.
@@ -1405,8 +1471,12 @@ impl Client {
                     &bound_action,
                     &key_sequence,
                     continuation_hint_hidden_until,
+                    input_read_stamp.painted_input_pane_moved_by_others_count,
                 );
-                KeyOutcome::Fire(bound_action)
+                KeyOutcome::Fire(FiredAction {
+                    action_reference: bound_action.action_reference,
+                    painted_input_pane_moved_by_others_count,
+                })
             }
             (exact_bound_action, true) => {
                 // A prefix-only sequence waits for its next chord with no
@@ -1419,6 +1489,7 @@ impl Client {
                     sequence: key_sequence,
                     ambiguity_deadline,
                     continuation_hint_hidden_until,
+                    painted_input_pane_moved_by_others_count,
                 });
                 KeyOutcome::Pending
             }
@@ -1469,8 +1540,9 @@ impl Client {
     /// order:
     ///
     /// 1. A passed ambiguity deadline fires the sequence's complete binding,
-    ///    which the call returns. The sequence closes, unless the binding's
-    ///    action is continuous and its prefix opens again.
+    ///    which the call returns with the sequence's move count. The sequence
+    ///    closes, unless the binding's action is continuous and its prefix
+    ///    opens again with the same move count.
     /// 2. A passed hint deadline of the sequence still open makes the hint bar
     ///    show it ([`is_continuation_hint_hidden`](Self::is_continuation_hint_hidden)
     ///    turns `false`).
@@ -1481,7 +1553,7 @@ impl Client {
     /// and opens `<C-y> a`, the chord timeout is 500 ms and the which-key delay
     /// is 800 ms: at `t + 500 ms` the call returns `core:quit`, and the hint
     /// bar never shows `<C-y>`.
-    pub fn expire_key_sequence(&mut self, current_time: Instant) -> Option<BoundAction> {
+    pub fn expire_key_sequence(&mut self, current_time: Instant) -> Option<FiredAction> {
         let due_key_sequence = self.pending_key_sequence.take_if(|pending_key_sequence| {
             pending_key_sequence
                 .ambiguity_deadline
@@ -1496,8 +1568,13 @@ impl Client {
                 &bound_action,
                 &due_key_sequence.sequence,
                 due_key_sequence.continuation_hint_hidden_until,
+                due_key_sequence.painted_input_pane_moved_by_others_count,
             );
-            Some(bound_action)
+            Some(FiredAction {
+                action_reference: bound_action.action_reference,
+                painted_input_pane_moved_by_others_count: due_key_sequence
+                    .painted_input_pane_moved_by_others_count,
+            })
         });
         if let Some(pending_key_sequence) = self.pending_key_sequence.as_mut() {
             if pending_key_sequence
@@ -1524,12 +1601,14 @@ impl Client {
     /// captures the keyboard like any other open sequence, so a key that
     /// resizes nothing is discarded and the prefix stands until `Esc` leaves
     /// it. It carries `continuation_hint_hidden_until`, the hint deadline of
-    /// the sequence that fired, and no ambiguity deadline.
+    /// the sequence that fired, `painted_input_pane_moved_by_others_count`,
+    /// the move count of the read that fired it, and no ambiguity deadline.
     fn rearm_continuous_sequence_prefix(
         &mut self,
         bound_action: &BoundAction,
         key_sequence: &KeySequence,
         continuation_hint_hidden_until: Option<Instant>,
+        painted_input_pane_moved_by_others_count: u64,
     ) {
         let is_continuous = self
             .registry
@@ -1546,6 +1625,7 @@ impl Client {
             ),
             ambiguity_deadline: None,
             continuation_hint_hidden_until,
+            painted_input_pane_moved_by_others_count,
         });
     }
 }
@@ -1713,11 +1793,14 @@ fn resolve_placement_target_anchor(placement_target: &TiledPlacementTarget) -> P
     }
 }
 
-/// The binding the unlock chord fires, built here and never looked up in the
-/// keymap. The escape from locked mode holds whatever any config layer says.
-fn build_unlock_bound_action() -> BoundAction {
-    BoundAction {
+/// The `core:unlock` action the unlock chord fires, carrying
+/// `painted_input_pane_moved_by_others_count`, the move count of the read of
+/// that chord. It is built here and never looked up in the keymap: the escape
+/// from locked mode holds whatever any config layer says.
+fn build_unlock_fired_action(painted_input_pane_moved_by_others_count: u64) -> FiredAction {
+    FiredAction {
         action_reference: ActionReference::from_core_action_name("unlock")
             .expect("the reserved unlock action name satisfies the action-name grammar"),
+        painted_input_pane_moved_by_others_count,
     }
 }

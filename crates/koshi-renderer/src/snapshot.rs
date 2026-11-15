@@ -1967,11 +1967,11 @@ pub struct ClientSnapshot {
     /// and is what `koshi inspect client` reports.
     pub lock_mode: LockMode,
     /// The last lock command that the client's own connection sent and the
-    /// session ran before it built this snapshot. `None` before the session
-    /// runs one, and again after the session restarts. A viewer that sent a
-    /// lock command keeps its own lock mode until a frame names that command
-    /// here.
-    pub last_applied_lock_command_id: Option<CommandId>,
+    /// session ran or refused before it built this snapshot. `None` before
+    /// the session settles one, and again after the session restarts. A viewer
+    /// that sent a lock command keeps its own lock mode until a frame names
+    /// that command here.
+    pub last_settled_lock_command_id: Option<CommandId>,
     /// The last floating pane move that the client's own connection sent,
     /// from its mouse or a key binding, and the session ran before it built
     /// this snapshot. `None` before the session runs one, and again after the
@@ -1996,14 +1996,16 @@ pub struct ClientSnapshot {
     /// that pane is suppressed for want of space or hidden behind a zoomed
     /// pane. The viewer names it when it attaches again.
     pub typed_pane_id: Option<PaneId>,
-    /// How many times on this connection something other than the client's
-    /// own connection moved the client's input to another pane, or to no
-    /// pane, from `1` on an attach whose screen showed another typed pane,
-    /// else from `0`. The viewer tags each key, paste and key-fired command
-    /// with the count of the last frame it drew.
+    /// How many times something other than the client's own connection moved
+    /// the client's input to another pane, or to no pane. An attach that names
+    /// the frame its screen shows continues the count from that frame, plus
+    /// `1` when that frame showed another typed pane. The viewer tags each
+    /// key, paste and key-fired command with the count of the newest frame it
+    /// wrote to its terminal before it read the first byte of that input.
     pub input_pane_moved_by_others_count: u64,
-    /// How many key and paste requests of this connection the session dropped
-    /// for a tag below `input_pane_moved_by_others_count`. The viewer posts one
+    /// How many key and paste requests the session dropped for a tag below
+    /// `input_pane_moved_by_others_count`. An attach that names the frame its
+    /// screen shows continues the count from that frame. The viewer posts one
     /// warning for each one this count rises by.
     pub dropped_input_request_count: u64,
 }

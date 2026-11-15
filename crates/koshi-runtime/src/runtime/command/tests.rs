@@ -57,6 +57,7 @@ use crate::runtime::render_schedule::tests::{
     DEFAULT_FRAME_INTERVAL_DURATION,
 };
 use koshi_ipc::placement::PanePlacementPreviewTarget;
+use koshi_ipc::protocol::FiredAction;
 use koshi_renderer::snapshot::{Delivery, PlacementSnapshot};
 
 use super::*;
@@ -2851,8 +2852,8 @@ fn get_client_lock_mode(runtime: &Server, session_id: SessionId, client_id: Clie
         .get_lock_mode()
 }
 
-/// Read `client_id`'s last applied lock command out of session `session_id`.
-fn get_client_last_applied_lock_command_id(
+/// Read `client_id`'s last settled lock command out of session `session_id`.
+fn get_client_last_settled_lock_command_id(
     runtime: &Server,
     session_id: SessionId,
     client_id: ClientId,
@@ -2861,7 +2862,7 @@ fn get_client_last_applied_lock_command_id(
         .clients
         .get_client_by_id(client_id)
         .expect("client")
-        .get_last_applied_lock_command_id()
+        .get_last_settled_lock_command_id()
 }
 
 #[test]
@@ -3062,7 +3063,7 @@ fn setting_the_current_lock_mode_emits_nothing() {
 fn a_lock_command_from_the_clients_own_connection_is_its_last_applied_lock_command() {
     let (mut runtime, _runtime_event_sender, client_id, session_id) = build_lock_fixture();
     assert_eq!(
-        get_client_last_applied_lock_command_id(&runtime, session_id, client_id),
+        get_client_last_settled_lock_command_id(&runtime, session_id, client_id),
         None
     );
 
@@ -3079,7 +3080,7 @@ fn a_lock_command_from_the_clients_own_connection_is_its_last_applied_lock_comma
         Ok(vec!["InputModeChanged"])
     );
     assert_eq!(
-        get_client_last_applied_lock_command_id(&runtime, session_id, client_id),
+        get_client_last_settled_lock_command_id(&runtime, session_id, client_id),
         Some(lock_command_id)
     );
 
@@ -3101,7 +3102,7 @@ fn a_lock_command_from_the_clients_own_connection_is_its_last_applied_lock_comma
         LockMode::Locked
     );
     assert_eq!(
-        get_client_last_applied_lock_command_id(&runtime, session_id, client_id),
+        get_client_last_settled_lock_command_id(&runtime, session_id, client_id),
         Some(repeated_lock_command_id)
     );
 }
@@ -3149,11 +3150,11 @@ fn a_lock_command_from_another_source_changes_the_mode_and_not_the_last_applied_
         LockMode::Normal
     );
     assert_eq!(
-        get_client_last_applied_lock_command_id(&runtime, session_id, alice_client_id),
+        get_client_last_settled_lock_command_id(&runtime, session_id, alice_client_id),
         Some(alice_lock_command_id)
     );
     assert_eq!(
-        get_client_last_applied_lock_command_id(&runtime, session_id, bob_client_id),
+        get_client_last_settled_lock_command_id(&runtime, session_id, bob_client_id),
         None
     );
 
@@ -3174,7 +3175,7 @@ fn a_lock_command_from_another_source_changes_the_mode_and_not_the_last_applied_
         LockMode::Locked
     );
     assert_eq!(
-        get_client_last_applied_lock_command_id(&runtime, session_id, alice_client_id),
+        get_client_last_settled_lock_command_id(&runtime, session_id, alice_client_id),
         Some(alice_lock_command_id)
     );
 }
@@ -9383,6 +9384,7 @@ fn a_confirmed_same_tab_swap_commits_and_records_the_last_applied_placement() {
         TiledPlacementTarget::Swap {
             target_pane_id: split_pane_id,
         },
+        None,
     );
 
     assert_eq!(
@@ -9916,13 +9918,15 @@ fn build_server_placement_snapshot(
 
 /// Confirm `placement_target` of the source pane of `placement_snapshot` as
 /// `client_id`, under `command_id`, with the layout the preview shows for it
-/// ([`Server::confirm_pane_placement`]).
+/// ([`Server::confirm_pane_placement`]). `fired_action` is the key action
+/// that confirms, or `None` for a mouse drop.
 fn confirm_previewed_placement(
     runtime: &mut Server,
     client_id: ClientId,
     command_id: CommandId,
     placement_snapshot: &PlacementSnapshot,
     placement_target: TiledPlacementTarget,
+    fired_action: Option<FiredAction>,
 ) -> CommandResult {
     let placed_preview = placement_snapshot
         .build_placed_preview(&placement_target)
@@ -9933,8 +9937,38 @@ fn confirm_previewed_placement(
         placement_snapshot.source_pane_id,
         placement_target,
         &placed_preview.placed_tab_layout,
-        None,
+        fired_action,
     )
+}
+
+/// The `core:confirm-pane-placement` action, fired by a key typed against a
+/// frame that carries `painted_input_pane_moved_by_others_count`.
+fn build_confirm_placement_fired_action(
+    painted_input_pane_moved_by_others_count: u64,
+) -> FiredAction {
+    FiredAction {
+        action_reference: ActionReference::from_core_action_name("confirm-pane-placement")
+            .expect("valid core action name"),
+        painted_input_pane_moved_by_others_count,
+    }
+}
+
+/// Raise the move count of `client_id` to `input_pane_moved_by_others_count`,
+/// and keep its checked pane and dropped request count
+/// ([`Client::start_connection_input_counts`]).
+fn set_client_input_pane_moved_by_others_count(
+    runtime: &mut Server,
+    client_id: ClientId,
+    input_pane_moved_by_others_count: u64,
+) {
+    let client = runtime.get_client_mut(client_id).expect("attached client");
+    let checked_typed_pane_id = client.get_checked_typed_pane_id();
+    let dropped_input_request_count = client.get_dropped_input_request_count();
+    client.start_connection_input_counts(
+        checked_typed_pane_id,
+        input_pane_moved_by_others_count,
+        dropped_input_request_count,
+    );
 }
 
 #[test]
@@ -9986,6 +10020,7 @@ fn a_cross_tab_split_commits_at_the_destination_tab_size_its_preview_shows() {
             anchor: PanePlacementAnchor::Tab,
             direction: Direction::Right,
         },
+        None,
     );
     let CommandResult::Ok { .. } = command_result else {
         panic!("expected Ok, got {command_result:?}");
@@ -10044,6 +10079,7 @@ fn a_cross_tab_swap_commits_at_the_tab_sizes_its_preview_shows() {
         TiledPlacementTarget::Swap {
             target_pane_id: destination_pane_id,
         },
+        None,
     );
     let CommandResult::Ok { .. } = command_result else {
         panic!("expected Ok, got {command_result:?}");
@@ -10113,6 +10149,7 @@ fn a_cross_tab_preview_is_stale_once_a_following_client_moves_its_input_away() {
                 anchor: PanePlacementAnchor::Tab,
                 direction: Direction::Right,
             },
+            None,
         )),
         Err((
             RejectReason::InvalidState,
@@ -10484,6 +10521,7 @@ fn a_confirmation_that_no_longer_matches_the_session_is_rejected_and_answered() 
         TiledPlacementTarget::Swap {
             target_pane_id: split_pane_id,
         },
+        None,
     );
 
     assert_eq!(
@@ -10518,6 +10556,119 @@ fn a_confirmation_that_no_longer_matches_the_session_is_rejected_and_answered() 
             .get_last_applied_placement_command_id(),
         None
     );
+}
+
+#[test]
+fn a_key_confirmation_typed_against_a_frame_before_the_input_moved_is_refused_and_answered() {
+    let ResizeFixture {
+        mut runtime,
+        session_id,
+        client_id,
+        root_pane_id,
+        split_pane_id,
+        ..
+    } = build_resize_fixture();
+    let tab_id = get_attached_client(&runtime, session_id, client_id).get_active_tab_id();
+    let placement_snapshot =
+        build_server_placement_snapshot(&mut runtime, client_id, root_pane_id, tab_id);
+    let (delivery_receiver, _writer_handoff) = runtime.subscribe(client_id, 60, None);
+    set_client_input_pane_moved_by_others_count(&mut runtime, client_id, 1);
+    let _ = take_session_view_changes(&mut runtime, session_id);
+    let session_records_before = serialize_session_records(&runtime);
+    let command_id = CommandId::new();
+
+    let command_result = confirm_previewed_placement(
+        &mut runtime,
+        client_id,
+        command_id,
+        &placement_snapshot,
+        TiledPlacementTarget::Swap {
+            target_pane_id: split_pane_id,
+        },
+        Some(build_confirm_placement_fired_action(0)),
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::ViewChanged,
+            help: None,
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+    assert_eq!(
+        take_session_view_changes(&mut runtime, session_id),
+        SessionViewChanges::default()
+    );
+    let rejections: Vec<Delivery> = delivery_receiver
+        .try_iter()
+        .filter(|delivery| matches!(delivery, Delivery::CommandRejected { .. }))
+        .collect();
+    assert_eq!(
+        rejections,
+        vec![Delivery::CommandRejected {
+            command_id,
+            fired_action: Some(
+                ActionReference::from_core_action_name("confirm-pane-placement")
+                    .expect("valid core action name")
+            ),
+            reject_reason: RejectReason::ViewChanged,
+            help: None,
+        }]
+    );
+    assert_eq!(
+        get_attached_client(&runtime, session_id, client_id)
+            .get_last_applied_placement_command_id(),
+        None
+    );
+}
+
+#[test]
+fn a_key_confirmation_typed_against_the_current_frame_and_a_mouse_drop_both_commit() {
+    for fired_action in [Some(build_confirm_placement_fired_action(1)), None] {
+        let ResizeFixture {
+            mut runtime,
+            session_id,
+            client_id,
+            root_pane_id,
+            split_pane_id,
+            ..
+        } = build_resize_fixture();
+        let tab_id = get_attached_client(&runtime, session_id, client_id).get_active_tab_id();
+        let placement_snapshot =
+            build_server_placement_snapshot(&mut runtime, client_id, root_pane_id, tab_id);
+        set_client_input_pane_moved_by_others_count(&mut runtime, client_id, 1);
+        let command_id = CommandId::new();
+
+        let command_result = confirm_previewed_placement(
+            &mut runtime,
+            client_id,
+            command_id,
+            &placement_snapshot,
+            TiledPlacementTarget::Swap {
+                target_pane_id: split_pane_id,
+            },
+            fired_action.clone(),
+        );
+
+        assert_eq!(
+            get_command_outcome(&command_result),
+            Ok(vec!["PanePlacementCommitted", "LayoutChanged"]),
+            "fired action {fired_action:?}"
+        );
+        assert_eq!(
+            runtime.session_by_id[&session_id].tabs[&tab_id]
+                .get_layout_tree()
+                .list_leaf_pane_ids(),
+            vec![split_pane_id, root_pane_id]
+        );
+        assert_eq!(
+            get_attached_client(&runtime, session_id, client_id)
+                .get_last_applied_placement_command_id(),
+            Some(command_id)
+        );
+    }
 }
 
 #[test]

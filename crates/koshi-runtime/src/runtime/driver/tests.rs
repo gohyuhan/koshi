@@ -16,7 +16,7 @@ use koshi_core::action::ActionReference;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     ClosePaneArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
-    MoveFloatingPaneArgs, ToggleLockModeArgs,
+    LockModeArgs, MoveFloatingPaneArgs, ToggleLockModeArgs,
 };
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, Point, Size};
@@ -27,7 +27,7 @@ use koshi_core::key::{
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{PtySize, SpawnSpec};
-use koshi_ipc::protocol::{FiredAction, PaintedTypedPane};
+use koshi_ipc::protocol::{FiredAction, PaintedInputView};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -512,7 +512,7 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
         max_frames_per_second: 120,
         response_sender: attach_response_sender,
         placement_preview_target: None,
-        painted_typed_pane: None,
+        painted_input_view: None,
     });
     let attach_accepted = attach_response_receiver
         .try_recv()
@@ -2110,6 +2110,131 @@ fn a_directional_focus_key_fired_before_another_client_moved_its_pane_is_refused
     );
 }
 
+/// A session where Alice, by key binding, closed the right pane that Bob
+/// typed in, after both subscribed. Returns Alice's id, Bob's id, and Bob's
+/// delivery receiver with the deliveries of the close taken off it.
+fn build_session_where_another_client_closed_bobs_pane(
+    server: &mut Server,
+) -> (ClientId, ClientId, DeliveryReceiver) {
+    let (alice_client_id, _left_pane_id) = bootstrap_test_session(server, SessionId::new());
+    let right_pane_id = split_focused_pane(server, alice_client_id);
+    let bob_client_id = attach_second_client(server, alice_client_id, Some(right_pane_id));
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(alice_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+    let _ = bob_delivery_receiver.try_iter().count();
+    (alice_client_id, bob_client_id, bob_delivery_receiver)
+}
+
+/// Bob's `core:lock` key, fired against the frame that showed the pane Alice
+/// closed, is refused with `RejectReason::ViewChanged`. Bob stays unlocked,
+/// and his frame names the refused command as his last settled lock command.
+#[test]
+fn a_lock_key_fired_before_another_client_moved_its_pane_is_refused_and_settled() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (_alice_client_id, bob_client_id, bob_delivery_receiver) =
+        build_session_where_another_client_closed_bobs_pane(&mut server);
+    let command_id = CommandId::new();
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        command_id,
+        CommandSource::from_key_binding(bob_client_id),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: None,
+        }),
+        "lock",
+    ));
+
+    assert_eq!(
+        bob_delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::CommandRejected {
+            command_id,
+            fired_action: Some(
+                ActionReference::from_core_action_name("lock").expect("the action name is valid"),
+            ),
+            reject_reason: RejectReason::ViewChanged,
+            help: None,
+        }]
+    );
+    let bob_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            bob_snapshot.lock_mode,
+            bob_snapshot.last_settled_lock_command_id
+        ),
+        (LockMode::Normal, Some(command_id))
+    );
+}
+
+/// Bob's `core:toggle-lock` key that names Bob, fired against the frame that
+/// showed the pane Alice closed, is refused, and Bob's frame names it as his
+/// last settled lock command.
+#[test]
+fn a_refused_toggle_lock_key_naming_its_own_client_is_settled() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (_alice_client_id, bob_client_id, _bob_delivery_receiver) =
+        build_session_where_another_client_closed_bobs_pane(&mut server);
+    let command_id = CommandId::new();
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        command_id,
+        CommandSource::from_key_binding(bob_client_id),
+        Command::ToggleLockMode(ToggleLockModeArgs {
+            client_id: Some(bob_client_id),
+        }),
+        "toggle-lock",
+    ));
+
+    let bob_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            bob_snapshot.lock_mode,
+            bob_snapshot.last_settled_lock_command_id
+        ),
+        (LockMode::Normal, Some(command_id))
+    );
+}
+
+/// Bob's key binding that locks Alice, fired against the frame that showed
+/// the pane Alice closed, is refused. Neither Bob's frame nor Alice's names
+/// it as a settled lock command, and Alice stays unlocked.
+#[test]
+fn a_refused_lock_key_naming_another_client_settles_no_lock_command() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, bob_client_id, _bob_delivery_receiver) =
+        build_session_where_another_client_closed_bobs_pane(&mut server);
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(bob_client_id),
+        Command::SetLockMode(LockModeArgs {
+            is_locked: true,
+            client_id: Some(alice_client_id),
+        }),
+        "lock",
+    ));
+
+    let alice_snapshot = get_client_snapshot(&server, alice_client_id);
+    assert_eq!(
+        (
+            get_client_snapshot(&server, bob_client_id).last_settled_lock_command_id,
+            alice_snapshot.last_settled_lock_command_id,
+            alice_snapshot.lock_mode
+        ),
+        (None, None, LockMode::Normal)
+    );
+}
+
 /// Bob is viewed by two subscribers, as when a new connection subscribes
 /// before the old subscription is removed. Alice closes the pane Bob types
 /// in: Bob's move count rises from `0` to `1`.
@@ -2175,11 +2300,11 @@ fn a_key_binding_command_from_a_client_no_session_holds_is_refused_as_from_a_det
 }
 
 /// Attach a fresh local client at 80x24 through [`RuntimeEvent::IpcAttach`],
-/// naming `painted_typed_pane` as the typed pane its screen still shows.
+/// naming `painted_input_view` as the typed pane its screen still shows.
 /// Returns what the attach minted.
-fn attach_client_naming_painted_typed_pane(
+fn attach_client_naming_painted_input_view(
     server: &mut Server,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
 ) -> AttachAccepted {
     let (attach_response_sender, attach_response_receiver) = mpsc::channel();
     let _ = server.handle_runtime_event(RuntimeEvent::IpcAttach {
@@ -2196,7 +2321,7 @@ fn attach_client_naming_painted_typed_pane(
         granted_identity: None,
         max_frames_per_second: 60,
         placement_preview_target: None,
-        painted_typed_pane,
+        painted_input_view,
         response_sender: attach_response_sender,
     });
     attach_response_receiver
@@ -2205,21 +2330,24 @@ fn attach_client_naming_painted_typed_pane(
         .expect("a session is running")
 }
 
-/// A viewer's screen showed pane 3 when its connection ended, and the
-/// session no longer holds pane 3. Its attach names pane 3, and the count
-/// starts at `1`: the `a` it held through the gap, tagged `0`, is dropped,
-/// and the `b` it types against the new connection's first frame reaches the
-/// pane that takes its input now.
+/// A viewer's screen showed pane 3 with move count `4` and `2` dropped
+/// requests when its connection ended, and the session no longer holds
+/// pane 3. Its attach names that view: the move count starts at `5` and the
+/// dropped count at `2`. The `a` it held through the gap, tagged `4`, is
+/// dropped, and the `b` it types against the new connection's first frame,
+/// tagged `5`, reaches the pane that takes its input now.
 #[test]
 fn an_attach_naming_a_painted_pane_that_no_longer_takes_the_input_drops_the_keys_typed_against_that_screen(
 ) {
     let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (_first_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
 
-    let attach_accepted = attach_client_naming_painted_typed_pane(
+    let attach_accepted = attach_client_naming_painted_input_view(
         &mut server,
-        Some(PaintedTypedPane {
+        Some(PaintedInputView {
             typed_pane_id: Some(PaneId::new()),
+            input_pane_moved_by_others_count: 4,
+            dropped_input_request_count: 2,
         }),
     );
     let client_snapshot = get_client_snapshot(&server, attach_accepted.client_id);
@@ -2229,17 +2357,17 @@ fn an_attach_naming_a_painted_pane_that_no_longer_takes_the_input_drops_the_keys
             client_snapshot.input_pane_moved_by_others_count,
             client_snapshot.dropped_input_request_count
         ),
-        (Some(pane_id), 1, 0)
+        (Some(pane_id), 5, 2)
     );
     let _ = server.handle_runtime_event(build_painted_key_press_event(
         attach_accepted.client_id,
         'a',
-        0,
+        4,
     ));
     let _ = server.handle_runtime_event(build_painted_key_press_event(
         attach_accepted.client_id,
         'b',
-        1,
+        5,
     ));
 
     assert_eq!(
@@ -2250,38 +2378,45 @@ fn an_attach_naming_a_painted_pane_that_no_longer_takes_the_input_drops_the_keys
     );
     assert_eq!(
         get_client_snapshot(&server, attach_accepted.client_id).dropped_input_request_count,
-        1
+        3
     );
 }
 
-/// A first attach names no painted pane, and an attach after a lost
-/// connection names the pane that still takes the input. Each count starts
-/// at `0`, and an `a` tagged `0` reaches the pane.
+/// A first attach names no painted view, and both counts start at `0`. An
+/// attach after a lost connection names a view of the pane that still takes
+/// the input, with move count `4` and `2` dropped requests, and the counts
+/// continue from `4` and `2`. An `a` tagged with each start count reaches the
+/// pane.
 #[test]
-fn a_first_attach_and_an_attach_naming_the_pane_that_still_takes_the_input_let_the_keys_through() {
+fn a_first_attach_starts_both_counts_at_zero_and_an_attach_naming_the_pane_that_still_takes_the_input_continues_them(
+) {
     let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (_first_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let mut start_counts = Vec::new();
 
-    for painted_typed_pane in [
+    for painted_input_view in [
         None,
-        Some(PaintedTypedPane {
+        Some(PaintedInputView {
             typed_pane_id: Some(pane_id),
+            input_pane_moved_by_others_count: 4,
+            dropped_input_request_count: 2,
         }),
     ] {
         let attach_accepted =
-            attach_client_naming_painted_typed_pane(&mut server, painted_typed_pane);
-        assert_eq!(
-            get_client_snapshot(&server, attach_accepted.client_id)
-                .input_pane_moved_by_others_count,
-            0
-        );
+            attach_client_naming_painted_input_view(&mut server, painted_input_view);
+        let client_snapshot = get_client_snapshot(&server, attach_accepted.client_id);
+        start_counts.push((
+            client_snapshot.input_pane_moved_by_others_count,
+            client_snapshot.dropped_input_request_count,
+        ));
         let _ = server.handle_runtime_event(build_painted_key_press_event(
             attach_accepted.client_id,
             'a',
-            0,
+            client_snapshot.input_pane_moved_by_others_count,
         ));
     }
 
+    assert_eq!(start_counts, vec![(0, 0), (4, 2)]);
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -2290,11 +2425,13 @@ fn a_first_attach_and_an_attach_naming_the_pane_that_still_takes_the_input_let_t
     );
 }
 
-/// Bob's first connection counts one move by Alice and one dropped key. His
-/// next connection, whose painted pane still takes his input, starts both
-/// counts at `0`, and the frame carries the pane he types into.
+/// Bob's first connection counts one move by Alice and one dropped key, and
+/// his kept client record holds `1` and `1`. His next connection names the
+/// view his screen still shows, a frame of the left pane with both counts at
+/// `0`: the counts start at `0` and `0`, and the frame carries the pane he
+/// types into.
 #[test]
-fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_again() {
+fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_at_the_named_view() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
@@ -2325,8 +2462,10 @@ fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_again() {
     let (_bob_next_delivery_receiver, _) = server.subscribe(
         bob_client_id,
         60,
-        Some(PaintedTypedPane {
+        Some(PaintedInputView {
             typed_pane_id: Some(left_pane_id),
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         }),
     );
 

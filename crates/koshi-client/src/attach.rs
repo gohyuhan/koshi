@@ -173,12 +173,11 @@ use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
 
 use crate::floating_pane_tray::FloatingPaneTrayAnchor;
-use crate::input::{InputReadClock, KeyOutcome, RequestedClientActionFit};
+use crate::input::{InputReadStamp, KeyOutcome, RequestedClientActionFit};
 use crate::mouse::MouseAction;
 use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client, LinkStatus, PlacementTargetOutcome};
 use koshi_config::layer::PartialKoshiConfig;
-use koshi_config::types::BoundAction;
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
@@ -202,7 +201,7 @@ use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{
     ClientActionRefusal, ConnectionToken, FiredAction, IncomingResponse, IpcRequest,
-    IpcRequestKind, IpcResult, PaintedTypedPane, WireMouseAction,
+    IpcRequestKind, IpcResult, PaintedInputView, WireMouseAction,
 };
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
@@ -967,9 +966,10 @@ impl<B: Backend> Screen<B> {
     /// all from one tray anchor ([`Client::find_floating_pane_tray_anchor`]).
     /// The tray layout that keeps the open tray in step with the pending frame
     /// ([`Client::update_floating_pane_tray`]) is the one that anchor uses.
-    /// After a paint, the frame's dropped input request count posts its
-    /// warnings ([`Client::update_dropped_input_request_count`]); they show
-    /// from the next paint.
+    /// After a paint, the client records the frame's input fields
+    /// ([`Client::record_painted_input_view`]): the input read clock takes its
+    /// move count, and its dropped count posts its warnings, which show from
+    /// the next paint.
     ///
     /// [`SessionSnapshot::has_same_floating_pane_visibility`]: koshi_renderer::snapshot::SessionSnapshot::has_same_floating_pane_visibility
     fn commit_pending_snapshot(
@@ -1112,8 +1112,14 @@ impl<B: Backend> Screen<B> {
             painted_viewer_chrome,
             drawn_notifications,
         );
-        client.update_dropped_input_request_count(
-            snapshot.client_snapshot.dropped_input_request_count,
+        client.record_painted_input_view(
+            PaintedInputView {
+                typed_pane_id: snapshot.client_snapshot.typed_pane_id,
+                input_pane_moved_by_others_count: snapshot
+                    .client_snapshot
+                    .input_pane_moved_by_others_count,
+                dropped_input_request_count: snapshot.client_snapshot.dropped_input_request_count,
+            },
             SystemTime::now(),
         );
         self.last_snapshot = Some(snapshot);
@@ -2252,16 +2258,15 @@ impl Uplink {
     }
 
     /// Queue `command` under `command_id`, issued by `client`'s key binding,
-    /// naming `fired_action`, the action the key fired, tagged with `client`'s
-    /// painted input pane move count
-    /// ([`Client::get_painted_input_pane_moved_by_others_count`]), or `None`
-    /// when a mouse event built the command.
+    /// naming `fired_action`, the action the key fired with the move count of
+    /// the frame its first chord was read against, or `None` when a mouse
+    /// event built the command.
     fn submit_key_binding_command(
         &mut self,
         client: &Client,
         command_id: CommandId,
         command: Command,
-        fired_action: Option<&ActionReference>,
+        fired_action: Option<&FiredAction>,
     ) {
         let command_envelope = CommandEnvelope::from_parts(
             command_id,
@@ -2270,11 +2275,7 @@ impl Uplink {
         );
         self.send_request(IpcRequestKind::SubmitCommand {
             command_envelope: Box::new(command_envelope),
-            fired_action: fired_action.map(|action_reference| FiredAction {
-                action_reference: action_reference.clone(),
-                painted_input_pane_moved_by_others_count: client
-                    .get_painted_input_pane_moved_by_others_count(),
-            }),
+            fired_action: fired_action.cloned(),
         });
     }
 
@@ -2308,7 +2309,7 @@ impl Uplink {
         &mut self,
         client: &Client,
         placement_input_action: PlacementInputAction,
-        fired_action: Option<&ActionReference>,
+        fired_action: Option<&FiredAction>,
     ) {
         match placement_input_action {
             PlacementInputAction::FocusPane { pane_id } => {
@@ -2399,11 +2400,17 @@ impl Uplink {
         };
         match client.find_requested_client_action_fit(client_action_kind, action_reference) {
             RequestedClientActionFit::Runs => {
+                let fired_action = FiredAction {
+                    action_reference: action_reference.clone(),
+                    painted_input_pane_moved_by_others_count: client
+                        .get_input_read_clock()
+                        .get_painted_input_pane_moved_by_others_count(),
+                };
                 self.run_dispatch_plan(
                     client,
                     DispatchPlan::ClientAction(client_action_kind),
                     mouse_frame,
-                    action_reference,
+                    &fired_action,
                 );
                 None
             }
@@ -2421,6 +2428,9 @@ impl Uplink {
     /// queued like every other session command, and [`ControlFlow::Continue`]
     /// for every other binding.
     ///
+    /// A binding that [`refuse_stale_fired_action`] refuses runs nothing and
+    /// sends nothing.
+    ///
     /// A lock binding switches `client` to the lock mode it sets at once, as
     /// [`Client::apply_lock_command`] says, and goes up as `SetLockMode` for
     /// that mode under a new command id: `core:toggle-lock` in `Normal` goes
@@ -2430,10 +2440,13 @@ impl Uplink {
     fn submit_bound_action(
         &mut self,
         client: &mut Client,
-        bound_action: BoundAction,
+        fired_action: FiredAction,
         mouse_frame: Option<&MouseFrame>,
     ) -> ControlFlow<()> {
-        let Ok(dispatch_plan) = self.resolve_action_plan(client, &bound_action.action_reference)
+        if refuse_stale_fired_action(client, &fired_action) {
+            return ControlFlow::Continue(());
+        }
+        let Ok(dispatch_plan) = self.resolve_action_plan(client, &fired_action.action_reference)
         else {
             return ControlFlow::Continue(());
         };
@@ -2444,17 +2457,12 @@ impl Uplink {
                 client,
                 lock_command_id,
                 build_set_lock_mode_command(lock_mode),
-                Some(&bound_action.action_reference),
+                Some(&fired_action),
             );
             return ControlFlow::Continue(());
         }
         let is_quit_plan = is_quit_dispatch_plan(&dispatch_plan);
-        self.run_dispatch_plan(
-            client,
-            dispatch_plan,
-            mouse_frame,
-            &bound_action.action_reference,
-        );
+        self.run_dispatch_plan(client, dispatch_plan, mouse_frame, &fired_action);
         if is_quit_plan {
             ControlFlow::Break(())
         } else {
@@ -2473,7 +2481,7 @@ impl Uplink {
         client: &mut Client,
         dispatch_plan: DispatchPlan,
         mouse_frame: Option<&MouseFrame>,
-        fired_action: &ActionReference,
+        fired_action: &FiredAction,
     ) {
         match dispatch_plan {
             DispatchPlan::Command(command) => {
@@ -2496,6 +2504,32 @@ impl Uplink {
             }
         }
     }
+}
+
+/// Refuse `fired_action` when its move count is below the move count of the
+/// newest frame this viewer wrote
+/// ([`InputReadClock::get_painted_input_pane_moved_by_others_count`](crate::input::InputReadClock::get_painted_input_pane_moved_by_others_count)).
+/// A refused binding posts one `Warning` in this viewer, such as
+/// `core:close-pane: your view changed as you typed`
+/// ([`Client::post_command_rejection`] with [`RejectReason::ViewChanged`]).
+/// Returns `true` when it refused the binding. Example: the newest frame
+/// carries `1`, and `core:close-pane` typed against `0` is refused.
+fn refuse_stale_fired_action(client: &mut Client, fired_action: &FiredAction) -> bool {
+    if fired_action.painted_input_pane_moved_by_others_count
+        >= client
+            .get_input_read_clock()
+            .get_painted_input_pane_moved_by_others_count()
+    {
+        return false;
+    }
+    client.post_command_rejection(
+        Some(&fired_action.action_reference),
+        RejectReason::ViewChanged,
+        None,
+        NonZeroU32::MIN,
+        SystemTime::now(),
+    );
+    true
 }
 
 /// Whether `dispatch_plan` runs [`Command::Quit`].
@@ -3173,14 +3207,9 @@ fn attach_once(
             }
         };
     let should_read_input = io::stdin().is_tty();
-    let input_read_clock = Arc::new(InputReadClock::default());
+    let input_read_clock = terminal_owner.get_input_read_clock();
     terminal_owner
-        .activate_terminal(
-            input_sender,
-            client_id,
-            Arc::clone(&input_read_clock),
-            should_read_input,
-        )
+        .activate_terminal(input_sender, client_id, should_read_input)
         .map_err(|activation_detail| CliError::Runtime {
             detail: activation_detail,
         })?;
@@ -3572,12 +3601,7 @@ fn run_attachment<B: Backend, W: Write>(
                             reject_reason,
                             help,
                         }) => {
-                            client.reject_sent_command(
-                                command_id,
-                                last_mouse_frame
-                                    .as_ref()
-                                    .map(|mouse_frame| mouse_frame.client_snapshot.lock_mode),
-                            );
+                            client.reject_sent_command(command_id);
                             client.post_command_rejection(
                                 fired_action.as_ref(),
                                 reject_reason,
@@ -3616,9 +3640,7 @@ fn run_attachment<B: Backend, W: Write>(
                         // resync forgets every remembered move, and the next
                         // move asks for its whole distance from the drag
                         // anchor. Nothing is released by this: no round ever
-                        // waited. The lock command the viewer waits for is
-                        // forgotten, and the next frame sets the lock mode.
-                        // The command rejections the session held
+                        // waited. The command rejections the session held
                         // post their `Warning`s after the session's queue is
                         // taken.
                         Ok(SessionEvent::Resync {
@@ -3630,7 +3652,6 @@ fn run_attachment<B: Backend, W: Write>(
                             sent_border_moves.clear();
                             client.prepare_placement_reconciliation();
                             client.forget_sent_floating_pane_move();
-                            client.set_pending_lock_command_id(None);
                             apply_session_notification_queue(
                                 client,
                                 session_id,
@@ -3721,7 +3742,11 @@ fn run_attachment<B: Backend, W: Write>(
         }
         if let Some(attachment_ending) = attachment_ending {
             let placement_preview_target = client.find_placement_preview_target();
-            let painted_typed_pane = client.get_painted_typed_pane();
+            let painted_input_view = client.get_painted_input_view();
+            // The frame that waits to be painted came from the connection that
+            // ended and was never on the screen: the next connection's first
+            // frame takes its place.
+            screen.pending_snapshot = None;
             let (link_recovery, attempt_rejoin): (
                 LinkRecovery,
                 Arc<dyn Fn() -> RejoinAnswer + Send + Sync>,
@@ -3749,7 +3774,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 attach_settings,
                                 cell_size,
                                 placement_preview_target,
-                                painted_typed_pane,
+                                painted_input_view,
                                 remote_link_timeout_ms,
                             ) {
                                 Ok(joined_session) => RejoinAnswer::Joined(
@@ -3779,7 +3804,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 attach_settings,
                                 cell_size,
                                 placement_preview_target,
-                                painted_typed_pane,
+                                painted_input_view,
                                 remote_link_timeout_ms,
                             ))
                         }),
@@ -3825,7 +3850,6 @@ fn run_attachment<B: Backend, W: Write>(
             connection_token = joined_session.connection_token;
             resume_token = attach_answer.resume_token;
             client.set_client_id(client_id);
-            client.clear_painted_input_counts();
             apply_session_notification_queue(client, session_id, &attach_answer.notification_queue);
             client.end_mouse_gestures();
             pending_mouse_actions.clear();
@@ -4114,7 +4138,7 @@ fn dial_remote(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let stored_saved_server =
@@ -4138,7 +4162,7 @@ fn dial_remote(
         attach_settings,
         cell_size,
         placement_preview_target,
-        painted_typed_pane,
+        painted_input_view,
         remote_link_timeout_ms,
     )
 }
@@ -4155,9 +4179,9 @@ fn dial_remote(
 /// `resume_client_id` names the client record to come back as, and
 /// `resume_token` is the secret the last attach minted, presented to get that
 /// attach's view back. `placement_preview_target` is the placement target the
-/// client previews, and is `None` on a first join. `painted_typed_pane` is the
-/// typed pane of the newest frame the client painted, which its screen still
-/// shows, and is `None` on a first join.
+/// client previews, and is `None` on a first join. `painted_input_view` is the
+/// input fields of the newest frame the client painted, which its screen
+/// still shows, and is `None` on a first join.
 ///
 /// The join runs under the deadline that `remote_link` holds until the
 /// session answers `Prepared`. The `Commit` and its answer then run under a
@@ -4200,7 +4224,7 @@ fn join_remote_session(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let link_timeout = Duration::from_millis(u64::from(remote_link_timeout_ms));
@@ -4218,7 +4242,7 @@ fn join_remote_session(
             cell_size,
             Some(remote_link_timeout_ms),
             placement_preview_target,
-            painted_typed_pane,
+            painted_input_view,
         ))
         .map_err(build_link_failure)?;
     let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
@@ -4367,13 +4391,13 @@ fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<
 /// The Attach names `client_id` and presents `resume_token`, the secret the
 /// attach of the connection that ended minted, as the proof of that claim. It
 /// carries `placement_preview_target`, the placement target the client
-/// previews, and `painted_typed_pane`, the typed pane of the newest frame the
-/// client painted. A session that still holds that record hands its view straight back. The
-/// returned client is `client_id` when the session handed its record back,
-/// and a fresh client the session minted when it cannot: a restart that could
-/// not bring the carried layout back holds no record, a record whose tab
-/// closed is not handed back, and a claim with no token or another token is
-/// not proven. Example: a record whose tab closed is taken over by its token,
+/// previews, and `painted_input_view`, the input fields of the newest frame
+/// the client painted. A session that still holds that record hands it back
+/// with its view. The returned client is `client_id` when the session handed
+/// its record back, and a fresh client the session minted when it cannot: a
+/// restart that could not bring the carried layout back holds no record, a
+/// record whose tab closed is not handed back, and a claim with no token or
+/// another token is not proven. Example: a record whose tab closed is taken over by its token,
 /// and the fresh client comes back with that record's view on the first tab.
 ///
 /// `Err` carries the ending the attachment reports: what [`rejoin_session`]
@@ -4396,7 +4420,7 @@ fn reconnect_after_restart(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, AttachmentEnding> {
     let restart_deadline = Instant::now() + RESTART_WINDOW_DURATION;
@@ -4419,7 +4443,7 @@ fn reconnect_after_restart(
                 attach_settings,
                 cell_size,
                 placement_preview_target,
-                painted_typed_pane,
+                painted_input_view,
             );
             if rejoin_result.as_ref().is_err_and(|rejoin_ending| {
                 matches!(
@@ -4455,7 +4479,7 @@ fn reconnect_after_restart(
                     attach_settings,
                     cell_size,
                     placement_preview_target,
-                    painted_typed_pane,
+                    painted_input_view,
                     remote_link_timeout_ms,
                 )
             },
@@ -4674,7 +4698,9 @@ impl LinkRecovery {
                 lock_mode,
                 ..
             } => Some((*lock_command_id, *lock_mode)),
-            HeldInput::Keyboard(_) | HeldInput::FiredBinding { .. } | HeldInput::Paste(_) => None,
+            HeldInput::Keyboard { .. }
+            | HeldInput::FiredBinding { .. }
+            | HeldInput::Paste { .. } => None,
         };
         if !holding_input_hold.hold_input(held_input) {
             tracing::warn!(
@@ -4727,8 +4753,8 @@ impl InputHold {
     /// [`HeldInput::Keyboard`] of 2 keys added to 1023 held inputs is refused.
     fn hold_input(&mut self, held_input: HeldInput) -> bool {
         let (added_input_count, paste_byte_count) = match &held_input {
-            HeldInput::Keyboard(key_inputs) => (key_inputs.len(), 0),
-            HeldInput::Paste(pasted_text) => (1, pasted_text.len()),
+            HeldInput::Keyboard { key_inputs, .. } => (key_inputs.len(), 0),
+            HeldInput::Paste { pasted_text, .. } => (1, pasted_text.len()),
             HeldInput::FiredBinding { .. } | HeldInput::LockCommand { .. } => (1, 0),
         };
         let held_input_count = self.held_input_count.saturating_add(added_input_count);
@@ -4746,19 +4772,25 @@ impl InputHold {
 }
 
 /// One input a restart rejoin holds, in the form it goes up once the client
-/// joins.
+/// joins. Each one carries the move count of the frame on the screen when its
+/// read happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HeldInput {
     /// The keys of one read the base keymap passed through, and the key
     /// releases, oldest first. Sent as one [`IpcRequestKind::Keyboard`].
-    Keyboard(Vec<KeyInput>),
+    Keyboard {
+        /// The keys, oldest first.
+        key_inputs: Vec<KeyInput>,
+        /// The move count of the frame on the screen when the keys were read.
+        painted_input_pane_moved_by_others_count: u64,
+    },
     /// A binding the base keymap fired, other than the quit binding and a
     /// lock binding. Run as [`Uplink::run_dispatch_plan`] runs it.
     FiredBinding {
         /// The binding's plan.
         dispatch_plan: DispatchPlan,
-        /// The action the binding fired.
-        fired_action: ActionReference,
+        /// The action the binding fired, with its move count.
+        fired_action: FiredAction,
     },
     /// A lock binding the base keymap fired. Sent as the `SetLockMode` command
     /// for `lock_mode` under `lock_command_id`, naming `fired_action`.
@@ -4767,11 +4799,16 @@ enum HeldInput {
         lock_command_id: CommandId,
         /// The lock mode the binding set on the viewer when it fired.
         lock_mode: LockMode,
-        /// The action the binding fired.
-        fired_action: ActionReference,
+        /// The action the binding fired, with its move count.
+        fired_action: FiredAction,
     },
     /// Pasted text. Sent as [`IpcRequestKind::Paste`].
-    Paste(String),
+    Paste {
+        /// The pasted text, exactly as the outer terminal delivered it.
+        pasted_text: String,
+        /// The move count of the frame on the screen when the paste was read.
+        painted_input_pane_moved_by_others_count: u64,
+    },
 }
 
 /// Run the stretch with no link: read this terminal, keep the tag on the
@@ -4852,10 +4889,10 @@ fn run_without_link<B: Backend>(
         };
         client.set_link_status(link_status);
         let input_judge_time = client.get_input_read_clock().find_input_judge_time();
-        if let Some(bound_action) = input_judge_time
+        if let Some(fired_action) = input_judge_time
             .and_then(|input_judge_time| client.expire_key_sequence(input_judge_time))
         {
-            if hold_fired_binding(&mut link_recovery, client, uplink, bound_action).is_break() {
+            if hold_fired_binding(&mut link_recovery, client, uplink, fired_action).is_break() {
                 break Err(AttachmentEnding::LeftWhileReconnecting);
             }
         }
@@ -4929,16 +4966,18 @@ fn run_without_link<B: Backend>(
             Incoming::Input(terminal_input) => {
                 let TerminalInput {
                     runtime_events,
-                    read_at,
+                    read_stamp,
                 } = *terminal_input;
                 if matches!(runtime_events.as_slice(), [RuntimeEvent::Quit]) {
                     break Err(AttachmentEnding::TerminalGone);
                 }
-                client.get_input_read_clock().note_input_taken(read_at);
+                client
+                    .get_input_read_clock()
+                    .note_input_taken(read_stamp.read_at);
                 // A sequence whose deadline passed before this read fires
                 // first, and the read's events are handled after it.
-                if let Some(expired_bound_action) = client.expire_key_sequence(read_at) {
-                    if hold_fired_binding(&mut link_recovery, client, uplink, expired_bound_action)
+                if let Some(expired_fired_action) = client.expire_key_sequence(read_stamp.read_at) {
+                    if hold_fired_binding(&mut link_recovery, client, uplink, expired_fired_action)
                         .is_break()
                     {
                         break Err(AttachmentEnding::LeftWhileReconnecting);
@@ -4950,7 +4989,12 @@ fn run_without_link<B: Backend>(
                 let mut pane_key_inputs = Vec::new();
                 for runtime_event in runtime_events {
                     if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
-                        hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs);
+                        hold_pane_key_inputs(
+                            &mut link_recovery,
+                            client,
+                            &mut pane_key_inputs,
+                            read_stamp,
+                        );
                     }
                     match runtime_event {
                         RuntimeEvent::KeyInput { key_input, .. } => {
@@ -4958,18 +5002,19 @@ fn run_without_link<B: Backend>(
                                 pane_key_inputs.push(key_input);
                                 continue;
                             };
-                            match client.resolve_key(chord, read_at) {
-                                KeyOutcome::Fire(bound_action) => {
+                            match client.resolve_key(chord, read_stamp) {
+                                KeyOutcome::Fire(fired_action) => {
                                     hold_pane_key_inputs(
                                         &mut link_recovery,
                                         client,
                                         &mut pane_key_inputs,
+                                        read_stamp,
                                     );
                                     if hold_fired_binding(
                                         &mut link_recovery,
                                         client,
                                         uplink,
-                                        bound_action,
+                                        fired_action,
                                     )
                                     .is_break()
                                     {
@@ -4984,12 +5029,20 @@ fn run_without_link<B: Backend>(
                                         &mut link_recovery,
                                         client,
                                         &mut pane_key_inputs,
+                                        read_stamp,
                                     );
                                 }
                             }
                         }
                         RuntimeEvent::HostPaste { pasted_text, .. } => {
-                            link_recovery.hold_input(client, HeldInput::Paste(pasted_text));
+                            link_recovery.hold_input(
+                                client,
+                                HeldInput::Paste {
+                                    pasted_text,
+                                    painted_input_pane_moved_by_others_count: read_stamp
+                                        .painted_input_pane_moved_by_others_count,
+                                },
+                            );
                         }
                         RuntimeEvent::CellSize { cell_size, .. } => {
                             let _ = cell_size_query.accept_cell_size_reply(cell_size);
@@ -5003,7 +5056,7 @@ fn run_without_link<B: Backend>(
                         _ => {}
                     }
                 }
-                hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs);
+                hold_pane_key_inputs(&mut link_recovery, client, &mut pane_key_inputs, read_stamp);
             }
         }
     };
@@ -5067,18 +5120,27 @@ fn build_redial_answer(dial_result: Result<JoinedSession, DialError>) -> RejoinA
     }
 }
 
-/// Hold `pane_key_inputs`, the keys of one read that go to the pane, as one
-/// [`HeldInput::Keyboard`] through [`LinkRecovery::hold_input`], and leave it
-/// empty. Holds nothing when it has no key.
+/// Hold `pane_key_inputs`, the keys of the read `read_stamp` stamped that go
+/// to the pane, as one [`HeldInput::Keyboard`] carrying the move count of
+/// `read_stamp`, through [`LinkRecovery::hold_input`], and leave it empty.
+/// Holds nothing when it has no key.
 fn hold_pane_key_inputs(
     link_recovery: &mut LinkRecovery,
     client: &mut Client,
     pane_key_inputs: &mut Vec<KeyInput>,
+    read_stamp: InputReadStamp,
 ) {
     if pane_key_inputs.is_empty() {
         return;
     }
-    link_recovery.hold_input(client, HeldInput::Keyboard(take(pane_key_inputs)));
+    link_recovery.hold_input(
+        client,
+        HeldInput::Keyboard {
+            key_inputs: take(pane_key_inputs),
+            painted_input_pane_moved_by_others_count: read_stamp
+                .painted_input_pane_moved_by_others_count,
+        },
+    );
 }
 
 /// Answer one binding that fired while this viewer has no link, against the
@@ -5088,15 +5150,18 @@ fn hold_pane_key_inputs(
 /// A lock binding is held as [`HeldInput::LockCommand`] for the lock mode it
 /// sets from `client`'s lock mode, under a new command id. Every other binding
 /// is held as its [`HeldInput::FiredBinding`]. Both go through
-/// [`LinkRecovery::hold_input`]. An action the table refuses is held as
-/// nothing.
+/// [`LinkRecovery::hold_input`]. A binding that [`refuse_stale_fired_action`]
+/// refuses, and an action the table refuses, are held as nothing.
 fn hold_fired_binding(
     link_recovery: &mut LinkRecovery,
     client: &mut Client,
     uplink: &Uplink,
-    bound_action: BoundAction,
+    fired_action: FiredAction,
 ) -> ControlFlow<()> {
-    let Ok(dispatch_plan) = uplink.resolve_action_plan(client, &bound_action.action_reference)
+    if refuse_stale_fired_action(client, &fired_action) {
+        return ControlFlow::Continue(());
+    }
+    let Ok(dispatch_plan) = uplink.resolve_action_plan(client, &fired_action.action_reference)
     else {
         return ControlFlow::Continue(());
     };
@@ -5107,11 +5172,11 @@ fn hold_fired_binding(
         Some(lock_mode) => HeldInput::LockCommand {
             lock_command_id: CommandId::new(),
             lock_mode,
-            fired_action: bound_action.action_reference,
+            fired_action,
         },
         None => HeldInput::FiredBinding {
             dispatch_plan,
-            fired_action: bound_action.action_reference,
+            fired_action,
         },
     };
     link_recovery.hold_input(client, held_input);
@@ -5133,11 +5198,13 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
     client.set_pending_lock_command_id(None);
     for held_input in held_inputs {
         match held_input {
-            HeldInput::Keyboard(key_inputs) => {
+            HeldInput::Keyboard {
+                key_inputs,
+                painted_input_pane_moved_by_others_count,
+            } => {
                 uplink.send_request(IpcRequestKind::Keyboard {
                     key_inputs,
-                    painted_input_pane_moved_by_others_count: client
-                        .get_painted_input_pane_moved_by_others_count(),
+                    painted_input_pane_moved_by_others_count,
                 });
             }
             HeldInput::FiredBinding {
@@ -5159,11 +5226,13 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
                 );
                 client.set_pending_lock_command_id(Some(lock_command_id));
             }
-            HeldInput::Paste(pasted_text) => {
+            HeldInput::Paste {
+                pasted_text,
+                painted_input_pane_moved_by_others_count,
+            } => {
                 uplink.send_request(IpcRequestKind::Paste {
                     pasted_text,
-                    painted_input_pane_moved_by_others_count: client
-                        .get_painted_input_pane_moved_by_others_count(),
+                    painted_input_pane_moved_by_others_count,
                 });
             }
         }
@@ -5437,9 +5506,9 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// and the token is the one that record's last attach minted, and mints a
 /// fresh client otherwise. Either way, the caller holds the returned id from
 /// here. `placement_preview_target` is the placement target the client
-/// previews, and a first join leaves it `None`. `painted_typed_pane` is the
-/// typed pane of the newest frame the client painted, and a first join leaves
-/// it `None`.
+/// previews, and a first join leaves it `None`. `painted_input_view` is the
+/// input fields of the newest frame the client painted, and a first join
+/// leaves it `None`.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the Hello or the `Prepare` could not be
@@ -5464,7 +5533,7 @@ fn join_session(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
     commit_timeout: Option<Duration>,
 ) -> Result<SessionAttachAnswer, DialError> {
     let hello = IpcRequest {
@@ -5480,7 +5549,7 @@ fn join_session(
             cell_size,
             None,
             placement_preview_target,
-            painted_typed_pane,
+            painted_input_view,
         ))
         .map_err(build_link_failure)?;
 
@@ -5515,7 +5584,7 @@ struct AttachSettings {
 /// has written it nothing for a third of it. It is `None` on this machine,
 /// where the session writes no `Pong`. `placement_preview_target` is the
 /// placement target the client previews, and is `None` on a first join.
-/// `painted_typed_pane` is the typed pane of the newest frame the client
+/// `painted_input_view` is the input fields of the newest frame the client
 /// painted, and is `None` on a first join.
 /// Reports the pane area left by the built-in two-row UI.
 fn build_attach_prepare_request(
@@ -5525,7 +5594,7 @@ fn build_attach_prepare_request(
     cell_size: Option<PixelCellSize>,
     link_timeout_ms: Option<u32>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
 ) -> IpcRequest {
     let viewport_size = get_terminal_viewport_size();
     IpcRequest {
@@ -5542,7 +5611,7 @@ fn build_attach_prepare_request(
             link_timeout_ms,
             max_frames_per_second: attach_settings.max_frames_per_second,
             placement_preview_target,
-            painted_typed_pane,
+            painted_input_view,
         })),
     }
 }
@@ -5612,7 +5681,7 @@ fn apply_session_notification_queue(
 /// fresh client the session minted otherwise.
 ///
 /// The Attach carries `placement_preview_target`, the placement target the
-/// client previews, and `painted_typed_pane`, the typed pane of the newest
+/// client previews, and `painted_input_view`, the input fields of the newest
 /// frame the client painted.
 ///
 /// `connection_token` is the token this client attached under; the wait watches it for a
@@ -5646,7 +5715,7 @@ fn rejoin_session(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
-    painted_typed_pane: Option<PaintedTypedPane>,
+    painted_input_view: Option<PaintedInputView>,
 ) -> Result<JoinedSession, AttachmentEnding> {
     if connection_token.expose_secret().is_empty() {
         tracing::warn!(
@@ -5684,7 +5753,7 @@ fn rejoin_session(
             attach_settings,
             cell_size,
             placement_preview_target,
-            painted_typed_pane,
+            painted_input_view,
             Some(RESTART_WINDOW_DURATION),
         );
         let attach_answer = match join_result {
@@ -6030,7 +6099,10 @@ impl TerminalCloseWatch {
                         should_run_default_action.store(true, Ordering::SeqCst);
                         let _ = incoming_sender.send(Incoming::Input(Box::new(TerminalInput {
                             runtime_events: vec![RuntimeEvent::Quit],
-                            read_at: Instant::now(),
+                            read_stamp: InputReadStamp {
+                                read_at: Instant::now(),
+                                painted_input_pane_moved_by_others_count: 0,
+                            },
                         })));
                     }
                 });
@@ -6173,7 +6245,10 @@ unsafe extern "system" fn handle_console_control(control_type: u32) -> windows_s
     let is_quit_sent = incoming_sender
         .send(Incoming::Input(Box::new(TerminalInput {
             runtime_events: vec![RuntimeEvent::Quit],
-            read_at: Instant::now(),
+            read_stamp: InputReadStamp {
+                read_at: Instant::now(),
+                painted_input_pane_moved_by_others_count: 0,
+            },
         })))
         .is_ok();
     if !is_quit_sent && !is_console_break {
@@ -6206,12 +6281,15 @@ fn build_input_channel() -> (
 /// any open sequence all live here. This decides what the press means, and
 /// the session sees only the answer — the commands a binding runs, or the whole
 /// key event to write. A release, and a key no keybinding can name, resolve
-/// nothing and reach the session as they are. A key resolves at `read_at`, the
-/// instant the input thread read it: a key that opens a sequence that is both a
-/// binding and a longer one's prefix sets that sequence's ambiguity deadline
-/// one chord timeout after `read_at`. A press that goes to the pane's program
-/// also ends the selection gesture under way. A key that goes to the pane is
-/// added to `pane_key_inputs`, and sends nothing. Every other key outcome
+/// nothing and reach the session as they are. A key resolves against
+/// `read_stamp`, the read that brought it: a key that opens a sequence that is
+/// both a binding and a longer one's prefix sets that sequence's ambiguity
+/// deadline one chord timeout after the read's `read_at`. Each key, paste and
+/// fired binding carries the move count of `read_stamp`: the count the screen
+/// showed when the input's first byte was read. A binding typed over several
+/// reads carries the count of its first chord. A press that goes to the pane's
+/// program also ends the selection gesture under way. A key that goes to the
+/// pane is added to `pane_key_inputs`, and sends nothing. Every other key outcome
 /// first sends `pane_key_inputs` as one [`IpcRequestKind::Keyboard`]
 /// ([`send_pane_key_inputs`]): a fired binding, a key a sequence holds, and a
 /// discarded key. The caller sends `pane_key_inputs` before any other event,
@@ -6239,7 +6317,7 @@ fn process_runtime_input_with_cell_size(
     cell_size_query: &mut terminal::CellSizeQuery,
     mouse_frame: Option<&MouseFrame>,
     runtime_event: RuntimeEvent,
-    read_at: Instant,
+    read_stamp: InputReadStamp,
     pane_key_inputs: &mut Vec<KeyInput>,
 ) -> ControlFlow<()> {
     match runtime_event {
@@ -6265,10 +6343,10 @@ fn process_runtime_input_with_cell_size(
                 }
                 return ControlFlow::Continue(());
             };
-            match client.resolve_key(chord, read_at) {
-                KeyOutcome::Fire(bound_action) => {
-                    send_pane_key_inputs(client, uplink, pane_key_inputs);
-                    return uplink.submit_bound_action(client, bound_action, mouse_frame);
+            match client.resolve_key(chord, read_stamp) {
+                KeyOutcome::Fire(fired_action) => {
+                    send_pane_key_inputs(uplink, pane_key_inputs, read_stamp);
+                    return uplink.submit_bound_action(client, fired_action, mouse_frame);
                 }
                 KeyOutcome::PassThrough(_) => {
                     // The key belongs to the program in the pane, so a
@@ -6284,7 +6362,7 @@ fn process_runtime_input_with_cell_size(
                 // floating pane is drawn where the frame places it. Any other
                 // discard draws nothing.
                 KeyOutcome::Pending | KeyOutcome::Discard => {
-                    send_pane_key_inputs(client, uplink, pane_key_inputs);
+                    send_pane_key_inputs(uplink, pane_key_inputs, read_stamp);
                 }
             }
         }
@@ -6316,8 +6394,8 @@ fn process_runtime_input_with_cell_size(
             client.end_mouse_selection();
             uplink.send_request(IpcRequestKind::Paste {
                 pasted_text,
-                painted_input_pane_moved_by_others_count: client
-                    .get_painted_input_pane_moved_by_others_count(),
+                painted_input_pane_moved_by_others_count: read_stamp
+                    .painted_input_pane_moved_by_others_count,
             });
         }
         _ => {}
@@ -6355,10 +6433,10 @@ fn expire_input_timers(
     pending_mouse_actions: &mut Vec<MouseAction>,
     judge_time: Instant,
 ) -> ControlFlow<()> {
-    if let Some(bound_action) = client.expire_key_sequence(judge_time) {
+    if let Some(fired_action) = client.expire_key_sequence(judge_time) {
         flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
         if uplink
-            .submit_bound_action(client, bound_action, mouse_frame)
+            .submit_bound_action(client, fired_action, mouse_frame)
             .is_break()
         {
             return ControlFlow::Break(());
@@ -6378,9 +6456,10 @@ fn expire_input_timers(
 /// oldest first, against `mouse_frame`, the frame this terminal last painted.
 /// Requests leave `uplink` in the order of the inputs that caused them.
 ///
-/// The events are judged at `terminal_input.read_at`, the instant the input
-/// thread read them. The loop records that it took the read
-/// ([`InputReadClock::note_input_taken`]), and every input timer due at that
+/// The events are judged at `terminal_input.read_stamp`: the instant the
+/// input thread read them, and the move count each key, paste and binding of
+/// the read carries. The loop records that it took the read
+/// ([`crate::input::InputReadClock::note_input_taken`]), and every input timer due at that
 /// instant runs first ([`expire_input_timers`]). Example: `<C-y>` binds
 /// `core:new-tab` and opens `<C-y> a`, the chord timeout is 500 ms, and a paste
 /// is read 600 ms after `<C-y>`: the `NewTab` command goes up, then the paste.
@@ -6432,8 +6511,9 @@ fn handle_terminal_input_event(
 ) -> ControlFlow<()> {
     let TerminalInput {
         runtime_events,
-        read_at,
+        read_stamp,
     } = terminal_input;
+    let read_at = read_stamp.read_at;
     client.get_input_read_clock().note_input_taken(read_at);
     if expire_input_timers(
         client,
@@ -6450,7 +6530,7 @@ fn handle_terminal_input_event(
     let mut pane_key_inputs = Vec::new();
     for runtime_event in runtime_events {
         if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
-            send_pane_key_inputs(client, uplink, &mut pane_key_inputs);
+            send_pane_key_inputs(uplink, &mut pane_key_inputs, read_stamp);
         }
         match runtime_event {
             RuntimeEvent::MouseInput { mouse_input, .. } => {
@@ -6490,7 +6570,7 @@ fn handle_terminal_input_event(
                     cell_size_query,
                     mouse_frame,
                     other_runtime_event,
-                    read_at,
+                    read_stamp,
                     &mut pane_key_inputs,
                 )
                 .is_break()
@@ -6500,22 +6580,25 @@ fn handle_terminal_input_event(
             }
         }
     }
-    send_pane_key_inputs(client, uplink, &mut pane_key_inputs);
+    send_pane_key_inputs(uplink, &mut pane_key_inputs, read_stamp);
     ControlFlow::Continue(())
 }
 
-/// Send `pane_key_inputs`, keys of one read that go to the pane, as one
-/// [`IpcRequestKind::Keyboard`] request tagged with `client`'s painted input
-/// pane move count ([`Client::get_painted_input_pane_moved_by_others_count`]),
-/// and leave it empty. Sends nothing when it has no key.
-fn send_pane_key_inputs(client: &Client, uplink: &mut Uplink, pane_key_inputs: &mut Vec<KeyInput>) {
+/// Send `pane_key_inputs`, keys of the read `read_stamp` stamped that go to
+/// the pane, as one [`IpcRequestKind::Keyboard`] request tagged with the
+/// move count of `read_stamp`, and leave it empty. Sends nothing when it has no key.
+fn send_pane_key_inputs(
+    uplink: &mut Uplink,
+    pane_key_inputs: &mut Vec<KeyInput>,
+    read_stamp: InputReadStamp,
+) {
     if pane_key_inputs.is_empty() {
         return;
     }
     uplink.send_request(IpcRequestKind::Keyboard {
         key_inputs: take(pane_key_inputs),
-        painted_input_pane_moved_by_others_count: client
-            .get_painted_input_pane_moved_by_others_count(),
+        painted_input_pane_moved_by_others_count: read_stamp
+            .painted_input_pane_moved_by_others_count,
     });
 }
 

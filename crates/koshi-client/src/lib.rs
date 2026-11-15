@@ -62,7 +62,7 @@ use koshi_core::{
     ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId},
 };
 use koshi_ipc::placement::PanePlacementPreviewTarget;
-use koshi_ipc::protocol::PaintedTypedPane;
+use koshi_ipc::protocol::PaintedInputView;
 use koshi_layout::placement::PlacedTabLayout;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::placement::{PlacedPreview, PlacementPreviewError};
@@ -273,10 +273,6 @@ pub(crate) struct ViewerRestorePoint {
     /// The notification center as it stood: open or sliding out, its scroll,
     /// its selected card and its slide. `None` while it was closed.
     notification_center_state: Option<NotificationCenterState>,
-    /// The input pane move count of the newest painted frame.
-    painted_input_pane_moved_by_others_count: u64,
-    /// The typed pane of the newest painted frame.
-    painted_typed_pane: Option<PaintedTypedPane>,
 }
 
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
@@ -359,24 +355,17 @@ pub struct Client {
     /// The newest lock command this viewer sent, or holds to send, whose lock
     /// mode [`lock_mode`](Self::lock_mode) shows before the session runs it.
     /// While it is set, a painted frame that does not name it as the last
-    /// applied lock command leaves `lock_mode` as it is. `None` when no lock
+    /// settled lock command leaves `lock_mode` as it is. `None` when no lock
     /// command waits.
     pending_lock_command_id: Option<CommandId>,
     /// Whether this viewer grabs the mouse for text selection. It decides what
     /// a press means before anything is sent. The session keeps its own copy,
     /// which the frame carries for the mode indicator and the hint bar's label.
     is_mouse_selection_enabled: bool,
-    /// The `input_pane_moved_by_others_count` of the newest painted frame on
-    /// this connection, `0` before the first. Each key, paste and key-fired
-    /// command this viewer sends carries it.
-    painted_input_pane_moved_by_others_count: u64,
-    /// The `dropped_input_request_count` of the newest painted frame on this
-    /// connection, `0` before the first.
-    painted_dropped_input_request_count: u64,
-    /// The `typed_pane_id` of the newest painted frame on any connection of
-    /// this attachment, which the screen shows until the next frame paints.
-    /// `None` before the first frame.
-    painted_typed_pane: Option<PaintedTypedPane>,
+    /// The input fields of the newest frame this viewer wrote to its terminal,
+    /// on any connection of this attachment, which the screen shows until the
+    /// next frame is written. `None` before the first frame.
+    painted_input_view: Option<PaintedInputView>,
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
     pending_key_sequence: Option<PendingKeySequence>,
@@ -497,9 +486,7 @@ impl Client {
             lock_mode: LockMode::Normal,
             pending_lock_command_id: None,
             is_mouse_selection_enabled: false,
-            painted_input_pane_moved_by_others_count: 0,
-            painted_dropped_input_request_count: 0,
-            painted_typed_pane: None,
+            painted_input_view: None,
             pending_key_sequence: None,
             input_read_clock: Arc::default(),
             last_mouse_press: None,
@@ -663,11 +650,9 @@ impl Client {
     /// naming it (`settle_placement_command`), whether it settles a sent
     /// floating pane move by naming it (`settle_floating_pane_move`), the
     /// active tab with its focused pane and tab list, the lock mode, the
-    /// tab-strip peek, whether mouse-select is on, the placement preview
-    /// (`update_placement_preview`), the input pane move count each key,
-    /// paste and key-fired command carries, and the typed pane an attach after
-    /// a lost connection names. A tab-strip peek
-    /// made on another tab is dropped. The settled placement, the active tab,
+    /// tab-strip peek, whether mouse-select is on, and the placement preview
+    /// (`update_placement_preview`). A tab-strip peek made on another tab is
+    /// dropped. The settled placement, the active tab,
     /// the lock mode, mouse-select, and an unavailable preview can end pane
     /// placement mode or clear its target. The settled move can end floating
     /// pane move mode, and a lock mode or mouse-select change ends the move
@@ -679,11 +664,11 @@ impl Client {
     /// `update_placement_preview` describe.
     ///
     /// The lock mode is taken only when no lock command is pending, or when
-    /// the snapshot names the pending one as the last applied lock command;
-    /// the pending command is then cleared. Example: after `<C-l>` sends lock
-    /// command `A` and shows `Locked`, a snapshot with `Normal` that names no
-    /// lock command leaves `Locked`, and the next snapshot that names `A` sets
-    /// its own lock mode.
+    /// the snapshot names the pending one as the last settled lock command,
+    /// which the session ran or refused; the pending command is then cleared.
+    /// Example: after `<C-l>` sends lock command `A` and shows `Locked`, a
+    /// snapshot with `Normal` that names no lock command leaves `Locked`, and
+    /// the next snapshot that names `A` sets its own lock mode.
     pub fn apply_render_snapshot(&mut self, render_snapshot: &RenderSnapshot) {
         self.settle_placement_command(
             render_snapshot
@@ -709,7 +694,7 @@ impl Client {
         );
         let is_lock_command_pending = self.pending_lock_command_id.is_some()
             && self.pending_lock_command_id
-                != render_snapshot.client_snapshot.last_applied_lock_command_id;
+                != render_snapshot.client_snapshot.last_settled_lock_command_id;
         if !is_lock_command_pending {
             self.pending_lock_command_id = None;
             self.set_lock_mode(render_snapshot.client_snapshot.lock_mode);
@@ -722,46 +707,46 @@ impl Client {
             render_snapshot.placement_preview.as_ref(),
             is_placement_reconciled,
         );
-        self.painted_input_pane_moved_by_others_count = render_snapshot
-            .client_snapshot
-            .input_pane_moved_by_others_count;
-        self.painted_typed_pane = Some(PaintedTypedPane {
-            typed_pane_id: render_snapshot.client_snapshot.typed_pane_id,
-        });
     }
 
-    /// The `input_pane_moved_by_others_count` of the newest painted frame on
-    /// this connection, `0` before the first: the tag each key, paste and
-    /// key-fired command this viewer sends carries.
-    pub(crate) fn get_painted_input_pane_moved_by_others_count(&self) -> u64 {
-        self.painted_input_pane_moved_by_others_count
+    /// The input fields of the newest frame this viewer wrote to its terminal,
+    /// which the screen still shows: what an attach after a lost connection
+    /// names. `None` before the first frame.
+    pub(crate) fn get_painted_input_view(&self) -> Option<PaintedInputView> {
+        self.painted_input_view
     }
 
-    /// The typed pane of the newest painted frame, which the screen still
-    /// shows: the pane an attach after a lost connection names. `None` before
-    /// the first frame.
-    pub(crate) fn get_painted_typed_pane(&self) -> Option<PaintedTypedPane> {
-        self.painted_typed_pane
-    }
-
-    /// Take `dropped_input_request_count`, the count a frame painted at
-    /// `created_at` carries: post one `Warning` from koshi,
-    /// [`DROPPED_INPUT_NOTIFICATION_TEXT`], for each request it rises by over
-    /// the count of the last painted frame
+    /// Record `painted_input_view`, the input fields of a frame just written
+    /// to the terminal at `created_at`. The input read clock takes its move
+    /// count, which each read after this call carries
+    /// ([`InputReadClock::set_painted_input_pane_moved_by_others_count`]).
+    /// One `Warning` from koshi, [`DROPPED_INPUT_NOTIFICATION_TEXT`], is posted
+    /// for each request its dropped count rises by over the last recorded
+    /// frame's, `0` before the first
     /// ([`post_core_notification`](Self::post_core_notification)). A count
     /// that does not rise posts nothing, and a rise above `u32::MAX` posts
     /// `u32::MAX`.
     ///
-    /// Example: a frame with count `5` after a frame with count `0` posts one
-    /// entry with `repeat_count` 5.
-    pub(crate) fn update_dropped_input_request_count(
+    /// Example: a frame with dropped count `5` after a frame with dropped
+    /// count `0` posts one entry with `repeat_count` 5.
+    pub(crate) fn record_painted_input_view(
         &mut self,
-        dropped_input_request_count: u64,
+        painted_input_view: PaintedInputView,
         created_at: SystemTime,
     ) {
-        let new_dropped_request_count =
-            dropped_input_request_count.saturating_sub(self.painted_dropped_input_request_count);
-        self.painted_dropped_input_request_count = dropped_input_request_count;
+        let last_dropped_input_request_count = self
+            .painted_input_view
+            .map_or(0, |last_painted_input_view| {
+                last_painted_input_view.dropped_input_request_count
+            });
+        let new_dropped_request_count = painted_input_view
+            .dropped_input_request_count
+            .saturating_sub(last_dropped_input_request_count);
+        self.painted_input_view = Some(painted_input_view);
+        self.input_read_clock
+            .set_painted_input_pane_moved_by_others_count(
+                painted_input_view.input_pane_moved_by_others_count,
+            );
         let Some(post_count) =
             NonZeroU32::new(u32::try_from(new_dropped_request_count).unwrap_or(u32::MAX))
         else {
@@ -773,14 +758,6 @@ impl Client {
             post_count,
             created_at,
         );
-    }
-
-    /// Set both painted input counts back to `0` for a new connection: each
-    /// key, paste and key-fired command sent before that connection's first
-    /// frame carries `0`. The painted typed pane stays.
-    pub(crate) fn clear_painted_input_counts(&mut self) {
-        self.painted_input_pane_moved_by_others_count = 0;
-        self.painted_dropped_input_request_count = 0;
     }
 
     /// Copy every field [`apply_render_snapshot`](Self::apply_render_snapshot)
@@ -801,8 +778,6 @@ impl Client {
             sent_floating_pane_move: self.sent_floating_pane_move,
             floating_pane_tray: self.floating_pane_tray,
             notification_center_state: self.notification_history.get_notification_center_state(),
-            painted_input_pane_moved_by_others_count: self.painted_input_pane_moved_by_others_count,
-            painted_typed_pane: self.painted_typed_pane,
         }
     }
 
@@ -823,8 +798,6 @@ impl Client {
             sent_floating_pane_move,
             floating_pane_tray,
             notification_center_state,
-            painted_input_pane_moved_by_others_count,
-            painted_typed_pane,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -841,8 +814,6 @@ impl Client {
         self.floating_pane_tray = floating_pane_tray;
         self.notification_history
             .set_notification_center_state(notification_center_state);
-        self.painted_input_pane_moved_by_others_count = painted_input_pane_moved_by_others_count;
-        self.painted_typed_pane = painted_typed_pane;
     }
 
     /// Record the view carried by the newest painted frame: its active tab,
@@ -1371,16 +1342,12 @@ impl Client {
         self.get_pending_placement_command_id() == Some(command_id)
     }
 
-    /// Drop the command `command_id` names, which the session rejected: the
-    /// pending lock command, a sent floating pane move
+    /// Drop the command `command_id` names, which the session rejected: a sent
+    /// floating pane move
     /// ([`reject_floating_pane_move`](Self::reject_floating_pane_move)), or
-    /// the pending placement confirmation.
-    ///
-    /// A rejected pending lock command stops waiting, and the viewer shows
-    /// `painted_lock_mode`, the lock mode of the newest painted frame; with no
-    /// painted frame, the next painted frame sets the lock mode. Example: after
-    /// `<C-l>` shows `Locked` and its command is rejected, the viewer shows
-    /// `Normal` when the newest painted frame carries `Normal`.
+    /// the pending placement confirmation. A rejected lock command settles
+    /// when a frame names it
+    /// ([`apply_render_snapshot`](Self::apply_render_snapshot)).
     ///
     /// After a rejected confirmation, pane
     /// placement mode that lasts until Esc stays on with the preview it holds,
@@ -1389,18 +1356,7 @@ impl Client {
     /// a mode that lasts until its drag ends closes. A held preview that is
     /// unavailable then ends the mode. Changes nothing when `command_id` names
     /// none of them.
-    pub(crate) fn reject_sent_command(
-        &mut self,
-        command_id: CommandId,
-        painted_lock_mode: Option<LockMode>,
-    ) {
-        if self.pending_lock_command_id == Some(command_id) {
-            self.pending_lock_command_id = None;
-            if let Some(painted_lock_mode) = painted_lock_mode {
-                self.set_lock_mode(painted_lock_mode);
-            }
-            return;
-        }
+    pub(crate) fn reject_sent_command(&mut self, command_id: CommandId) {
         if self.reject_floating_pane_move(command_id) {
             return;
         }

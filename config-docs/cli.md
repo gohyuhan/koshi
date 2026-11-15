@@ -787,9 +787,18 @@ and shows `<action>: your view changed as you typed`, such as
 `core:close-pane: your view changed as you typed`. A move that your own keys
 or clicks make drops nothing.
 
+koshi judges each key and paste against the newest screen that koshi wrote to
+your terminal before it read the key. A paste that arrives in several pieces
+is judged against the screen of its first piece. A keybinding of several keys,
+such as `<C-p> x`, is judged against the screen of its first key. koshi never
+waits for your terminal to answer. A key that koshi reads after it wrote the
+new screen goes to the new pane, also when you typed it before your terminal
+drew that screen, or before you noticed the change.
+
 Example: you type `ls` in pane 3, and another client closes pane 3 before your
 screen shows the change. Your input moves to pane 4, and the `ls` is dropped.
-The next key you type goes to pane 4.
+After your screen shows pane 4 taking your input, the next key you type goes
+to pane 4.
 
 ### Floating panes
 

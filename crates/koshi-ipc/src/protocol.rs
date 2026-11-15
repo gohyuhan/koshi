@@ -486,21 +486,24 @@ pub enum IpcRequestKind {
         /// named before the client's first frame: that frame and each frame
         /// after it carry the target's preview. `None` names no target.
         placement_preview_target: Option<PanePlacementPreviewTarget>,
-        /// The typed pane of the newest frame the caller painted on an earlier
-        /// connection to this session, which its screen still shows. `None`
-        /// on a first attach. When it names another pane than the one that
-        /// takes the client's input once the attach is done, the client's
+        /// The input fields of the newest frame the caller painted on an
+        /// earlier connection to this session, which its screen still shows.
+        /// `None` on a first attach. The client's
         /// [`FrameClient::input_pane_moved_by_others_count`](crate::frame::FrameClient::input_pane_moved_by_others_count)
-        /// starts at `1`, and every key, paste and key-fired command the
-        /// caller typed against that screen reaches no pane. It starts at `0`
-        /// otherwise.
+        /// starts at the view's count, plus `1` when the view's typed pane is
+        /// not the pane that takes the client's input once the attach is
+        /// done. Its
+        /// [`FrameClient::dropped_input_request_count`](crate::frame::FrameClient::dropped_input_request_count)
+        /// starts at the view's dropped count. A first attach starts both at
+        /// `0`.
         ///
-        /// Example: the screen showed pane 3, and during a restart another
-        /// client closed pane 3. The attach after the restart names pane 3,
-        /// pane 4 takes the input, and the keys held through the restart,
-        /// tagged `0`, reach no pane.
+        /// Example: the screen showed pane 3 with move count `4`, and during a
+        /// restart another client closed pane 3. The attach after the restart
+        /// names pane 3 and count `4`. Pane 4 takes the input, the count
+        /// starts at `5`, and the keys held through the restart, tagged `4`,
+        /// reach no pane.
         #[serde(deserialize_with = "Option::deserialize")]
-        painted_typed_pane: Option<PaintedTypedPane>,
+        painted_input_view: Option<PaintedInputView>,
     },
     /// The keyboard events an attached client sends for the pane it is typing
     /// into, from one read of its terminal: its keymap bound nothing to each
@@ -522,8 +525,9 @@ pub enum IpcRequestKind {
         /// The keyboard events the client read from its terminal, oldest
         /// first.
         key_inputs: Vec<KeyInput>,
-        /// The `input_pane_moved_by_others_count` of the last frame this
-        /// client drew on this connection, `0` before its first frame.
+        /// The `input_pane_moved_by_others_count` of the newest frame the
+        /// client wrote to its terminal before it read the input's first byte,
+        /// `0` before its first frame.
         painted_input_pane_moved_by_others_count: u64,
     },
     /// The attached client's terminal changed size.
@@ -549,8 +553,9 @@ pub enum IpcRequestKind {
     Paste {
         /// The pasted text, exactly as the client's terminal delivered it.
         pasted_text: String,
-        /// The `input_pane_moved_by_others_count` of the last frame this
-        /// client drew on this connection, `0` before its first frame.
+        /// The `input_pane_moved_by_others_count` of the newest frame the
+        /// client wrote to its terminal before it read the input's first byte,
+        /// `0` before its first frame.
         painted_input_pane_moved_by_others_count: u64,
     },
     /// One round of mouse actions the attached client decided, in the order
@@ -605,12 +610,15 @@ pub enum IpcRequestKind {
         placement_target: TiledPlacementTarget,
         /// The destination tab as the client draws it after the placement.
         expected_placed_tab_layout: PlacedTabLayout,
-        /// The action the client's key fired to confirm, or `None` when a
-        /// mouse drop confirmed. The session names it in the
-        /// `CommandRejected` it sends for a refused placement. A message
+        /// The action the client's key fired to confirm, with the move count
+        /// of the frame the key was typed against, or `None` when a mouse drop
+        /// confirmed. A key confirmation whose move count is below the
+        /// client's move count in the session is refused with
+        /// [`RejectReason::ViewChanged`]. The session names the action in
+        /// the `CommandRejected` it sends for a refused placement. A message
         /// without `fired_action` is refused.
         #[serde(deserialize_with = "Option::deserialize")]
-        fired_action: Option<ActionReference>,
+        fired_action: Option<FiredAction>,
     },
     /// Ask the session for the events it published most recently, newest last.
     /// The answer holds each event's name and the ids it named, and no payload
@@ -804,15 +812,20 @@ pub enum IpcRequestKind {
     Commit,
 }
 
-/// The pane a client's newest painted frame showed taking its input
-/// ([`FrameClient::typed_pane_id`](crate::frame::FrameClient::typed_pane_id)),
-/// named when the client attaches again
-/// ([`IpcRequestKind::Attach`]).
+/// The input fields of a client's newest painted frame, named when the client
+/// attaches again ([`IpcRequestKind::Attach`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaintedTypedPane {
-    /// The frame's typed pane. `None` when that frame showed no pane taking
-    /// the input.
+pub struct PaintedInputView {
+    /// The frame's
+    /// [`FrameClient::typed_pane_id`](crate::frame::FrameClient::typed_pane_id).
+    /// `None` when that frame showed no pane taking the input.
     pub typed_pane_id: Option<PaneId>,
+    /// The frame's
+    /// [`FrameClient::input_pane_moved_by_others_count`](crate::frame::FrameClient::input_pane_moved_by_others_count).
+    pub input_pane_moved_by_others_count: u64,
+    /// The frame's
+    /// [`FrameClient::dropped_input_request_count`](crate::frame::FrameClient::dropped_input_request_count).
+    pub dropped_input_request_count: u64,
 }
 
 /// The action an attached client's key fired to build a command, and the frame
@@ -833,8 +846,10 @@ pub struct PaintedTypedPane {
 pub struct FiredAction {
     /// The action the key fired, such as `core:close-pane`.
     pub action_reference: ActionReference,
-    /// The `input_pane_moved_by_others_count` of the last frame the client drew
-    /// on this connection, `0` before its first frame.
+    /// The `input_pane_moved_by_others_count` of the newest frame the client
+    /// wrote to its terminal before it read the binding's first key, `0`
+    /// before its first frame. An action another caller asks the client to
+    /// run carries the count of the newest frame the client wrote.
     pub painted_input_pane_moved_by_others_count: u64,
 }
 

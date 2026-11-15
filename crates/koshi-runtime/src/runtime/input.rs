@@ -27,16 +27,18 @@
 //!
 //! **A press reaches only the pane the client's screen showed.** Each key,
 //! paste and key-fired command carries the
-//! `input_pane_moved_by_others_count` of the last frame the client drew. When
-//! another client, the CLI or a pane's exit moved the client's input to
-//! another pane after that frame, the count the session holds is higher, and
-//! the press reaches no pane (`Server::is_input_stale`). Example: the client's
-//! frame with count `0` shows pane 3 focused. Another client closes pane 3,
-//! and the count becomes `1`. The `l` typed against the frame with count `0`
-//! is dropped, and the first key tagged `1` reaches pane 4. Each connection
-//! starts the count again: at `1` when the pane its viewer's screen still
-//! shows no longer takes the input, and at `0` otherwise
-//! (`Server::subscribe`).
+//! `input_pane_moved_by_others_count` of the newest frame the viewer wrote
+//! to its terminal before it read the input's first byte. When another client,
+//! the CLI or a pane's exit moved the client's input to another pane after
+//! that frame, the count the session holds is higher, and the press reaches
+//! no pane
+//! (`Server::is_input_stale`). Example: the client's frame with count `0`
+//! shows pane 3 focused. Another client closes pane 3, and the count becomes
+//! `1`. The `l` typed against the frame with count `0` is dropped, and the
+//! first key tagged `1` reaches pane 4. A first attach starts the count at
+//! `0`. An attach after a lost connection continues the count of the frame
+//! its viewer's screen still shows, plus `1` when that frame's typed pane is
+//! not the pane that takes the input (`Server::subscribe`).
 
 use crate::server::Server;
 use koshi_core::ids::{ClientId, PaneId};

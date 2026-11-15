@@ -27,6 +27,7 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::notification::NotificationSource;
+use koshi_ipc::protocol::FiredAction;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::placement::{PlacementTabSizes, SwapTabSizes};
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
@@ -41,6 +42,7 @@ use koshi_renderer::snapshot::{
 use koshi_test_support::fixtures::build_floating_pane_id;
 
 use super::*;
+use crate::input::InputReadStamp;
 
 pub(crate) use koshi_test_support::fixtures::build_key_input_for_chord;
 
@@ -153,6 +155,25 @@ pub(crate) fn build_core_bound_action(action_name: &str) -> BoundAction {
     BoundAction {
         action_reference: ActionReference::from_core_action_name(action_name)
             .expect("valid core action name"),
+    }
+}
+
+/// The core action `action_name` as a key fires it against a screen whose
+/// frame carries the move count `0`.
+pub(crate) fn build_core_fired_action(action_name: &str) -> FiredAction {
+    FiredAction {
+        action_reference: ActionReference::from_core_action_name(action_name)
+            .expect("valid core action name"),
+        painted_input_pane_moved_by_others_count: 0,
+    }
+}
+
+/// The stamp of a read at `read_at` against a screen whose frame carries the
+/// move count `0`.
+pub(crate) fn build_input_read_stamp(read_at: Instant) -> InputReadStamp {
+    InputReadStamp {
+        read_at,
+        painted_input_pane_moved_by_others_count: 0,
     }
 }
 
@@ -621,7 +642,7 @@ fn an_unavailable_preview_waits_for_the_answer_to_a_confirmation_then_ends_the_m
         Some(placement_target)
     );
 
-    client.reject_sent_command(command_id, None);
+    client.reject_sent_command(command_id);
 
     assert_eq!(client.placement_state.placement_mode, None);
     assert!(!client.is_placement_confirmation_pending());
@@ -701,7 +722,7 @@ fn a_frame_naming_another_placement_keeps_the_confirmation_until_the_session_rej
     );
     assert!(!client.placement_state.needs_placement_reconciliation);
 
-    client.reject_sent_command(command_id, None);
+    client.reject_sent_command(command_id);
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
@@ -1192,6 +1213,7 @@ fn build_client_with_submitted_placement(
         ),
         ambiguity_deadline: None,
         continuation_hint_hidden_until: None,
+        painted_input_pane_moved_by_others_count: 0,
     });
     client
 }
@@ -1257,7 +1279,8 @@ fn a_tab_hover_asks_for_no_wakeup_while_an_input_event_is_on_its_way() {
 
     let read_at = client
         .get_input_read_clock()
-        .stamp_input_read(Instant::now());
+        .stamp_input_read(Instant::now(), 0)
+        .read_at;
 
     assert_eq!(
         client.compute_next_placement_tab_hover_wakeup(hover_started_at),
@@ -1426,7 +1449,7 @@ fn a_rejected_keyboard_placement_keeps_pane_placement_mode_when_staying_is_off()
         .should_stay_in_pane_placement_mode_after_placement = false;
     record_pending_placement_command(&mut client, command_id);
 
-    client.reject_sent_command(command_id, None);
+    client.reject_sent_command(command_id);
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_placement_target(), None);
@@ -1453,7 +1476,7 @@ fn a_rejected_keyboard_placement_selects_the_whole_tab_of_the_held_preview() {
     placement_mode.pending_placement_command_id = Some(command_id);
     hold_placement_snapshot(&mut client, placement_snapshot);
 
-    client.reject_sent_command(command_id, None);
+    client.reject_sent_command(command_id);
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
@@ -1481,7 +1504,7 @@ fn rejected_mouse_placement_returns_to_the_base_mode() {
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
 
-    client.reject_sent_command(command_id, None);
+    client.reject_sent_command(command_id);
     assert!(!client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::Locked);
     assert!(client.placement_state.placement_mode.is_none());
@@ -1504,7 +1527,7 @@ fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
 
-    client.reject_sent_command(CommandId::new(), None);
+    client.reject_sent_command(CommandId::new());
     assert!(client.is_placement_confirmation_pending());
     assert_eq!(
         client.get_placement_target().cloned(),
@@ -1557,7 +1580,7 @@ pub(crate) fn build_render_snapshot(
             focused_pane_id: None,
             active_tab_focused_pane_id: None,
             lock_mode,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled,
@@ -1823,7 +1846,7 @@ fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
     // sequence.
     client.resolve_key(
         KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-        Instant::now(),
+        build_input_read_stamp(Instant::now()),
     );
     assert_eq!(
         client.get_pending_key_sequence(),
@@ -1942,7 +1965,7 @@ fn a_refused_keybinding_file_leaves_an_open_sequence_alone() {
     let mut client = build_test_client();
     client.resolve_key(
         KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
-        Instant::now(),
+        build_input_read_stamp(Instant::now()),
     );
 
     client.load_startup_config(
@@ -2612,9 +2635,9 @@ fn a_viewer_with_no_link_reads_keys_with_its_base_keymap_while_a_placement_waits
     assert_eq!(
         client.resolve_key(
             KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('q')),
-            Instant::now(),
+            build_input_read_stamp(Instant::now()),
         ),
-        crate::input::KeyOutcome::Fire(build_core_bound_action("quit"))
+        crate::input::KeyOutcome::Fire(build_core_fired_action("quit"))
     );
     assert!(
         client.is_placement_confirmation_pending(),
@@ -2651,7 +2674,7 @@ fn a_frame_that_does_not_name_the_pending_lock_command_leaves_the_lock_mode_the_
 
     unanswered_snapshot
         .client_snapshot
-        .last_applied_lock_command_id = Some(CommandId::new());
+        .last_settled_lock_command_id = Some(CommandId::new());
     client.apply_render_snapshot(&unanswered_snapshot);
 
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -2669,7 +2692,7 @@ fn the_frame_that_names_the_pending_lock_command_sets_the_lock_mode_and_ends_the
     let mut answering_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
     answering_snapshot
         .client_snapshot
-        .last_applied_lock_command_id = Some(lock_command_id);
+        .last_settled_lock_command_id = Some(lock_command_id);
     client.apply_render_snapshot(&answering_snapshot);
 
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
@@ -2806,7 +2829,7 @@ fn a_rejected_paint_puts_back_the_lock_command_the_viewer_waited_for() {
     let mut answering_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
     answering_snapshot
         .client_snapshot
-        .last_applied_lock_command_id = Some(lock_command_id);
+        .last_settled_lock_command_id = Some(lock_command_id);
     client.apply_render_snapshot(&answering_snapshot);
     assert_eq!(client.get_pending_lock_command_id(), None);
 
@@ -2847,60 +2870,79 @@ fn build_dropped_input_warning_entry(
     )
 }
 
-/// A frame with input pane move count `4` and typed pane 3 sets both. A
-/// second frame with count `6` and no typed pane, whose paint is rejected,
-/// puts them back.
+/// A painted input view with no typed pane, move count `0` and
+/// `dropped_input_request_count`.
+fn build_painted_input_view(dropped_input_request_count: u64) -> PaintedInputView {
+    PaintedInputView {
+        typed_pane_id: None,
+        input_pane_moved_by_others_count: 0,
+        dropped_input_request_count,
+    }
+}
+
+/// Recording a painted frame with typed pane 3 and move count `4` stores that
+/// view, and the input read clock holds the move count `4` that tags the next
+/// read of the terminal.
 #[test]
-fn a_painted_frame_sets_the_move_count_and_the_typed_pane_and_a_rejected_paint_puts_both_back() {
+fn a_recorded_painted_input_view_is_stored_and_the_clock_holds_its_move_count() {
+    let mut client = build_test_client();
+    assert_eq!(
+        (
+            client.get_painted_input_view(),
+            client
+                .get_input_read_clock()
+                .get_painted_input_pane_moved_by_others_count()
+        ),
+        (None, 0)
+    );
+    let painted_input_view = PaintedInputView {
+        typed_pane_id: Some(PaneId::new()),
+        input_pane_moved_by_others_count: 4,
+        dropped_input_request_count: 0,
+    };
+
+    client.record_painted_input_view(painted_input_view, SystemTime::UNIX_EPOCH);
+
+    assert_eq!(client.get_painted_input_view(), Some(painted_input_view));
+    assert_eq!(
+        client
+            .get_input_read_clock()
+            .get_painted_input_pane_moved_by_others_count(),
+        4
+    );
+}
+
+/// A frame with move count `6` and dropped count `2` that is applied and
+/// never painted leaves the recorded view, the read tag `4` and the
+/// notification queue as they were.
+#[test]
+fn an_applied_frame_that_is_not_painted_leaves_the_painted_input_view_and_the_read_tag() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let third_pane_id = PaneId::new();
-    assert_eq!(
-        (
-            client.get_painted_input_pane_moved_by_others_count(),
-            client.get_painted_typed_pane()
-        ),
-        (0, None)
-    );
-    let mut first_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
-    first_snapshot
-        .client_snapshot
-        .input_pane_moved_by_others_count = 4;
-    first_snapshot.client_snapshot.typed_pane_id = Some(third_pane_id);
-    client.apply_render_snapshot(&first_snapshot);
-    let viewer_restore_point = client.build_viewer_restore_point();
-    let mut rejected_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
-    rejected_snapshot
+    let painted_input_view = PaintedInputView {
+        typed_pane_id: Some(PaneId::new()),
+        input_pane_moved_by_others_count: 4,
+        dropped_input_request_count: 0,
+    };
+    client.record_painted_input_view(painted_input_view, SystemTime::UNIX_EPOCH);
+    let mut unpainted_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
+    unpainted_snapshot
         .client_snapshot
         .input_pane_moved_by_others_count = 6;
+    unpainted_snapshot
+        .client_snapshot
+        .dropped_input_request_count = 2;
 
-    client.apply_render_snapshot(&rejected_snapshot);
-    assert_eq!(
-        (
-            client.get_painted_input_pane_moved_by_others_count(),
-            client.get_painted_typed_pane()
-        ),
-        (
-            6,
-            Some(PaintedTypedPane {
-                typed_pane_id: None
-            })
-        )
-    );
-    client.restore_viewer(viewer_restore_point);
+    client.apply_render_snapshot(&unpainted_snapshot);
 
+    assert_eq!(client.get_painted_input_view(), Some(painted_input_view));
     assert_eq!(
-        (
-            client.get_painted_input_pane_moved_by_others_count(),
-            client.get_painted_typed_pane()
-        ),
-        (
-            4,
-            Some(PaintedTypedPane {
-                typed_pane_id: Some(third_pane_id)
-            })
-        )
+        client
+            .get_input_read_clock()
+            .get_painted_input_pane_moved_by_others_count(),
+        4
     );
+    assert_eq!(list_notification_entries(&client), Vec::new());
 }
 
 /// Frames carrying dropped counts `0, 5, 5, 6` post nothing, then one
@@ -2911,8 +2953,8 @@ fn a_dropped_request_count_that_rises_posts_one_merged_warning_per_dropped_reque
     let mut entries_after_each_frame = Vec::new();
 
     for dropped_input_request_count in [0, 5, 5, 6] {
-        client.update_dropped_input_request_count(
-            dropped_input_request_count,
+        client.record_painted_input_view(
+            build_painted_input_view(dropped_input_request_count),
             SystemTime::UNIX_EPOCH,
         );
         entries_after_each_frame.push(list_notification_entries(&client));
@@ -2938,8 +2980,8 @@ fn a_dropped_request_count_that_rises_past_u32_max_posts_a_warning_repeated_u32_
     let mut entries_after_each_frame = Vec::new();
 
     for dropped_input_request_count in [u64::from(u32::MAX) + 7, u64::from(u32::MAX) + 9] {
-        client.update_dropped_input_request_count(
-            dropped_input_request_count,
+        client.record_painted_input_view(
+            build_painted_input_view(dropped_input_request_count),
             SystemTime::UNIX_EPOCH,
         );
         entries_after_each_frame.push(list_notification_entries(&client));
@@ -2954,74 +2996,29 @@ fn a_dropped_request_count_that_rises_past_u32_max_posts_a_warning_repeated_u32_
     );
 }
 
-/// A connection counted move `4` and `3` drops, and the next connection
-/// starts again: the painted move count reads `0`, the typed pane of the
-/// screen stays, and that connection's `2` drops post 2 more warnings.
+/// `<C-l>` shows `Locked` and its command is refused: the viewer keeps
+/// `Locked` and waits for that command until a frame names it settled, then
+/// shows that frame's `Normal`.
 #[test]
-fn cleared_painted_counts_start_a_new_connection_from_zero_and_keep_the_painted_typed_pane() {
+fn a_rejected_lock_command_waits_for_the_frame_that_names_it_settled() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let pane_id = PaneId::new();
-    let mut painted_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
-    painted_snapshot
-        .client_snapshot
-        .input_pane_moved_by_others_count = 4;
-    painted_snapshot.client_snapshot.typed_pane_id = Some(pane_id);
-    client.apply_render_snapshot(&painted_snapshot);
-    client.update_dropped_input_request_count(3, SystemTime::UNIX_EPOCH);
-
-    client.clear_painted_input_counts();
-    client.update_dropped_input_request_count(2, SystemTime::UNIX_EPOCH);
-
-    assert_eq!(
-        (
-            client.get_painted_input_pane_moved_by_others_count(),
-            client.get_painted_typed_pane()
-        ),
-        (
-            0,
-            Some(PaintedTypedPane {
-                typed_pane_id: Some(pane_id)
-            })
-        )
-    );
-    assert_eq!(
-        list_notification_entries(&client),
-        vec![build_dropped_input_warning_entry(5)]
-    );
-}
-
-/// `<C-l>` shows `Locked` and its command is refused: the viewer shows the
-/// `Normal` of the newest painted frame and waits for no lock command.
-#[test]
-fn a_rejected_lock_command_shows_the_lock_mode_of_the_newest_painted_frame() {
-    let mut client = build_test_client();
     let lock_command_id = CommandId::new();
     client.apply_lock_command(lock_command_id, LockMode::Locked);
 
-    client.reject_sent_command(lock_command_id, Some(LockMode::Normal));
+    client.reject_sent_command(lock_command_id);
+    assert_eq!(
+        (client.get_lock_mode(), client.get_pending_lock_command_id()),
+        (LockMode::Locked, Some(lock_command_id))
+    );
+    let mut settling_snapshot = build_render_snapshot(client_id, LockMode::Normal, false);
+    settling_snapshot
+        .client_snapshot
+        .last_settled_lock_command_id = Some(lock_command_id);
+    client.apply_render_snapshot(&settling_snapshot);
 
     assert_eq!(
         (client.get_lock_mode(), client.get_pending_lock_command_id()),
         (LockMode::Normal, None)
     );
-}
-
-/// With no painted frame, a refused lock command leaves `Locked` shown and
-/// waits for no lock command; the next frame's `Normal` is then taken.
-#[test]
-fn a_rejected_lock_command_with_no_painted_frame_takes_the_next_frames_lock_mode() {
-    let mut client = build_test_client();
-    let client_id = client.get_client_id();
-    let lock_command_id = CommandId::new();
-    client.apply_lock_command(lock_command_id, LockMode::Locked);
-
-    client.reject_sent_command(lock_command_id, None);
-    assert_eq!(
-        (client.get_lock_mode(), client.get_pending_lock_command_id()),
-        (LockMode::Locked, None)
-    );
-    client.apply_render_snapshot(&build_render_snapshot(client_id, LockMode::Normal, false));
-
-    assert_eq!(client.get_lock_mode(), LockMode::Normal);
 }

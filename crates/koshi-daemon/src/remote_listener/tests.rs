@@ -2228,7 +2228,7 @@ mod bridge_round_trip {
                     link_timeout_ms,
                     max_frames_per_second: 60,
                     placement_preview_target: None,
-                    painted_typed_pane: None,
+                    painted_input_view: None,
                 },
             },
         );

@@ -7,7 +7,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use koshi_input::host::{Event, Parser, WindowSize};
+use koshi_input::host::{Event, Parser, TaggedEvent, WindowSize};
 use windows_sys::Win32::Foundation::{HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Storage::FileSystem::WriteFile;
 use windows_sys::Win32::System::Console::{
@@ -27,6 +27,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VkKeyScanW, VK_MENU};
 use super::{
     choose_shorter_timeout_duration, ESCAPE_SEQUENCE_TIMEOUT_DURATION, OUTPUT_BUFFER_BYTE_COUNT,
 };
+use crate::input::InputReadClock;
 use crate::terminal::{limit_window_size, reader};
 
 const CP_UTF8: u32 = 65_001;
@@ -164,7 +165,9 @@ pub(crate) struct EventSource {
     terminal_window_size_handle: ConsoleHandle,
     terminal_input_parser: Parser,
     terminal_wake_event: Arc<TerminalWakeEventHandle>,
-    pending_high_surrogate: Option<u16>,
+    /// The high surrogate that ended the last console read, and the move count
+    /// that read was tagged with.
+    pending_high_surrogate: Option<(u16, u64)>,
     input_sequence_started_at: Option<Instant>,
     last_reported_window_size: WindowSize,
     next_resize_check_instant: Instant,
@@ -200,7 +203,7 @@ impl EventSource {
     /// read, read the waiting characters into the parser. Otherwise remove
     /// every record it looked at and read nothing. Example: a focus record and
     /// a menu record are removed, and the next wait sees an empty buffer.
-    fn process_console_input(&mut self) -> io::Result<()> {
+    fn process_console_input(&mut self, input_read_clock: &InputReadClock) -> io::Result<()> {
         let mut input_records = [INPUT_RECORD::default(); PEEKED_INPUT_RECORD_COUNT];
         let mut peeked_record_count = 0_u32;
         // SAFETY: `terminal_input_handle` is an open console input handle.
@@ -227,7 +230,7 @@ impl EventSource {
             .iter()
             .any(|input_record| has_input_record_character(input_record, nul_key_scan))
         {
-            return self.process_terminal_input_characters();
+            return self.process_terminal_input_characters(input_read_clock);
         }
         let mut removed_record_count = 0_u32;
         // SAFETY: `input_records` holds `PEEKED_INPUT_RECORD_COUNT` writable
@@ -249,12 +252,17 @@ impl EventSource {
     }
 
     /// Read up to [`TERMINAL_INPUT_UNIT_COUNT`] UTF-16 units from the console
-    /// and hand them to the parser as UTF-8. A high surrogate that ends the
-    /// read waits for the unit that starts the next read; an unpaired
-    /// surrogate becomes U+FFFD. Example: the units `0xD83D` and `0xDE00`
-    /// reach the parser as the bytes `F0 9F 98 80`, even when a read ends
-    /// between them.
-    fn process_terminal_input_characters(&mut self) -> io::Result<()> {
+    /// and hand them to the parser as UTF-8, tagged with the move count
+    /// `input_read_clock` holds once the read returns. A high surrogate that
+    /// ends the read waits for the unit that starts the next read, and the
+    /// character they make carries the move count of the read that held the
+    /// high surrogate; an unpaired surrogate becomes U+FFFD. Example: the
+    /// units `0xD83D` and `0xDE00` reach the parser as the bytes
+    /// `F0 9F 98 80`, even when a read ends between them.
+    fn process_terminal_input_characters(
+        &mut self,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<()> {
         let mut terminal_input_units = [0_u16; TERMINAL_INPUT_UNIT_COUNT];
         let mut terminal_input_unit_count = 0_u32;
         // SAFETY: `terminal_input_units` holds `TERMINAL_INPUT_UNIT_COUNT` writable
@@ -278,6 +286,8 @@ impl EventSource {
                 "terminal input reached end-of-file",
             ));
         }
+        let painted_input_pane_moved_by_others_count =
+            input_read_clock.get_painted_input_pane_moved_by_others_count();
         let read_units = &terminal_input_units[..terminal_input_unit_count as usize];
         let (decoded_units, trailing_high_surrogate) = match read_units.split_last() {
             Some((&last_unit, leading_units)) if (0xD800..=0xDBFF).contains(&last_unit) => {
@@ -285,17 +295,29 @@ impl EventSource {
             }
             _ => (read_units, None),
         };
-        let terminal_input_text: String = char::decode_utf16(
-            self.pending_high_surrogate
-                .take()
+        let pending_high_surrogate = self.pending_high_surrogate.take();
+        let mut decoded_characters = char::decode_utf16(
+            pending_high_surrogate
+                .map(|(high_surrogate, _)| high_surrogate)
                 .into_iter()
                 .chain(decoded_units.iter().copied()),
         )
-        .map(|decoded_character| decoded_character.unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect();
-        self.pending_high_surrogate = trailing_high_surrogate;
-        self.terminal_input_parser
-            .process_input_bytes(terminal_input_text.as_bytes());
+        .map(|decoded_character| decoded_character.unwrap_or(char::REPLACEMENT_CHARACTER));
+        if let Some((_, high_surrogate_input_tag)) = pending_high_surrogate {
+            if let Some(first_character) = decoded_characters.next() {
+                self.terminal_input_parser.process_input_bytes(
+                    first_character.encode_utf8(&mut [0_u8; 4]).as_bytes(),
+                    high_surrogate_input_tag,
+                );
+            }
+        }
+        let terminal_input_text: String = decoded_characters.collect();
+        self.pending_high_surrogate = trailing_high_surrogate
+            .map(|high_surrogate| (high_surrogate, painted_input_pane_moved_by_others_count));
+        self.terminal_input_parser.process_input_bytes(
+            terminal_input_text.as_bytes(),
+            painted_input_pane_moved_by_others_count,
+        );
         self.input_sequence_started_at = self
             .terminal_input_parser
             .needs_input_sequence_timeout()
@@ -303,19 +325,31 @@ impl EventSource {
         Ok(())
     }
 
-    fn build_resize_event_if_window_size_changed(&mut self) -> io::Result<Option<Event>> {
+    /// A resize event tagged with the move count `input_read_clock` holds, when
+    /// the console window size differs from the last one reported.
+    fn build_resize_event_if_window_size_changed(
+        &mut self,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<Option<TaggedEvent>> {
         self.next_resize_check_instant = Instant::now() + RESIZE_POLL_INTERVAL_DURATION;
         let current_terminal_window_size = self.terminal_window_size_handle.read_window_size()?;
         if current_terminal_window_size == self.last_reported_window_size {
             return Ok(None);
         }
         self.last_reported_window_size = current_terminal_window_size;
-        Ok(Some(Event::WindowResized(current_terminal_window_size)))
+        Ok(Some(TaggedEvent {
+            event: Event::WindowResized(current_terminal_window_size),
+            input_tag: input_read_clock.get_painted_input_pane_moved_by_others_count(),
+        }))
     }
 }
 
 impl reader::EventSource for EventSource {
-    fn try_read_event(&mut self, timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
+    fn try_read_event(
+        &mut self,
+        timeout_duration: Option<Duration>,
+        input_read_clock: &InputReadClock,
+    ) -> io::Result<Option<TaggedEvent>> {
         let event_wait_deadline_instant =
             timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
         loop {
@@ -326,7 +360,7 @@ impl reader::EventSource for EventSource {
             }
             if Instant::now() >= self.next_resize_check_instant {
                 if let Some(terminal_resize_event) =
-                    self.build_resize_event_if_window_size_changed()?
+                    self.build_resize_event_if_window_size_changed(input_read_clock)?
                 {
                     return Ok(Some(terminal_resize_event));
                 }
@@ -374,7 +408,7 @@ impl reader::EventSource for EventSource {
                     ));
                 }
                 terminal_wait_result if terminal_wait_result == WAIT_OBJECT_0 + 1 => {
-                    self.process_console_input()?;
+                    self.process_console_input(input_read_clock)?;
                     continue;
                 }
                 WAIT_TIMEOUT => {}
@@ -403,7 +437,7 @@ impl reader::EventSource for EventSource {
         }
     }
 
-    fn remove_next_parsed_event(&mut self) -> Option<Event> {
+    fn remove_next_parsed_event(&mut self) -> Option<TaggedEvent> {
         self.terminal_input_parser.remove_next_pending_event()
     }
 }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{
     build_server_with_fake_pty_backend, create_session_with_attached_client, TEST_VIEWPORT_SIZE,
 };
-use koshi_client::input::KeyOutcome;
+use koshi_client::input::{InputReadStamp, KeyOutcome};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
@@ -96,7 +96,11 @@ fn typed_keys_write_to_the_focused_pane() {
     );
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
         let key_chord = KeyChord::from_parts(BindingModifierFlags::NONE, key);
-        match viewer.resolve_key(key_chord, Instant::now()) {
+        let input_read_stamp = InputReadStamp {
+            read_at: Instant::now(),
+            painted_input_pane_moved_by_others_count: 0,
+        };
+        match viewer.resolve_key(key_chord, input_read_stamp) {
             KeyOutcome::PassThrough(passthrough_key_chord) => {
                 server.handle_key_inputs(
                     client_id,

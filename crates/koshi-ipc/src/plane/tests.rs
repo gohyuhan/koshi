@@ -757,7 +757,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                     link_timeout_ms: None,
                     max_frames_per_second: 60,
                     placement_preview_target: None,
-                    painted_typed_pane: None,
+                    painted_input_view: None,
                 },
             })
             .expect("send attach");
@@ -779,7 +779,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                         link_timeout_ms: None,
                         max_frames_per_second: 60,
                         placement_preview_target: None,
-                        painted_typed_pane: None,
+                        painted_input_view: None,
                     },
                 },
                 RequestDisposition::Stop,

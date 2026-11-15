@@ -11,7 +11,10 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use koshi_core::command::{Command, CommandResult, CommandSource, FocusPaneArgs, FocusTarget};
+use koshi_core::command::{
+    Command, CommandResult, CommandSource, FocusPaneArgs, FocusTarget, LockModeArgs,
+    ToggleLockModeArgs,
+};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::process::KillPolicy;
@@ -285,7 +288,9 @@ impl Server {
             // found none, goes back as nothing. A command from a key binding
             // typed against a frame older than the last move of the client's
             // input pane by others does not run, and goes back rejected with
-            // `RejectReason::ViewChanged`.
+            // `RejectReason::ViewChanged`. A rejected lock command from a key
+            // binding that names no other client becomes that client's last
+            // settled lock command, which its next frame carries.
             RuntimeEvent::Ipc {
                 command_envelope,
                 fired_action,
@@ -309,6 +314,13 @@ impl Server {
                         ..
                     })
                 );
+                let is_own_lock_command = match &command_envelope.command {
+                    Command::SetLockMode(LockModeArgs { client_id, .. })
+                    | Command::ToggleLockMode(ToggleLockModeArgs { client_id }) => {
+                        client_id.is_none() || *client_id == key_binding_client_id
+                    }
+                    _ => false,
+                };
                 let is_stale_key_binding_command = match (key_binding_client_id, &fired_action) {
                     (Some(client_id), Some(fired_action)) => self.is_input_stale(
                         client_id,
@@ -334,6 +346,11 @@ impl Server {
                     },
                 ) = (key_binding_client_id, &command_result)
                 {
+                    if is_own_lock_command {
+                        if let Some(client) = self.get_client_mut(client_id) {
+                            client.set_last_settled_lock_command_id(*command_id);
+                        }
+                    }
                     if !(has_directional_target && *reason == RejectReason::TargetNotFound) {
                         self.send_command_rejection(
                             client_id,
@@ -359,7 +376,7 @@ impl Server {
                 granted_identity,
                 max_frames_per_second,
                 placement_preview_target,
-                painted_typed_pane,
+                painted_input_view,
                 response_sender,
             } => {
                 // The client and its subscription are registered together here:
@@ -376,7 +393,7 @@ impl Server {
                     granted_identity.as_deref(),
                     max_frames_per_second,
                     placement_preview_target,
-                    painted_typed_pane,
+                    painted_input_view,
                 ));
             }
             RuntimeEvent::IpcDiscovery { response_sender } => {

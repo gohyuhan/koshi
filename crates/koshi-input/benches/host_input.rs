@@ -29,7 +29,7 @@ fn measure_parser(input_bytes: &[u8]) -> (Duration, usize) {
     let start_instant = Instant::now();
     let mut parsed_event_count = 0usize;
     for _ in 0..EVENT_COUNT_PER_CASE {
-        parser.process_input_bytes(black_box(input_bytes));
+        parser.process_input_bytes(black_box(input_bytes), 0);
         while parser.remove_next_pending_event().is_some() {
             parsed_event_count += 1;
         }

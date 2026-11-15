@@ -26,7 +26,7 @@ use koshi_image::{AnimationFrame, FrameDelay, LoopPolicy};
 use koshi_ipc::image_chunk::IMAGE_CHUNK_FRAME_HEAD_BYTE_COUNT;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    FiredAction, GraphicsCapabilities, IpcRequest, PaintedTypedPane, WireMouseAction,
+    FiredAction, GraphicsCapabilities, IpcRequest, PaintedInputView, WireMouseAction,
     MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::ReceivedFrame;
@@ -256,7 +256,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             focused_pane_id: Some(pane_id),
             active_tab_focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
-            last_applied_lock_command_id: None,
+            last_settled_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
             typed_pane_id: None,
@@ -1299,7 +1299,7 @@ fn build_attach_request(
             link_timeout_ms,
             max_frames_per_second: 60,
             placement_preview_target: None,
-            painted_typed_pane: None,
+            painted_input_view: None,
         },
     }
 }
@@ -1343,7 +1343,7 @@ fn attach_test_client_with_graphics(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
-                painted_typed_pane: None,
+                painted_input_view: None,
             },
         },
     );
@@ -1365,7 +1365,7 @@ fn attach_test_client_with_graphics(
 }
 
 #[test]
-fn an_attach_forwards_its_initial_cell_measurement_and_painted_typed_pane_before_the_session_reply()
+fn an_attach_forwards_its_initial_cell_measurement_and_painted_input_view_before_the_session_reply()
 {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
@@ -1387,8 +1387,10 @@ fn an_attach_forwards_its_initial_cell_measurement_and_painted_typed_pane_before
     let _: IpcResponse = connection.recv().expect("hello reply");
     let measured_cell_size =
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
-    let painted_typed_pane = PaintedTypedPane {
+    let painted_input_view = PaintedInputView {
         typed_pane_id: Some(PaneId::new()),
+        input_pane_moved_by_others_count: 4,
+        dropped_input_request_count: 2,
     };
     send_prepare_request(
         &mut connection,
@@ -1404,7 +1406,7 @@ fn an_attach_forwards_its_initial_cell_measurement_and_painted_typed_pane_before
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
-                painted_typed_pane: Some(painted_typed_pane),
+                painted_input_view: Some(painted_input_view),
             },
         },
     );
@@ -1413,7 +1415,7 @@ fn an_attach_forwards_its_initial_cell_measurement_and_painted_typed_pane_before
 
     let RuntimeEvent::IpcAttach {
         cell_size,
-        painted_typed_pane: forwarded_painted_typed_pane,
+        painted_input_view: forwarded_painted_input_view,
         response_sender,
         ..
     } = inbox_receiver
@@ -1423,8 +1425,8 @@ fn an_attach_forwards_its_initial_cell_measurement_and_painted_typed_pane_before
         panic!("expected IpcAttach");
     };
     assert_eq!(
-        (cell_size, forwarded_painted_typed_pane),
-        (Some(measured_cell_size), Some(painted_typed_pane))
+        (cell_size, forwarded_painted_input_view),
+        (Some(measured_cell_size), Some(painted_input_view))
     );
     let (delivery_sender, delivery_receiver) = create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
     response_sender
@@ -7728,7 +7730,7 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
                 link_timeout_ms: Some(link_timeout_ms),
                 max_frames_per_second: 60,
                 placement_preview_target: None,
-                painted_typed_pane: None,
+                painted_input_view: None,
             },
         };
 
@@ -7787,7 +7789,7 @@ fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_k
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
-            painted_typed_pane: None,
+            painted_input_view: None,
         },
     };
 
@@ -7872,7 +7874,7 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
                 link_timeout_ms: None,
                 max_frames_per_second,
                 placement_preview_target: None,
-                painted_typed_pane: None,
+                painted_input_view: None,
             },
         };
 
