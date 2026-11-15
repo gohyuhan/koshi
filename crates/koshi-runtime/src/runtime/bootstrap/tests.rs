@@ -80,6 +80,7 @@ fn attach_test_client(
             None,
             60,
             None,
+            None,
         )
         .expect("the session accepts the attach")
 }

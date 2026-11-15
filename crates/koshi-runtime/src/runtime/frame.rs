@@ -131,6 +131,9 @@ pub(crate) fn build_wire_frame_with_content_ids(
                 .last_applied_floating_pane_move_command_id,
             last_applied_placement_command_id: client_snapshot.last_applied_placement_command_id,
             is_mouse_selection_enabled: client_snapshot.is_mouse_selection_enabled,
+            typed_pane_id: client_snapshot.typed_pane_id,
+            input_pane_moved_by_others_count: client_snapshot.input_pane_moved_by_others_count,
+            dropped_input_request_count: client_snapshot.dropped_input_request_count,
         },
     }
 }

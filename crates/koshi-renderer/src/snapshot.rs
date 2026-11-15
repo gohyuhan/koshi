@@ -1990,6 +1990,22 @@ pub struct ClientSnapshot {
     /// reads it off a painted frame to decide whether a press in a mouse-aware
     /// pane begins a highlight.
     pub is_mouse_selection_enabled: bool,
+    /// The pane a keystroke from the client types into as this frame shows
+    /// it: [`focused_pane_id`](Self::focused_pane_id) when this frame draws
+    /// that pane's content. `None` when the client focuses no pane, and when
+    /// that pane is suppressed for want of space or hidden behind a zoomed
+    /// pane. The viewer names it when it attaches again.
+    pub typed_pane_id: Option<PaneId>,
+    /// How many times on this connection something other than the client's
+    /// own connection moved the client's input to another pane, or to no
+    /// pane, from `1` on an attach whose screen showed another typed pane,
+    /// else from `0`. The viewer tags each key, paste and key-fired command
+    /// with the count of the last frame it drew.
+    pub input_pane_moved_by_others_count: u64,
+    /// How many key and paste requests of this connection the session dropped
+    /// for a tag below `input_pane_moved_by_others_count`. The viewer posts one
+    /// warning for each one this count rises by.
+    pub dropped_input_request_count: u64,
 }
 
 #[cfg(test)]

@@ -247,6 +247,25 @@ pub struct Client {
     /// after the session restarts: the resume file does not carry it.
     #[serde(skip)]
     last_applied_placement_command_id: Option<CommandId>,
+    /// The pane that took this client's input when the runtime last checked
+    /// it ([`start_connection_input_counts`](Self::start_connection_input_counts),
+    /// [`update_checked_typed_pane`](Self::update_checked_typed_pane)), or
+    /// `None` when no pane took it. The resume file does not carry it.
+    #[serde(skip)]
+    checked_typed_pane_id: Option<PaneId>,
+    /// How many checks on this client's connection found its input moved to
+    /// another pane, or to no pane, by something other than that connection.
+    /// Starts at `0` or `1` with each connection
+    /// ([`start_connection_input_counts`](Self::start_connection_input_counts)).
+    /// The resume file does not carry it.
+    #[serde(skip)]
+    input_pane_moved_by_others_count: u64,
+    /// How many key and paste requests on this client's connection the
+    /// session dropped: each one typed against a frame older than the last
+    /// move that `input_pane_moved_by_others_count` counts. Starts at `0` with
+    /// each connection. The resume file does not carry it.
+    #[serde(skip)]
+    dropped_input_request_count: u64,
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
@@ -353,6 +372,9 @@ impl Client {
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
+            checked_typed_pane_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
             is_mouse_selection_enabled: false,
             scroll_offset_by_pane_id: HashMap::new(),
             selection_by_pane_id: HashMap::new(),
@@ -681,6 +703,84 @@ impl Client {
         self.is_view_changed |=
             self.last_applied_placement_command_id != Some(placement_command_id);
         self.last_applied_placement_command_id = Some(placement_command_id);
+    }
+
+    /// How many checks on this client's connection found its input moved to
+    /// another pane, or to no pane, by something other than that connection.
+    #[must_use]
+    pub fn get_input_pane_moved_by_others_count(&self) -> u64 {
+        self.input_pane_moved_by_others_count
+    }
+
+    /// The pane that takes this client's input as the last check recorded
+    /// it: [`start_connection_input_counts`](Self::start_connection_input_counts)
+    /// or [`update_checked_typed_pane`](Self::update_checked_typed_pane).
+    /// `None` before the first check, and when no pane takes the input.
+    #[must_use]
+    pub fn get_checked_typed_pane_id(&self) -> Option<PaneId> {
+        self.checked_typed_pane_id
+    }
+
+    /// Start the input counts of a new connection: record `typed_pane_id` as
+    /// the checked pane, and set
+    /// [`get_dropped_input_request_count`](Self::get_dropped_input_request_count)
+    /// to `0`.
+    /// [`get_input_pane_moved_by_others_count`](Self::get_input_pane_moved_by_others_count)
+    /// starts at `1` when `is_typed_pane_changed_since_painted_frame` is
+    /// `true`, and at `0` otherwise. Marks no view change.
+    ///
+    /// Example: the viewer's screen showed pane 3, and pane 4 takes the input
+    /// when it attaches again: `start_connection_input_counts(Some(4), true)`
+    /// sets the count to `1`.
+    pub fn start_connection_input_counts(
+        &mut self,
+        typed_pane_id: Option<PaneId>,
+        is_typed_pane_changed_since_painted_frame: bool,
+    ) {
+        self.checked_typed_pane_id = typed_pane_id;
+        self.input_pane_moved_by_others_count =
+            u64::from(is_typed_pane_changed_since_painted_frame);
+        self.dropped_input_request_count = 0;
+    }
+
+    /// Record `typed_pane_id` as the pane that takes this client's input now.
+    /// When it differs from the pane the last check recorded and
+    /// `is_moved_by_others` is `true`, add one to
+    /// [`get_input_pane_moved_by_others_count`](Self::get_input_pane_moved_by_others_count).
+    /// Marks no view change. Call it only for a client whose view already
+    /// changed.
+    ///
+    /// Example: a check recorded pane 3, another client closes pane 3, and
+    /// this client's input moves to pane 4: `update_checked_typed_pane(Some(4),
+    /// true)` raises the count from `0` to `1`. The same call with `false`
+    /// records pane 4 and leaves the count at `0`.
+    pub fn update_checked_typed_pane(
+        &mut self,
+        typed_pane_id: Option<PaneId>,
+        is_moved_by_others: bool,
+    ) {
+        if self.checked_typed_pane_id == typed_pane_id {
+            return;
+        }
+        self.checked_typed_pane_id = typed_pane_id;
+        if is_moved_by_others {
+            self.input_pane_moved_by_others_count += 1;
+        }
+    }
+
+    /// How many key and paste requests on this client's connection the
+    /// session dropped.
+    #[must_use]
+    pub fn get_dropped_input_request_count(&self) -> u64 {
+        self.dropped_input_request_count
+    }
+
+    /// Add one to
+    /// [`get_dropped_input_request_count`](Self::get_dropped_input_request_count),
+    /// and mark this client's view changed.
+    pub fn record_dropped_input_request(&mut self) {
+        self.is_view_changed = true;
+        self.dropped_input_request_count += 1;
     }
 
     /// Whether this client grabs the mouse for text selection.

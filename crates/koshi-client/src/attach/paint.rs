@@ -164,6 +164,11 @@ fn build_render_snapshot_with_images(
                 .client_snapshot
                 .last_applied_placement_command_id,
             is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
+            typed_pane_id: painted_frame.client_snapshot.typed_pane_id,
+            input_pane_moved_by_others_count: painted_frame
+                .client_snapshot
+                .input_pane_moved_by_others_count,
+            dropped_input_request_count: painted_frame.client_snapshot.dropped_input_request_count,
         },
         placement_preview,
     }

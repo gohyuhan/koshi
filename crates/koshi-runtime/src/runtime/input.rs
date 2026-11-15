@@ -24,6 +24,19 @@
 //! fullscreen pane — takes nothing. The pane a
 //! press may reach is the one `Server::find_typed_pane` names; when it names
 //! none, the press is dropped.
+//!
+//! **A press reaches only the pane the client's screen showed.** Each key,
+//! paste and key-fired command carries the
+//! `input_pane_moved_by_others_count` of the last frame the client drew. When
+//! another client, the CLI or a pane's exit moved the client's input to
+//! another pane after that frame, the count the session holds is higher, and
+//! the press reaches no pane (`Server::is_input_stale`). Example: the client's
+//! frame with count `0` shows pane 3 focused. Another client closes pane 3,
+//! and the count becomes `1`. The `l` typed against the frame with count `0`
+//! is dropped, and the first key tagged `1` reaches pane 4. Each connection
+//! starts the count again: at `1` when the pane its viewer's screen still
+//! shows no longer takes the input, and at `0` otherwise
+//! (`Server::subscribe`).
 
 use crate::server::Server;
 use koshi_core::ids::{ClientId, PaneId};
@@ -152,6 +165,44 @@ impl Server {
         let tab_id = attached_client.get_active_tab_id();
         let client_solve = session.compute_client_solve(attached_client, tab_id)?;
         find_content_rect(&client_solve, pane_id).map(|_| pane_id)
+    }
+
+    /// Whether input that `client_id` typed against a frame carrying
+    /// `painted_input_pane_moved_by_others_count` is stale: the count is below
+    /// the client's own
+    /// ([`Client::get_input_pane_moved_by_others_count`](koshi_session::client::Client::get_input_pane_moved_by_others_count)).
+    /// `false` for a client no session holds.
+    pub(crate) fn is_input_stale(
+        &self,
+        client_id: ClientId,
+        painted_input_pane_moved_by_others_count: u64,
+    ) -> bool {
+        self.get_session_for_client(client_id)
+            .and_then(|session| session.clients.get_client_by_id(client_id))
+            .is_some_and(|attached_client| {
+                painted_input_pane_moved_by_others_count
+                    < attached_client.get_input_pane_moved_by_others_count()
+            })
+    }
+
+    /// Drop a key or paste request of `client_id` typed against a frame
+    /// carrying `painted_input_pane_moved_by_others_count` when it is stale
+    /// ([`is_input_stale`](Self::is_input_stale)): add one to the client's
+    /// dropped request count
+    /// ([`Client::record_dropped_input_request`](koshi_session::client::Client::record_dropped_input_request)),
+    /// which its next frame carries. Returns whether the request was dropped.
+    pub(crate) fn drop_stale_input(
+        &mut self,
+        client_id: ClientId,
+        painted_input_pane_moved_by_others_count: u64,
+    ) -> bool {
+        if !self.is_input_stale(client_id, painted_input_pane_moved_by_others_count) {
+            return false;
+        }
+        if let Some(attached_client) = self.get_client_mut(client_id) {
+            attached_client.record_dropped_input_request();
+        }
+        true
     }
 
     /// Write the keys the viewer did not bind, from one read of its terminal,

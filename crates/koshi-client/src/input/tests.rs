@@ -753,7 +753,7 @@ fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again() {
         .get_pending_placement_command_id()
         .expect("Enter recorded a pending placement command");
 
-    client.reject_placement_command(command_id);
+    client.reject_sent_command(command_id, None);
 
     assert!(!client.is_placement_confirmation_pending());
     assert_eq!(
@@ -2906,7 +2906,7 @@ fn enter_sends_exactly_one_move_to_the_cell_the_arrows_reached() {
         "a second Enter sends nothing"
     );
 
-    client.reject_placement_command(command_id);
+    client.reject_sent_command(command_id, None);
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
 }
 
@@ -2987,7 +2987,7 @@ fn a_rejected_floating_pane_move_keeps_the_mode_on_with_either_stay_setting() {
             Some(Point { column: 10, row: 5 })
         );
 
-        client.reject_placement_command(command_id);
+        client.reject_sent_command(command_id, None);
 
         assert_eq!(
             client.pane_move_mode,

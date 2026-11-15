@@ -111,6 +111,7 @@ fn attach_test_client_with_resume_token(
                 link_timeout_ms: None,
                 max_frames_per_second: 60,
                 placement_preview_target: None,
+                painted_typed_pane: None,
             },
         },
     );
@@ -354,6 +355,7 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
                             "Attach": {
                                 "viewport_size": { "column_count": 80, "row_count": 24 },
                                 "max_frames_per_second": 60,
+                                "painted_typed_pane": null,
                                 "tier": "admin"
                             }
                         }
@@ -1199,6 +1201,7 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
                     request_id: 4,
                     request_kind: IpcRequestKind::Keyboard {
                         key_inputs: vec![build_key_input_for_chord(TYPED_KEY_CHORD)],
+                        painted_input_pane_moved_by_others_count: 0,
                     },
                 })
                 .expect("send key press");

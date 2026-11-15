@@ -5,7 +5,8 @@
 //! floating cell sizes, the floating set and its size solve, a tab's stored
 //! solve with the focus handoff and the floating pane minimize each solve
 //! runs, the solve each client draws its active tab with and when it is built
-//! again, the serialized shape, and every invariant
+//! again, the view changes of two events merged, the serialized shape, and
+//! every invariant
 //! [`Session::validate_session_consistency`] checks.
 
 use super::*;
@@ -5614,5 +5615,40 @@ fn a_floating_pane_the_session_does_not_hold_or_the_client_holds_no_view_of_has_
     assert_eq!(
         read_client_floating_pane_solve(&session, bob_client_id, floating_pane_id),
         None
+    );
+}
+
+/// Tab `1` changed for client `a`, then tab `2` changed for client `b` with
+/// the tab bar and the pane sizing: the merge lists both tabs and both
+/// clients, and sets both flags. The floating set stays unchanged.
+#[test]
+fn merge_view_changes_joins_both_sets_and_keeps_each_flag_either_side_set() {
+    let first_tab_id = TabId::new();
+    let second_tab_id = TabId::new();
+    let first_client_id = ClientId::new();
+    let second_client_id = ClientId::new();
+    let mut view_changes = SessionViewChanges {
+        layout_changed_tab_ids: BTreeSet::from([first_tab_id]),
+        changed_client_ids: BTreeSet::from([first_client_id]),
+        ..SessionViewChanges::default()
+    };
+
+    view_changes.merge_view_changes(SessionViewChanges {
+        layout_changed_tab_ids: BTreeSet::from([second_tab_id]),
+        changed_client_ids: BTreeSet::from([second_client_id]),
+        is_tab_bar_changed: true,
+        is_floating_set_changed: false,
+        is_pane_sizing_changed: true,
+    });
+
+    assert_eq!(
+        view_changes,
+        SessionViewChanges {
+            layout_changed_tab_ids: BTreeSet::from([first_tab_id, second_tab_id]),
+            changed_client_ids: BTreeSet::from([first_client_id, second_client_id]),
+            is_tab_bar_changed: true,
+            is_floating_set_changed: false,
+            is_pane_sizing_changed: true,
+        }
     );
 }

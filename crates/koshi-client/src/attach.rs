@@ -201,8 +201,8 @@ use koshi_ipc::event::{IncomingEvent, SessionEvent};
 use koshi_ipc::image_chunk::ImageChunkFrame;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{
-    ClientActionRefusal, ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
-    WireMouseAction,
+    ClientActionRefusal, ConnectionToken, FiredAction, IncomingResponse, IpcRequest,
+    IpcRequestKind, IpcResult, PaintedTypedPane, WireMouseAction,
 };
 use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
@@ -967,6 +967,9 @@ impl<B: Backend> Screen<B> {
     /// all from one tray anchor ([`Client::find_floating_pane_tray_anchor`]).
     /// The tray layout that keeps the open tray in step with the pending frame
     /// ([`Client::update_floating_pane_tray`]) is the one that anchor uses.
+    /// After a paint, the frame's dropped input request count posts its
+    /// warnings ([`Client::update_dropped_input_request_count`]); they show
+    /// from the next paint.
     ///
     /// [`SessionSnapshot::has_same_floating_pane_visibility`]: koshi_renderer::snapshot::SessionSnapshot::has_same_floating_pane_visibility
     fn commit_pending_snapshot(
@@ -1108,6 +1111,10 @@ impl<B: Backend> Screen<B> {
             committed_regions,
             painted_viewer_chrome,
             drawn_notifications,
+        );
+        client.update_dropped_input_request_count(
+            snapshot.client_snapshot.dropped_input_request_count,
+            SystemTime::now(),
         );
         self.last_snapshot = Some(snapshot);
         Some(mouse_frame)
@@ -2245,8 +2252,10 @@ impl Uplink {
     }
 
     /// Queue `command` under `command_id`, issued by `client`'s key binding,
-    /// naming `fired_action`, the action the key fired, or `None` when a mouse
-    /// event built the command.
+    /// naming `fired_action`, the action the key fired, tagged with `client`'s
+    /// painted input pane move count
+    /// ([`Client::get_painted_input_pane_moved_by_others_count`]), or `None`
+    /// when a mouse event built the command.
     fn submit_key_binding_command(
         &mut self,
         client: &Client,
@@ -2261,7 +2270,11 @@ impl Uplink {
         );
         self.send_request(IpcRequestKind::SubmitCommand {
             command_envelope: Box::new(command_envelope),
-            fired_action: fired_action.cloned(),
+            fired_action: fired_action.map(|action_reference| FiredAction {
+                action_reference: action_reference.clone(),
+                painted_input_pane_moved_by_others_count: client
+                    .get_painted_input_pane_moved_by_others_count(),
+            }),
         });
     }
 
@@ -3559,7 +3572,12 @@ fn run_attachment<B: Backend, W: Write>(
                             reject_reason,
                             help,
                         }) => {
-                            client.reject_placement_command(command_id);
+                            client.reject_sent_command(
+                                command_id,
+                                last_mouse_frame
+                                    .as_ref()
+                                    .map(|mouse_frame| mouse_frame.client_snapshot.lock_mode),
+                            );
                             client.post_command_rejection(
                                 fired_action.as_ref(),
                                 reject_reason,
@@ -3598,7 +3616,9 @@ fn run_attachment<B: Backend, W: Write>(
                         // resync forgets every remembered move, and the next
                         // move asks for its whole distance from the drag
                         // anchor. Nothing is released by this: no round ever
-                        // waited. The command rejections the session held
+                        // waited. The lock command the viewer waits for is
+                        // forgotten, and the next frame sets the lock mode.
+                        // The command rejections the session held
                         // post their `Warning`s after the session's queue is
                         // taken.
                         Ok(SessionEvent::Resync {
@@ -3610,6 +3630,7 @@ fn run_attachment<B: Backend, W: Write>(
                             sent_border_moves.clear();
                             client.prepare_placement_reconciliation();
                             client.forget_sent_floating_pane_move();
+                            client.set_pending_lock_command_id(None);
                             apply_session_notification_queue(
                                 client,
                                 session_id,
@@ -3700,6 +3721,7 @@ fn run_attachment<B: Backend, W: Write>(
         }
         if let Some(attachment_ending) = attachment_ending {
             let placement_preview_target = client.find_placement_preview_target();
+            let painted_typed_pane = client.get_painted_typed_pane();
             let (link_recovery, attempt_rejoin): (
                 LinkRecovery,
                 Arc<dyn Fn() -> RejoinAnswer + Send + Sync>,
@@ -3727,6 +3749,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 attach_settings,
                                 cell_size,
                                 placement_preview_target,
+                                painted_typed_pane,
                                 remote_link_timeout_ms,
                             ) {
                                 Ok(joined_session) => RejoinAnswer::Joined(
@@ -3756,6 +3779,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 attach_settings,
                                 cell_size,
                                 placement_preview_target,
+                                painted_typed_pane,
                                 remote_link_timeout_ms,
                             ))
                         }),
@@ -3801,6 +3825,7 @@ fn run_attachment<B: Backend, W: Write>(
             connection_token = joined_session.connection_token;
             resume_token = attach_answer.resume_token;
             client.set_client_id(client_id);
+            client.clear_painted_input_counts();
             apply_session_notification_queue(client, session_id, &attach_answer.notification_queue);
             client.end_mouse_gestures();
             pending_mouse_actions.clear();
@@ -4026,6 +4051,7 @@ fn dial_session(
                         cell_size,
                         None,
                         None,
+                        None,
                     )?;
                     Ok(JoinedSession {
                         reader,
@@ -4045,6 +4071,7 @@ fn dial_session(
                     resume_token,
                     attach_settings,
                     cell_size,
+                    None,
                     None,
                     remote_link_timeout_ms,
                 )
@@ -4087,6 +4114,7 @@ fn dial_remote(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
+    painted_typed_pane: Option<PaintedTypedPane>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let stored_saved_server =
@@ -4110,6 +4138,7 @@ fn dial_remote(
         attach_settings,
         cell_size,
         placement_preview_target,
+        painted_typed_pane,
         remote_link_timeout_ms,
     )
 }
@@ -4126,7 +4155,9 @@ fn dial_remote(
 /// `resume_client_id` names the client record to come back as, and
 /// `resume_token` is the secret the last attach minted, presented to get that
 /// attach's view back. `placement_preview_target` is the placement target the
-/// client previews, and is `None` on a first join.
+/// client previews, and is `None` on a first join. `painted_typed_pane` is the
+/// typed pane of the newest frame the client painted, which its screen still
+/// shows, and is `None` on a first join.
 ///
 /// The join runs under the deadline that `remote_link` holds until the
 /// session answers `Prepared`. The `Commit` and its answer then run under a
@@ -4169,6 +4200,7 @@ fn join_remote_session(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
+    painted_typed_pane: Option<PaintedTypedPane>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let link_timeout = Duration::from_millis(u64::from(remote_link_timeout_ms));
@@ -4186,6 +4218,7 @@ fn join_remote_session(
             cell_size,
             Some(remote_link_timeout_ms),
             placement_preview_target,
+            painted_typed_pane,
         ))
         .map_err(build_link_failure)?;
     let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
@@ -4334,7 +4367,8 @@ fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<
 /// The Attach names `client_id` and presents `resume_token`, the secret the
 /// attach of the connection that ended minted, as the proof of that claim. It
 /// carries `placement_preview_target`, the placement target the client
-/// previews. A session that still holds that record hands its view straight back. The
+/// previews, and `painted_typed_pane`, the typed pane of the newest frame the
+/// client painted. A session that still holds that record hands its view straight back. The
 /// returned client is `client_id` when the session handed its record back,
 /// and a fresh client the session minted when it cannot: a restart that could
 /// not bring the carried layout back holds no record, a record whose tab
@@ -4362,6 +4396,7 @@ fn reconnect_after_restart(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
+    painted_typed_pane: Option<PaintedTypedPane>,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, AttachmentEnding> {
     let restart_deadline = Instant::now() + RESTART_WINDOW_DURATION;
@@ -4384,6 +4419,7 @@ fn reconnect_after_restart(
                 attach_settings,
                 cell_size,
                 placement_preview_target,
+                painted_typed_pane,
             );
             if rejoin_result.as_ref().is_err_and(|rejoin_ending| {
                 matches!(
@@ -4419,6 +4455,7 @@ fn reconnect_after_restart(
                     attach_settings,
                     cell_size,
                     placement_preview_target,
+                    painted_typed_pane,
                     remote_link_timeout_ms,
                 )
             },
@@ -5097,7 +5134,11 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
     for held_input in held_inputs {
         match held_input {
             HeldInput::Keyboard(key_inputs) => {
-                uplink.send_request(IpcRequestKind::Keyboard { key_inputs });
+                uplink.send_request(IpcRequestKind::Keyboard {
+                    key_inputs,
+                    painted_input_pane_moved_by_others_count: client
+                        .get_painted_input_pane_moved_by_others_count(),
+                });
             }
             HeldInput::FiredBinding {
                 dispatch_plan,
@@ -5119,7 +5160,11 @@ fn send_held_inputs(client: &mut Client, uplink: &mut Uplink, held_inputs: Vec<H
                 client.set_pending_lock_command_id(Some(lock_command_id));
             }
             HeldInput::Paste(pasted_text) => {
-                uplink.send_request(IpcRequestKind::Paste { pasted_text });
+                uplink.send_request(IpcRequestKind::Paste {
+                    pasted_text,
+                    painted_input_pane_moved_by_others_count: client
+                        .get_painted_input_pane_moved_by_others_count(),
+                });
             }
         }
     }
@@ -5392,7 +5437,9 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// and the token is the one that record's last attach minted, and mints a
 /// fresh client otherwise. Either way, the caller holds the returned id from
 /// here. `placement_preview_target` is the placement target the client
-/// previews, and a first join leaves it `None`.
+/// previews, and a first join leaves it `None`. `painted_typed_pane` is the
+/// typed pane of the newest frame the client painted, and a first join leaves
+/// it `None`.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the Hello or the `Prepare` could not be
@@ -5417,6 +5464,7 @@ fn join_session(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
+    painted_typed_pane: Option<PaintedTypedPane>,
     commit_timeout: Option<Duration>,
 ) -> Result<SessionAttachAnswer, DialError> {
     let hello = IpcRequest {
@@ -5432,6 +5480,7 @@ fn join_session(
             cell_size,
             None,
             placement_preview_target,
+            painted_typed_pane,
         ))
         .map_err(build_link_failure)?;
 
@@ -5466,6 +5515,8 @@ struct AttachSettings {
 /// has written it nothing for a third of it. It is `None` on this machine,
 /// where the session writes no `Pong`. `placement_preview_target` is the
 /// placement target the client previews, and is `None` on a first join.
+/// `painted_typed_pane` is the typed pane of the newest frame the client
+/// painted, and is `None` on a first join.
 /// Reports the pane area left by the built-in two-row UI.
 fn build_attach_prepare_request(
     resume_client_id: Option<ClientId>,
@@ -5474,6 +5525,7 @@ fn build_attach_prepare_request(
     cell_size: Option<PixelCellSize>,
     link_timeout_ms: Option<u32>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
+    painted_typed_pane: Option<PaintedTypedPane>,
 ) -> IpcRequest {
     let viewport_size = get_terminal_viewport_size();
     IpcRequest {
@@ -5490,6 +5542,7 @@ fn build_attach_prepare_request(
             link_timeout_ms,
             max_frames_per_second: attach_settings.max_frames_per_second,
             placement_preview_target,
+            painted_typed_pane,
         })),
     }
 }
@@ -5559,7 +5612,8 @@ fn apply_session_notification_queue(
 /// fresh client the session minted otherwise.
 ///
 /// The Attach carries `placement_preview_target`, the placement target the
-/// client previews.
+/// client previews, and `painted_typed_pane`, the typed pane of the newest
+/// frame the client painted.
 ///
 /// `connection_token` is the token this client attached under; the wait watches it for a
 /// change. A new socket whose session refuses the join while it replaces its
@@ -5592,6 +5646,7 @@ fn rejoin_session(
     attach_settings: AttachSettings,
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
+    painted_typed_pane: Option<PaintedTypedPane>,
 ) -> Result<JoinedSession, AttachmentEnding> {
     if connection_token.expose_secret().is_empty() {
         tracing::warn!(
@@ -5629,6 +5684,7 @@ fn rejoin_session(
             attach_settings,
             cell_size,
             placement_preview_target,
+            painted_typed_pane,
             Some(RESTART_WINDOW_DURATION),
         );
         let attach_answer = match join_result {
@@ -6211,7 +6267,7 @@ fn process_runtime_input_with_cell_size(
             };
             match client.resolve_key(chord, read_at) {
                 KeyOutcome::Fire(bound_action) => {
-                    send_pane_key_inputs(uplink, pane_key_inputs);
+                    send_pane_key_inputs(client, uplink, pane_key_inputs);
                     return uplink.submit_bound_action(client, bound_action, mouse_frame);
                 }
                 KeyOutcome::PassThrough(_) => {
@@ -6228,7 +6284,7 @@ fn process_runtime_input_with_cell_size(
                 // floating pane is drawn where the frame places it. Any other
                 // discard draws nothing.
                 KeyOutcome::Pending | KeyOutcome::Discard => {
-                    send_pane_key_inputs(uplink, pane_key_inputs);
+                    send_pane_key_inputs(client, uplink, pane_key_inputs);
                 }
             }
         }
@@ -6258,7 +6314,11 @@ fn process_runtime_input_with_cell_size(
             // The text belongs to the program in the pane, so a selection
             // gesture over it is over.
             client.end_mouse_selection();
-            uplink.send_request(IpcRequestKind::Paste { pasted_text });
+            uplink.send_request(IpcRequestKind::Paste {
+                pasted_text,
+                painted_input_pane_moved_by_others_count: client
+                    .get_painted_input_pane_moved_by_others_count(),
+            });
         }
         _ => {}
     }
@@ -6390,7 +6450,7 @@ fn handle_terminal_input_event(
     let mut pane_key_inputs = Vec::new();
     for runtime_event in runtime_events {
         if !matches!(runtime_event, RuntimeEvent::KeyInput { .. }) {
-            send_pane_key_inputs(uplink, &mut pane_key_inputs);
+            send_pane_key_inputs(client, uplink, &mut pane_key_inputs);
         }
         match runtime_event {
             RuntimeEvent::MouseInput { mouse_input, .. } => {
@@ -6440,19 +6500,22 @@ fn handle_terminal_input_event(
             }
         }
     }
-    send_pane_key_inputs(uplink, &mut pane_key_inputs);
+    send_pane_key_inputs(client, uplink, &mut pane_key_inputs);
     ControlFlow::Continue(())
 }
 
 /// Send `pane_key_inputs`, keys of one read that go to the pane, as one
-/// [`IpcRequestKind::Keyboard`] request, and leave it empty. Sends nothing
-/// when it has no key.
-fn send_pane_key_inputs(uplink: &mut Uplink, pane_key_inputs: &mut Vec<KeyInput>) {
+/// [`IpcRequestKind::Keyboard`] request tagged with `client`'s painted input
+/// pane move count ([`Client::get_painted_input_pane_moved_by_others_count`]),
+/// and leave it empty. Sends nothing when it has no key.
+fn send_pane_key_inputs(client: &Client, uplink: &mut Uplink, pane_key_inputs: &mut Vec<KeyInput>) {
     if pane_key_inputs.is_empty() {
         return;
     }
     uplink.send_request(IpcRequestKind::Keyboard {
         key_inputs: take(pane_key_inputs),
+        painted_input_pane_moved_by_others_count: client
+            .get_painted_input_pane_moved_by_others_count(),
     });
 }
 

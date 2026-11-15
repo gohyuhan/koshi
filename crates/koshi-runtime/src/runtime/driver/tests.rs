@@ -2,8 +2,10 @@
 //! per subscriber, the views a child exit marks, the frames each pass pushes,
 //! a freed queue slot that is a wake only, the image animations each pass
 //! advances, the live-pane check, the routing of an attached client's key
-//! press and pasted text, the inbox events that are dropped or answered on
-//! their reply channel, and the abrupt group-kill the panic path takes.
+//! press and pasted text, the keys, pastes and key-binding commands typed
+//! against a frame from before another actor moved the client's input pane,
+//! the inbox events that are dropped or answered on their reply channel, and
+//! the abrupt group-kill the panic path takes.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::mpsc;
@@ -13,8 +15,8 @@ use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::action::ActionReference;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget, MoveFloatingPaneArgs,
-    ToggleLockModeArgs,
+    ClosePaneArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
+    MoveFloatingPaneArgs, ToggleLockModeArgs,
 };
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, Point, Size};
@@ -25,6 +27,7 @@ use koshi_core::key::{
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_core::process::{PtySize, SpawnSpec};
+use koshi_ipc::protocol::{FiredAction, PaintedTypedPane};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -35,11 +38,11 @@ use crate::runtime::command::tests::{
     create_session_with_attached_client,
 };
 use crate::runtime::delivery_queue::DeliveryReceiver;
-use crate::runtime::event::RuntimeEvent;
+use crate::runtime::event::{AttachAccepted, RuntimeEvent};
 use crate::runtime::render_schedule::tests::{
     mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
 };
-use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
+use koshi_renderer::snapshot::{ClientSnapshot, Delivery, RenderSnapshot};
 use koshi_test_support::fixtures::build_new_pane_args;
 
 use super::*;
@@ -156,6 +159,7 @@ fn a_client_key_press_is_written_to_that_clients_focused_pane() {
             BindingModifierFlags::NONE,
             Key::Char('a'),
         ))],
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -183,6 +187,7 @@ fn a_client_key_repeat_is_written_to_that_clients_focused_pane() {
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
         key_inputs: vec![repeated_key_input],
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -210,6 +215,7 @@ fn a_client_key_release_writes_nothing_to_that_clients_focused_pane() {
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
         key_inputs: vec![released_key_input],
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -239,6 +245,7 @@ fn a_client_key_that_no_chord_can_name_writes_nothing_to_that_clients_focused_pa
     let control_flow = server.handle_runtime_event(RuntimeEvent::ClientKeyboard {
         client_id,
         key_inputs: vec![left_shift_key_input],
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -251,13 +258,14 @@ fn a_client_key_that_no_chord_can_name_writes_nothing_to_that_clients_focused_pa
 }
 
 #[test]
-fn a_host_paste_is_written_to_that_clients_focused_pane() {
+fn a_client_paste_is_written_to_that_clients_focused_pane() {
     let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
 
-    let control_flow = server.handle_runtime_event(RuntimeEvent::HostPaste {
+    let control_flow = server.handle_runtime_event(RuntimeEvent::ClientPaste {
         client_id,
         pasted_text: String::from("hello\nworld"),
+        painted_input_pane_moved_by_others_count: 0,
     });
 
     // A fresh pane has bracketed paste off: the text reaches it unwrapped,
@@ -319,6 +327,25 @@ fn a_mouse_event_no_attached_viewer_answered_is_dropped_instead_of_written() {
             position: Point { column: 10, row: 3 },
             modifier_flags: BindingModifierFlags::NONE,
         },
+    });
+
+    assert_eq!(control_flow, ControlFlow::Continue(()));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+}
+
+#[test]
+fn a_paste_no_attached_viewer_read_is_dropped_instead_of_written() {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+
+    let control_flow = server.handle_runtime_event(RuntimeEvent::HostPaste {
+        client_id,
+        pasted_text: String::from("ls\n"),
     });
 
     assert_eq!(control_flow, ControlFlow::Continue(()));
@@ -451,7 +478,7 @@ fn with_no_subscriber_the_loop_sleeps_until_an_event() {
 fn a_new_subscriber_gets_its_first_frame_at_once_and_one_push_sends_it() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let current_time = Instant::now();
 
     assert_eq!(
@@ -485,6 +512,7 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
         max_frames_per_second: 120,
         response_sender: attach_response_sender,
         placement_preview_target: None,
+        painted_typed_pane: None,
     });
     let attach_accepted = attach_response_receiver
         .try_recv()
@@ -518,7 +546,7 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
     let client_ids = [first_client_id, second_client_id, third_client_id];
     let delivery_receivers: Vec<DeliveryReceiver> = client_ids
         .iter()
-        .map(|&client_id| server.subscribe(client_id, 60).0)
+        .map(|&client_id| server.subscribe(client_id, 60, None).0)
         .collect();
     let mut last_frames: Vec<Option<RenderSnapshot>> = vec![None; client_ids.len()];
     let mut random_state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -568,6 +596,7 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
                         BindingModifierFlags::NONE,
                         Key::Char('a'),
                     ))],
+                    painted_input_pane_moved_by_others_count: 0,
                 });
             }
         }
@@ -603,8 +632,8 @@ fn a_command_that_fails_validation_marks_no_view_and_a_lock_toggle_marks_the_vie
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
-    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
-    let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     let rejected_command_id = CommandId::new();
@@ -705,7 +734,7 @@ fn a_grace_window_close_carrying_another_servers_id_detaches_nobody_and_one_carr
 fn a_change_right_after_a_frame_waits_out_the_frame_interval() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
@@ -739,8 +768,8 @@ fn list_frame_waits_after_input_event(
     let session_id = SessionId::new();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
-    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
-    let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 
@@ -753,24 +782,33 @@ fn list_frame_waits_after_input_event(
     )
 }
 
+/// An IPC event that runs `command` from `command_source` and names no fired
+/// action. Its reply channel is closed.
+fn build_command_event(command_source: CommandSource, command: Command) -> RuntimeEvent {
+    let (response_sender, _response_receiver) = mpsc::channel();
+    RuntimeEvent::Ipc {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            CommandId::new(),
+            command_source,
+            command,
+        )),
+        fired_action: None,
+        response_sender,
+    }
+}
+
 /// An IPC event from `command_source` that toggles the lock mode of
 /// `client_id`. Its reply channel is closed.
 fn build_toggle_lock_mode_event(
     command_source: CommandSource,
     client_id: ClientId,
 ) -> RuntimeEvent {
-    let (response_sender, _response_receiver) = mpsc::channel();
-    RuntimeEvent::Ipc {
-        command_envelope: Box::new(CommandEnvelope::from_parts(
-            CommandId::new(),
-            command_source,
-            Command::ToggleLockMode(ToggleLockModeArgs {
-                client_id: Some(client_id),
-            }),
-        )),
-        fired_action: None,
-        response_sender,
-    }
+    build_command_event(
+        command_source,
+        Command::ToggleLockMode(ToggleLockModeArgs {
+            client_id: Some(client_id),
+        }),
+    )
 }
 
 #[test]
@@ -785,12 +823,15 @@ fn a_clients_own_input_lets_its_next_frame_go_at_once_and_a_command_from_outside
                 BindingModifierFlags::NONE,
                 Key::Char('a'),
             ))],
+            painted_input_pane_moved_by_others_count: 0,
         });
     assert_eq!(key_waits, own_input_waits);
-    let paste_waits = list_frame_waits_after_input_event(|client_id, _| RuntimeEvent::HostPaste {
-        client_id,
-        pasted_text: String::from("a"),
-    });
+    let paste_waits =
+        list_frame_waits_after_input_event(|client_id, _| RuntimeEvent::ClientPaste {
+            client_id,
+            pasted_text: String::from("a"),
+            painted_input_pane_moved_by_others_count: 0,
+        });
     assert_eq!(paste_waits, own_input_waits);
     let mouse_round_waits =
         list_frame_waits_after_input_event(|client_id, _| RuntimeEvent::ClientMouse {
@@ -830,28 +871,13 @@ fn a_clients_own_input_lets_its_next_frame_go_at_once_and_a_command_from_outside
 fn the_exit_of_a_tiled_pane_and_of_a_floating_pane_each_mark_every_view() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _root_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
-    let CommandResult::Ok { emitted_events, .. } =
-        server.submit_command(CommandEnvelope::from_parts(
-            CommandId::new(),
-            CommandSource::KeyBinding { client_id },
-            Command::NewPane(build_new_pane_args()),
-        ))
-    else {
-        panic!("the split is handled");
-    };
-    let tiled_pane_id = emitted_events
-        .iter()
-        .find_map(|emitted_event| match emitted_event {
-            koshi_core::event::Event::PaneCreated(pane_created) => Some(pane_created.pane_id),
-            _ => None,
-        })
-        .expect("the split creates a pane");
+    let tiled_pane_id = split_focused_pane(&mut server, client_id);
     let htop_pane_id = create_floating_pane(
         &mut server,
         CommandSource::KeyBinding { client_id },
         build_floating_new_pane_args(None, None, false),
     );
-    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let first_exit_time = Instant::now();
     server.push_due_frames(first_exit_time);
 
@@ -950,7 +976,7 @@ fn an_animated_pane_marks_the_view_that_shows_it_only_when_its_frame_changes() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
-    let (_delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let start_time = Instant::now();
     server.push_due_frames(start_time);
 
@@ -972,7 +998,7 @@ fn an_animated_pane_marks_the_view_that_shows_it_only_when_its_frame_changes() {
 fn an_animation_that_starts_after_an_idle_stretch_shows_its_first_frame_for_its_whole_gap() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let idle_time = Instant::now();
     server.push_due_frames(idle_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
@@ -1017,7 +1043,7 @@ fn an_overdue_animation_frame_wakes_the_loop_at_the_first_grid_time_after_now() 
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let start_time = Instant::now();
     // The pass sends the first frame and starts the animation clock: the red
     // frame ends at `start_time + 100 ms`.
@@ -1054,7 +1080,7 @@ fn a_detached_session_sets_no_wakeup_for_its_animation_and_an_attach_sees_the_fr
     }
     // 10150 ms is 25 loops of 400 ms and 150 ms into the next one: blue.
     let attach_time = start_time + Duration::from_millis(10_150);
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     server.push_due_frames(attach_time);
 
     assert_eq!(get_shown_rgba_bytes(&server, pane_id), BLUE_RGBA_BYTES);
@@ -1108,7 +1134,7 @@ fn a_three_loop_animation_that_ends_while_hidden_shows_its_last_frame_when_its_t
         b""
     );
     server.insert_terminal_engine(pane_id, terminal_engine);
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     open_new_tab_for_client(&mut server, client_id);
     assert!(!server.is_pane_shown_to_client(client_id, pane_id));
     let start_time = Instant::now();
@@ -1136,7 +1162,7 @@ fn a_client_that_switches_to_the_tab_of_a_running_animation_gets_its_frames_from
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     open_new_tab_for_client(&mut server, client_id);
     let start_time = Instant::now();
     server.push_due_frames(start_time);
@@ -1173,7 +1199,7 @@ fn a_two_frame_animation_of_one_ms_frames_wakes_a_session_at_60_frames_a_second_
         pane_id,
         build_two_frame_animated_terminal_engine_with_gaps(1, 1),
     );
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
     let start_time = Instant::now();
     let end_time = start_time + Duration::from_secs(1);
 
@@ -1532,7 +1558,8 @@ fn list_floating_solved_sizes(server: &Server, session_id: SessionId) -> Vec<(Ve
 }
 
 /// An IPC event that runs `command` under `command_id` from `command_source`,
-/// naming `fired_action`. Its reply channel is closed.
+/// naming `fired_action`, typed against a frame with input pane move count
+/// `0`. Its reply channel is closed.
 fn build_fired_command_event(
     command_id: CommandId,
     command_source: CommandSource,
@@ -1546,9 +1573,11 @@ fn build_fired_command_event(
             command_source,
             command,
         )),
-        fired_action: Some(
-            ActionReference::from_core_action_name(fired_action).expect("the action name is valid"),
-        ),
+        fired_action: Some(FiredAction {
+            action_reference: ActionReference::from_core_action_name(fired_action)
+                .expect("the action name is valid"),
+            painted_input_pane_moved_by_others_count: 0,
+        }),
         response_sender,
     }
 }
@@ -1558,8 +1587,8 @@ fn a_refused_key_binding_command_goes_back_to_the_pressing_client_alone_with_its
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
-    let (other_delivery_receiver, _) = server.subscribe(other_client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    let (other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
     let command_id = CommandId::new();
 
     let control_flow = server.handle_runtime_event(build_fired_command_event(
@@ -1599,7 +1628,7 @@ fn a_refused_key_binding_command_goes_back_to_the_pressing_client_alone_with_its
 fn a_key_that_finds_no_pane_in_its_direction_or_no_floating_pane_goes_back_as_nothing() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     for (focus_target, fired_action) in [
         (FocusTarget::Direction(Direction::Left), "focus-pane-left"),
@@ -1631,7 +1660,7 @@ fn a_refused_command_from_the_command_line_goes_back_to_no_client() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let session_id = SessionId::new();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
-    let (delivery_receiver, _) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -1646,5 +1675,668 @@ fn a_refused_command_from_the_command_line_goes_back_to_no_client() {
     assert_eq!(
         delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
         Vec::new()
+    );
+}
+
+/// A `ClientKeyboard` event from `client_id` that presses `character`, typed
+/// against a frame that carries `painted_input_pane_moved_by_others_count`.
+fn build_painted_key_press_event(
+    client_id: ClientId,
+    character: char,
+    painted_input_pane_moved_by_others_count: u64,
+) -> RuntimeEvent {
+    RuntimeEvent::ClientKeyboard {
+        client_id,
+        key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char(character),
+        ))],
+        painted_input_pane_moved_by_others_count,
+    }
+}
+
+/// The client part of the frame `server` builds for `client_id`.
+fn get_client_snapshot(server: &Server, client_id: ClientId) -> ClientSnapshot {
+    server
+        .build_snapshot(client_id)
+        .expect("the client is attached")
+        .client_snapshot
+}
+
+/// Split `client_id`'s focused pane to the right through the client's own
+/// keybinding, and return the new pane, which the client then focuses.
+fn split_focused_pane(server: &mut Server, client_id: ClientId) -> PaneId {
+    let command_result = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(build_new_pane_args()),
+    ));
+    let CommandResult::Ok { emitted_events, .. } = command_result else {
+        panic!("expected the split pane to be created, got {command_result:?}");
+    };
+    emitted_events
+        .iter()
+        .find_map(|emitted_event| match emitted_event {
+            koshi_core::event::Event::PaneCreated(pane_created) => Some(pane_created.pane_id),
+            _ => None,
+        })
+        .expect("the split creates a pane")
+}
+
+/// Alice closes the right pane Bob types in. Bob's `a`, typed against the
+/// frame that showed the right pane, reaches no pane and counts one dropped
+/// request. Bob's `b`, typed against a frame that carries the move, reaches
+/// the left pane, which took his input.
+#[test]
+fn a_key_typed_before_another_client_closed_its_pane_is_dropped_and_a_key_typed_after_reaches_the_next_pane(
+) {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let right_pane_id = split_focused_pane(&mut server, alice_client_id);
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(alice_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+    let bob_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            bob_snapshot.input_pane_moved_by_others_count,
+            bob_snapshot.dropped_input_request_count
+        ),
+        (1, 0)
+    );
+    let alice_snapshot = get_client_snapshot(&server, alice_client_id);
+    assert_eq!(
+        (
+            alice_snapshot.input_pane_moved_by_others_count,
+            alice_snapshot.dropped_input_request_count
+        ),
+        (0, 0)
+    );
+
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'a', 0));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(right_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        get_client_snapshot(&server, bob_client_id).dropped_input_request_count,
+        1
+    );
+
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'b', 1));
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        vec![vec![b'b']]
+    );
+    assert_eq!(
+        get_client_snapshot(&server, bob_client_id).dropped_input_request_count,
+        1
+    );
+}
+
+/// A client splits, then moves its own focus left with its keybinding. Its
+/// `a`, typed against the frame from before both moves, reaches the left
+/// pane: the client's own moves count nothing.
+#[test]
+fn a_key_typed_before_the_clients_own_focus_move_reaches_the_pane_it_moved_to() {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    let _ = server.handle_runtime_event(build_command_event(
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(build_new_pane_args()),
+    ));
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Direction(Direction::Left),
+            client_id: None,
+        }),
+        "focus-pane-left",
+    ));
+
+    let _ = server.handle_runtime_event(build_painted_key_press_event(client_id, 'a', 0));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        vec![vec![b'a']]
+    );
+    let client_snapshot = get_client_snapshot(&server, client_id);
+    assert_eq!(
+        (
+            client_snapshot.input_pane_moved_by_others_count,
+            client_snapshot.dropped_input_request_count
+        ),
+        (0, 0)
+    );
+}
+
+/// `koshi focus-pane --client <id>` typed in another terminal moves the
+/// client's input from the right pane to the left pane. The client's `a`,
+/// typed against the frame that showed the right pane, is dropped.
+#[test]
+fn a_key_typed_before_a_command_line_moved_the_clients_focus_is_dropped() {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let session_id = SessionId::new();
+    let (client_id, left_pane_id) = bootstrap_test_session(&mut server, session_id);
+    let right_pane_id = split_focused_pane(&mut server, client_id);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+
+    let _ = server.handle_runtime_event(build_command_event(
+        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(left_pane_id),
+            client_id: None,
+        }),
+    ));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(client_id, 'a', 0));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(right_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    let client_snapshot = get_client_snapshot(&server, client_id);
+    assert_eq!(
+        (
+            client_snapshot.input_pane_moved_by_others_count,
+            client_snapshot.dropped_input_request_count
+        ),
+        (1, 1)
+    );
+}
+
+/// The shell in the right pane exits, and the client's input moves to the
+/// left pane. In the same pass, right after the output turn that serves the
+/// exit, the client's `a` and its paste arrive, both typed against the frame
+/// that showed the right pane: each is dropped whole, two dropped requests.
+#[test]
+fn a_key_and_a_paste_typed_before_their_pane_exited_are_dropped() {
+    let (mut server, fake_pty_backend, _inbox_sender) = build_test_runtime_with_inbox_sender();
+    let (client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let right_pane_id = split_focused_pane(&mut server, client_id);
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+
+    fake_pty_backend
+        .trigger_child_exit(right_pane_id, koshi_core::process::ExitStatus::ExitCode(0))
+        .expect("the right pane is spawned");
+    assert!(!server.handle_runtime_events(None));
+    assert_eq!(server.serve_output_turn(), None);
+    let _ = server.handle_runtime_event(build_painted_key_press_event(client_id, 'a', 0));
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientPaste {
+        client_id,
+        pasted_text: String::from("ls\n"),
+        painted_input_pane_moved_by_others_count: 0,
+    });
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        Vec::<Vec<u8>>::new()
+    );
+    let client_snapshot = get_client_snapshot(&server, client_id);
+    assert_eq!(
+        (
+            client_snapshot.input_pane_moved_by_others_count,
+            client_snapshot.dropped_input_request_count
+        ),
+        (1, 2)
+    );
+}
+
+/// The shell in the floating pane the client types in exits, and the
+/// client's input moves to the tiled pane. The client's `a`, typed against
+/// the frame that showed the floating pane, is dropped; its `b`, typed
+/// against the next frame, reaches the tiled pane.
+#[test]
+fn a_key_typed_before_its_floating_pane_exited_is_dropped() {
+    let (mut server, fake_pty_backend, _inbox_sender) = build_test_runtime_with_inbox_sender();
+    let (client_id, tiled_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let floating_pane_id = create_floating_pane(
+        &mut server,
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+
+    fake_pty_backend
+        .trigger_child_exit(
+            floating_pane_id,
+            koshi_core::process::ExitStatus::ExitCode(0),
+        )
+        .expect("the floating pane is spawned");
+    assert_eq!(server.run_dispatch_pass(), DispatchPassOutcome::Served);
+    let _ = server.handle_runtime_event(build_painted_key_press_event(client_id, 'a', 0));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(client_id, 'b', 1));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(tiled_pane_id)
+            .expect("writes"),
+        vec![vec![b'b']]
+    );
+    let client_snapshot = get_client_snapshot(&server, client_id);
+    assert_eq!(
+        (
+            client_snapshot.input_pane_moved_by_others_count,
+            client_snapshot.dropped_input_request_count
+        ),
+        (1, 1)
+    );
+}
+
+/// Alice splits the pane both clients type in. Bob's frame changes, but Bob
+/// still types in the left pane: his `a`, typed against the frame from
+/// before the split, reaches it.
+#[test]
+fn a_key_typed_before_another_client_changed_the_view_reaches_a_pane_that_did_not_move() {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(left_pane_id));
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+
+    let _ = server.handle_runtime_event(build_command_event(
+        CommandSource::from_key_binding(alice_client_id),
+        Command::NewPane(build_new_pane_args()),
+    ));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'a', 0));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        vec![vec![b'a']]
+    );
+    let bob_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            bob_snapshot.input_pane_moved_by_others_count,
+            bob_snapshot.dropped_input_request_count
+        ),
+        (0, 0)
+    );
+}
+
+/// Alice closes the right pane Bob types in. Bob's `close-pane` key, fired
+/// against the frame that showed the right pane, closes nothing: Bob alone
+/// gets the refusal, with the action his key fired. A refused command adds
+/// no dropped request.
+#[test]
+fn a_key_binding_fired_before_another_client_moved_its_pane_is_refused_to_that_client_alone() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let right_pane_id = split_focused_pane(&mut server, alice_client_id);
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
+    let (alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(alice_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+    let _ = alice_delivery_receiver.try_iter().count();
+    let _ = bob_delivery_receiver.try_iter().count();
+    let command_id = CommandId::new();
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        command_id,
+        CommandSource::from_key_binding(bob_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: None,
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+
+    assert_eq!(server.live_pane_ids, HashSet::from([left_pane_id]));
+    assert_eq!(
+        bob_delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::CommandRejected {
+            command_id,
+            fired_action: Some(
+                ActionReference::from_core_action_name("close-pane")
+                    .expect("the action name is valid"),
+            ),
+            reject_reason: RejectReason::ViewChanged,
+            help: None,
+        }]
+    );
+    assert_eq!(
+        alice_delivery_receiver
+            .try_iter()
+            .collect::<Vec<Delivery>>(),
+        Vec::new()
+    );
+    let bob_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            bob_snapshot.input_pane_moved_by_others_count,
+            bob_snapshot.dropped_input_request_count
+        ),
+        (1, 0)
+    );
+}
+
+/// Alice closes the right pane Bob types in, and Bob's input moves to the
+/// left pane, the only pane left. Bob's `focus-pane-left`, typed against the
+/// frame that showed the right pane, is refused with
+/// `RejectReason::ViewChanged` to Bob, and Bob's focus stays on the left
+/// pane.
+#[test]
+fn a_directional_focus_key_fired_before_another_client_moved_its_pane_is_refused_with_a_warning() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let right_pane_id = split_focused_pane(&mut server, alice_client_id);
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(alice_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+    let _ = bob_delivery_receiver.try_iter().count();
+    let command_id = CommandId::new();
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        command_id,
+        CommandSource::from_key_binding(bob_client_id),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Direction(Direction::Left),
+            client_id: None,
+        }),
+        "focus-pane-left",
+    ));
+
+    assert_eq!(
+        bob_delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
+        vec![Delivery::CommandRejected {
+            command_id,
+            fired_action: Some(
+                ActionReference::from_core_action_name("focus-pane-left")
+                    .expect("the action name is valid"),
+            ),
+            reject_reason: RejectReason::ViewChanged,
+            help: None,
+        }]
+    );
+    assert_eq!(
+        get_client_snapshot(&server, bob_client_id).focused_pane_id,
+        Some(left_pane_id)
+    );
+}
+
+/// Bob is viewed by two subscribers, as when a new connection subscribes
+/// before the old subscription is removed. Alice closes the pane Bob types
+/// in: Bob's move count rises from `0` to `1`.
+#[test]
+fn a_client_viewed_by_two_subscribers_counts_one_move_when_another_client_closes_its_pane() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, _left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let right_pane_id = split_focused_pane(&mut server, alice_client_id);
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (_first_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    let (_second_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(alice_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+
+    assert_eq!(
+        get_client_snapshot(&server, bob_client_id).input_pane_moved_by_others_count,
+        1
+    );
+}
+
+/// A key-binding command from a client that no session holds, tagged with
+/// the painted count `0`, is refused with
+/// `RejectReason::SourceClientStale`.
+#[test]
+fn a_key_binding_command_from_a_client_no_session_holds_is_refused_as_from_a_detached_client() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let _ = bootstrap_test_session(&mut server, SessionId::new());
+    let command_id = CommandId::new();
+    let (response_sender, response_receiver) = mpsc::channel();
+
+    let _ = server.handle_runtime_event(RuntimeEvent::Ipc {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            command_id,
+            CommandSource::from_key_binding(ClientId::new()),
+            Command::ToggleLockMode(ToggleLockModeArgs::default()),
+        )),
+        fired_action: Some(FiredAction {
+            action_reference: ActionReference::from_core_action_name("toggle-lock-mode")
+                .expect("the action name is valid"),
+            painted_input_pane_moved_by_others_count: 0,
+        }),
+        response_sender,
+    });
+
+    assert_eq!(
+        response_receiver.try_recv(),
+        Ok(CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::SourceClientStale,
+            help: None,
+        })
+    );
+}
+
+/// Attach a fresh local client at 80x24 through [`RuntimeEvent::IpcAttach`],
+/// naming `painted_typed_pane` as the typed pane its screen still shows.
+/// Returns what the attach minted.
+fn attach_client_naming_painted_typed_pane(
+    server: &mut Server,
+    painted_typed_pane: Option<PaintedTypedPane>,
+) -> AttachAccepted {
+    let (attach_response_sender, attach_response_receiver) = mpsc::channel();
+    let _ = server.handle_runtime_event(RuntimeEvent::IpcAttach {
+        resume_client_id: None,
+        resume_token: None,
+        viewport_size: Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        pane_area: None,
+        cell_size: None,
+        attached_at: SystemTime::UNIX_EPOCH,
+        client_origin: ClientOrigin::Local { is_same_user: true },
+        granted_identity: None,
+        max_frames_per_second: 60,
+        placement_preview_target: None,
+        painted_typed_pane,
+        response_sender: attach_response_sender,
+    });
+    attach_response_receiver
+        .try_recv()
+        .expect("the attach is answered")
+        .expect("a session is running")
+}
+
+/// A viewer's screen showed pane 3 when its connection ended, and the
+/// session no longer holds pane 3. Its attach names pane 3, and the count
+/// starts at `1`: the `a` it held through the gap, tagged `0`, is dropped,
+/// and the `b` it types against the new connection's first frame reaches the
+/// pane that takes its input now.
+#[test]
+fn an_attach_naming_a_painted_pane_that_no_longer_takes_the_input_drops_the_keys_typed_against_that_screen(
+) {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (_first_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+
+    let attach_accepted = attach_client_naming_painted_typed_pane(
+        &mut server,
+        Some(PaintedTypedPane {
+            typed_pane_id: Some(PaneId::new()),
+        }),
+    );
+    let client_snapshot = get_client_snapshot(&server, attach_accepted.client_id);
+    assert_eq!(
+        (
+            client_snapshot.typed_pane_id,
+            client_snapshot.input_pane_moved_by_others_count,
+            client_snapshot.dropped_input_request_count
+        ),
+        (Some(pane_id), 1, 0)
+    );
+    let _ = server.handle_runtime_event(build_painted_key_press_event(
+        attach_accepted.client_id,
+        'a',
+        0,
+    ));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(
+        attach_accepted.client_id,
+        'b',
+        1,
+    ));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![b'b']]
+    );
+    assert_eq!(
+        get_client_snapshot(&server, attach_accepted.client_id).dropped_input_request_count,
+        1
+    );
+}
+
+/// A first attach names no painted pane, and an attach after a lost
+/// connection names the pane that still takes the input. Each count starts
+/// at `0`, and an `a` tagged `0` reaches the pane.
+#[test]
+fn a_first_attach_and_an_attach_naming_the_pane_that_still_takes_the_input_let_the_keys_through() {
+    let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (_first_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+
+    for painted_typed_pane in [
+        None,
+        Some(PaintedTypedPane {
+            typed_pane_id: Some(pane_id),
+        }),
+    ] {
+        let attach_accepted =
+            attach_client_naming_painted_typed_pane(&mut server, painted_typed_pane);
+        assert_eq!(
+            get_client_snapshot(&server, attach_accepted.client_id)
+                .input_pane_moved_by_others_count,
+            0
+        );
+        let _ = server.handle_runtime_event(build_painted_key_press_event(
+            attach_accepted.client_id,
+            'a',
+            0,
+        ));
+    }
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(pane_id)
+            .expect("writes"),
+        vec![vec![b'a'], vec![b'a']]
+    );
+}
+
+/// Bob's first connection counts one move by Alice and one dropped key. His
+/// next connection, whose painted pane still takes his input, starts both
+/// counts at `0`, and the frame carries the pane he types into.
+#[test]
+fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_again() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let right_pane_id = split_focused_pane(&mut server, alice_client_id);
+    let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(alice_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'a', 0));
+    let first_connection_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            first_connection_snapshot.input_pane_moved_by_others_count,
+            first_connection_snapshot.dropped_input_request_count
+        ),
+        (1, 1)
+    );
+
+    server.unsubscribe_client(bob_client_id);
+    let (_bob_next_delivery_receiver, _) = server.subscribe(
+        bob_client_id,
+        60,
+        Some(PaintedTypedPane {
+            typed_pane_id: Some(left_pane_id),
+        }),
+    );
+
+    let next_connection_snapshot = get_client_snapshot(&server, bob_client_id);
+    assert_eq!(
+        (
+            next_connection_snapshot.typed_pane_id,
+            next_connection_snapshot.input_pane_moved_by_others_count,
+            next_connection_snapshot.dropped_input_request_count
+        ),
+        (Some(left_pane_id), 0, 0)
     );
 }

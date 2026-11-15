@@ -798,7 +798,10 @@ leaving. Each attached terminal reconnects by itself. Keys and pastes typed
 while it reconnects go to the restarted session once the terminal joins it, in
 the order they were typed. A terminal holds at most 1024 of them, and at most
 one frame of pasted text; past either limit, everything typed during that
-restart is dropped. The quit keybinding leaves at once. A terminal that does not
+restart is dropped. If the pane that takes your input after the restart is not
+the pane your screen showed, the keys and pastes typed before your screen shows
+the restarted session are dropped, and koshi shows `Keys not sent: your view
+changed as you typed`. The quit keybinding leaves at once. A terminal that does not
 come back is dropped, for example a terminal that runs koshi 0.4.0, which
 cannot attach to a newer session. A terminal on this machine that ends while
 it joins the restarted session, before it has sent anything there, has not

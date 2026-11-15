@@ -822,8 +822,9 @@ fn reject_reason_diagnostics_are_human() {
             RejectReason::NoClientAttached,
             "no client is attached to the session",
         ),
+        (RejectReason::ViewChanged, "your view changed as you typed"),
     ];
-    assert_eq!(reject_reason_cases.len(), 8);
+    assert_eq!(reject_reason_cases.len(), 9);
     for (reject_reason, expected_reject_reason_text) in &reject_reason_cases {
         assert_eq!(&reject_reason.to_string(), expected_reject_reason_text);
     }

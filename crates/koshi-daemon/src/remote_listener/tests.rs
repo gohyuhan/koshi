@@ -2228,6 +2228,7 @@ mod bridge_round_trip {
                     link_timeout_ms,
                     max_frames_per_second: 60,
                     placement_preview_target: None,
+                    painted_typed_pane: None,
                 },
             },
         );
@@ -2352,6 +2353,7 @@ mod bridge_round_trip {
                 request_id: 3,
                 request_kind: IpcRequestKind::Keyboard {
                     key_inputs: vec![shifted_digit.clone()],
+                    painted_input_pane_moved_by_others_count: 0,
                 },
             })
             .expect("the keyboard request is written");
@@ -2372,6 +2374,7 @@ mod bridge_round_trip {
                         key_event_kind: KeyEventKind::Release,
                         ..shifted_digit
                     }],
+                    painted_input_pane_moved_by_others_count: 0,
                 },
             })
             .expect("the release is written");
@@ -3051,6 +3054,7 @@ mod bridge_round_trip {
                 request_id: 3,
                 request_kind: IpcRequestKind::Paste {
                     pasted_text: pasted_text.clone(),
+                    painted_input_pane_moved_by_others_count: 0,
                 },
             })
             .expect("the paste is written");

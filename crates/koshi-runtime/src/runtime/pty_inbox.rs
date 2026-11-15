@@ -316,7 +316,9 @@ impl Server {
     /// ([`grant_pane_output`](koshi_pty::backend::state::PtyBackend::grant_pane_output)),
     /// then handle the exit the turn took
     /// ([`handle_child_exit`](Self::handle_child_exit)) and publish its
-    /// events. Returns the pane when its queue still holds output, for the
+    /// events, and record the view changes of the turn with no sending client
+    /// ([`record_view_changes`](Self::record_view_changes)). Returns the pane
+    /// when its queue still holds output, for the
     /// caller to put back at the end of the rotation. A pane whose queue the
     /// server no longer holds gets no turn.
     pub(crate) fn serve_output_turn(&mut self) -> Option<PaneId> {
@@ -333,6 +335,7 @@ impl Server {
             let child_exit_events = self.handle_child_exit(pane_id, exit_status);
             self.publish_events(&child_exit_events);
         }
+        self.record_view_changes(None);
         output_turn.has_more_output.then_some(pane_id)
     }
 

@@ -25,7 +25,7 @@ pub(crate) fn subscribe_and_push_first_frame(
     client_id: ClientId,
     current_time: Instant,
 ) -> DeliveryReceiver {
-    let (delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60);
+    let (delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60, None);
     server.mark_changed_views();
     server.push_frames(current_time);
     assert_eq!(

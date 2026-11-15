@@ -389,6 +389,9 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: true,
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         placement_preview: None,
     }
@@ -469,6 +472,13 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
     expected_render_snapshot
         .client_snapshot
         .last_applied_floating_pane_move_command_id = Some(CommandId::new());
+    expected_render_snapshot.client_snapshot.typed_pane_id = Some(empty_pane_id);
+    expected_render_snapshot
+        .client_snapshot
+        .input_pane_moved_by_others_count = 4;
+    expected_render_snapshot
+        .client_snapshot
+        .dropped_input_request_count = 5;
     expected_render_snapshot
         .client_snapshot
         .last_applied_placement_command_id = Some(CommandId::new());

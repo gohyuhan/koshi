@@ -2623,7 +2623,7 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
 fn build_server_with_mouse_event_queue() -> (Server, Arc<FakePtyBackend>, ClientId, DeliveryReceiver)
 {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let (mouse_event_queue, _) = server.subscribe(client_id, 60);
+    let (mouse_event_queue, _) = server.subscribe(client_id, 60, None);
     (server, fake_pty_backend, client_id, mouse_event_queue)
 }
 
@@ -2928,7 +2928,7 @@ fn a_client_with_no_subscription_is_answered_nothing() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Another client's queue, which would catch an answer sent to the wrong one.
-    let (unrelated_event_queue, _) = server.subscribe(ClientId::new(), 60);
+    let (unrelated_event_queue, _) = server.subscribe(ClientId::new(), 60, None);
 
     server.run_client_mouse(
         client_id,
@@ -4116,6 +4116,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             None,
             60,
             None,
+            None,
         )
         .expect("the first dial attaches");
     forward_mouse_at(
@@ -4138,6 +4139,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             ClientOrigin::Remote,
             None,
             60,
+            None,
             None,
         )
         .expect("the second dial attaches");

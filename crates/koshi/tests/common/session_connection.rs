@@ -68,6 +68,7 @@ pub fn build_attach_request() -> IpcRequest {
             link_timeout_ms: None,
             max_frames_per_second: 60,
             placement_preview_target: None,
+            painted_typed_pane: None,
         },
     }
 }

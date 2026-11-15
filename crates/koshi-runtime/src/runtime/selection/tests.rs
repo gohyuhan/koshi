@@ -63,7 +63,7 @@ fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
 fn build_selection_runtime_with_outer_terminal() -> (Server, ViewerClient, PaneId, DeliveryReceiver)
 {
     let (mut server, client_id, pane_id) = build_selection_server();
-    let (outer_terminal_receiver, _) = server.subscribe(client_id, 60);
+    let (outer_terminal_receiver, _) = server.subscribe(client_id, 60, None);
     let viewer = build_viewer(client_id);
     (server, viewer, pane_id, outer_terminal_receiver)
 }

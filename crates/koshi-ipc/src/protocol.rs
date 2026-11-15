@@ -486,6 +486,21 @@ pub enum IpcRequestKind {
         /// named before the client's first frame: that frame and each frame
         /// after it carry the target's preview. `None` names no target.
         placement_preview_target: Option<PanePlacementPreviewTarget>,
+        /// The typed pane of the newest frame the caller painted on an earlier
+        /// connection to this session, which its screen still shows. `None`
+        /// on a first attach. When it names another pane than the one that
+        /// takes the client's input once the attach is done, the client's
+        /// [`FrameClient::input_pane_moved_by_others_count`](crate::frame::FrameClient::input_pane_moved_by_others_count)
+        /// starts at `1`, and every key, paste and key-fired command the
+        /// caller typed against that screen reaches no pane. It starts at `0`
+        /// otherwise.
+        ///
+        /// Example: the screen showed pane 3, and during a restart another
+        /// client closed pane 3. The attach after the restart names pane 3,
+        /// pane 4 takes the input, and the keys held through the restart,
+        /// tagged `0`, reach no pane.
+        #[serde(deserialize_with = "Option::deserialize")]
+        painted_typed_pane: Option<PaintedTypedPane>,
     },
     /// The keyboard events an attached client sends for the pane it is typing
     /// into, from one read of its terminal: its keymap bound nothing to each
@@ -497,10 +512,19 @@ pub enum IpcRequestKind {
     /// in one write, or writes none of them. Typing `é` and `-` in one read
     /// sends both events in one request, and the pane reads `C3 A9 2D` from
     /// one write.
+    ///
+    /// A request whose `painted_input_pane_moved_by_others_count` is below the
+    /// client's count at the session
+    /// ([`FrameClient::input_pane_moved_by_others_count`](crate::frame::FrameClient::input_pane_moved_by_others_count))
+    /// reaches no pane: the session drops it whole and adds one to the
+    /// client's [`FrameClient::dropped_input_request_count`](crate::frame::FrameClient::dropped_input_request_count).
     Keyboard {
         /// The keyboard events the client read from its terminal, oldest
         /// first.
         key_inputs: Vec<KeyInput>,
+        /// The `input_pane_moved_by_others_count` of the last frame this
+        /// client drew on this connection, `0` before its first frame.
+        painted_input_pane_moved_by_others_count: u64,
     },
     /// The attached client's terminal changed size.
     Resize {
@@ -521,9 +545,13 @@ pub enum IpcRequestKind {
     },
     /// Text the attached client's outer terminal pasted, for the pane it is
     /// typing into. Carried whole: no character of it fires a keybinding.
+    /// Dropped whole by the rule [`Keyboard`](Self::Keyboard) states.
     Paste {
         /// The pasted text, exactly as the client's terminal delivered it.
         pasted_text: String,
+        /// The `input_pane_moved_by_others_count` of the last frame this
+        /// client drew on this connection, `0` before its first frame.
+        painted_input_pane_moved_by_others_count: u64,
     },
     /// One round of mouse actions the attached client decided, in the order
     /// the session must run them. A round is what the viewer accumulated for
@@ -535,12 +563,11 @@ pub enum IpcRequestKind {
         /// The command, its id and its source.
         command_envelope: Box<CommandEnvelope>,
         /// The action the attached client's key fired to build the command,
-        /// or `None` when no key fired it. The session names it in the
-        /// [`SessionEvent::CommandRejected`](crate::event::SessionEvent::CommandRejected)
-        /// it sends for the command, and reads it for nothing else. A message
-        /// without `fired_action` is refused.
+        /// with the move count of the frame the key was typed against, or
+        /// `None` when no key fired it. A message without `fired_action` is
+        /// refused.
         #[serde(deserialize_with = "Option::deserialize")]
-        fired_action: Option<ActionReference>,
+        fired_action: Option<FiredAction>,
     },
     /// Ask the session to describe itself in full. The caller narrows the
     /// answer to the query it was asked.
@@ -775,6 +802,40 @@ pub enum IpcRequestKind {
     /// this request's `request_id`. With nothing held, the session refuses it
     /// with [`IpcErrorCode::RequestFailed`] and the connection keeps serving.
     Commit,
+}
+
+/// The pane a client's newest painted frame showed taking its input
+/// ([`FrameClient::typed_pane_id`](crate::frame::FrameClient::typed_pane_id)),
+/// named when the client attaches again
+/// ([`IpcRequestKind::Attach`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaintedTypedPane {
+    /// The frame's typed pane. `None` when that frame showed no pane taking
+    /// the input.
+    pub typed_pane_id: Option<PaneId>,
+}
+
+/// The action an attached client's key fired to build a command, and the frame
+/// the key was typed against.
+///
+/// The session names `action_reference` in the
+/// [`SessionEvent::CommandRejected`](crate::event::SessionEvent::CommandRejected)
+/// it sends for the command. A command whose
+/// `painted_input_pane_moved_by_others_count` is below the client's count at
+/// the session
+/// ([`FrameClient::input_pane_moved_by_others_count`](crate::frame::FrameClient::input_pane_moved_by_others_count))
+/// does not run, and is rejected with [`RejectReason::ViewChanged`].
+///
+/// Example: the frame with count `0` shows pane 3 focused. Another client
+/// closes pane 3, and the count becomes `1`. `<leader>p x` typed against the
+/// frame with count `0` closes no pane and is rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FiredAction {
+    /// The action the key fired, such as `core:close-pane`.
+    pub action_reference: ActionReference,
+    /// The `input_pane_moved_by_others_count` of the last frame the client drew
+    /// on this connection, `0` before its first frame.
+    pub painted_input_pane_moved_by_others_count: u64,
 }
 
 /// Why an attached client did not run the action an

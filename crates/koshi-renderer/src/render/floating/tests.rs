@@ -129,7 +129,10 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
             last_applied_lock_command_id: None,
             last_applied_floating_pane_move_command_id: None,
             is_mouse_selection_enabled: false,
+            typed_pane_id: None,
             last_applied_placement_command_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         placement_preview: None,
     }

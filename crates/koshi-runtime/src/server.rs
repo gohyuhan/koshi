@@ -32,6 +32,7 @@ use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
+use koshi_ipc::protocol::PaintedTypedPane;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events::RecentEventRing;
@@ -261,6 +262,12 @@ pub struct Server {
     /// answer goes to the subscriber that views the client whose viewer sent
     /// the round.
     pub(crate) subscriptions: Vec<FrameSubscription>,
+    /// The view changes each session made since the last
+    /// [`mark_changed_views`](Self::mark_changed_views), by session id,
+    /// gathered event by event
+    /// ([`record_view_changes`](Self::record_view_changes)). A session that
+    /// changed nothing has no entry. Never carried across an image swap.
+    pub(crate) pending_view_changes_by_session_id: HashMap<SessionId, SessionViewChanges>,
     /// The pane placement preview each client names, by client id
     /// ([`set_pane_placement_preview`](Self::set_pane_placement_preview)).
     /// [`mark_changed_views`](Self::mark_changed_views) builds a preview again
@@ -372,6 +379,7 @@ impl Server {
             event_bus: EventBus::new(),
             recent_event_ring,
             subscriptions: Vec::new(),
+            pending_view_changes_by_session_id: HashMap::new(),
             placement_preview_by_client_id: HashMap::new(),
             held_mouse_buttons: Vec::new(),
             ipc_server: None,
@@ -704,13 +712,30 @@ impl Server {
     /// [`compute_frame_interval`] of `max_frames_per_second`, and its first
     /// frame is due at once.
     ///
+    /// Starts the input counts of the client's new connection
+    /// ([`Client::start_connection_input_counts`]): the pane that takes
+    /// `client_id`'s input becomes the checked pane, and the moved-by-others
+    /// count starts at `1` when `painted_typed_pane` names another pane, and
+    /// at `0` otherwise. A first attach passes `None`, which starts it at
+    /// `0`.
+    ///
     /// # Panics
     /// When `max_frames_per_second` is `0`.
     pub fn subscribe(
         &mut self,
         client_id: ClientId,
         max_frames_per_second: u16,
+        painted_typed_pane: Option<PaintedTypedPane>,
     ) -> (DeliveryReceiver, Arc<WriterHandoff>) {
+        let typed_pane_id = self.find_typed_pane(client_id);
+        let is_typed_pane_changed_since_painted_frame = painted_typed_pane
+            .is_some_and(|painted_typed_pane| painted_typed_pane.typed_pane_id != typed_pane_id);
+        if let Some(client) = self.get_client_mut(client_id) {
+            client.start_connection_input_counts(
+                typed_pane_id,
+                is_typed_pane_changed_since_painted_frame,
+            );
+        }
         let (subscriber_id, delivery_receiver, writer_handoff) = self.event_bus.subscribe();
         self.subscriptions.push(FrameSubscription {
             subscriber_id,
@@ -856,20 +881,65 @@ impl Server {
         self.remove_ended_subscriptions();
     }
 
-    /// Read each session's view changes ([`Session::take_view_changes`]),
-    /// build again each placement preview that reads a changed state
-    /// ([`update_changed_placement_previews`](Self::update_changed_placement_previews)),
-    /// then mark the view changed ([`FramePace::mark_view_changed`]) of every
-    /// subscriber whose client's frame shows a changed state
-    /// ([`is_client_frame_changed`](Self::is_client_frame_changed)). A pass in
-    /// which no session changed reads no client and no subscriber.
-    pub(crate) fn mark_changed_views(&mut self) {
+    /// Take each session's view changes ([`Session::take_view_changes`]) and
+    /// add them to the changes the next
+    /// [`mark_changed_views`](Self::mark_changed_views) reads. Before that, for
+    /// each subscriber whose client's frame shows a changed state
+    /// ([`is_client_frame_changed`](Self::is_client_frame_changed)), record the
+    /// pane that takes the client's input now ([`Server::find_typed_pane`],
+    /// [`Client::update_checked_typed_pane`]). A changed pane counts as a move
+    /// by others unless `sending_client_id` names that client: the event that
+    /// made the changes arrived on another connection, or on none.
+    ///
+    /// A call in which no session changed takes each session's empty view
+    /// changes, asks no client for its pane, and solves no layout.
+    ///
+    /// Example: client `B` types in pane 3, and client `A` closes pane 3 with
+    /// `<leader>p x`. `B`'s input moves to pane 4, and the call with
+    /// `sending_client_id` `Some(A)` raises `B`'s count by one. `A`'s own input
+    /// moved too, and `A`'s count stays as it was.
+    pub(crate) fn record_view_changes(&mut self, sending_client_id: Option<ClientId>) {
         let view_changes_by_session_id: HashMap<SessionId, SessionViewChanges> = self
             .session_by_id
             .iter_mut()
             .map(|(&session_id, session)| (session_id, session.take_view_changes()))
             .filter(|(_, view_changes)| !view_changes.is_empty())
             .collect();
+        if view_changes_by_session_id.is_empty() {
+            return;
+        }
+        for subscription_index in 0..self.subscriptions.len() {
+            let client_id = self.subscriptions[subscription_index].client_id;
+            if !self.is_client_frame_changed(client_id, &view_changes_by_session_id) {
+                continue;
+            }
+            let typed_pane_id = self.find_typed_pane(client_id);
+            let is_moved_by_others = sending_client_id != Some(client_id);
+            if let Some(client) = self.get_client_mut(client_id) {
+                client.update_checked_typed_pane(typed_pane_id, is_moved_by_others);
+            }
+        }
+        for (session_id, view_changes) in view_changes_by_session_id {
+            self.pending_view_changes_by_session_id
+                .entry(session_id)
+                .or_default()
+                .merge_view_changes(view_changes);
+        }
+    }
+
+    /// Record the view changes made since the last event with no sending
+    /// client ([`record_view_changes`](Self::record_view_changes)), take every
+    /// view change gathered since the last call, build again each placement
+    /// preview that reads a changed state
+    /// ([`update_changed_placement_previews`](Self::update_changed_placement_previews)),
+    /// then mark the view changed ([`FramePace::mark_view_changed`]) of every
+    /// subscriber whose client's frame shows a changed state
+    /// ([`is_client_frame_changed`](Self::is_client_frame_changed)). A pass in
+    /// which no session changed reads no client and no subscriber.
+    pub(crate) fn mark_changed_views(&mut self) {
+        self.record_view_changes(None);
+        let view_changes_by_session_id =
+            std::mem::take(&mut self.pending_view_changes_by_session_id);
         if view_changes_by_session_id.is_empty() {
             return;
         }

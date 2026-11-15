@@ -33,7 +33,7 @@ fn bootstrap_opens_one_shell_and_its_first_subscriber_gets_a_frame_at_once() {
     assert_eq!(render_snapshot.pane_snapshots.len(), 1);
 
     // A new subscriber is owed its first frame, which is due immediately.
-    let (_delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60);
+    let (_delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60, None);
     assert_eq!(
         server.compute_next_render_wakeup(Instant::now()),
         Some(Duration::ZERO)

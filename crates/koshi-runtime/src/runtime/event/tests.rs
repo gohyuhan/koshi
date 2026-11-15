@@ -1,7 +1,16 @@
 //! Tests for how an [`EndingNotice`] holds the session's last frame and counts
-//! the client writing threads.
+//! the client writing threads, and for the client whose own connection
+//! carried each [`RuntimeEvent`].
 
 use super::*;
+
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use koshi_core::command::{Command, CommandEnvelope, ToggleLockModeArgs};
+use koshi_core::ids::{CommandId, PaneId, SessionId};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
+use koshi_test_support::fixtures::build_key_input_for_chord;
 
 #[test]
 fn an_ending_notice_starts_empty_and_holds_the_ending_it_was_raised_with() {
@@ -82,4 +91,74 @@ fn writing_threads_sharing_one_ending_notice_all_count_into_it() {
     }
 
     assert_eq!(ending_notice.wait_until_writers_end(Instant::now()), 8);
+}
+
+/// An IPC event that toggles the lock mode, from `command_source`.
+fn build_toggle_lock_mode_event(command_source: CommandSource) -> RuntimeEvent {
+    let (response_sender, _response_receiver) = mpsc::channel();
+    RuntimeEvent::Ipc {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            CommandId::new(),
+            command_source,
+            Command::ToggleLockMode(ToggleLockModeArgs { client_id: None }),
+        )),
+        fired_action: None,
+        response_sender,
+    }
+}
+
+/// Bob's key and a command from Bob's key binding or mouse name Bob. A
+/// command typed on a command line names no client, even one typed in Bob's
+/// own pane or one that targets Bob, and so do the session's own events.
+#[test]
+fn an_event_names_the_client_whose_own_connection_carried_it() {
+    let bob_client_id = ClientId::new();
+    let session_id = SessionId::new();
+
+    let sending_client_ids: Vec<Option<ClientId>> = [
+        RuntimeEvent::ClientKeyboard {
+            client_id: bob_client_id,
+            key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Char('a'),
+            ))],
+            painted_input_pane_moved_by_others_count: 0,
+        },
+        RuntimeEvent::ClientPaste {
+            client_id: bob_client_id,
+            pasted_text: String::from("ls"),
+            painted_input_pane_moved_by_others_count: 0,
+        },
+        build_toggle_lock_mode_event(CommandSource::from_key_binding(bob_client_id)),
+        build_toggle_lock_mode_event(CommandSource::from_mouse(bob_client_id)),
+        build_toggle_lock_mode_event(CommandSource::from_in_session_cli(
+            session_id,
+            Some(bob_client_id),
+            PaneId::new(),
+            PathBuf::from("/tmp/koshi.sock"),
+        )),
+        build_toggle_lock_mode_event(CommandSource::from_external_cli(
+            Some(session_id),
+            Some(bob_client_id),
+        )),
+        RuntimeEvent::Quit,
+        RuntimeEvent::QueueRoomFreed,
+    ]
+    .iter()
+    .map(RuntimeEvent::find_sending_client_id)
+    .collect();
+
+    assert_eq!(
+        sending_client_ids,
+        vec![
+            Some(bob_client_id),
+            Some(bob_client_id),
+            Some(bob_client_id),
+            Some(bob_client_id),
+            None,
+            None,
+            None,
+            None,
+        ]
+    );
 }

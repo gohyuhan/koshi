@@ -66,7 +66,8 @@ use koshi_ipc::frame::{
     FrameSlot, FrameTab, PaintedFrame,
 };
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult, ProcessImageId,
+    ConnectionToken, FiredAction, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult,
+    PaintedTypedPane, ProcessImageId,
 };
 use koshi_ipc::remote_wire::RemoteClientFrame;
 use koshi_ipc::router::{
@@ -284,6 +285,9 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
     }
 }
@@ -1215,6 +1219,7 @@ fn coming_back_to_a_session_that_restarts_again_waits_for_its_next_image_and_joi
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
+        None,
     )
     .expect("the next image hands the client record back");
 
@@ -1460,6 +1465,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
+        None,
         MIN_LINK_TIMEOUT_MS,
     )
     .expect("the session joins");
@@ -1506,7 +1512,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
 }
 
 #[test]
-fn a_remote_join_names_its_placement_target_and_pings_every_third_of_the_link_timeout_until_answered(
+fn a_remote_join_names_its_placement_target_and_painted_typed_pane_and_pings_every_third_of_the_link_timeout_until_answered(
 ) {
     let (client_connection, serving_connection) = connect_test_socket_pair();
     let (client_frame_reader, client_frame_writer) = client_connection.split();
@@ -1517,6 +1523,9 @@ fn a_remote_join_names_its_placement_target_and_pings_every_third_of_the_link_ti
     let placement_preview_target = PanePlacementPreviewTarget {
         source_pane_id: PaneId::new(),
         destination_tab_id: TabId::new(),
+    };
+    let painted_typed_pane = PaintedTypedPane {
+        typed_pane_id: Some(PaneId::new()),
     };
     let (join_result_sender, join_result_receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -1533,6 +1542,7 @@ fn a_remote_join_names_its_placement_target_and_pings_every_third_of_the_link_ti
             TEXT_ONLY_ATTACH_SETTINGS,
             None,
             Some(placement_preview_target),
+            Some(painted_typed_pane),
             MIN_LINK_TIMEOUT_MS,
         );
         let _ = join_result_sender.send(join_result.map(|joined_session| {
@@ -1615,14 +1625,23 @@ fn a_remote_join_names_its_placement_target_and_pings_every_third_of_the_link_ti
     let IpcRequestKind::Attach {
         link_timeout_ms,
         placement_preview_target: attached_placement_preview_target,
+        painted_typed_pane: attached_painted_typed_pane,
         ..
     } = *prepared_kind
     else {
         panic!("the Prepare carries the session's Attach");
     };
     assert_eq!(
-        (link_timeout_ms, attached_placement_preview_target),
-        (Some(MIN_LINK_TIMEOUT_MS), Some(placement_preview_target))
+        (
+            link_timeout_ms,
+            attached_placement_preview_target,
+            attached_painted_typed_pane
+        ),
+        (
+            Some(MIN_LINK_TIMEOUT_MS),
+            Some(placement_preview_target),
+            Some(painted_typed_pane)
+        )
     );
     let join_ping = IpcRequest {
         request_id: 2,
@@ -1676,6 +1695,7 @@ fn coming_back_after_a_restart_presents_the_resume_token_and_keeps_the_one_it_mi
         },
         None,
         None,
+        None,
     )
     .expect("the stand-in session handed the client record back");
     assert_eq!(joined_session.attach_answer.client_id, client_id);
@@ -1707,6 +1727,7 @@ fn coming_back_after_a_restart_presents_the_resume_token_and_keeps_the_one_it_mi
             link_timeout_ms: None,
             max_frames_per_second: DEFAULT_MAX_FRAMES_PER_SECOND,
             placement_preview_target: None,
+            painted_typed_pane: None,
         }),
         "the restart path claims the client record with its token and reports this terminal's capability"
     );
@@ -1736,6 +1757,7 @@ fn attach_asks_for_the_frame_rate_its_settings_name() {
             None,
             None,
             None,
+            None,
         );
         let IpcRequestKind::Attach {
             max_frames_per_second: sent_max_frames_per_second,
@@ -1760,6 +1782,7 @@ fn attach_advertises_the_selected_native_protocol() {
         None,
         None,
         None,
+        None,
     );
     let sixel_attach_request = build_attach_prepare_request(
         None,
@@ -1772,6 +1795,7 @@ fn attach_advertises_the_selected_native_protocol() {
             },
             max_frames_per_second: DEFAULT_MAX_FRAMES_PER_SECOND,
         },
+        None,
         None,
         None,
         None,
@@ -1831,6 +1855,7 @@ fn a_restarted_session_that_refuses_the_join_ends_with_that_refusal() {
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
+        None,
     );
     assert_eq!(
         rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
@@ -1872,6 +1897,7 @@ fn a_restarted_session_that_closes_before_answering_the_join_ends_as_restarting(
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
+        None,
     );
     stand_in_session_thread
         .join()
@@ -1902,6 +1928,7 @@ fn a_restarted_session_whose_new_socket_takes_no_connection_ends_as_restarting()
         None,
         Instant::now() + RESTART_WINDOW_DURATION,
         TEXT_ONLY_ATTACH_SETTINGS,
+        None,
         None,
         None,
     );
@@ -1945,6 +1972,7 @@ fn a_restarted_session_that_never_answers_the_join_ends_as_restarting_at_the_dea
         None,
         restart_deadline,
         TEXT_ONLY_ATTACH_SETTINGS,
+        None,
         None,
         None,
     );
@@ -2014,6 +2042,7 @@ fn a_restarted_session_that_mints_a_new_client_is_joined_as_that_client() {
         None,
         Instant::now() + RESTART_WINDOW_DURATION,
         TEXT_ONLY_ATTACH_SETTINGS,
+        None,
         None,
         None,
     )
@@ -2117,6 +2146,60 @@ fn a_viewer_in_pane_placement_mode_names_its_placement_target_in_the_attach_afte
     );
 }
 
+/// A viewer whose newest painted frame showed pane 3 taking its input, with
+/// input pane move count `4`, names pane 3 in the attach after a restart. On
+/// the new connection its painted move count reads `0`, and the typed pane
+/// its screen shows stays pane 3.
+#[test]
+fn a_viewer_names_the_typed_pane_of_its_newest_painted_frame_in_the_attach_after_a_restart() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let recorded_attach_request =
+        spawn_restarted_session(runtime_directory.path(), session_id, None, Ok(client_id));
+    let third_pane_id = PaneId::new();
+    let mut client = build_test_client();
+    let mut painted_snapshot =
+        crate::tests::build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
+    painted_snapshot.client_snapshot.typed_pane_id = Some(third_pane_id);
+    painted_snapshot
+        .client_snapshot
+        .input_pane_moved_by_others_count = 4;
+    client.apply_render_snapshot(&painted_snapshot);
+
+    let (attachment_ending, client) = run_local_attachment_through_restart(
+        runtime_directory.path(),
+        session_id,
+        client_id,
+        client,
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
+    let IpcRequestKind::Attach {
+        painted_typed_pane, ..
+    } = recorded_attach_request
+        .lock()
+        .expect("the slot outlives every panic")
+        .clone()
+        .expect("the viewer joined the restarted session")
+    else {
+        panic!("the recorded request is an attach");
+    };
+    assert_eq!(
+        painted_typed_pane,
+        Some(PaintedTypedPane {
+            typed_pane_id: Some(third_pane_id)
+        })
+    );
+    assert_eq!(
+        (
+            client.get_painted_input_pane_moved_by_others_count(),
+            client.get_painted_typed_pane()
+        ),
+        (0, painted_typed_pane)
+    );
+}
+
 #[test]
 fn another_local_users_restarting_session_is_not_waited_for() {
     let runtime_directory = build_test_runtime_directory();
@@ -2132,6 +2215,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         None,
         Instant::now() + RESTART_WINDOW_DURATION,
         TEXT_ONLY_ATTACH_SETTINGS,
+        None,
         None,
         None,
     );
@@ -2258,6 +2342,7 @@ fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_i
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
+        None,
     );
     assert_eq!(
         rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
@@ -2289,6 +2374,7 @@ fn a_restart_into_an_incompatible_build_with_no_resume_token_carries_no_claim() 
         None,
         Instant::now() + RESTART_WINDOW_DURATION,
         TEXT_ONLY_ATTACH_SETTINGS,
+        None,
         None,
         None,
     );
@@ -2403,6 +2489,7 @@ fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts()
         TEXT_ONLY_ATTACH_SETTINGS,
         None,
         None,
+        None,
         30_000,
     );
     let reconnect_returned_at = Instant::now();
@@ -2441,6 +2528,7 @@ fn a_restart_into_an_incompatible_build_with_no_router_running_returns_at_once()
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
         None,
         TEXT_ONLY_ATTACH_SETTINGS,
+        None,
         None,
         None,
         30_000,
@@ -2821,6 +2909,9 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
         viewer_chrome: koshi_renderer::snapshot::ViewerChrome::default(),
@@ -5100,6 +5191,7 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
                 key_inputs: vec![crate::tests::build_key_input_for_chord(
                     KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('a'),)
                 )],
+                painted_input_pane_moved_by_others_count: 0,
             },
         }
     );
@@ -5171,7 +5263,8 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_inputs: vec![released_key_input]
+                key_inputs: vec![released_key_input],
+                painted_input_pane_moved_by_others_count: 0,
             },
         }
     );
@@ -5214,7 +5307,8 @@ fn a_key_no_binding_can_name_goes_up_the_connection_whole() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_inputs: vec![left_shift_key_input]
+                key_inputs: vec![left_shift_key_input],
+                painted_input_pane_moved_by_others_count: 0,
             },
         }
     );
@@ -5258,7 +5352,8 @@ fn a_text_only_event_goes_up_the_connection_whole() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
-                key_inputs: vec![text_only_key_input]
+                key_inputs: vec![text_only_key_input],
+                painted_input_pane_moved_by_others_count: 0,
             },
         }
     );
@@ -5531,9 +5626,75 @@ fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Paste {
                 pasted_text: String::from("hello\nworld"),
+                painted_input_pane_moved_by_others_count: 0,
             },
         },
         "the block crosses whole, line break and all"
+    );
+}
+
+/// The newest painted frame carries input pane move count `3`: a key the
+/// keymap does not bind and a paste each go up tagged `3`.
+#[test]
+fn a_typed_key_and_a_paste_go_up_tagged_with_the_painted_move_count() {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let mut painted_snapshot =
+        crate::tests::build_render_snapshot(client_id, LockMode::Normal, false);
+    painted_snapshot
+        .client_snapshot
+        .input_pane_moved_by_others_count = 3;
+    client.apply_render_snapshot(&painted_snapshot);
+    let mut control_socket = build_test_control_socket();
+
+    process_runtime_input(
+        &mut client,
+        &mut control_socket.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: crate::tests::build_key_input_for_chord(build_plain_chord('a')),
+        },
+        Instant::now(),
+    );
+    process_runtime_input(
+        &mut client,
+        &mut control_socket.uplink,
+        RuntimeEvent::HostPaste {
+            client_id,
+            pasted_text: String::from("ls"),
+        },
+        Instant::now(),
+    );
+
+    // The sentinel goes out behind both inputs, and the reads stop at it.
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let mut sent_request_kinds = Vec::new();
+    loop {
+        let request: IpcRequest = control_socket
+            .session_connection
+            .recv()
+            .expect("read the next request");
+        if request.request_id == sentinel_request_id {
+            break;
+        }
+        sent_request_kinds.push(request.request_kind);
+    }
+    assert_eq!(
+        sent_request_kinds,
+        vec![
+            IpcRequestKind::Keyboard {
+                key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                    'a'
+                ))],
+                painted_input_pane_moved_by_others_count: 3,
+            },
+            IpcRequestKind::Paste {
+                pasted_text: String::from("ls"),
+                painted_input_pane_moved_by_others_count: 3,
+            },
+        ]
     );
 }
 
@@ -5955,6 +6116,9 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             last_applied_floating_pane_move_command_id: None,
             last_applied_placement_command_id: None,
             is_mouse_selection_enabled: false,
+            typed_pane_id: None,
+            input_pane_moved_by_others_count: 0,
+            dropped_input_request_count: 0,
         },
         placement_preview: None,
     }
@@ -8337,6 +8501,7 @@ fn attachment_skips_a_redraw_after_paste_when_viewer_paint_is_unchanged() {
             paste_request.request_kind,
             IpcRequestKind::Paste {
                 pasted_text: String::from("viewer input"),
+                painted_input_pane_moved_by_others_count: 0,
             }
         );
         producer_sender
@@ -9736,9 +9901,17 @@ fn keys_and_pastes_during_a_restart_are_held_in_order_for_the_restarted_session(
     );
 }
 
+/// The newest painted frame carries input pane move count `3`: the held key,
+/// key-fired command and paste go up in order, each tagged `3`.
 #[test]
-fn held_inputs_go_up_in_the_order_they_were_typed() {
+fn held_inputs_go_up_in_the_order_they_were_typed_tagged_with_the_painted_move_count() {
     let mut client = build_test_client();
+    let mut painted_snapshot =
+        crate::tests::build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
+    painted_snapshot
+        .client_snapshot
+        .input_pane_moved_by_others_count = 3;
+    client.apply_render_snapshot(&painted_snapshot);
     let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = build_test_uplink(request_sender);
 
@@ -9767,6 +9940,7 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
             key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
                 'a'
             ))],
+            painted_input_pane_moved_by_others_count: 3,
         }
     );
     let IpcRequestKind::SubmitCommand {
@@ -9780,11 +9954,18 @@ fn held_inputs_go_up_in_the_order_they_were_typed() {
         command_envelope.command,
         Command::NewTab(NewTabArgs::default())
     );
-    assert_eq!(*fired_action, Some(build_test_action_reference("new-tab")));
+    assert_eq!(
+        *fired_action,
+        Some(FiredAction {
+            action_reference: build_test_action_reference("new-tab"),
+            painted_input_pane_moved_by_others_count: 3,
+        })
+    );
     assert_eq!(
         sent_requests[2].request_kind,
         IpcRequestKind::Paste {
             pasted_text: String::from("pasted"),
+            painted_input_pane_moved_by_others_count: 3,
         }
     );
 }
@@ -9881,6 +10062,7 @@ fn keys_typed_after_the_lock_key_resolve_in_locked_mode_before_the_session_answe
         *tab_request_kind,
         IpcRequestKind::Keyboard {
             key_inputs: vec![crate::tests::build_key_input_for_chord(build_tab_chord())],
+            painted_input_pane_moved_by_others_count: 0,
         }
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -9930,6 +10112,7 @@ fn a_quit_key_bound_in_normal_mode_alone_reaches_the_pane_right_after_the_lock_k
         *quit_key_request_kind,
         IpcRequestKind::Keyboard {
             key_inputs: vec![crate::tests::build_key_input_for_chord(quit_chord)],
+            painted_input_pane_moved_by_others_count: 0,
         }
     );
 }
@@ -10325,6 +10508,7 @@ fn held_lock_commands_go_up_under_their_own_ids_and_leave_the_mode_and_open_sequ
         tab_request.request_kind,
         IpcRequestKind::Keyboard {
             key_inputs: vec![crate::tests::build_key_input_for_chord(build_tab_chord())],
+            painted_input_pane_moved_by_others_count: 0,
         }
     );
     let IpcRequestKind::SubmitCommand {
@@ -12557,6 +12741,7 @@ fn an_attach_request_carries_the_link_timeout_it_is_given() {
             None,
             link_timeout_ms,
             None,
+            None,
         );
         let IpcRequestKind::Attach {
             link_timeout_ms: sent_link_timeout_ms,
@@ -13055,6 +13240,7 @@ fn a_key_read_after_the_ambiguity_deadline_fires_the_open_binding_and_then_resol
             key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
                 'a'
             ))],
+            painted_input_pane_moved_by_others_count: 0,
         },
         "`a` no longer continues the sequence and goes to the pane"
     );
@@ -13403,6 +13589,7 @@ fn a_paste_read_after_the_ambiguity_deadline_goes_up_after_the_binding_the_deadl
         sent_requests[1].request_kind,
         IpcRequestKind::Paste {
             pasted_text: String::from("typed"),
+            painted_input_pane_moved_by_others_count: 0,
         }
     );
     assert_eq!(client.get_pending_key_sequence(), None);
@@ -13563,6 +13750,7 @@ fn an_edge_scroll_step_due_before_a_key_was_read_goes_up_before_the_key() {
                 key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
                     'x'
                 ))],
+                painted_input_pane_moved_by_others_count: 0,
             },
         ]
     );
@@ -14466,6 +14654,7 @@ fn the_keys_of_one_read_that_go_to_the_pane_go_up_in_one_request() {
         list_requests_for_one_read(&mut client, runtime_events),
         vec![IpcRequestKind::Keyboard {
             key_inputs: build_key_inputs_for_text("é-a"),
+            painted_input_pane_moved_by_others_count: 0,
         }]
     );
 }
@@ -14495,6 +14684,7 @@ fn a_bound_key_in_a_read_goes_up_between_the_keys_before_and_after_it() {
         *keys_before_request_kind,
         IpcRequestKind::Keyboard {
             key_inputs: build_key_inputs_for_text("ab"),
+            painted_input_pane_moved_by_others_count: 0,
         }
     );
     assert_eq!(
@@ -14509,6 +14699,7 @@ fn a_bound_key_in_a_read_goes_up_between_the_keys_before_and_after_it() {
         *keys_after_request_kind,
         IpcRequestKind::Keyboard {
             key_inputs: build_key_inputs_for_text("cd"),
+            painted_input_pane_moved_by_others_count: 0,
         }
     );
 }
@@ -14536,9 +14727,11 @@ fn a_key_an_open_sequence_takes_ends_the_request_of_the_keys_before_it() {
         vec![
             IpcRequestKind::Keyboard {
                 key_inputs: build_key_inputs_for_text("a"),
+                painted_input_pane_moved_by_others_count: 0,
             },
             IpcRequestKind::Keyboard {
                 key_inputs: build_key_inputs_for_text("b"),
+                painted_input_pane_moved_by_others_count: 0,
             },
         ]
     );
@@ -14564,6 +14757,7 @@ fn a_key_release_in_a_read_goes_up_in_the_request_of_its_read() {
                 crate::tests::build_key_input_for_chord(build_plain_chord('a')),
                 a_key_release_input,
             ],
+            painted_input_pane_moved_by_others_count: 0,
         }]
     );
 }
@@ -14585,12 +14779,15 @@ fn a_paste_in_a_read_goes_up_between_the_keys_before_and_after_it() {
         vec![
             IpcRequestKind::Keyboard {
                 key_inputs: build_key_inputs_for_text("a"),
+                painted_input_pane_moved_by_others_count: 0,
             },
             IpcRequestKind::Paste {
                 pasted_text: String::from("pasted"),
+                painted_input_pane_moved_by_others_count: 0,
             },
             IpcRequestKind::Keyboard {
                 key_inputs: build_key_inputs_for_text("b"),
+                painted_input_pane_moved_by_others_count: 0,
             },
         ]
     );
@@ -14649,7 +14846,7 @@ fn each_read_of_keys_for_the_pane_reaches_it_in_one_write_at_every_split() {
             );
         }
         for sent_request in request_receiver.try_iter() {
-            let IpcRequestKind::Keyboard { key_inputs } = sent_request.request_kind else {
+            let IpcRequestKind::Keyboard { key_inputs, .. } = sent_request.request_kind else {
                 panic!("typed text sends keys only, not {sent_request:?}");
             };
             server.handle_key_inputs(server_client_id, &key_inputs);
@@ -15115,7 +15312,21 @@ fn run_attachment_over_notification_events(
     attached_notification_queue: &NotificationQueue,
     incoming_events: Vec<Incoming>,
 ) -> Client {
-    let mut client = build_test_client();
+    run_client_attachment_over_notification_events(
+        build_test_client(),
+        session_id,
+        attached_notification_queue,
+        incoming_events,
+    )
+}
+
+/// [`run_attachment_over_notification_events`] with `client` as the viewer.
+fn run_client_attachment_over_notification_events(
+    mut client: Client,
+    session_id: SessionId,
+    attached_notification_queue: &NotificationQueue,
+    incoming_events: Vec<Incoming>,
+) -> Client {
     client
         .take_session_notification_queue(session_id, attached_notification_queue)
         .expect("the attach answer's queue is the session's");
@@ -16127,5 +16338,58 @@ fn a_requested_close_of_a_center_that_is_closed_answers_ok_and_changes_nothing()
     assert_eq!(
         request_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty)
+    );
+}
+
+/// A viewer that shows `Locked` while it waits for its `<C-l>` lock command
+/// reads a `Resync`: it waits for no lock command after it.
+#[test]
+fn a_resync_forgets_the_lock_command_the_viewer_waits_for() {
+    let session_id = SessionId::new();
+    let attached_notification_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+    let mut client = build_test_client();
+    client.apply_lock_command(CommandId::new(), LockMode::Locked);
+
+    let client = run_client_attachment_over_notification_events(
+        client,
+        session_id,
+        &attached_notification_queue,
+        vec![build_session_event_incoming(SessionEvent::Resync {
+            dropped_event_count: 1,
+            notification_queue: attached_notification_queue.clone(),
+            held_command_rejections: Vec::new(),
+            dropped_command_rejection_count: 0,
+        })],
+    );
+
+    assert_eq!(client.get_pending_lock_command_id(), None);
+}
+
+/// A committed frame whose dropped request count rose from `0` to `2` posts
+/// the dropped-keys warning, repeated twice.
+#[test]
+fn a_committed_frame_whose_dropped_request_count_rose_posts_the_dropped_keys_warning() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let mut render_snapshot =
+        crate::tests::build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
+    render_snapshot.client_snapshot.dropped_input_request_count = 2;
+
+    commit_test_snapshot(&mut client, &mut screen, &render_snapshot, Instant::now());
+
+    let posted_warnings: Vec<(String, u32)> = client
+        .get_notification_history()
+        .list_merged_entries()
+        .map(|notification_entry| {
+            (
+                notification_entry.text.clone(),
+                notification_entry.repeat_count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        posted_warnings,
+        vec![(crate::DROPPED_INPUT_NOTIFICATION_TEXT.to_owned(), 2)]
     );
 }

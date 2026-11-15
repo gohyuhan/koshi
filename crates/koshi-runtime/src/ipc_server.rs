@@ -1241,6 +1241,7 @@ fn serve_connection(
                 link_timeout_ms,
                 max_frames_per_second,
                 placement_preview_target,
+                painted_typed_pane,
             } => {
                 // A connection that ends before its first request after this
                 // attach reports its client as returning when it came from
@@ -1264,6 +1265,7 @@ fn serve_connection(
                         granted_identity: handshake.get_granted_identity().map(str::to_string),
                         max_frames_per_second,
                         placement_preview_target,
+                        painted_typed_pane,
                         response_sender,
                     },
                 );
@@ -1921,9 +1923,13 @@ fn stream_events(
                 client_id,
                 cell_size,
             },
-            IpcRequestKind::Keyboard { key_inputs } => RuntimeEvent::ClientKeyboard {
+            IpcRequestKind::Keyboard {
+                key_inputs,
+                painted_input_pane_moved_by_others_count,
+            } => RuntimeEvent::ClientKeyboard {
                 client_id,
                 key_inputs,
+                painted_input_pane_moved_by_others_count,
             },
             IpcRequestKind::Resize { viewport_size, .. }
                 if viewport_size.compute_cell_count() > MAX_VIEWPORT_CELL_COUNT =>
@@ -1946,9 +1952,13 @@ fn stream_events(
                 pane_area,
                 cell_size,
             },
-            IpcRequestKind::Paste { pasted_text } => RuntimeEvent::HostPaste {
+            IpcRequestKind::Paste {
+                pasted_text,
+                painted_input_pane_moved_by_others_count,
+            } => RuntimeEvent::ClientPaste {
                 client_id,
                 pasted_text,
+                painted_input_pane_moved_by_others_count,
             },
             IpcRequestKind::Mouse(mouse_actions) => RuntimeEvent::ClientMouse {
                 client_id,

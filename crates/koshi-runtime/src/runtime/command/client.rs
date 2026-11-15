@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use koshi_core::client::resolve_client_label;
 use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::protocol::{ConnectionToken, PaintedTypedPane};
 
 use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
@@ -136,15 +136,20 @@ impl Server {
     /// The client's first frame carries the target's preview. `None` names no
     /// target.
     ///
+    /// `painted_typed_pane` starts the client's input counts at the
+    /// subscription ([`subscribe`](Self::subscribe)): the typed pane of the
+    /// newest frame the caller painted on an earlier connection, or `None` on
+    /// a first attach.
+    ///
     /// `client_origin` and `granted_identity` describe the connection, as
     /// [`Self::handle_client_attach`] reads them: a freshly minted client with
     /// no saved view, or whose saved label another client holds, takes its
     /// label from them, and a client record taken back keeps its label.
     // Carries the whole of one attach request: what it claims back (`resume_client_id`,
     // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`,
-    // `cell_size`, `placement_preview_target`), who the connection carries
-    // (`client_origin`, `granted_identity`), and how the connection is served
-    // (`attached_at`, `max_frames_per_second`).
+    // `cell_size`, `placement_preview_target`, `painted_typed_pane`), who the
+    // connection carries (`client_origin`, `granted_identity`), and how the
+    // connection is served (`attached_at`, `max_frames_per_second`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach(
         &mut self,
@@ -158,6 +163,7 @@ impl Server {
         granted_identity: Option<&str>,
         max_frames_per_second: u16,
         placement_preview_target: Option<PanePlacementPreviewTarget>,
+        painted_typed_pane: Option<PaintedTypedPane>,
     ) -> Option<AttachAccepted> {
         let session = self.get_sole_session()?;
         let session_id = session.session_id;
@@ -242,7 +248,8 @@ impl Server {
         self.publish_events(&emitted_events);
         self.set_pane_placement_preview(client_id, placement_preview_target);
 
-        let (deliveries, writer_handoff) = self.subscribe(client_id, max_frames_per_second);
+        let (deliveries, writer_handoff) =
+            self.subscribe(client_id, max_frames_per_second, painted_typed_pane);
         let resume_token = self.saved_view_store.mint_resume_token(client_id);
         let session = self
             .session_by_id

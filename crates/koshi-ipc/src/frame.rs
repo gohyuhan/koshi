@@ -654,6 +654,25 @@ pub struct FrameClient {
     /// `SELECT` tag to the mode indicator, and decides whether a press in a
     /// mouse-aware pane begins a highlight.
     pub is_mouse_selection_enabled: bool,
+    /// The pane a keystroke from the client types into as this frame shows
+    /// it: [`focused_pane_id`](Self::focused_pane_id) when this frame draws
+    /// that pane's content. `None` when the client focuses no pane, and when
+    /// that pane is suppressed for want of space or hidden behind a zoomed
+    /// pane.
+    pub typed_pane_id: Option<PaneId>,
+    /// How many times on this connection something other than the client's
+    /// own connection moved the client's input to another pane, or to no
+    /// pane: another client, the CLI, or a pane's child exiting. It starts at
+    /// `1` on an attach whose
+    /// [`PaintedTypedPane`](crate::protocol::PaintedTypedPane) names another
+    /// pane than `typed_pane_id`, and at `0` otherwise. The client tags each
+    /// key, paste and key-fired command with the count of the last frame it
+    /// drew.
+    pub input_pane_moved_by_others_count: u64,
+    /// How many key and paste requests of this connection the session
+    /// dropped: each request whose tag was below
+    /// `input_pane_moved_by_others_count`.
+    pub dropped_input_request_count: u64,
 }
 
 /// One pane's content apart from its rows, its cursor and its scroll
