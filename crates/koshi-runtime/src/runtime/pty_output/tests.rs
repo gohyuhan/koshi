@@ -166,7 +166,7 @@ fn build_measured_client(
         },
         None,
         active_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

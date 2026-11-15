@@ -987,7 +987,8 @@ fn step_four_names_the_missing_or_misshapen_field() {
 }
 
 #[test]
-fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view_its_history() {
+fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its_history_and_each_local_origin_an_unknown_account(
+) {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "S": {
@@ -1008,15 +1009,25 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
                     "layout": {"Pane": "P0"},
                     "solved_tab_size": {"column_count": 80, "row_count": 22}
                 }},
-                "clients": {"client_by_id": {"C": {
-                    "color_index": 0,
-                    "floating_pane_view_by_pane_id": {
-                        "P1": {"position": {"Pinned": {"column": 10, "row": 3}}, "is_minimized": false},
-                        "P2": {"position": "Default", "is_minimized": true}
+                "clients": {"client_by_id": {
+                    "C": {
+                        "color_index": 0,
+                        "origin": "Local",
+                        "floating_pane_view_by_pane_id": {
+                            "P1": {"position": {"Pinned": {"column": 10, "row": 3}}, "is_minimized": false},
+                            "P2": {"position": "Default", "is_minimized": true}
+                        },
+                        "shown_floating_pane_ids": ["P1"],
+                        "focused_floating_pane_id": "P1"
                     },
-                    "shown_floating_pane_ids": ["P1"],
-                    "focused_floating_pane_id": "P1"
-                }}}
+                    "R": {
+                        "color_index": 1,
+                        "origin": "Remote",
+                        "floating_pane_view_by_pane_id": {},
+                        "shown_floating_pane_ids": [],
+                        "focused_floating_pane_id": null
+                    }
+                }}
             }
         },
         "carried_pane_state_by_pane_id": {},
@@ -1070,25 +1081,35 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
                             "solved_size": {"column_count": 80, "row_count": 22}
                         }
                     }},
-                    "clients": {"client_by_id": {"C": {
-                        "color_index": 0,
-                        "floating_pane_view_by_floating_pane_id": {
-                            "P1": {
-                                "position": {"Pinned": {"column": 10, "row": 3}},
-                                "is_minimized": false,
-                                "focus_history": ["P1"],
-                                "zoomed_pane_id": null
+                    "clients": {"client_by_id": {
+                        "C": {
+                            "color_index": 0,
+                            "origin": {"Local": {"is_same_user": false}},
+                            "floating_pane_view_by_floating_pane_id": {
+                                "P1": {
+                                    "position": {"Pinned": {"column": 10, "row": 3}},
+                                    "is_minimized": false,
+                                    "focus_history": ["P1"],
+                                    "zoomed_pane_id": null
+                                },
+                                "P2": {
+                                    "position": "Default",
+                                    "is_minimized": true,
+                                    "focus_history": ["P2"],
+                                    "zoomed_pane_id": null
+                                }
                             },
-                            "P2": {
-                                "position": "Default",
-                                "is_minimized": true,
-                                "focus_history": ["P2"],
-                                "zoomed_pane_id": null
-                            }
+                            "shown_floating_pane_ids": ["P1"],
+                            "focused_floating_pane_id": "P1"
                         },
-                        "shown_floating_pane_ids": ["P1"],
-                        "focused_floating_pane_id": "P1"
-                    }}}
+                        "R": {
+                            "color_index": 1,
+                            "origin": "Remote",
+                            "floating_pane_view_by_floating_pane_id": {},
+                            "shown_floating_pane_ids": [],
+                            "focused_floating_pane_id": null
+                        }
+                    }}
                 }
             },
             "carried_pane_state_by_pane_id": {},
@@ -1118,7 +1139,7 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_and_gives_each_view
 
 #[test]
 fn step_five_moves_each_client_after_the_first_holder_of_an_index_to_the_lowest_free_index() {
-    let build_client_record = |color_index: u64| serde_json::json!({"color_index": color_index, "floating_pane_view_by_pane_id": {}});
+    let build_client_record = |color_index: u64| serde_json::json!({"color_index": color_index, "origin": "Remote", "floating_pane_view_by_pane_id": {}});
     let mut resume_body = serde_json::json!({"session_by_id": {
         "S": {
             "floating_set": {"members": []},
@@ -1290,11 +1311,33 @@ fn step_five_names_the_missing_or_misshapen_field() {
             build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
                 "floating_pane_view_by_pane_id": {}
             }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.origin is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "origin": "Elsewhere",
+                "floating_pane_view_by_pane_id": {}
+            }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.origin must be \"Local\" or \"Remote\"",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "origin": {"Local": {"is_same_user": true}},
+                "floating_pane_view_by_pane_id": {}
+            }}}})),
+            "body.session_by_id.S.clients.client_by_id.C.origin must be \"Local\" or \"Remote\"",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
+                "origin": "Local",
+                "floating_pane_view_by_pane_id": {}
+            }}}})),
             "body.session_by_id.S.clients.client_by_id.C.color_index is missing",
         ),
         (
             build_step_five_session(serde_json::json!({"clients": {"client_by_id": {"C": {
                 "color_index": "two",
+                "origin": "Local",
                 "floating_pane_view_by_pane_id": {}
             }}}})),
             "body.session_by_id.S.clients.client_by_id.C.color_index must be a whole number",

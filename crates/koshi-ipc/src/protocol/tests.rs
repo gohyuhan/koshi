@@ -7,7 +7,7 @@
 
 use std::num::NonZeroU16;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use koshi_core::client::ClientOrigin;
 
@@ -38,7 +38,7 @@ use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -230,7 +230,7 @@ fn build_populated_test_session_overview() -> SessionOverview {
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
-            origin: Some(ClientOrigin::Local),
+            origin: ClientOrigin::Local { is_same_user: true },
             pane_area: None,
         }],
     }
@@ -662,7 +662,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
                 "active_tab_id": "00000000-0000-0000-0000-000000000001",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000001",
                 "lock_mode": "Normal",
-                "origin": "Local",
+                "origin": { "Local": { "is_same_user": true } },
                 "pane_area": null
             }]
         })
@@ -684,78 +684,6 @@ fn the_plane_a_remote_client_reaches_names_no_token_verb() {
             "{verb} must stay off the plane a remote client speaks"
         );
     }
-}
-
-#[test]
-fn a_client_row_decodes_across_the_shape_that_added_origin() {
-    // A client row written without `origin` decodes with `origin: None`.
-    let client_row_without_origin_json = json!({
-        "client_id": "00000000-0000-0000-0000-000000000001",
-        "label": "C-swift-otter",
-        "color_index": 2,
-        "session_id": "00000000-0000-0000-0000-000000000001",
-        "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
-        "viewport_size": { "column_count": 80, "row_count": 24 },
-        "active_tab_id": "00000000-0000-0000-0000-000000000001",
-        "focused_pane_id": null,
-        "lock_mode": "Normal"
-    });
-    let decoded_client_row: ClientDiscovery =
-        serde_json::from_value(client_row_without_origin_json)
-            .expect("a row from a build without origin decodes");
-    assert_eq!(
-        decoded_client_row,
-        ClientDiscovery {
-            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-            label: "C-swift-otter".to_string(),
-            color_index: 2,
-            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            attached_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            viewport_size: Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            active_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-            focused_pane_id: None,
-            lock_mode: LockMode::Normal,
-            origin: None,
-            pane_area: None,
-        }
-    );
-
-    // The other direction: a row this build writes, read by a shape that has
-    // no `origin` field. `OldClientRecord` is that shape.
-    #[derive(Debug, PartialEq, Deserialize)]
-    struct OldClientRecord {
-        client_id: ClientId,
-        session_id: SessionId,
-        attached_at: SystemTime,
-        viewport_size: Size,
-        active_tab_id: TabId,
-        focused_pane_id: Option<PaneId>,
-        lock_mode: LockMode,
-    }
-    let mut written_client_row = build_populated_test_session_overview().clients.remove(0);
-    written_client_row.origin = Some(ClientOrigin::Remote);
-    let written_client_row_json =
-        serde_json::to_value(written_client_row).expect("a client row encodes");
-    let old_client_record: OldClientRecord = serde_json::from_value(written_client_row_json)
-        .expect("the older shape reads a row carrying origin");
-    assert_eq!(
-        old_client_record,
-        OldClientRecord {
-            client_id: ClientId::from_uuid(build_fixed_test_uuid()),
-            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-            attached_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-            viewport_size: Size {
-                column_count: 80,
-                row_count: 24,
-            },
-            active_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
-            focused_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            lock_mode: LockMode::Normal,
-        }
-    );
 }
 
 #[test]
@@ -1249,6 +1177,7 @@ fn hello_request_round_trips() {
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
             is_remote: false,
+            granted_identity: None,
         },
     };
 
@@ -1264,6 +1193,7 @@ fn hello_request_encodes_to_the_expected_shape() {
             maximum_protocol_version: 2,
             connection_token: build_test_connection_token(),
             is_remote: false,
+            granted_identity: None,
         },
     };
 
@@ -1276,10 +1206,72 @@ fn hello_request_encodes_to_the_expected_shape() {
                     "minimum_protocol_version": 1,
                     "maximum_protocol_version": 2,
                     "connection_token": "k7QxSecret",
-                    "is_remote": false
+                    "is_remote": false,
+                    "granted_identity": null
                 }
             }
         })
+    );
+}
+
+#[test]
+fn a_hello_carrying_a_grant_identity_encodes_it_and_reads_it_back() {
+    let ipc_request = IpcRequest {
+        request_id: 1,
+        request_kind: IpcRequestKind::Hello {
+            minimum_protocol_version: 6,
+            maximum_protocol_version: 6,
+            connection_token: build_test_connection_token(),
+            is_remote: true,
+            granted_identity: Some("bob".to_string()),
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&ipc_request).expect("request encodes"),
+        json!({
+            "request_id": 1,
+            "request_kind": {
+                "Hello": {
+                    "minimum_protocol_version": 6,
+                    "maximum_protocol_version": 6,
+                    "connection_token": "k7QxSecret",
+                    "is_remote": true,
+                    "granted_identity": "bob"
+                }
+            }
+        })
+    );
+    assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+}
+
+#[test]
+fn a_hello_without_a_grant_identity_field_reads_as_none() {
+    let decoded_request: IpcRequest = serde_json::from_value(json!({
+        "request_id": 1,
+        "request_kind": {
+            "Hello": {
+                "minimum_protocol_version": 5,
+                "maximum_protocol_version": 5,
+                "connection_token": "k7QxSecret",
+                "is_remote": true
+            }
+        }
+    }))
+    .expect("a Hello of a build without the field decodes");
+
+    assert_eq!(
+        decoded_request,
+        IpcRequest {
+            request_id: 1,
+            request_kind: IpcRequestKind::Hello {
+                minimum_protocol_version: 5,
+                maximum_protocol_version: 5,
+                connection_token: build_test_connection_token(),
+                is_remote: true,
+                granted_identity: None,
+            },
+        }
     );
 }
 
@@ -1292,6 +1284,7 @@ fn a_hello_marking_a_remote_caller_round_trips_and_encodes_true() {
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
             is_remote: true,
+            granted_identity: None,
         },
     };
 
@@ -2823,6 +2816,7 @@ fn a_hello_carrying_an_unknown_field_ignores_it() {
                 maximum_protocol_version: 2,
                 connection_token: build_test_connection_token(),
                 is_remote: false,
+                granted_identity: None,
             },
         }
     );
@@ -2855,6 +2849,7 @@ fn the_hello_this_build_sends_carries_the_range_it_speaks() {
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
             is_remote: false,
+            granted_identity: None,
         }
     );
 }
@@ -2897,13 +2892,15 @@ fn nesting_a_token_in_a_request_keeps_it_out_of_debug_output() {
             maximum_protocol_version: 1,
             connection_token: build_test_connection_token(),
             is_remote: false,
+            granted_identity: None,
         },
     };
 
     assert_eq!(
         format!("{ipc_request:?}"),
         "Envelope { request_id: 1, request_kind: Hello { minimum_protocol_version: 1, \
-         maximum_protocol_version: 1, connection_token: ConnectionToken(***), is_remote: false } }"
+         maximum_protocol_version: 1, connection_token: ConnectionToken(***), is_remote: false, \
+         granted_identity: None } }"
     );
 }
 

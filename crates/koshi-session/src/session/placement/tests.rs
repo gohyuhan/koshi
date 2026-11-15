@@ -145,7 +145,7 @@ fn attach_client(session: &mut Session, client_id: ClientId, tab_id: TabId, pane
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -449,7 +449,7 @@ fn transfer_ranks_the_source_tabs_panes_at_its_size_after_the_acting_client_leav
             row_count: 2,
         })),
         source_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -2032,7 +2032,7 @@ fn docking_into_another_tab_solves_the_tab_the_acting_client_left_at_its_other_v
             row_count: 10,
         })),
         source_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -2995,7 +2995,7 @@ fn attach_client_with_pane_area(
         pane_area_size,
         Some(PaneArea::Reported(pane_area_size)),
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

@@ -14,6 +14,7 @@
 
 use super::*;
 
+use koshi_core::client::ClientOrigin;
 #[cfg(unix)]
 use koshi_core::command::{ClosePaneArgs, NewPaneArgs, NewPanePlacement};
 use koshi_core::command::{
@@ -203,7 +204,8 @@ fn attach_test_client(server: &mut Server) -> AttachAccepted {
         pane_area: None,
         cell_size: None,
         attached_at: SystemTime::now(),
-        is_remote: false,
+        client_origin: ClientOrigin::Local { is_same_user: true },
+        granted_identity: None,
         max_frames_per_second: 60,
         response_sender: attach_response_sender,
         placement_preview_target: None,
@@ -676,7 +678,8 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
         first_tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let open_second_tab_command_id = CommandId::new();
@@ -2231,6 +2234,7 @@ fn connect_greeted_session(session_start: &SessionStart) -> (FrameReader, FrameW
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send the Hello");

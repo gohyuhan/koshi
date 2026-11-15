@@ -38,8 +38,12 @@ fn is_token_admitted_for_session(
     current_time: SystemTime,
 ) -> bool {
     token_store
-        .find_token_scope(connection_token, current_time)
-        .is_some_and(|admitted_scope| admitted_scope.is_allowed_for_session(session_id))
+        .find_token_grant(connection_token, current_time)
+        .is_some_and(|admitted_grant| {
+            admitted_grant
+                .token_scope
+                .is_allowed_for_session(session_id)
+        })
 }
 
 /// The permission bits of the file or directory at `file_path`.
@@ -1178,14 +1182,17 @@ fn a_store_holding_no_records_reads_back_as_a_store_holding_no_records() {
 }
 
 #[test]
-fn a_live_secret_is_admitted_with_the_scope_it_was_granted_on() {
+fn a_live_secret_is_admitted_with_the_scope_and_identity_it_was_granted_on() {
     let session_id = SessionId::new();
     let (token_store, connection_token) =
         build_granted_token_store(TokenScope::Session(session_id), None);
 
     assert_eq!(
-        token_store.find_token_scope(&connection_token, build_system_time_at_seconds(200)),
-        Some(TokenScope::Session(session_id))
+        token_store.find_token_grant(&connection_token, build_system_time_at_seconds(200)),
+        Some(AdmittedGrant {
+            token_scope: TokenScope::Session(session_id),
+            granted_identity: "ada".to_string(),
+        })
     );
     assert_eq!(token_store.token_records[0].last_used_at, None);
     assert!(TokenScope::Session(session_id).is_allowed_for_session(session_id));
@@ -1197,7 +1204,7 @@ fn a_secret_no_record_holds_is_admitted_by_nothing() {
     let (token_store, _connection_token) = build_granted_token_store(TokenScope::HostWide, None);
 
     assert_eq!(
-        token_store.find_token_scope(
+        token_store.find_token_grant(
             &ConnectionToken::generate(),
             build_system_time_at_seconds(200)
         ),
@@ -1211,7 +1218,7 @@ fn a_revoked_secret_and_an_expired_one_are_admitted_by_nothing() {
     let (mut token_store, connection_token) = build_granted_token_store(TokenScope::HostWide, None);
     token_store.revoke_token_grants("ada", None, build_system_time_at_seconds(150));
     assert_eq!(
-        token_store.find_token_scope(&connection_token, build_system_time_at_seconds(200)),
+        token_store.find_token_grant(&connection_token, build_system_time_at_seconds(200)),
         None
     );
 
@@ -1220,12 +1227,15 @@ fn a_revoked_secret_and_an_expired_one_are_admitted_by_nothing() {
         Some(build_system_time_at_seconds(150)),
     );
     assert_eq!(
-        token_store.find_token_scope(&connection_token, build_system_time_at_seconds(150)),
+        token_store.find_token_grant(&connection_token, build_system_time_at_seconds(150)),
         None
     );
     assert_eq!(
-        token_store.find_token_scope(&connection_token, build_system_time_at_seconds(149)),
-        Some(TokenScope::HostWide)
+        token_store.find_token_grant(&connection_token, build_system_time_at_seconds(149)),
+        Some(AdmittedGrant {
+            token_scope: TokenScope::HostWide,
+            granted_identity: "ada".to_string(),
+        })
     );
 }
 
@@ -1320,12 +1330,12 @@ fn the_last_live_record_holding_a_secret_is_the_one_that_answers() {
     let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(1));
     let connection_token = ConnectionToken::generate();
     let mut token_store = TokenStore::new();
-    for (scope, issued_at_seconds) in [
-        (TokenScope::Session(session_id), 100),
-        (TokenScope::HostWide, 200),
+    for (identity, scope, issued_at_seconds) in [
+        ("ada", TokenScope::Session(session_id), 100),
+        ("bea", TokenScope::HostWide, 200),
     ] {
         token_store.token_records.push(TokenRecord {
-            identity: "ada".to_string(),
+            identity: identity.to_string(),
             token_hash: hash_connection_token(&connection_token),
             scope,
             issued_at: build_system_time_at_seconds(issued_at_seconds),
@@ -1336,8 +1346,11 @@ fn the_last_live_record_holding_a_secret_is_the_one_that_answers() {
     }
 
     assert_eq!(
-        token_store.find_token_scope(&connection_token, build_system_time_at_seconds(300)),
-        Some(TokenScope::HostWide)
+        token_store.find_token_grant(&connection_token, build_system_time_at_seconds(300)),
+        Some(AdmittedGrant {
+            token_scope: TokenScope::HostWide,
+            granted_identity: "bea".to_string(),
+        })
     );
 }
 
@@ -1348,15 +1361,16 @@ fn a_later_revoked_record_leaves_an_earlier_live_one_answering() {
     let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(1));
     let connection_token = ConnectionToken::generate();
     let mut token_store = TokenStore::new();
-    for (scope, revoked_at) in [
-        (TokenScope::Session(session_id), None),
+    for (identity, scope, revoked_at) in [
+        ("ada", TokenScope::Session(session_id), None),
         (
+            "bea",
             TokenScope::HostWide,
             Some(build_system_time_at_seconds(250)),
         ),
     ] {
         token_store.token_records.push(TokenRecord {
-            identity: "ada".to_string(),
+            identity: identity.to_string(),
             token_hash: hash_connection_token(&connection_token),
             scope,
             issued_at: build_system_time_at_seconds(100),
@@ -1367,8 +1381,11 @@ fn a_later_revoked_record_leaves_an_earlier_live_one_answering() {
     }
 
     assert_eq!(
-        token_store.find_token_scope(&connection_token, build_system_time_at_seconds(300)),
-        Some(TokenScope::Session(session_id))
+        token_store.find_token_grant(&connection_token, build_system_time_at_seconds(300)),
+        Some(AdmittedGrant {
+            token_scope: TokenScope::Session(session_id),
+            granted_identity: "ada".to_string(),
+        })
     );
 }
 

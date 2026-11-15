@@ -56,7 +56,7 @@ fn build_single_pane_session() -> (Session, TabId, PaneId, ClientId) {
         TEST_VIEWPORT_SIZE,
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -228,7 +228,7 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
         TEST_VIEWPORT_SIZE,
         None,
         first_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -430,7 +430,7 @@ fn commit_with_no_acting_client_drops_the_tabs_zoom_for_a_client_on_another_tab(
         TEST_VIEWPORT_SIZE,
         None,
         other_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -606,7 +606,7 @@ fn commit_drops_the_splitting_clients_zoom_and_no_others() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

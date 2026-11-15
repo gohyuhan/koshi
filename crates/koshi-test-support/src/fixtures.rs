@@ -641,7 +641,7 @@ fn answer_session_requests(
     let mut session_connection = session_listener.accept().expect("accept the caller");
     let mut session_handshake = Handshake::from_expected_token_and_peer(
         session_connection_token,
-        Peer::Local {
+        Peer {
             is_same_user: true,
             is_other_user_access_allowed: false,
         },

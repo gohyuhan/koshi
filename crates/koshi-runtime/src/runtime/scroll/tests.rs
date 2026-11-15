@@ -74,7 +74,7 @@ fn attach_test_session_with_pane(runtime: &mut Server) -> (PaneId, ClientId) {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -719,7 +719,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
             },
             None,
             tab_id,
-            ClientOrigin::Local,
+            ClientOrigin::Local { is_same_user: true },
             "C-test-client".to_string(),
             0,
         );

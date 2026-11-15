@@ -19,6 +19,7 @@ use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, CommandSource, CopyArgs, FocusPaneArgs, FocusTabArgs,
     GridPosition, LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewPanePlacement,
@@ -222,7 +223,7 @@ pub(crate) fn attach_client_record(session: &mut Session, client: Client) {
     let _ = session.update_tab_solve(tab_id);
 }
 
-/// Attach a client with [`ClientOrigin::Local`] viewing `tab_id`, optionally with
+/// Attach a client with [`ClientOrigin::Local { is_same_user: true }`] viewing `tab_id`, optionally with
 /// `focused_pane_id` recorded there.
 pub(crate) fn attach_client(
     session: &mut Session,
@@ -235,7 +236,7 @@ pub(crate) fn attach_client(
         client_id,
         tab_id,
         focused_pane_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         None,
     );
 }
@@ -289,7 +290,8 @@ pub(crate) fn attach_client_through_server(
         active_tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     attached_client_id
@@ -343,13 +345,14 @@ pub(crate) fn attach_client_to_only_tab(
         tab_id,
         None,
         attached_at,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     client_id
 }
 
-/// Attach a client with [`ClientOrigin::Local`] viewing `tab_id` and reporting
+/// Attach a client with [`ClientOrigin::Local { is_same_user: true }`] viewing `tab_id` and reporting
 /// `pane_area`, optionally with `focused_pane_id` recorded there.
 fn attach_client_with_reported_pane_area(
     session: &mut Session,
@@ -363,7 +366,7 @@ fn attach_client_with_reported_pane_area(
         client_id,
         tab_id,
         focused_pane_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         pane_area,
     );
 }
@@ -769,7 +772,7 @@ fn a_refused_command_leaves_every_session_byte_for_byte_the_same() {
         mut runtime,
         first_pane_id: pane_id,
         ..
-    } = build_command_matrix_server(ClientOrigin::Local);
+    } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
     let session_records_before = serialize_session_records(&runtime);
 
     // A close aimed at a real pane, from a client the session does not hold.
@@ -806,7 +809,7 @@ fn a_command_from_a_client_id_no_session_holds_is_refused_and_changes_nothing() 
         mut runtime,
         first_pane_id: pane_id,
         ..
-    } = build_command_matrix_server(ClientOrigin::Local);
+    } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
     let session_records_before = serialize_session_records(&runtime);
 
     // The id belongs to no client anywhere, so there is no session to act in.
@@ -846,7 +849,7 @@ fn a_command_from_a_client_that_has_detached_is_refused_and_changes_nothing() {
         first_pane_id: pane_id,
         session_id,
         ..
-    } = build_command_matrix_server(ClientOrigin::Local);
+    } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
     let detached_client = runtime
         .session_by_id
         .get_mut(&session_id)
@@ -985,7 +988,7 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             first_tab_id: local_tab_id,
             first_pane_id: local_pane_id,
             ..
-        } = build_command_matrix_server(ClientOrigin::Local);
+        } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
         let local_command = build_every_command(local_tab_id, local_pane_id)[command_index].clone();
         let command_name = get_command_name(&local_command);
         assert!(
@@ -2430,7 +2433,7 @@ fn new_pane_stacked_with_no_space_is_min_size() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -2541,7 +2544,7 @@ fn new_pane_with_no_space_is_min_size() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -4154,7 +4157,7 @@ fn focus_suppressed_pane_is_rejected_and_mutates_nothing() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -6519,7 +6522,7 @@ fn new_pane_wont_fit_on_a_background_tab_changes_nothing() {
         },
         None,
         front_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -6593,7 +6596,7 @@ fn new_pane_adoption_reflows_the_vacated_tab() {
         },
         None,
         front_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -6736,7 +6739,7 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         },
         None,
         back_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -6753,7 +6756,7 @@ fn new_pane_adoption_reflows_a_stale_sized_background_sibling() {
         },
         None,
         front_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -6858,7 +6861,7 @@ fn new_pane_external_sole_client_that_cannot_fit_is_min_size() {
         },
         None,
         front_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -7457,7 +7460,7 @@ fn new_pane_cross_session_sizes_to_a_target_session_viewer() {
         },
         None,
         second_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -8002,7 +8005,7 @@ fn close_pane_unviewed_tab_repairs_stored_focus() {
         },
         None,
         first_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -8381,7 +8384,7 @@ fn close_last_pane_reflows_the_tab_its_viewers_move_to() {
         },
         None,
         solo_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -8677,7 +8680,7 @@ fn close_pane_repairs_focus_for_every_client_focused_on_it() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -9442,7 +9445,7 @@ fn swapping_panes_in_different_tabs_exchanges_slots_without_lifecycle_events() {
         session_id,
         second_tab_id,
         second_pane_id,
-    } = build_command_matrix_server(ClientOrigin::Local);
+    } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     let command_envelope = build_command_envelope(
@@ -9596,7 +9599,7 @@ fn swapping_a_sole_source_pane_reflows_source_viewers_without_closing_source_tab
                     row_count: 10,
                 })),
                 source_tab_id,
-                ClientOrigin::Local,
+                ClientOrigin::Local { is_same_user: true },
                 "C-source-viewer".to_string(),
                 0,
             );
@@ -10153,7 +10156,7 @@ fn placing_a_sole_pane_in_another_tab_closes_only_the_empty_source_tab() {
         session_id,
         second_tab_id,
         second_pane_id,
-    } = build_command_matrix_server(ClientOrigin::Local);
+    } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
     let _ = take_session_view_changes(&mut runtime, session_id);
 
     let command_envelope = build_command_envelope(
@@ -10419,7 +10422,7 @@ fn place_pane_with_an_unknown_destination_anchor_rejects_without_mutating_sessio
         first_pane_id,
         second_tab_id,
         ..
-    } = build_command_matrix_server(ClientOrigin::Local);
+    } = build_command_matrix_server(ClientOrigin::Local { is_same_user: true });
     let session_records_before = serialize_session_records(&runtime);
 
     let command_envelope = build_command_envelope(
@@ -12242,7 +12245,7 @@ fn new_tab_reflows_the_vacated_tab_for_its_remaining_viewer() {
         },
         None,
         existing_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -12708,7 +12711,7 @@ fn close_tab_reflows_the_tab_its_viewers_move_to() {
         },
         None,
         closing_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -13710,7 +13713,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         },
         None,
         moving_client_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -13726,7 +13729,7 @@ fn focus_tab_reflows_both_the_target_and_the_left_tab() {
         },
         None,
         staying_client_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -13836,7 +13839,7 @@ fn new_tab_for_a_client_below_minimum_size_is_rejected() {
         },
         None,
         first_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -14158,7 +14161,7 @@ fn toggle_fullscreen_below_the_pane_floor_is_rejected() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -15232,7 +15235,8 @@ fn client_attach_records_the_view_of_the_joining_client_only() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -15754,7 +15758,8 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -15924,7 +15929,8 @@ fn a_smaller_client_shrinks_every_floating_pane_and_its_detach_regrows_them() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -15989,7 +15995,8 @@ fn dropping_a_client_that_did_not_attach_again_regrows_every_floating_pane() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     // bob's record came across an update, and bob does not attach again.
@@ -16058,7 +16065,8 @@ fn a_client_too_small_for_the_floating_minimum_shrinks_the_pane_to_its_cap() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16163,7 +16171,8 @@ fn a_starving_client_beside_a_roomy_one_leaves_every_floating_pane_as_it_is() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16270,7 +16279,8 @@ fn detaching_the_last_client_freezes_every_floating_pane_until_a_client_attaches
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16319,7 +16329,8 @@ fn a_client_viewing_another_tab_still_shrinks_every_floating_pane() {
         other_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16379,7 +16390,8 @@ fn a_floating_pane_takes_the_cell_size_of_the_earliest_attached_client_on_any_ta
         other_tab_id,
         Some(bob_cell_size),
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(read_floating_cell_size(&runtime), Some(alice_cell_size));
@@ -16411,7 +16423,8 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let mut other_session = build_bare_session(SessionId::new());
@@ -16431,7 +16444,8 @@ fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
         other_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16476,7 +16490,8 @@ fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
         tab_id,
         Some(cell_size),
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let measured_client = runtime.session_by_id[&session_id]
@@ -16623,7 +16638,8 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16680,7 +16696,8 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16732,7 +16749,8 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let newly_focused_pane_id = PaneId::new();
@@ -16750,7 +16768,8 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16812,7 +16831,8 @@ fn attaching_passes_over_a_focus_history_entry_collapsed_to_a_stack_header() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -16881,7 +16901,8 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let resize_count_before_detach = fake_pty_backend
@@ -16943,7 +16964,8 @@ fn client_detach_records_the_leaving_client_and_no_other_view() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let _ = take_session_view_changes(&mut runtime, session_id);
@@ -17062,7 +17084,8 @@ fn auto_close_keeps_the_session_while_another_client_is_still_attached() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -17143,7 +17166,8 @@ fn auto_close_ends_the_session_when_detach_all_empties_it() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(
@@ -17193,7 +17217,8 @@ fn detach_all_leaves_the_session_running_while_auto_close_is_off() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -17341,7 +17366,8 @@ fn quit_from_one_of_two_clients_keeps_the_session_under_auto_close() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -17457,7 +17483,8 @@ fn client_attach_to_an_unknown_session_is_dropped() {
         TabId::new(),
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert!(emitted_events.is_empty());
@@ -17501,7 +17528,8 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
         TabId::new(),
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -17565,7 +17593,8 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         first_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     runtime.handle_client_attach(
@@ -17576,7 +17605,8 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         first_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(
@@ -17607,7 +17637,8 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         second_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -17695,7 +17726,8 @@ fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged()
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -17732,7 +17764,8 @@ fn client_detach_marks_the_view_of_every_other_subscriber() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let now = Instant::now();
@@ -17774,7 +17807,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         viewport_size,
         None,
         viewed_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -17816,7 +17849,7 @@ fn unviewed_tab_adoption_sizes_the_new_pane_to_the_pane_region() {
         viewport_size,
         None,
         front_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -17932,7 +17965,8 @@ fn same_session_reattach_preserves_client_view_state() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -18001,7 +18035,8 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
         second_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -20219,7 +20254,8 @@ fn detach_all_takes_every_attached_client() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let (initial_client_delivery_receiver, _) = runtime.subscribe(initial_client_id, 60);
@@ -20335,7 +20371,8 @@ fn detach_with_several_attached_and_none_named_lists_the_ids_to_choose_from() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -20866,7 +20903,8 @@ fn a_client_the_router_bridged_from_another_machine_is_recorded_remote() {
         tab_id,
         None,
         SystemTime::now(),
-        true,
+        ClientOrigin::Remote,
+        None,
         None,
     );
 
@@ -20908,7 +20946,8 @@ fn a_client_that_reached_this_machine_directly_is_recorded_local() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -20921,7 +20960,7 @@ fn a_client_that_reached_this_machine_directly_is_recorded_local() {
             .get_client_by_id(joining_client_id)
             .expect("the attached client")
             .get_origin(),
-        ClientOrigin::Local
+        ClientOrigin::Local { is_same_user: true }
     );
 }
 
@@ -20950,7 +20989,8 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(
@@ -20962,7 +21002,7 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
             .get_client_by_id(client_id)
             .expect("the attached client")
             .get_origin(),
-        ClientOrigin::Local
+        ClientOrigin::Local { is_same_user: true }
     );
 
     runtime.handle_client_attach(
@@ -20973,7 +21013,8 @@ fn resuming_a_local_clients_id_over_a_remote_connection_records_it_remote() {
         tab_id,
         None,
         SystemTime::now(),
-        true,
+        ClientOrigin::Remote,
+        None,
         None,
     );
 
@@ -21016,7 +21057,8 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
         tab_id,
         None,
         SystemTime::now(),
-        true,
+        ClientOrigin::Remote,
+        None,
         None,
     );
 
@@ -21028,7 +21070,8 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -21041,7 +21084,7 @@ fn a_remote_client_that_comes_back_on_a_local_connection_records_it_local() {
             .get_client_by_id(client_id)
             .expect("the re-attached client")
             .get_origin(),
-        ClientOrigin::Local
+        ClientOrigin::Local { is_same_user: true }
     );
 }
 
@@ -21504,7 +21547,8 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(
@@ -21524,7 +21568,8 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -21753,7 +21798,8 @@ fn attach_bob(
         tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     bob_client_id

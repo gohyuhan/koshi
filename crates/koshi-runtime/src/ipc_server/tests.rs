@@ -8,6 +8,7 @@ use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
 
 use koshi_core::action::ActionReference;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, ToggleLockModeArgs,
 };
@@ -2952,6 +2953,7 @@ fn build_hello_request(runtime_directory: &Path, session_id: SessionId) -> IpcRe
             connection_token: load_test_endpoint_file(runtime_directory, session_id)
                 .connection_token,
             is_remote: false,
+            granted_identity: None,
         },
     }
 }
@@ -3302,6 +3304,7 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
                 maximum_protocol_version: PROTOCOL_VERSION + 5,
                 connection_token: endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send a hello reaching above this build");
@@ -3356,6 +3359,7 @@ fn a_caller_sharing_no_version_is_refused_and_serves_nothing() {
                 maximum_protocol_version: caller_minimum_protocol_version + 2,
                 connection_token: endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send a hello sharing no version");
@@ -3414,6 +3418,7 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
                 maximum_protocol_version: previous_release_protocol_version,
                 connection_token: endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send a hello from the protocol before this one");
@@ -3568,6 +3573,7 @@ fn a_wrong_token_is_refused_as_bad_token() {
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: ConnectionToken::from_secret("not-the-secret"),
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send hello");
@@ -3618,6 +3624,7 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: initial_endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send hello with the token from before the restart");
@@ -4680,7 +4687,7 @@ fn serve_other_user(
             connection,
             ConnectionToken::generate(),
             &inbox_sender,
-            Peer::Local {
+            Peer {
                 is_same_user: false,
                 is_other_user_access_allowed: true,
             },
@@ -4706,6 +4713,7 @@ fn build_other_user_hello() -> IpcRequest {
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret(""),
             is_remote: false,
+            granted_identity: None,
         },
     }
 }
@@ -5659,6 +5667,7 @@ fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: initial_endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send hello with the token from before the rotation");
@@ -5755,6 +5764,7 @@ fn a_rotation_that_cannot_advertise_the_fresh_token_refuses_the_one_before_it() 
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: initial_endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send hello with the token from before the rotation");
@@ -6260,7 +6270,7 @@ fn closing_a_served_connections_read_direction_ends_only_its_reads() {
     delete_socket_file(&socket_address);
 }
 
-/// A stand-in dispatcher that reports the `is_remote` flag of every attach it
+/// A stand-in dispatcher that reports the origin and grant identity of every attach it
 /// is asked for and accepts each one as `client_id`. Holds the delivery queues
 /// it hands out open, and the writing threads stay blocked. It answers each
 /// `IpcPrepare` probe ([`answer_prepare_probe`]). Exits when every inbox sender
@@ -6269,22 +6279,26 @@ fn spawn_origin_reporting_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
-) -> (JoinHandle<()>, Receiver<bool>) {
-    let (remote_flag_sender, remote_flag_receiver) = mpsc::channel();
+) -> (JoinHandle<()>, Receiver<(ClientOrigin, Option<String>)>) {
+    let (attach_origin_sender, attach_origin_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
         let mut delivery_senders = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
         for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
             match runtime_event {
                 RuntimeEvent::IpcAttach {
-                    is_remote,
+                    client_origin,
+                    granted_identity,
                     response_sender,
                     ..
                 } => {
                     let (delivery_sender, delivery_receiver) =
                         create_delivery_queue(SUBSCRIBER_QUEUE_CAPACITY);
                     delivery_senders.push(delivery_sender);
-                    if remote_flag_sender.send(is_remote).is_err() {
+                    if attach_origin_sender
+                        .send((client_origin, granted_identity))
+                        .is_err()
+                    {
                         break;
                     }
                     let _ = response_sender.send(Some(build_attach_accepted(
@@ -6300,17 +6314,18 @@ fn spawn_origin_reporting_dispatcher(
             }
         }
     });
-    (dispatcher_thread, remote_flag_receiver)
+    (dispatcher_thread, attach_origin_receiver)
 }
 
-/// Opens a connection, sends a Hello with `is_remote`, attaches on it, and
-/// checks both replies. The connection comes back carrying `client_id`'s
-/// stream.
+/// Opens a connection, sends a Hello with `is_remote` and `granted_identity`,
+/// attaches on it, and checks both replies. The connection comes back carrying
+/// `client_id`'s stream.
 fn attach_saying_remote(
     runtime_directory: &Path,
     session_id: SessionId,
     client_id: ClientId,
     is_remote: bool,
+    granted_identity: Option<&str>,
 ) -> Connection {
     let endpoint_file = load_test_endpoint_file(runtime_directory, session_id);
     let mut connection = connect_to_session_socket(runtime_directory, session_id);
@@ -6322,6 +6337,7 @@ fn attach_saying_remote(
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: endpoint_file.connection_token,
                 is_remote,
+                granted_identity: granted_identity.map(str::to_string),
             },
         })
         .expect("send hello");
@@ -6345,15 +6361,17 @@ fn attach_saying_remote(
     connection
 }
 
-/// The attach the dispatcher is asked for is marked remote exactly when the
-/// Hello that opened the connection said so.
+/// The attach the dispatcher is asked for is remote, carrying the Hello's
+/// grant identity, exactly when the token-checked Hello that opened the
+/// connection named another machine. Every other attach is local to this
+/// machine's own user and carries no identity.
 #[test]
 fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-origin");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let (dispatcher_thread, received_remote_flags) =
+    let (dispatcher_thread, received_attach_origins) =
         spawn_origin_reporting_dispatcher(inbox_receiver, client_id, session_id);
     let ipc_server = IpcServer::start(
         &runtime_directory,
@@ -6365,18 +6383,25 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     )
     .expect("start serving");
 
-    let local_connection = attach_saying_remote(&runtime_directory, session_id, client_id, false);
+    let local_connection = attach_saying_remote(
+        &runtime_directory,
+        session_id,
+        client_id,
+        false,
+        Some("alice"),
+    );
     assert_eq!(
-        received_remote_flags.recv_timeout(Duration::from_secs(5)),
-        Ok(false),
-        "a hello naming no other machine leaves the attach it carries local",
+        received_attach_origins.recv_timeout(Duration::from_secs(5)),
+        Ok((ClientOrigin::Local { is_same_user: true }, None)),
+        "a hello naming no other machine leaves the attach it carries local, with no identity",
     );
 
-    let remote_connection = attach_saying_remote(&runtime_directory, session_id, client_id, true);
+    let remote_connection =
+        attach_saying_remote(&runtime_directory, session_id, client_id, true, Some("bob"));
     assert_eq!(
-        received_remote_flags.recv_timeout(Duration::from_secs(5)),
-        Ok(true),
-        "a hello naming another machine marks the attach it carries remote",
+        received_attach_origins.recv_timeout(Duration::from_secs(5)),
+        Ok((ClientOrigin::Remote, Some("bob".to_string()))),
+        "a hello naming another machine marks the attach it carries remote, with its identity",
     );
 
     drop(local_connection);
@@ -6512,6 +6537,7 @@ fn send_hello_sharing_no_version(
                 connection_token: load_test_endpoint_file(runtime_directory, session_id)
                     .connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send a hello sharing no version");
@@ -7260,6 +7286,7 @@ fn a_clipboard_request_from_another_machine_is_refused_and_the_connection_keeps_
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: endpoint_file.connection_token,
             is_remote: true,
+            granted_identity: None,
         },
     );
     assert_eq!(hello_response.answer_result, build_accepted_hello_result());
@@ -7391,6 +7418,7 @@ fn attach_test_client_over_link(
                 connection_token: load_test_endpoint_file(runtime_directory, session_id)
                     .connection_token,
                 is_remote,
+                granted_identity: None,
             },
         })
         .expect("send hello");
@@ -8646,6 +8674,7 @@ fn a_held_clipboard_copy_is_refused_at_its_commit_once_a_second_hello_marks_the_
             connection_token: load_test_endpoint_file(&runtime_directory, session_id)
                 .connection_token,
             is_remote: true,
+            granted_identity: None,
         },
     );
     assert_eq!(

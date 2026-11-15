@@ -21,6 +21,7 @@ use std::time::{Instant, SystemTime};
 
 use koshi_core::{
     action::ActionReference,
+    client::ClientOrigin,
     command::{CommandEnvelope, CommandResult, CommandSource, TiledPlacementTarget},
     discovery::SessionOverview,
     geometry::{PaneArea, Size},
@@ -237,11 +238,17 @@ pub enum RuntimeEvent {
         /// When the producer received the request. The handler reads this
         /// value, not the clock.
         attached_at: SystemTime,
-        /// Whether the connection carrying this attach reached the session
-        /// from another machine. The client is minted with it as its origin.
-        /// The router marks the Hello it sends for a remote caller; every
-        /// other connection leaves it `false`.
-        is_remote: bool,
+        /// Where the connection carrying this attach came from
+        /// ([`Handshake::get_client_origin`](koshi_ipc::handshake::Handshake::get_client_origin)).
+        /// The client is minted with it as its origin, and a client the
+        /// attach takes back gets it as its origin.
+        client_origin: ClientOrigin,
+        /// The grant identity the connection's Hello carried for a caller on
+        /// another machine
+        /// ([`Handshake::get_granted_identity`](koshi_ipc::handshake::Handshake::get_granted_identity)),
+        /// or `None`. A freshly minted client takes its label from it
+        /// ([`resolve_client_label`](koshi_core::client::resolve_client_label)).
+        granted_identity: Option<String>,
         /// The most frames a second the session sends this client, from `30`
         /// to `120`: the client's subscription gets a frame at most once per
         /// [`compute_frame_interval`](koshi_core::constant::compute_frame_interval)

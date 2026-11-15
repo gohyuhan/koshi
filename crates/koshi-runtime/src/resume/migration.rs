@@ -1308,12 +1308,14 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 /// 4. Each saved view gains `color_index: 0`.
 /// 5. The client records of each session hold distinct `color_index` values,
 ///    as [`assign_unique_color_indexes_five_to_six`] states.
+/// 6. Each client record's `origin` of `"Local"` becomes
+///    `{"Local": {"is_same_user": false}}`, and `"Remote"` stays `"Remote"`.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
 /// a client record or a saved view is not an object, or misses a field that
 /// format 5 writes, or when a client record's `color_index` is not a whole
-/// number.
+/// number, or its `origin` is neither `"Local"` nor `"Remote"`.
 fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageError> {
     let body_fields = get_json_object(resume_body, "body")?;
     let sessions = get_required_json_field(body_fields, "session_by_id", "body")?;
@@ -1344,7 +1346,10 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
         migrate_json_object_members(
             client_by_id,
             &client_by_id_path,
-            migrate_floating_pane_views_five_to_six,
+            |client_record, record_path| {
+                migrate_floating_pane_views_five_to_six(client_record, record_path)?;
+                migrate_client_origin_five_to_six(client_record, record_path)
+            },
         )?;
         assign_unique_color_indexes_five_to_six(client_by_id, &client_by_id_path)
     })?;
@@ -1452,6 +1457,30 @@ fn assign_unique_color_indexes_five_to_six(
             "color_index".to_string(),
             serde_json::json!(free_color_index),
         );
+    }
+    Ok(())
+}
+
+/// Convert the `origin` of the client record `client_record`, as step 6 of
+/// [`migrate_resume_five_to_six`] states.
+///
+/// # Errors
+/// Returns an invalid-resume error when `client_record` is not an object, has
+/// no `origin`, or its `origin` is neither `"Local"` nor `"Remote"`.
+fn migrate_client_origin_five_to_six(
+    client_record: &mut Value,
+    json_path: &str,
+) -> Result<(), StorageError> {
+    let client_fields = get_json_object(client_record, json_path)?;
+    let origin = get_required_json_field(client_fields, "origin", json_path)?;
+    match origin.as_str() {
+        Some("Local") => *origin = serde_json::json!({"Local": {"is_same_user": false}}),
+        Some("Remote") => {}
+        _ => {
+            return Err(build_invalid_resume_error(format!(
+                "{json_path}.origin must be \"Local\" or \"Remote\""
+            )))
+        }
     }
     Ok(())
 }

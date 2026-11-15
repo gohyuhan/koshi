@@ -31,7 +31,7 @@ fn build_client(client_id: ClientId, active_tab_id: TabId) -> Client {
         },
         None,
         active_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-calm-otter".to_string(),
         1,
     )

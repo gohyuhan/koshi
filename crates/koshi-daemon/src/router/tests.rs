@@ -8597,6 +8597,7 @@ fn an_admitted_secret_is_registered_with_its_scope_and_stamped_in_the_store() {
         connection_admission,
         Some(RemoteConnectionAdmission {
             scope: TokenScope::HostWide,
+            granted_identity: "alice".to_string(),
             remote_connection_id: 0,
         })
     );
@@ -8632,6 +8633,38 @@ fn an_admitted_secret_is_registered_with_its_scope_and_stamped_in_the_store() {
 }
 
 #[test]
+fn an_admission_carries_the_grant_identity_as_label_text() {
+    let runtime_directory = build_test_runtime_directory();
+    let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
+    let mut token_store = TokenStore::new();
+    let (connection_token, _) = token_store.grant_token(
+        "Bob\tSmith\u{1b}[2J\n".to_string(),
+        TokenScope::HostWide,
+        SystemTime::now(),
+        None,
+    );
+    token_store
+        .write_token_store_to_path(&token_store_path)
+        .expect("the token store is written");
+    let mut remote_state = build_no_remote_state();
+    let (caller_stream, _served_stream) = build_loopback_connection_pair();
+
+    assert_eq!(
+        admit_remote_token(
+            Some(&token_store_path),
+            &mut remote_state,
+            &connection_token,
+            caller_stream
+        ),
+        Some(RemoteConnectionAdmission {
+            scope: TokenScope::HostWide,
+            granted_identity: "Bob Smith[2J".to_string(),
+            remote_connection_id: 0,
+        })
+    );
+}
+
+#[test]
 fn an_admission_reads_the_store_and_does_not_write_it() {
     // With no token use writer, an admitted secret leaves the store file's
     // bytes as they were.
@@ -8651,6 +8684,7 @@ fn an_admission_reads_the_store_and_does_not_write_it() {
         ),
         Some(RemoteConnectionAdmission {
             scope: TokenScope::HostWide,
+            granted_identity: "alice".to_string(),
             remote_connection_id: 0,
         })
     );
@@ -8934,6 +8968,7 @@ fn a_full_list_of_admitted_connections_admits_nothing_more() {
             connection_admission,
             Some(RemoteConnectionAdmission {
                 scope: TokenScope::HostWide,
+                granted_identity: "alice".to_string(),
                 remote_connection_id: admission_index as u64,
             }),
             "admission {admission_index} of {MAX_LIVE_REMOTE_CONNECTION_COUNT} takes the next number"
@@ -9033,6 +9068,7 @@ fn a_connection_that_ends_makes_room_for_the_next_one() {
         connection_admission,
         Some(RemoteConnectionAdmission {
             scope: TokenScope::HostWide,
+            granted_identity: "alice".to_string(),
             remote_connection_id: MAX_LIVE_REMOTE_CONNECTION_COUNT as u64,
         }),
         "the connection taking that place takes the next number, not the freed one"

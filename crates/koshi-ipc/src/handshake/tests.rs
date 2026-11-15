@@ -4,6 +4,7 @@
 //! exact code and message, and a refusal never changes what the gate lets
 //! through.
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
 
@@ -24,16 +25,11 @@ fn build_expected_connection_token() -> ConnectionToken {
 fn build_test_handshake() -> Handshake {
     Handshake::from_expected_token_and_peer(
         build_expected_connection_token(),
-        Peer::Local {
+        Peer {
             is_same_user: true,
             is_other_user_access_allowed: false,
         },
     )
-}
-
-/// A gate for a fresh connection from another machine, still closed.
-fn build_remote_test_handshake() -> Handshake {
-    Handshake::from_expected_token_and_peer(build_expected_connection_token(), Peer::Remote)
 }
 
 /// A gate for a fresh connection from another user of this machine, with
@@ -41,7 +37,7 @@ fn build_remote_test_handshake() -> Handshake {
 fn build_other_user_test_handshake(is_other_user_access_allowed: bool) -> Handshake {
     Handshake::from_expected_token_and_peer(
         build_expected_connection_token(),
-        Peer::Local {
+        Peer {
             is_same_user: false,
             is_other_user_access_allowed,
         },
@@ -80,6 +76,7 @@ fn build_hello_speaking(
         maximum_protocol_version,
         connection_token: build_expected_connection_token(),
         is_remote: false,
+        granted_identity: None,
     }
 }
 
@@ -88,15 +85,16 @@ fn build_good_hello() -> IpcRequestKind {
     build_hello_speaking(MIN_PROTOCOL_VERSION, PROTOCOL_VERSION)
 }
 
-/// A Hello speaking this build's range, presenting the right token, and
-/// saying `remote` — the shape the router sends for a caller it accepted over
-/// TLS.
-fn build_remote_hello() -> IpcRequestKind {
+/// A Hello speaking this build's range, presenting the right token, saying
+/// `remote` and carrying `granted_identity` — the shape the router sends for a
+/// caller it accepted over TLS.
+fn build_remote_hello(granted_identity: Option<&str>) -> IpcRequestKind {
     IpcRequestKind::Hello {
         minimum_protocol_version: MIN_PROTOCOL_VERSION,
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: build_expected_connection_token(),
         is_remote: true,
+        granted_identity: granted_identity.map(str::to_string),
     }
 }
 
@@ -107,6 +105,7 @@ fn build_wrong_token_hello() -> IpcRequestKind {
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: false,
+        granted_identity: None,
     }
 }
 
@@ -209,22 +208,6 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
 }
 
 #[test]
-fn a_hello_from_another_machine_with_a_wrong_token_is_refused_as_bad_token() {
-    assert_eq!(
-        build_remote_test_handshake().validate_request_kind(&build_wrong_token_hello()),
-        Err(build_bad_token_refusal())
-    );
-}
-
-#[test]
-fn a_hello_from_another_machine_with_the_right_token_is_accepted() {
-    let mut gate = build_remote_test_handshake();
-
-    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
-    assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
-}
-
-#[test]
 fn an_allowed_other_user_opens_the_gate_without_a_token() {
     let mut gate = build_other_user_test_handshake(true);
     let hello = IpcRequestKind::Hello {
@@ -232,6 +215,7 @@ fn an_allowed_other_user_opens_the_gate_without_a_token() {
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret(""),
         is_remote: false,
+        granted_identity: None,
     };
 
     assert_eq!(gate.validate_request_kind(&hello), Ok(()));
@@ -249,7 +233,7 @@ fn the_starting_user_still_presents_the_token_while_other_users_are_allowed() {
     // the token.
     let mut gate = Handshake::from_expected_token_and_peer(
         build_expected_connection_token(),
-        Peer::Local {
+        Peer {
             is_same_user: true,
             is_other_user_access_allowed: true,
         },
@@ -273,23 +257,6 @@ fn an_allowed_other_user_is_admitted_whatever_token_it_presents() {
         Ok(())
     );
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
-}
-
-#[test]
-fn a_hello_from_another_machine_presenting_no_token_is_refused_as_bad_token() {
-    // An empty token from another machine is refused like any other wrong
-    // token.
-    let hello = IpcRequestKind::Hello {
-        minimum_protocol_version: MIN_PROTOCOL_VERSION,
-        maximum_protocol_version: PROTOCOL_VERSION,
-        connection_token: ConnectionToken::from_secret(""),
-        is_remote: false,
-    };
-
-    assert_eq!(
-        build_remote_test_handshake().validate_request_kind(&hello),
-        Err(build_bad_token_refusal())
-    );
 }
 
 #[test]
@@ -358,16 +325,6 @@ fn an_out_of_range_hello_from_another_user_is_refused_for_the_version() {
     );
     assert_eq!(
         build_other_user_test_handshake(true).validate_request_kind(&build_hello_speaking(
-            ABOVE_PROTOCOL_VERSION,
-            ABOVE_PROTOCOL_VERSION
-        )),
-        Err(build_version_refusal(
-            ABOVE_PROTOCOL_VERSION,
-            ABOVE_PROTOCOL_VERSION
-        ))
-    );
-    assert_eq!(
-        build_remote_test_handshake().validate_request_kind(&build_hello_speaking(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         )),
@@ -455,6 +412,7 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
         maximum_protocol_version: ABOVE_PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: false,
+        granted_identity: None,
     };
 
     assert_eq!(
@@ -654,7 +612,10 @@ fn a_hello_that_says_nothing_leaves_the_connection_local() {
 fn a_hello_saying_remote_marks_the_connection() {
     let mut gate = build_test_handshake();
 
-    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(None)),
+        Ok(())
+    );
 
     assert!(gate.is_remote_caller());
 }
@@ -662,7 +623,10 @@ fn a_hello_saying_remote_marks_the_connection() {
 #[test]
 fn a_second_hello_cannot_clear_the_remote_mark() {
     let mut gate = build_test_handshake();
-    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(None)),
+        Ok(())
+    );
 
     assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
 
@@ -677,7 +641,10 @@ fn a_second_hello_can_still_set_the_remote_mark() {
     let mut gate = build_test_handshake();
     assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
 
-    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(None)),
+        Ok(())
+    );
 
     assert!(gate.is_remote_caller());
 }
@@ -690,6 +657,7 @@ fn a_refused_hello_saying_remote_does_not_mark_the_connection() {
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: true,
+        granted_identity: None,
     };
 
     assert_eq!(
@@ -713,6 +681,7 @@ fn a_refused_hello_saying_remote_leaves_the_gate_closed() {
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: true,
+        granted_identity: None,
     };
 
     assert_eq!(
@@ -724,29 +693,139 @@ fn a_refused_hello_saying_remote_leaves_the_gate_closed() {
 }
 
 #[test]
-fn a_remote_hello_from_another_machine_marks_the_connection() {
-    let mut gate = build_remote_test_handshake();
-
-    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
-
-    assert!(gate.is_remote_caller());
-    assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
-}
-
-#[test]
-fn an_allowed_other_users_hello_saying_remote_marks_the_connection() {
+fn an_allowed_other_users_hello_saying_remote_with_an_identity_records_neither() {
     let mut gate = build_other_user_test_handshake(true);
     let hello = IpcRequestKind::Hello {
         minimum_protocol_version: MIN_PROTOCOL_VERSION,
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret(""),
         is_remote: true,
+        granted_identity: Some("alice".to_string()),
     };
 
     assert_eq!(gate.validate_request_kind(&hello), Ok(()));
 
-    assert!(gate.is_remote_caller());
+    assert!(!gate.is_remote_caller());
+    assert_eq!(gate.get_granted_identity(), None);
+    assert_eq!(
+        gate.get_client_origin(),
+        ClientOrigin::Local {
+            is_same_user: false
+        }
+    );
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
+}
+
+#[test]
+fn a_remote_hello_with_the_owners_token_records_its_identity_and_the_remote_origin() {
+    let mut gate = build_test_handshake();
+
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(Some("bob"))),
+        Ok(())
+    );
+
+    assert_eq!(gate.get_client_origin(), ClientOrigin::Remote);
+    assert_eq!(gate.get_granted_identity(), Some("bob"));
+}
+
+#[test]
+fn a_local_hello_gives_the_origin_of_its_peers_account() {
+    let mut same_user_gate = build_test_handshake();
+    let mut other_user_gate = build_other_user_test_handshake(true);
+
+    assert_eq!(
+        same_user_gate.validate_request_kind(&build_good_hello()),
+        Ok(())
+    );
+    assert_eq!(
+        other_user_gate.validate_request_kind(&build_good_hello()),
+        Ok(())
+    );
+
+    assert_eq!(
+        same_user_gate.get_client_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
+    assert_eq!(
+        other_user_gate.get_client_origin(),
+        ClientOrigin::Local {
+            is_same_user: false
+        }
+    );
+}
+
+#[test]
+fn a_second_hello_does_not_change_the_recorded_identity() {
+    let mut gate = build_test_handshake();
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(Some("bob"))),
+        Ok(())
+    );
+
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(Some("eve"))),
+        Ok(())
+    );
+
+    assert_eq!(gate.get_granted_identity(), Some("bob"));
+}
+
+#[test]
+fn a_later_remote_hello_names_the_identity_an_earlier_one_left_unnamed() {
+    let mut gate = build_test_handshake();
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(None)),
+        Ok(())
+    );
+    assert_eq!(gate.get_granted_identity(), None);
+
+    assert_eq!(
+        gate.validate_request_kind(&build_remote_hello(Some("bob"))),
+        Ok(())
+    );
+
+    assert_eq!(gate.get_granted_identity(), Some("bob"));
+}
+
+#[test]
+fn a_hello_saying_local_records_no_identity_it_carries() {
+    let mut gate = build_test_handshake();
+    let hello = IpcRequestKind::Hello {
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
+        connection_token: build_expected_connection_token(),
+        is_remote: false,
+        granted_identity: Some("alice".to_string()),
+    };
+
+    assert_eq!(gate.validate_request_kind(&hello), Ok(()));
+
+    assert_eq!(gate.get_granted_identity(), None);
+    assert_eq!(
+        gate.get_client_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
+}
+
+#[test]
+fn a_hello_with_a_wrong_token_records_no_identity() {
+    let mut gate = build_test_handshake();
+    let refused = IpcRequestKind::Hello {
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
+        connection_token: ConnectionToken::from_secret("wrongToken"),
+        is_remote: true,
+        granted_identity: Some("alice".to_string()),
+    };
+
+    assert_eq!(
+        gate.validate_request_kind(&refused),
+        Err(build_bad_token_refusal())
+    );
+
+    assert_eq!(gate.get_granted_identity(), None);
+    assert!(!gate.is_remote_caller());
 }
 
 #[test]
@@ -757,6 +836,7 @@ fn a_refused_other_users_hello_saying_remote_does_not_mark_the_connection() {
         maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: build_expected_connection_token(),
         is_remote: true,
+        granted_identity: None,
     };
 
     assert_eq!(

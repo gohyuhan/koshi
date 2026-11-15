@@ -847,6 +847,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 7,
     };
 
@@ -891,6 +892,7 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 3,
     };
 
@@ -922,6 +924,7 @@ fn the_hello_of_koshi_0_4_0_on_an_admitted_connection_is_refused() {
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 3,
     };
 
@@ -1000,6 +1003,7 @@ fn serve_attach_against_locate_answer(
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 11,
     };
 
@@ -1120,6 +1124,7 @@ fn bytes_an_admitted_connection_sends_that_are_not_a_frame_are_refused() {
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 5,
     };
 
@@ -1149,6 +1154,7 @@ fn an_admitted_connection_that_hangs_up_is_answered_with_nothing() {
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 9,
     };
 
@@ -1179,6 +1185,7 @@ fn an_admitted_connection_ends_unanswered_when_the_dispatcher_is_gone() {
     };
     let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
+        granted_identity: "ada".to_string(),
         remote_connection_id: 4,
     };
 
@@ -1194,8 +1201,12 @@ fn an_admitted_connection_ends_unanswered_when_the_dispatcher_is_gone() {
 }
 
 #[test]
-fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
-    let hello_request = build_bridged_hello(ConnectionToken::from_secret("endpointSecret"), (1, 4));
+fn the_hello_the_router_sends_for_a_remote_caller_says_so_and_names_its_grant() {
+    let hello_request = build_bridged_hello(
+        ConnectionToken::from_secret("endpointSecret"),
+        (1, 4),
+        "bob",
+    );
 
     assert_eq!(
         hello_request,
@@ -1206,6 +1217,7 @@ fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
                 maximum_protocol_version: 4,
                 connection_token: ConnectionToken::from_secret("endpointSecret"),
                 is_remote: true,
+                granted_identity: Some("bob".to_string()),
             },
         }
     );
@@ -1360,6 +1372,7 @@ mod admission_answers {
                         let _ = response_sender.send(should_admit_connection.then_some(
                             RemoteConnectionAdmission {
                                 scope: TokenScope::HostWide,
+                                granted_identity: "ada".to_string(),
                                 remote_connection_id: 7,
                             },
                         ));
@@ -2073,6 +2086,7 @@ mod bridge_round_trip {
                     } => {
                         let _ = response_sender.send(Some(RemoteConnectionAdmission {
                             scope: TokenScope::HostWide,
+                            granted_identity: "ada".to_string(),
                             remote_connection_id: 7,
                         }));
                     }
@@ -2257,6 +2271,7 @@ mod bridge_round_trip {
                     maximum_protocol_version: koshi_ipc::protocol::PROTOCOL_VERSION,
                     connection_token: session_endpoint.connection_token.clone(),
                     is_remote: false,
+                    granted_identity: None,
                 },
             })
             .expect("the server reads the Hello");
@@ -3200,6 +3215,7 @@ fn a_bridge_to_a_session_replacing_its_image_opens_once_the_new_image_advertises
     let session_bridge = open_local_session_bridge_across_restart(
         &located_session,
         (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+        "bob",
     );
 
     let (connection_token, bridged_hello, _new_image_writer) =
@@ -3213,7 +3229,11 @@ fn a_bridge_to_a_session_replacing_its_image_opens_once_the_new_image_advertises
     assert_eq!(&bridged_bytes, b"new image");
     assert_eq!(
         bridged_hello,
-        build_bridged_hello(connection_token, (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION))
+        build_bridged_hello(
+            connection_token,
+            (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+            "bob"
+        )
     );
 }
 
@@ -3235,6 +3255,7 @@ fn a_bridge_to_a_session_whose_swap_window_passes_with_nothing_advertised_does_n
     let session_bridge = open_local_session_bridge_across_restart(
         &located_session,
         (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+        "bob",
     );
 
     let open_duration = open_started_at.elapsed();
@@ -3260,6 +3281,7 @@ fn a_bridge_to_a_session_that_is_not_replacing_its_image_and_advertises_nothing_
     let session_bridge = open_local_session_bridge_across_restart(
         &located_session,
         (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
+        "bob",
     );
 
     assert!(session_bridge.is_none(), "nothing is advertised");

@@ -67,7 +67,7 @@ fn build_client_on(session_id: SessionId, tab_id: TabId) -> Client {
         TEST_VIEWPORT_SIZE,
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     )

@@ -89,8 +89,9 @@ pub fn compute_agreed_protocol_version(
 /// - `Serialize` and [`expose_secret`](Self::expose_secret) write the **real secret**, for
 ///   the endpoint file and the socket.
 ///   `serde_json::to_string(&IpcRequestKind::build_hello_request(connection_token))`
-///   yields `{"Hello":{"minimum_protocol_version":5,"maximum_protocol_version":5,
-///   "connection_token":"k7Qx…","is_remote":false}}`, secret included.
+///   yields `{"Hello":{"minimum_protocol_version":6,"maximum_protocol_version":6,
+///   "connection_token":"k7Qx…","is_remote":false,"granted_identity":null}}`,
+///   secret included.
 /// - `Debug` and `Display` write `***`. A token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
@@ -398,7 +399,7 @@ pub enum IpcRequestKind {
     ///
     /// A second Hello on an open connection is checked and answered the same
     /// way. It settles the connection's version again from its own range, and
-    /// a `remote` of `true` stays set from then on.
+    /// an `is_remote` of `true` and a `granted_identity` stay set from then on.
     Hello {
         /// The lowest protocol version the caller speaks.
         minimum_protocol_version: u32,
@@ -409,9 +410,18 @@ pub enum IpcRequestKind {
         /// Whether the connection this Hello opens carries a caller on
         /// another machine. The router sets it on the local connection it
         /// opens for a remote caller. It changes nothing about whether the
-        /// Hello is accepted. The server records it as the origin of every
+        /// Hello is accepted. A session records it only from a Hello that
+        /// presented the session owner's token
+        /// ([`Handshake`](crate::handshake::Handshake)), as the origin of every
         /// client attached on this connection.
         is_remote: bool,
+        /// The identity of the grant a caller on another machine attached
+        /// with, which the router sets beside `is_remote`. `None` on every
+        /// other connection, and when the field is absent. A session records it
+        /// only from a Hello that presented the session owner's token and set
+        /// `is_remote`, and the client takes its label from it
+        /// ([`resolve_client_label`](koshi_core::client::resolve_client_label)).
+        granted_identity: Option<String>,
     },
     /// Join the session as a viewing client: the server mints the client,
     /// subscribes it to the session's event stream, and answers with
@@ -796,7 +806,7 @@ impl IpcRequestKind {
     /// The Hello this build opens a connection with: the versions it speaks,
     /// [`MIN_PROTOCOL_VERSION`] then [`PROTOCOL_VERSION`], the connection
     /// token the
-    /// caller presents, and `is_remote` set to `false`.
+    /// caller presents, `is_remote` set to `false`, and no `granted_identity`.
     #[must_use]
     pub fn build_hello_request(connection_token: ConnectionToken) -> IpcRequestKind {
         IpcRequestKind::Hello {
@@ -804,6 +814,7 @@ impl IpcRequestKind {
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token,
             is_remote: false,
+            granted_identity: None,
         }
     }
 

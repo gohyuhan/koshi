@@ -163,7 +163,8 @@ fn migrate_format_four_then_an_attach_with_no_token_is_the_client_an_external_ne
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -553,7 +554,8 @@ fn migrate_format_five_gives_a_client_sharing_an_index_a_free_one_that_its_recon
                 None,
                 None,
                 SystemTime::UNIX_EPOCH,
-                false,
+                ClientOrigin::Local { is_same_user: true },
+                None,
                 60,
                 None,
             )
@@ -570,6 +572,66 @@ fn migrate_format_five_gives_a_client_sharing_an_index_a_free_one_that_its_recon
     };
     assert_eq!(read_color_index(first_client_id), 0);
     assert_eq!(read_color_index(second_client_id), 1);
+}
+
+#[test]
+fn migrate_format_five_reads_each_local_client_as_another_account_until_its_claim_sets_its_account()
+{
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(include_bytes!("fixtures/format_five.json"));
+    let session_id: SessionId = parse_format_five_id(1);
+    let first_client_id: ClientId = parse_format_five_id(5);
+    let second_client_id: ClientId = parse_format_five_id(10);
+    let (mut resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let read_origin_and_label = |resumed_server: &Server, client_id: ClientId| {
+        let client = resumed_server.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .expect("the carried client");
+        (client.get_origin(), client.get_label().to_string())
+    };
+    let (first_client_origin, first_client_label) =
+        read_origin_and_label(&resumed_server, first_client_id);
+    let (second_client_origin, _) = read_origin_and_label(&resumed_server, second_client_id);
+    assert_eq!(
+        first_client_origin,
+        ClientOrigin::Local {
+            is_same_user: false
+        }
+    );
+    assert_eq!(
+        second_client_origin,
+        ClientOrigin::Local {
+            is_same_user: false
+        }
+    );
+
+    let attachment = resumed_server
+        .handle_ipc_attach(
+            Some(first_client_id),
+            Some(ConnectionToken::from_secret(
+                "format-five-first-client-token",
+            )),
+            FIRST_CLIENT_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            ClientOrigin::Local { is_same_user: true },
+            None,
+            60,
+            None,
+        )
+        .expect("the session hands the record back");
+
+    assert_eq!(attachment.client_id, first_client_id);
+    assert_eq!(
+        read_origin_and_label(&resumed_server, first_client_id),
+        (
+            ClientOrigin::Local { is_same_user: true },
+            first_client_label
+        ),
+        "the claim sets the account its connection reports and keeps the label"
+    );
 }
 
 #[test]
@@ -1554,7 +1616,8 @@ fn build_populated_server() -> PopulatedServer {
         first_tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -3291,8 +3354,17 @@ fn a_carried_session_with_its_client_comes_back_whole() {
     // A client written by this build reads back with the identity it went out
     // with, from a local and from a remote origin.
     for (origin, written_origin) in [
-        (ClientOrigin::Local, "Local"),
-        (ClientOrigin::Remote, "Remote"),
+        (
+            ClientOrigin::Local { is_same_user: true },
+            serde_json::json!({"Local": {"is_same_user": true}}),
+        ),
+        (
+            ClientOrigin::Local {
+                is_same_user: false,
+            },
+            serde_json::json!({"Local": {"is_same_user": false}}),
+        ),
+        (ClientOrigin::Remote, serde_json::json!("Remote")),
     ] {
         let resume_test_directory = TempDir::new().expect("create temp dir");
         let resume_file_path = resume_test_directory.path().join("client.resume");
@@ -3333,10 +3405,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             serde_json::from_str(raw_body.get()).expect("the body is json");
         let client_record_json = &body_json["session_by_id"][session_id.get_uuid().to_string()]
             ["clients"]["client_by_id"][client_id.get_uuid().to_string()];
-        assert_eq!(
-            client_record_json["origin"],
-            serde_json::Value::String(written_origin.to_string())
-        );
+        assert_eq!(client_record_json["origin"], written_origin);
         assert_eq!(
             client_record_json.get("tier"),
             None,
@@ -3407,7 +3476,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
         FIRST_CLIENT_VIEWPORT_SIZE,
         None,
         filed_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-swift-otter".to_string(),
         300,
     );
@@ -3688,7 +3757,8 @@ fn a_profile_session_carried_before_any_attach_keeps_its_starting_tab_and_pane()
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )

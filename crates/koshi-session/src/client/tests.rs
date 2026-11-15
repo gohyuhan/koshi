@@ -7,6 +7,7 @@
 
 use super::*;
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{GridPosition, SelectionKind};
 use koshi_core::geometry::{Direction, DEFAULT_FLOATING_PANE_SIZE};
 use koshi_layout::edit::split_leaf;
@@ -30,7 +31,7 @@ fn build_test_client_from_parts(
         },
         pane_area,
         active_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     )
@@ -48,7 +49,13 @@ fn build_test_client(active_tab_id: TabId) -> Client {
 
 #[test]
 fn a_client_keeps_the_origin_label_and_color_it_was_made_with() {
-    for origin in [ClientOrigin::Local, ClientOrigin::Remote] {
+    for origin in [
+        ClientOrigin::Local { is_same_user: true },
+        ClientOrigin::Local {
+            is_same_user: false,
+        },
+        ClientOrigin::Remote,
+    ] {
         let client = Client::from_attachment(
             ClientId::new(),
             SessionId::new(),
@@ -72,9 +79,18 @@ fn a_client_keeps_the_origin_label_and_color_it_was_made_with() {
 
 #[test]
 fn a_client_carries_where_it_connected_from_across_a_serde_round_trip() {
-    for (origin, expected_origin_wire_name) in [
-        (ClientOrigin::Local, "Local"),
-        (ClientOrigin::Remote, "Remote"),
+    for (origin, expected_origin_json) in [
+        (
+            ClientOrigin::Local { is_same_user: true },
+            serde_json::json!({"Local": {"is_same_user": true}}),
+        ),
+        (
+            ClientOrigin::Local {
+                is_same_user: false,
+            },
+            serde_json::json!({"Local": {"is_same_user": false}}),
+        ),
+        (ClientOrigin::Remote, serde_json::json!("Remote")),
     ] {
         let client_id = ClientId::new();
         let session_id = SessionId::new();
@@ -97,10 +113,7 @@ fn a_client_carries_where_it_connected_from_across_a_serde_round_trip() {
         let serialized_client_json = serde_json::to_string(&client).expect("the client encodes");
         let serialized_client_value: serde_json::Value =
             serde_json::from_str(&serialized_client_json).expect("the encoded JSON client is JSON");
-        assert_eq!(
-            serialized_client_value["origin"],
-            serde_json::Value::String(expected_origin_wire_name.to_string())
-        );
+        assert_eq!(serialized_client_value["origin"], expected_origin_json);
         assert_eq!(
             serialized_client_value.get("tier"),
             None,
@@ -918,7 +931,7 @@ fn a_viewport_with_no_room_for_the_tabline_and_hint_rows_gives_a_zero_row_pane_a
         },
         None,
         TabId::new(),
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -1387,7 +1400,7 @@ fn a_client_reads_back_the_session_and_attach_time_it_was_made_with() {
         },
         None,
         TabId::new(),
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-swift-otter".to_string(),
         3,
     );
@@ -1399,13 +1412,19 @@ fn a_client_reads_back_the_session_and_attach_time_it_was_made_with() {
 #[test]
 fn update_origin_replaces_where_the_client_connected_from() {
     let mut client = build_test_client(TabId::new());
-    assert_eq!(client.get_origin(), ClientOrigin::Local);
+    assert_eq!(
+        client.get_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
 
     client.update_origin(ClientOrigin::Remote);
     assert_eq!(client.get_origin(), ClientOrigin::Remote);
 
-    client.update_origin(ClientOrigin::Local);
-    assert_eq!(client.get_origin(), ClientOrigin::Local);
+    client.update_origin(ClientOrigin::Local { is_same_user: true });
+    assert_eq!(
+        client.get_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
 }
 
 #[test]

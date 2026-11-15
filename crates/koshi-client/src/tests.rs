@@ -19,6 +19,7 @@ use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
 use koshi_core::action::ActionReference;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{PanePlacementAnchor, TiledPlacementTarget};
 use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
@@ -81,7 +82,8 @@ pub(crate) fn create_session_with_attached_client(
         tab_id,
         None,
         std::time::SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     client_id

@@ -374,7 +374,7 @@ fn a_fresh_server_has_no_quit_flag_set() {
 }
 
 #[test]
-fn every_attached_client_is_local_with_its_own_generated_label() {
+fn every_attached_client_of_the_host_account_is_host_with_its_own_suffix() {
     let (mut server, bootstrapped_client_id) = boot_server();
     let session_id = *server.list_sessions().keys().next().expect("session");
     let attached_client_id = attach_client_through_server(
@@ -392,21 +392,101 @@ fn every_attached_client_is_local_with_its_own_generated_label() {
         .get_client_by_id(attached_client_id)
         .expect("attached client");
 
-    assert_eq!(bootstrapped_client.get_origin(), ClientOrigin::Local);
-    assert_eq!(attached_client.get_origin(), ClientOrigin::Local);
+    assert_eq!(
+        bootstrapped_client.get_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
+    assert_eq!(
+        attached_client.get_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
+    assert_eq!(bootstrapped_client.get_label(), "host");
+    assert_eq!(attached_client.get_label(), "host-2");
+}
 
-    // Both labels are generated as `C-<adjective>-<noun>`, and the attaching
-    // client never takes the label the bootstrapped one already holds.
-    for client_label in [bootstrapped_client.get_label(), attached_client.get_label()] {
-        let label_parts: Vec<&str> = client_label.split('-').collect();
+/// Each fresh client takes the label its origin and grant identity give, past
+/// the labels the session's clients already hold: the remote grant `bob` is
+/// `bob` then `bob-2`, a remote grant named `host` is `host-2` beside the host
+/// account's `host`, and another account's client and a remote client with no
+/// identity each take a generated `C-<adjective>-<noun>`. A re-attach keeps
+/// its label.
+#[test]
+fn every_fresh_client_takes_the_label_its_origin_and_grant_identity_give() {
+    let (mut server, bootstrapped_client_id) = boot_server();
+    let session_id = *server.list_sessions().keys().next().expect("session");
+    let active_tab_id = server.list_sessions()[&session_id]
+        .clients
+        .get_client_by_id(bootstrapped_client_id)
+        .expect("bootstrapped client")
+        .get_active_tab_id();
+    let attach_fresh_client =
+        |server: &mut Server, client_origin: ClientOrigin, granted_identity: Option<&str>| {
+            let client_id = ClientId::new();
+            let _ = server.handle_client_attach(
+                session_id,
+                client_id,
+                TEST_VIEWPORT_SIZE,
+                None,
+                active_tab_id,
+                None,
+                SystemTime::UNIX_EPOCH,
+                client_origin,
+                granted_identity,
+                None,
+            );
+            client_id
+        };
+
+    let first_bob_client_id = attach_fresh_client(&mut server, ClientOrigin::Remote, Some("bob"));
+    let second_bob_client_id = attach_fresh_client(&mut server, ClientOrigin::Remote, Some("bob"));
+    let remote_host_client_id =
+        attach_fresh_client(&mut server, ClientOrigin::Remote, Some("host"));
+    let other_account_client_id = attach_fresh_client(
+        &mut server,
+        ClientOrigin::Local {
+            is_same_user: false,
+        },
+        Some("alice"),
+    );
+    let unnamed_remote_client_id = attach_fresh_client(&mut server, ClientOrigin::Remote, None);
+    let _ = server.handle_client_attach(
+        session_id,
+        first_bob_client_id,
+        TEST_VIEWPORT_SIZE,
+        None,
+        active_tab_id,
+        None,
+        SystemTime::UNIX_EPOCH,
+        ClientOrigin::Remote,
+        Some("carol"),
+        None,
+    );
+
+    let clients = &server.list_sessions()[&session_id].clients;
+    let get_label = |client_id: ClientId| {
+        clients
+            .get_client_by_id(client_id)
+            .expect("attached client")
+            .get_label()
+            .to_string()
+    };
+    assert_eq!(get_label(bootstrapped_client_id), "host");
+    assert_eq!(get_label(first_bob_client_id), "bob");
+    assert_eq!(get_label(second_bob_client_id), "bob-2");
+    assert_eq!(get_label(remote_host_client_id), "host-2");
+    for generated_client_id in [other_account_client_id, unnamed_remote_client_id] {
+        let generated_label = get_label(generated_client_id);
+        let generated_label_parts: Vec<&str> = generated_label.split('-').collect();
         assert_eq!(
-            label_parts.len(),
-            3,
-            "not C-<adjective>-<noun>: {client_label}"
+            (generated_label_parts.len(), generated_label_parts[0]),
+            (3, "C"),
+            "a generated C-<adjective>-<noun>, got {generated_label}"
         );
-        assert_eq!(label_parts[0], "C");
     }
-    assert_ne!(bootstrapped_client.get_label(), attached_client.get_label());
+    assert_ne!(
+        get_label(other_account_client_id),
+        get_label(unnamed_remote_client_id)
+    );
 }
 
 #[test]
@@ -429,7 +509,8 @@ fn detaching_a_client_leaves_the_server_healthy_with_panes_alive() {
         active_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     // Same size, so nothing reflows; the joining client still lands on the
@@ -1641,7 +1722,8 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1675,7 +1757,8 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             Some(PaneArea::Starving),
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1690,7 +1773,8 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1712,7 +1796,8 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1743,7 +1828,8 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1758,7 +1844,8 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1818,7 +1905,8 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1895,7 +1983,8 @@ fn attach_with_token(
             None,
             None,
             attached_at,
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -1990,7 +2079,8 @@ fn a_re_attach_keeps_its_index_whatever_saved_index_it_names() {
         booted_tab_id,
         None,
         SystemTime::now(),
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         Some(7),
     );
 
@@ -2087,7 +2177,8 @@ fn a_client_awaiting_its_reconnect_keeps_its_index_from_fresh_clients_and_takes_
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -2799,7 +2890,8 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         None,
         None,
         now,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         60,
         None,
     );
@@ -2914,7 +3006,8 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -3264,7 +3357,8 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             None,
             None,
             SystemTime::now(),
-            true,
+            ClientOrigin::Remote,
+            None,
             60,
             None,
         )
@@ -3277,7 +3371,8 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             None,
             None,
             SystemTime::now(),
-            true,
+            ClientOrigin::Remote,
+            None,
             60,
             None,
         )
@@ -3302,7 +3397,8 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -3341,7 +3437,8 @@ fn after_a_swap_a_carried_client_with_no_token_hash_is_not_handed_back_by_its_id
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -3472,7 +3569,8 @@ fn a_carried_client_whose_tab_is_gone_is_taken_over_by_its_token_and_keeps_its_v
             None,
             None,
             SystemTime::now(),
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -3509,7 +3607,8 @@ fn a_token_proven_claim_on_a_client_a_connection_is_streaming_for_takes_that_cli
             None,
             None,
             SystemTime::now(),
-            true,
+            ClientOrigin::Remote,
+            None,
             60,
             None,
         )

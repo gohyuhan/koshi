@@ -3,7 +3,7 @@
 //! A session accepts several clients at once. Focus, viewport, input modes and
 //! the view of each floating pane live on each client; the session holds only
 //! this registry. Each client also carries what the server set at attach: its
-//! origin, its generated label and its color.
+//! origin, its label and its color.
 
 use std::{
     cell::OnceCell,
@@ -211,8 +211,10 @@ pub struct Client {
     active_tab_id: TabId,
     /// Where this client connected from, set by the server at attach.
     origin: ClientOrigin,
-    /// This client's display name, `C-<adjective>-<noun>`, generated at
-    /// attach and never changed.
+    /// This client's display name, set at attach and never changed:
+    /// `host` or `host-2` for the session owner's account, a grant's identity
+    /// such as `bob` for a remote client, and `C-<adjective>-<noun>` for
+    /// every other client.
     label: String,
     /// This client's index, chosen by the caller at attach and never changed.
     /// The client prints as
@@ -387,7 +389,7 @@ impl Client {
         self.origin
     }
 
-    /// This client's generated display name.
+    /// This client's display name, such as `host`, `bob` or `C-swift-otter`.
     #[must_use]
     pub fn get_label(&self) -> &str {
         &self.label

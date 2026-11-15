@@ -27,7 +27,7 @@ pub const MAX_REPORTED_TEXT_BYTE_COUNT: usize = 512;
 /// Every other character is kept, including zero-width joiners, combining
 /// marks and variation selectors. A tag-sequence flag keeps its base character
 /// and loses its region.
-fn is_refused_character(character: char) -> bool {
+pub(crate) fn is_refused_character(character: char) -> bool {
     matches!(character,
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
         | '\u{200E}' | '\u{200F}' | '\u{061C}'

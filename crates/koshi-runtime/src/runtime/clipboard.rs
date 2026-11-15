@@ -136,7 +136,7 @@ impl Server {
         let mut is_routed = !focusing_clients.is_empty();
         let mut host_write: Option<HostWrite> = None;
         for (client_id, client_origin) in focusing_clients {
-            if client_origin == ClientOrigin::Local {
+            if client_origin != ClientOrigin::Remote {
                 is_routed = false;
                 continue;
             }
@@ -171,7 +171,7 @@ impl Server {
             && self
                 .list_clients_focusing_pane(pane_id)
                 .iter()
-                .any(|&(_, client_origin)| client_origin != ClientOrigin::Local)
+                .any(|&(_, client_origin)| client_origin == ClientOrigin::Remote)
     }
 
     /// Whether the session takes a stand-in clipboard tool copy of

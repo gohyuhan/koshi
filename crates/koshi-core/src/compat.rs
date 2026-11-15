@@ -110,6 +110,13 @@ pub struct Surface {
 ///   no such field.
 /// - Each client of a `Discovery` answer carries `label` and `color_index`.
 ///   5 has neither field.
+/// - Each client of a `Discovery` answer carries `origin`, and a row without
+///   it fails to decode. Its `Local` arm carries `is_same_user`: whether the
+///   client runs as the user who started the session. 5 wrote `Local` with no
+///   field.
+/// - The Hello carries `granted_identity`: the grant identity the router sets
+///   for a caller on another machine. A Hello without it reads as `None`, and
+///   a session of 5 reads a Hello with it.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -253,7 +260,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// the format 5 clients of one session that share an index, the one with the
 /// lowest client id keeps it, and each other one takes the lowest index that
 /// no client of that session holds. Each saved view holds `color_index`, the
-/// index its client held, and a saved view of format 5 takes `0`. A session
+/// index its client held, and a saved view of format 5 takes `0`. A client's
+/// `Local` origin carries `is_same_user`, and a format 5 client whose origin
+/// is `Local` takes `is_same_user: false` until its connection comes back and
+/// sets the value it reports. A session
 /// of format 5 keeps its clients, and the body keeps its saved views and resume-token
 /// hashes. Format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views

@@ -62,7 +62,7 @@ impl Server {
                 active_tab_id: client.get_active_tab_id(),
                 focused_pane_id: client.get_active_focused_pane_id(),
                 lock_mode: client.get_lock_mode(),
-                origin: Some(client.get_origin()),
+                origin: client.get_origin(),
                 pane_area: client.get_reported_pane_area(),
             })
             .collect();

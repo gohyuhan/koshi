@@ -40,6 +40,7 @@ fn build_hello_request(request_id: u64) -> IpcRequest {
             maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("test-secret"),
             is_remote: false,
+            granted_identity: None,
         },
     }
 }

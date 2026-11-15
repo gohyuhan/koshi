@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use crate::runtime::command::tests::create_session_with_attached_client;
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::types::PaneClipboardWriteConfig;
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
 use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;
@@ -289,7 +290,8 @@ fn build_clipboard_routing_fixture(
         active_tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        true,
+        ClientOrigin::Remote,
+        None,
         None,
     );
     let (local_receiver, _) = server.subscribe(local_client_id, 60);
@@ -319,7 +321,10 @@ fn both_clients_of_the_fixture_focus_its_pane_from_where_they_connected() {
     assert_eq!(
         focusing_clients,
         vec![
-            (fixture.local_client_id, ClientOrigin::Local),
+            (
+                fixture.local_client_id,
+                ClientOrigin::Local { is_same_user: true }
+            ),
             (fixture.remote_client_id, ClientOrigin::Remote),
         ]
     );
@@ -623,7 +628,8 @@ fn a_tool_copy_that_one_client_on_another_machine_cannot_take_still_reaches_the_
         active_tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        true,
+        ClientOrigin::Remote,
+        None,
         None,
     );
 
