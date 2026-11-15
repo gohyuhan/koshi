@@ -497,24 +497,33 @@ count. In JSON, an absent value is `null`, a list of ids is the whole list,
 and a size, a rectangle, or a cell is an object of numbers:
 `"viewport_size": {"column_count": 120, "row_count": 40}`. `koshi inspect
 client --format json` writes `pane_area` as `null` for no report,
-`"starving"`, or a size object, and `origin` as `"local"`, `"remote"`, or
-`null`.
+`"starving"`, or a size object, and `origin` as `"local"` or `"remote"`.
 
 `koshi list-clients` and `koshi inspect client` print each client's `number`
 and `label` after its id. No two clients attached to one session have the
 same number. The session gives each new client the lowest number from `1` up
 that no attached client holds. Example: if clients `1` and `3` are attached,
 the next client gets `2`, and the client after it gets `4`. If a terminal
-reconnects with its saved view, it gets its old number back while no attached
-client holds that number. Clients of two different sessions can have the same
-number. The label is the name the session gave the client, such as
-`C-swift-otter`. `--format json` writes the same values: `"client_number": 2`
-and `"label": "C-swift-otter"`.
+reconnects with its saved view, it gets its old number and its old label back
+while no attached client holds each one. Example: `bob-2` drops and dials
+again after `bob` has left, and it is still `bob-2`. Clients of two different sessions can have the same
+number. The label is the name the session gave the client at attach:
+
+1. A client of the account that runs the session, on this machine, is `host`.
+2. A client on another machine is the identity of the grant whose token it
+   used, such as `bob`, cleaned as `koshi share grant` describes.
+3. Every other client gets a generated name, such as `C-swift-otter`. A
+   client whose grant identity cleans to nothing gets one too.
+
+If an attached client already holds the label, the new client gets `-2`, then
+`-3`, and so on: a second terminal of the session's account is `host-2`.
+`--format json` writes the same values: `"client_number": 2` and
+`"label": "bob"`.
 
 ```text
-id                                           number  label          session  session_name
-client-0192f7d0-6c1e-7a51-9d4e-000000000001  1       C-swift-otter  …        work
-client-0192f7d0-6c1e-7a51-9d4e-000000000002  2       C-brave-heron  …        work
+id                                           number  label  session  session_name
+client-0192f7d0-6c1e-7a51-9d4e-000000000001  1       host   …        work
+client-0192f7d0-6c1e-7a51-9d4e-000000000002  2       bob    …        work
 ```
 
 `koshi list-panes` lists the tiled panes of each session in tab order, then
@@ -1142,6 +1151,21 @@ refused by the router, and no token is granted.
 A grant prints its token once, so copy it from that one printing. Anyone
 holding the token can run anything the granting user can.
 
+A client that connects with the token gets the identity as its label in every
+session the grant reaches. `koshi share grant bob` prints that label:
+
+```text
+Everyone attached to a session this grant reaches sees the name bob.
+```
+
+The label is the identity with each run of spaces, tabs and line breaks
+folded into one space. Control characters, text direction marks, interlinear
+annotation marks, the noncharacters U+FFFE and U+FFFF, and tag characters are
+removed. The result is cut to 32 cells and 512 bytes. Example: the identity
+`Bob<TAB>Smith` prints `sees the name Bob Smith.` An identity that cleans to
+nothing, such as three spaces, prints `sees a generated name.`, and its
+clients get a generated label, such as `C-swift-otter`.
+
 A listen address in `koshi.kdl` sets the address; it does not open the port.
 With an address set and remote access still off, `koshi share grant` says so
 and offers to switch it on:
@@ -1615,9 +1639,9 @@ koshi: command not permitted
   a terminal outside koshi.
 ```
 
-A session server too old to say where a client connected from lists that
-client with no origin. Such a row is refused the same as a client from another
-machine.
+A session answer that does not decode, such as a client row with no
+`origin`, is a session that cannot answer, and the second refusal names the
+decode failure.
 
 Both refusals exit 1 and print nothing on standard output. No token is
 granted, revoked or listed, and the token store is neither read nor written.

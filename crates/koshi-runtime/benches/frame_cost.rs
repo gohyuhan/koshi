@@ -17,6 +17,7 @@
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs, NewPanePlacement,
     ResizePaneArgs,
@@ -137,7 +138,8 @@ fn build_pane_grid_server(grid_side_pane_count: u16) -> (Server, ClientId, Vec<P
         tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     let first_pane_id = *server

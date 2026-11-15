@@ -1,8 +1,10 @@
 //! Generated names for sessions, tabs, and clients.
 //!
-//! Every name is system-generated: no command accepts caller text for one,
-//! and a name is assigned at creation and never changes. The runtime asks
-//! this module for every name it assigns. A generated name is
+//! Every name here is system-generated: no command accepts caller text for
+//! one, and a name is assigned at creation and never changes. The runtime asks
+//! this module for every session and tab name, and for each client label that
+//! [`resolve_client_label`](crate::client::resolve_client_label) generates. A
+//! generated name is
 //! `<TYPE>-<adjective>-<noun>`, where `TYPE` is a one-letter kind tag (`S`,
 //! `T`, or `C`) and the adjective and noun come from the same language's
 //! 50-entry word lists — English, Japanese, or Traditional Chinese — e.g.

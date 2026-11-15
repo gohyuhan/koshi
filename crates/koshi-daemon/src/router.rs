@@ -120,6 +120,7 @@ use std::time::{Duration, Instant, SystemTime};
 use fs4::{FileExt, TryLockError};
 use koshi_config::layer::{merge_server, PartialKoshiConfig};
 use koshi_config::types::ServerConfig;
+use koshi_core::client::sanitize_client_label;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
@@ -1977,8 +1978,9 @@ fn serve_remote_admission(
     }
 }
 
-/// What a presented secret reaches, and the number the connection presenting
-/// it is registered under.
+/// What a presented secret reaches, the label text of the identity its grant
+/// was handed to ([`sanitize_client_label`]), and the number the connection
+/// presenting it is registered under.
 ///
 /// A secret that reaches something registers the connection against that
 /// secret's hash, whether or not it goes on to attach. The registration is
@@ -2014,7 +2016,7 @@ fn admit_remote_token(
         return None;
     };
     let used_at = SystemTime::now();
-    let scope = token_store.find_token_scope(connection_token, used_at)?;
+    let admitted_grant = token_store.find_token_grant(connection_token, used_at)?;
     let token_hash = hash_connection_token(connection_token);
     if let Some(token_use_writer) = &remote_state.token_use_writer {
         token_use_writer.record_token_use(token_hash.clone(), used_at);
@@ -2029,7 +2031,8 @@ fn admit_remote_token(
             remote_connection_id,
         });
     Some(RemoteConnectionAdmission {
-        scope,
+        scope: admitted_grant.token_scope,
+        granted_identity: sanitize_client_label(&admitted_grant.granted_identity),
         remote_connection_id,
     })
 }

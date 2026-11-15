@@ -132,7 +132,7 @@ fn pane_lifecycle_serializes_and_decodes_as_its_variant_name() {
 }
 
 /// A client row whose origin is `client_origin`, with fixed everything else.
-fn build_client_discovery(client_origin: Option<ClientOrigin>) -> ClientDiscovery {
+fn build_client_discovery(client_origin: ClientOrigin) -> ClientDiscovery {
     ClientDiscovery {
         client_id: ClientId::from_uuid(build_fixed_uuid()),
         label: "C-swift-otter".to_string(),
@@ -152,11 +152,13 @@ fn build_client_discovery(client_origin: Option<ClientOrigin>) -> ClientDiscover
 }
 
 #[test]
-fn a_client_row_carrying_no_label_or_no_color_index_is_refused() {
-    for required_field_name in ["label", "color_index"] {
+fn a_client_row_carrying_no_label_color_index_or_origin_is_refused() {
+    for required_field_name in ["label", "color_index", "origin"] {
         let mut client_discovery_json =
-            serde_json::to_value(build_client_discovery(Some(ClientOrigin::Local)))
-                .expect("serialize");
+            serde_json::to_value(build_client_discovery(ClientOrigin::Local {
+                is_same_user: true,
+            }))
+            .expect("serialize");
         client_discovery_json
             .as_object_mut()
             .expect("a client row is a JSON object")
@@ -180,7 +182,7 @@ fn client_discovery_json_without_pane_area_decodes_as_none() {
             column_count: 80,
             row_count: 22,
         })),
-        ..build_client_discovery(None)
+        ..build_client_discovery(ClientOrigin::Local { is_same_user: true })
     };
     let mut client_discovery_json = serde_json::to_value(&client_discovery).expect("serialize");
     client_discovery_json
@@ -192,36 +194,27 @@ fn client_discovery_json_without_pane_area_decodes_as_none() {
     let decoded_client_discovery: ClientDiscovery =
         serde_json::from_value(client_discovery_json).expect("deserialize");
 
-    assert_eq!(decoded_client_discovery, build_client_discovery(None));
-}
-
-#[test]
-fn a_client_row_carrying_no_origin_field_reads_as_unanswered_never_as_local() {
-    let mut client_discovery_json =
-        serde_json::to_value(build_client_discovery(Some(ClientOrigin::Local))).expect("serialize");
-    client_discovery_json
-        .as_object_mut()
-        .expect("a client row is a JSON object")
-        .remove("origin")
-        .expect("the row carries an `origin` field to remove");
-
-    let decoded_client_discovery: ClientDiscovery =
-        serde_json::from_value(client_discovery_json).expect("deserialize");
-
-    assert_eq!(decoded_client_discovery.origin, None);
-    assert_eq!(decoded_client_discovery, build_client_discovery(None));
+    assert_eq!(
+        decoded_client_discovery,
+        build_client_discovery(ClientOrigin::Local { is_same_user: true })
+    );
 }
 
 #[test]
 fn a_client_row_stating_its_origin_keeps_that_answer() {
-    for client_origin in [ClientOrigin::Local, ClientOrigin::Remote] {
+    for client_origin in [
+        ClientOrigin::Local { is_same_user: true },
+        ClientOrigin::Local {
+            is_same_user: false,
+        },
+        ClientOrigin::Remote,
+    ] {
         let client_discovery_json =
-            serde_json::to_value(build_client_discovery(Some(client_origin))).expect("serialize");
+            serde_json::to_value(build_client_discovery(client_origin)).expect("serialize");
         let decoded_client_discovery: ClientDiscovery =
             serde_json::from_value(client_discovery_json).expect("deserialize");
         assert_eq!(
-            decoded_client_discovery.origin,
-            Some(client_origin),
+            decoded_client_discovery.origin, client_origin,
             "{client_origin:?}"
         );
     }
@@ -301,7 +294,7 @@ fn client_discovery_round_trips_with_every_optional_field_set() {
             column_count: 80,
             row_count: 22,
         })),
-        ..build_client_discovery(Some(ClientOrigin::Remote))
+        ..build_client_discovery(ClientOrigin::Remote)
     };
 
     let client_discovery_json = serde_json::to_string(&client_discovery).expect("serializes");
@@ -315,7 +308,7 @@ fn client_discovery_round_trips_with_every_optional_field_set() {
 fn a_starving_pane_area_round_trips_through_json() {
     let client_discovery = ClientDiscovery {
         pane_area: Some(PaneArea::Starving),
-        ..build_client_discovery(None)
+        ..build_client_discovery(ClientOrigin::Local { is_same_user: true })
     };
 
     let client_discovery_json = serde_json::to_string(&client_discovery).expect("serializes");
@@ -343,7 +336,9 @@ fn session_overview_round_trips_through_json() {
             pane_count: 1,
         }],
         panes: vec![build_pane_discovery(None)],
-        clients: vec![build_client_discovery(Some(ClientOrigin::Local))],
+        clients: vec![build_client_discovery(ClientOrigin::Local {
+            is_same_user: false,
+        })],
     };
 
     let session_overview_json = serde_json::to_string(&session_overview).expect("serializes");
@@ -383,7 +378,7 @@ fn an_unknown_pane_lifecycle_variant_is_rejected() {
 #[test]
 fn a_client_row_missing_its_id_is_rejected() {
     let mut client_discovery_json =
-        serde_json::to_value(build_client_discovery(None)).expect("serialize");
+        serde_json::to_value(build_client_discovery(ClientOrigin::Remote)).expect("serialize");
     client_discovery_json
         .as_object_mut()
         .expect("a client row is a JSON object")

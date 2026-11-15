@@ -171,7 +171,7 @@ fn build_session_overview(
             active_tab_id: TabId::new(),
             focused_pane_id: None,
             lock_mode: LockMode::Normal,
-            origin: Some(ClientOrigin::Local),
+            origin: ClientOrigin::Local { is_same_user: true },
             pane_area: None,
         }],
     }

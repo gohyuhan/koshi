@@ -138,7 +138,7 @@ fn build_test_client_discovery() -> ClientDiscovery {
         active_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
         focused_pane_id: None,
         lock_mode: LockMode::Normal,
-        origin: Some(ClientOrigin::Local),
+        origin: ClientOrigin::Local { is_same_user: true },
         pane_area: None,
     }
 }
@@ -455,27 +455,31 @@ fn a_starving_pane_area_json_is_the_word_starving() {
 }
 
 #[test]
-fn a_remote_client_json_names_its_origin_and_an_unsaid_origin_is_null() {
-    let remote_client_discovery = ClientDiscovery {
-        origin: Some(ClientOrigin::Remote),
-        ..build_test_client_discovery()
-    };
-    let unsaid_origin_client_discovery = ClientDiscovery {
-        origin: None,
-        ..build_test_client_discovery()
-    };
+fn every_client_json_names_its_origin_and_never_its_account() {
+    for (client_origin, expected_origin_word) in [
+        (ClientOrigin::Local { is_same_user: true }, "local"),
+        (
+            ClientOrigin::Local {
+                is_same_user: false,
+            },
+            "local",
+        ),
+        (ClientOrigin::Remote, "remote"),
+    ] {
+        let client_discovery = ClientDiscovery {
+            origin: client_origin,
+            ..build_test_client_discovery()
+        };
+        let client_json: serde_json::Value =
+            serde_json::from_str(&render_client(&client_discovery, OutputFormat::Json))
+                .expect("the record is JSON");
 
-    let remote_json: serde_json::Value =
-        serde_json::from_str(&render_client(&remote_client_discovery, OutputFormat::Json))
-            .expect("the record is JSON");
-    let unsaid_origin_json: serde_json::Value = serde_json::from_str(&render_client(
-        &unsaid_origin_client_discovery,
-        OutputFormat::Json,
-    ))
-    .expect("the record is JSON");
-
-    assert_eq!(remote_json["origin"], serde_json::json!("remote"));
-    assert_eq!(unsaid_origin_json["origin"], serde_json::Value::Null);
+        assert_eq!(
+            client_json["origin"],
+            serde_json::json!(expected_origin_word),
+            "{client_origin:?}"
+        );
+    }
 }
 
 #[test]

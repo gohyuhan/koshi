@@ -81,7 +81,7 @@ fn build_session_with_client_reporting(
         viewport_size,
         pane_area,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -656,7 +656,7 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -802,7 +802,7 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
         },
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );
@@ -2249,7 +2249,7 @@ fn two_clients_place_one_floating_pane_at_the_same_size_and_their_own_cells() {
             row_count: 22,
         })),
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-default-position".to_string(),
         1,
     );

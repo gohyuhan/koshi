@@ -1770,7 +1770,7 @@ fn two_clients_selecting_in_one_pane_never_see_each_others_highlight() {
         },
         None,
         tab_id,
-        koshi_session::client::ClientOrigin::Local,
+        koshi_session::client::ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

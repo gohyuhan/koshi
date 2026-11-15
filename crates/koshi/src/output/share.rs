@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use koshi_core::client::sanitize_client_label;
 use koshi_core::text::sanitize_reported_text;
 use koshi_host::host_addresses::HostAddress;
 use koshi_ipc::protocol::ConnectionToken;
@@ -106,12 +107,19 @@ pub enum ConfigMismatch {
 }
 
 /// Render the secret a `share grant` minted: the block printed once, holding
-/// the secret itself.
+/// the secret itself, then the line naming what the people attached to a
+/// session the grant reaches see a client of this grant called.
 ///
 /// Carries no connect instructions; those are [`render_remote_ready`].
 ///
 /// `has_replaced_grant` opens the block with the line naming the grant that stopped
 /// working.
+///
+/// The name is [`sanitize_client_label`] of `token_identity`: `bob` gives
+/// `Everyone attached to a session this grant reaches sees the name bob.`, and
+/// `"Bob\tSmith"` gives `... sees the name Bob Smith.`. An identity that leaves
+/// nothing, such as `"   "`, gives `Everyone attached to a session this grant
+/// reaches sees a generated name.`
 #[must_use]
 pub fn render_share_grant(
     connection_token: &ConnectionToken,
@@ -129,6 +137,15 @@ pub fn render_share_grant(
     rendered_output.push_str("anyone holding this token can run anything you can.\n");
     rendered_output.push_str(connection_token.expose_secret());
     rendered_output.push('\n');
+    let client_label = sanitize_client_label(token_identity);
+    if client_label.is_empty() {
+        rendered_output
+            .push_str("Everyone attached to a session this grant reaches sees a generated name.\n");
+    } else {
+        rendered_output.push_str(&format!(
+            "Everyone attached to a session this grant reaches sees the name {client_label}.\n"
+        ));
+    }
     rendered_output
 }
 

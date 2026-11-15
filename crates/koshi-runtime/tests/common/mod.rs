@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use koshi_config::layer::PartialKoshiConfig;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
@@ -137,7 +138,8 @@ pub fn create_session_with_attached_client(server: &mut Server) -> ClientId {
         tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     client_id
@@ -254,6 +256,7 @@ pub fn open_session_connection(runtime_directory: &Path, session_id: SessionId) 
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: endpoint_file.connection_token,
                 is_remote: false,
+                granted_identity: None,
             },
         })
         .expect("send hello");

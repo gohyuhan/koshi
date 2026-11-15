@@ -6,6 +6,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
+use crate::remote_tokens::AdmittedGrant;
 
 /// Write one previous-format JSON record to its private directory.
 fn write_previous_file(file_path: &Path, file_contents: serde_json::Value) {
@@ -84,8 +85,11 @@ fn listener_migration_preserves_certificate_access_mark_and_grant() {
         TokenStore::load_token_store_from_path(&token_store_path).expect("read migrated grants");
     let admitted_at = SystemTime::UNIX_EPOCH + Duration::from_secs(400);
     assert_eq!(
-        migrated_grants.find_token_scope(&connection_token, admitted_at),
-        Some(TokenScope::HostWide)
+        migrated_grants.find_token_grant(&connection_token, admitted_at),
+        Some(AdmittedGrant {
+            token_scope: TokenScope::HostWide,
+            granted_identity: "ada".to_string(),
+        })
     );
 
     let certificate_bytes = std::fs::read(&certificate_path).expect("read migrated certificate");

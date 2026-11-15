@@ -47,7 +47,7 @@ fn build_test_socket_address(test_name: &str) -> String {
 fn build_test_handshake(connection_token: ConnectionToken) -> Handshake {
     Handshake::from_expected_token_and_peer(
         connection_token,
-        Peer::Local {
+        Peer {
             is_same_user: true,
             is_other_user_access_allowed: false,
         },
@@ -435,6 +435,7 @@ fn a_hello_naming_a_version_range_this_build_does_not_share_is_refused_here() {
                     maximum_protocol_version: unsupported_protocol_version,
                     connection_token,
                     is_remote: false,
+                    granted_identity: None,
                 },
             })
             .expect("send a hello from the future");

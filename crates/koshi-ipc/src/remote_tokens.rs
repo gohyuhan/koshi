@@ -157,6 +157,17 @@ impl TokenRecord {
     }
 }
 
+/// The grant a presented secret reached
+/// ([`TokenStore::find_token_grant`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedGrant {
+    /// How far the grant reaches.
+    pub token_scope: TokenScope,
+    /// Who the grant was handed to, in the words the operator typed
+    /// ([`TokenRecord::identity`]).
+    pub granted_identity: String,
+}
+
 /// One grant as a caller may see it: every field of a [`TokenRecord`] except
 /// the hash.
 ///
@@ -328,25 +339,25 @@ impl TokenStore {
         revoked_scopes
     }
 
-    /// What `connection_token` reaches at `current_time`.
+    /// The grant `connection_token` reaches at `current_time`.
     ///
     /// The presented secret is hashed once, then every record is walked, in
     /// order, and each hash compared through its last byte; a hash whose
     /// length differs is unequal at once, with no byte compared. The walk runs
-    /// to the end and reads no record out of a map. Returns the scope of the
-    /// last record holding that hash that still stands at `current_time`, and
-    /// `None` when no record does. No record changes.
+    /// to the end and reads no record out of a map. Returns the scope and the
+    /// identity of the last record holding that hash that still stands at
+    /// `current_time`, and `None` when no record does. No record changes.
     ///
     /// The caller checks the scope against the session it wants with
     /// [`TokenScope::is_allowed_for_session`].
     #[must_use]
-    pub fn find_token_scope(
+    pub fn find_token_grant(
         &self,
         connection_token: &ConnectionToken,
         current_time: SystemTime,
-    ) -> Option<TokenScope> {
+    ) -> Option<AdmittedGrant> {
         let presented_token_hash = hash_connection_token(connection_token);
-        let mut matching_token_scope = None;
+        let mut matching_token_record = None;
         for token_record in &self.token_records {
             let is_token_hash_matching: bool = token_record
                 .token_hash
@@ -354,10 +365,13 @@ impl TokenStore {
                 .ct_eq(presented_token_hash.as_bytes())
                 .into();
             if is_token_hash_matching && token_record.is_active_at(current_time) {
-                matching_token_scope = Some(&token_record.scope);
+                matching_token_record = Some(token_record);
             }
         }
-        matching_token_scope.cloned()
+        matching_token_record.map(|token_record| AdmittedGrant {
+            token_scope: token_record.scope.clone(),
+            granted_identity: token_record.identity.clone(),
+        })
     }
 
     /// Stamp `used_at` as the last-used time of every record holding

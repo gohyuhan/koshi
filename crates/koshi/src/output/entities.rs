@@ -348,8 +348,8 @@ struct ClientReport {
     /// `floating-pane-tray` or `notification-center`.
     lock_mode: &'static str,
     /// Where the client connected from, as [`format_client_origin`] names
-    /// it, or `None` when the session did not say.
-    origin: Option<&'static str>,
+    /// it.
+    origin: &'static str,
     /// The pane region the client reported, or `None` for no report.
     pane_area: Option<PaneAreaReport>,
 }
@@ -488,7 +488,7 @@ fn build_client_report(client_discovery: &ClientDiscovery) -> ClientReport {
             .focused_pane_id
             .map(|focused_pane_id| focused_pane_id.to_string()),
         lock_mode: client_discovery.lock_mode.get_keymap_name(),
-        origin: client_discovery.origin.map(format_client_origin),
+        origin: format_client_origin(client_discovery.origin),
         pane_area: client_discovery.pane_area.map(|pane_area| match pane_area {
             PaneArea::Starving => PaneAreaReport::Starving,
             PaneArea::Reported(size) => PaneAreaReport::Reported(size),
@@ -745,10 +745,11 @@ fn format_pane_lifecycle(pane_lifecycle: PaneLifecycle) -> &'static str {
     }
 }
 
-/// Where a client connected from, as JSON names it: `local` or `remote`.
+/// Where a client connected from, as JSON names it: `local` for a client of
+/// any account of this machine, `remote` for a client on another machine.
 fn format_client_origin(client_origin: ClientOrigin) -> &'static str {
     match client_origin {
-        ClientOrigin::Local => "local",
+        ClientOrigin::Local { .. } => "local",
         ClientOrigin::Remote => "remote",
     }
 }

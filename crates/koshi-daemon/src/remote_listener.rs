@@ -58,8 +58,10 @@
 //! own bytes. No path from it reaches the router's control plane, so
 //! `koshi share` is unreachable over a remote connection. A client counts as
 //! remote when this listener accepted it: the router marks the Hello it sends
-//! the session server on that client's behalf. A caller can add that mark to
-//! itself and cannot take it off.
+//! the session server on that client's behalf, and puts the identity of the
+//! caller's grant in it. The session reads both only from a Hello that
+//! presented its token, so neither a remote caller nor another user of this
+//! machine sets them.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -196,6 +198,10 @@ pub(crate) enum LocateRefusal {
 pub(crate) struct RemoteConnectionAdmission {
     /// How far the grant behind that secret reaches.
     pub scope: TokenScope,
+    /// The identity the grant behind that secret was handed to, as
+    /// [`sanitize_client_label`](koshi_core::client::sanitize_client_label)
+    /// gives it: the label text the session names this caller's client with.
+    pub granted_identity: String,
     /// The number this connection is registered under, named again when it
     /// attaches and when it ends.
     pub remote_connection_id: u64,
@@ -759,8 +765,9 @@ fn serve_remote_connection(
 /// [`bridge_remote_connection_to_session`] states.
 ///
 /// `session_protocol_versions` is the session protocol range the client named
-/// in its opening frame. [`bridge_remote_connection_to_session`] puts it in the
-/// session-plane Hello it sends for this client.
+/// in its opening frame. [`bridge_remote_connection_to_session`] puts it, and
+/// the admitted grant's `granted_identity`, in the session-plane Hello it sends
+/// for this client.
 fn serve_admitted_remote_connection(
     mut reader: TlsReader,
     mut writer: TlsWriter,
@@ -789,6 +796,7 @@ fn serve_admitted_remote_connection(
         &located_session,
         admitted_connection.remote_connection_id,
         session_protocol_versions,
+        &admitted_connection.granted_identity,
         link_timeout_ms.map(|link_timeout_ms| Duration::from_millis(u64::from(link_timeout_ms))),
         dispatcher_events_sender,
     );
@@ -891,12 +899,14 @@ fn process_admitted_remote_frames(
 /// The Hello the router sends a session server for a caller this listener
 /// accepted: `connection_token` from that session's endpoint file, the
 /// caller's own version range in `session_protocol_versions` as
-/// `(minimum, maximum)`, and `is_remote` set to `true`.
+/// `(minimum, maximum)`, `is_remote` set to `true`, and `granted_identity`,
+/// the label text of the caller's grant.
 ///
-/// This is the only place `is_remote` is set.
+/// This is the only place `is_remote` and `granted_identity` are set.
 fn build_bridged_hello(
     connection_token: ConnectionToken,
     session_protocol_versions: (u32, u32),
+    granted_identity: &str,
 ) -> IpcRequest {
     let (minimum_protocol_version, maximum_protocol_version) = session_protocol_versions;
     IpcRequest {
@@ -906,13 +916,14 @@ fn build_bridged_hello(
             maximum_protocol_version,
             connection_token,
             is_remote: true,
+            granted_identity: Some(granted_identity.to_string()),
         },
     }
 }
 
 /// Open the local connection to the session advertised at
 /// `session_endpoint_path` and send it the Hello carrying that session's
-/// endpoint token and `session_protocol_versions`.
+/// endpoint token, `session_protocol_versions` and `granted_identity`.
 ///
 /// Hands back the connection's two raw halves and the handle that closes its
 /// read direction.
@@ -923,6 +934,7 @@ fn build_bridged_hello(
 fn open_local_session_bridge(
     session_endpoint_path: &Path,
     session_protocol_versions: (u32, u32),
+    granted_identity: &str,
 ) -> Option<(RawReader, RawWriter, ReadCloser)> {
     let session_endpoint = EndpointFile::load_from_path(session_endpoint_path).ok()?;
     let mut session_connection = Connection::connect_to_own_server_within(
@@ -935,6 +947,7 @@ fn open_local_session_bridge(
         .send(&build_bridged_hello(
             session_endpoint.connection_token,
             session_protocol_versions,
+            granted_identity,
         ))
         .ok()?;
     let (session_reader, session_writer) = session_connection.split_raw();
@@ -955,22 +968,29 @@ fn open_local_session_bridge(
 fn open_local_session_bridge_across_restart(
     located_session: &LocatedSession,
     session_protocol_versions: (u32, u32),
+    granted_identity: &str,
 ) -> Option<(RawReader, RawWriter, ReadCloser)> {
     let session_endpoint_path = EndpointFile::resolve_endpoint_file_path(
         &located_session.runtime_directory,
         located_session.session_id,
     );
     loop {
-        if let Some(session_bridge) =
-            open_local_session_bridge(&session_endpoint_path, session_protocol_versions)
-        {
+        if let Some(session_bridge) = open_local_session_bridge(
+            &session_endpoint_path,
+            session_protocol_versions,
+            granted_identity,
+        ) {
             return Some(session_bridge);
         }
         if !is_replacing_its_image(
             &located_session.runtime_directory,
             located_session.session_id,
         ) {
-            return open_local_session_bridge(&session_endpoint_path, session_protocol_versions);
+            return open_local_session_bridge(
+                &session_endpoint_path,
+                session_protocol_versions,
+                granted_identity,
+            );
         }
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
@@ -981,7 +1001,8 @@ fn open_local_session_bridge_across_restart(
 /// and carry the bytes both ways.
 ///
 /// The router sends the session-plane Hello carrying the session's endpoint
-/// token and the client's version range. The session server's answer to that
+/// token, the client's version range and `granted_identity`. The session
+/// server's answer to that
 /// Hello, and everything after it, travels back through the bridge unread. A
 /// session that cannot be opened is refused with
 /// [`SESSION_NOT_ANSWERING_MESSAGE`], and the connection is reported ended
@@ -1014,12 +1035,17 @@ fn bridge_remote_connection_to_session(
     located_session: &LocatedSession,
     remote_connection_id: u64,
     session_protocol_versions: (u32, u32),
+    granted_identity: &str,
     link_timeout: Option<Duration>,
     dispatcher_events_sender: &Sender<RouterEvent>,
 ) {
     writer.set_idle_timeout(link_timeout);
     let Some((mut session_reader, mut session_writer, session_read_closer)) =
-        open_local_session_bridge_across_restart(located_session, session_protocol_versions)
+        open_local_session_bridge_across_restart(
+            located_session,
+            session_protocol_versions,
+            granted_identity,
+        )
     else {
         send_refusal_message(
             &mut writer,

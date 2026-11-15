@@ -259,21 +259,17 @@ fn one_attach_registers_the_client_the_server_minted() {
         .expect("minted client");
     assert_eq!(client.get_client_id(), client_id);
     assert_eq!(client.get_session_id(), session_id);
-    assert_eq!(client.get_origin(), ClientOrigin::Local);
+    assert_eq!(
+        client.get_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
     assert_eq!(client.get_color_index(), 0);
     assert_eq!(client.get_viewport_size(), TEST_VIEWPORT_SIZE);
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
         vec![client.get_active_tab_id()]
     );
-    let label_parts: Vec<&str> = client.get_label().split('-').collect();
-    assert_eq!(
-        label_parts.len(),
-        3,
-        "generated label, got {}",
-        client.get_label()
-    );
-    assert_eq!(label_parts[0], "C");
+    assert_eq!(client.get_label(), "host");
 }
 
 #[test]
@@ -402,7 +398,7 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
         .expect("the one attached client");
     assert_eq!(
         client.get_origin(),
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "the origin comes from the connection, not the request"
     );
     assert_eq!(
@@ -506,10 +502,8 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
         .expect("additional client");
     assert_eq!(initial_client_record.get_color_index(), 0);
     assert_eq!(additional_client_record.get_color_index(), 1);
-    assert_ne!(
-        initial_client_record.get_label(),
-        additional_client_record.get_label()
-    );
+    assert_eq!(initial_client_record.get_label(), "host");
+    assert_eq!(additional_client_record.get_label(), "host-2");
 }
 
 /// Close `tab_id`, the session's last tab, over `ipc_connection`, killing its

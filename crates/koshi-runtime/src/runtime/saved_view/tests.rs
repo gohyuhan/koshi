@@ -31,7 +31,7 @@ fn build_client(client_id: ClientId, active_tab_id: TabId) -> Client {
         },
         None,
         active_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-calm-otter".to_string(),
         1,
     )
@@ -344,6 +344,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
         saved_view_store.take_saved_view(&resume_token, build_system_time_at_seconds(101)),
         Some(SavedView {
             color_index: 1,
+            label: "C-calm-otter".to_string(),
             active_tab_id: tab_id,
             focus_history_by_tab_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),

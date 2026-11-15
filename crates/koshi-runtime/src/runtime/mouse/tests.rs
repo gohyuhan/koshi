@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::runtime::delivery_queue::DeliveryReceiver;
+use koshi_core::client::ClientOrigin;
 use koshi_core::event::{Event, PaneCreated, RejectReason};
 use koshi_test_support::fixtures::build_new_pane_args;
 
@@ -4111,7 +4112,8 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            true,
+            ClientOrigin::Remote,
+            None,
             60,
             None,
         )
@@ -4133,7 +4135,8 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            true,
+            ClientOrigin::Remote,
+            None,
             60,
             None,
         )

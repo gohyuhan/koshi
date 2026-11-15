@@ -428,7 +428,8 @@ fn an_attach_naming_a_placement_target_gives_its_first_frame_the_targets_preview
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             Some(PanePlacementPreviewTarget {
                 source_pane_id: preview_fixture.vim_pane_id,
@@ -489,7 +490,8 @@ fn an_attach_naming_no_placement_target_gives_the_client_no_preview() {
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -649,7 +651,7 @@ fn a_destination_tab_is_sized_by_the_acting_client_and_the_clients_that_view_it(
             },
             Some(PaneArea::Reported(pane_area)),
             tab_id,
-            ClientOrigin::Local,
+            ClientOrigin::Local { is_same_user: true },
             "C-test-client".to_string(),
             0,
         );
@@ -716,7 +718,7 @@ fn a_starving_sole_viewers_preview_draws_no_pane() {
         },
         Some(PaneArea::Starving),
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

@@ -10,10 +10,12 @@
 //! connection: the server feeds it every incoming request kind, and it
 //! answers with "serve it" or with the exact refusal to send back.
 //!
-//! Which checks a Hello meets depends on where the connection came from,
-//! named by [`Peer`](crate::handshake::Peer). The listener that accepted the
-//! connection fills that in from what the OS reports, never from anything the
-//! caller sent.
+//! Which checks a Hello meets depends on who opened the connection, named by
+//! [`Peer`](crate::handshake::Peer). The listener that accepted the connection
+//! fills that in from what the OS reports, never from anything the caller sent.
+//! A caller on another machine reaches a session through the router, which
+//! opens a connection of the session owner's account and presents the
+//! session's token for it.
 //!
 //! The rule itself — settle the version, check the token, open the gate, and
 //! refuse every other kind until it is open — is one `VersionGate`, shared
@@ -23,24 +25,22 @@
 //! protocol carries its own version range and its own words in `GateWords`,
 //! and each refusal reads in that protocol's own terms.
 
+use koshi_core::client::ClientOrigin;
+
 use crate::protocol::{
     compute_agreed_protocol_version, ConnectionToken, IpcErrorCode, IpcErrorPayload,
     IpcRequestKind, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
-/// Where a connection came from, as the listener that accepted it reports.
+/// Who opened a connection on this machine's own socket or named pipe, as the
+/// listener that accepted it reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Peer {
-    /// A connection from this machine.
-    Local {
-        /// Whether the peer process runs as the user who started this Koshi.
-        is_same_user: bool,
-        /// Whether `allow-other-users` in `koshi.kdl` is on, letting the other
-        /// users of this machine reach this Koshi.
-        is_other_user_access_allowed: bool,
-    },
-    /// A connection from another machine.
-    Remote,
+pub struct Peer {
+    /// Whether the peer process runs as the user who started this Koshi.
+    pub is_same_user: bool,
+    /// Whether `allow-other-users` in `koshi.kdl` is on, letting the other
+    /// users of this machine reach this Koshi.
+    pub is_other_user_access_allowed: bool,
 }
 
 /// What one protocol calls itself in its gate's refusals, and the versions
@@ -240,12 +240,23 @@ pub struct Handshake {
     /// The version range, the token and the settled version, in the session
     /// protocol's words.
     gate: VersionGate,
-    /// Where this connection came from, which decides whether its Hello is
-    /// asked for the token at all.
+    /// Who opened this connection, which decides whether its Hello is asked
+    /// for the token at all.
     peer: Peer,
-    /// Whether a Hello on this connection said it carries a caller on another
-    /// machine. Latched: once a Hello sets it, no later Hello clears it.
-    is_remote_caller: bool,
+    /// The caller on another machine this connection carries, set by the
+    /// first accepted Hello that presented this Koshi's token with
+    /// `is_remote: true`, and `None` until then. Latched: no Hello after it
+    /// clears it.
+    remote_caller: Option<RemoteCaller>,
+}
+
+/// A caller on another machine, as the accepted Hellos of its connection
+/// named it.
+#[derive(Debug)]
+struct RemoteCaller {
+    /// The `granted_identity` of the first such Hello that carried one, or
+    /// `None` while none did. No Hello after that one changes it.
+    granted_identity: Option<String>,
 }
 
 impl Handshake {
@@ -262,18 +273,45 @@ impl Handshake {
                 SESSION_WORDS,
             ),
             peer,
-            is_remote_caller: false,
+            remote_caller: None,
         }
     }
 
     /// Whether this connection carries a caller on another machine.
     ///
-    /// `false` until an accepted Hello says otherwise, and `true` from the
-    /// first accepted Hello that does. A refused Hello leaves this unchanged,
-    /// and a later accepted Hello saying `false` leaves this `true`.
+    /// `false` until an accepted Hello from this Koshi's own user, holding
+    /// this Koshi's token, says `is_remote: true`, and `true` from then on. A
+    /// refused Hello leaves this unchanged, an accepted Hello after it saying
+    /// `false` leaves this `true`, and a Hello from another user of this
+    /// machine never sets it.
     #[must_use]
     pub fn is_remote_caller(&self) -> bool {
-        self.is_remote_caller
+        self.remote_caller.is_some()
+    }
+
+    /// Where a client attached on this connection connected from:
+    /// [`ClientOrigin::Remote`] while [`is_remote_caller`](Self::is_remote_caller),
+    /// else [`ClientOrigin::Local`] carrying the peer's `is_same_user`.
+    #[must_use]
+    pub fn get_client_origin(&self) -> ClientOrigin {
+        if self.is_remote_caller() {
+            return ClientOrigin::Remote;
+        }
+        ClientOrigin::Local {
+            is_same_user: self.peer.is_same_user,
+        }
+    }
+
+    /// The grant identity of the caller on another machine this connection
+    /// carries: the `granted_identity` of the first accepted Hello that set
+    /// [`is_remote_caller`](Self::is_remote_caller) or came after it and
+    /// carried one. `None` while no such Hello carried one, and on every
+    /// connection that carries no caller on another machine.
+    #[must_use]
+    pub fn get_granted_identity(&self) -> Option<&str> {
+        self.remote_caller
+            .as_ref()
+            .and_then(|remote_caller| remote_caller.granted_identity.as_deref())
     }
 
     /// The protocol version this connection settled on, or `None` while no
@@ -308,12 +346,20 @@ impl Handshake {
     /// [`UnsupportedVersion`](IpcErrorCode::UnsupportedVersion) with both
     /// ranges named, whatever it came from.
     ///
-    /// Then, by peer: [`Peer::Remote`] and a same-user [`Peer::Local`] must
-    /// present a token equal to this Koshi's, and are refused as
+    /// Then, by peer: a peer of this Koshi's own user must present a token
+    /// equal to this Koshi's, and is refused as
     /// [`BadToken`](IpcErrorCode::BadToken) otherwise. Another user of this
     /// machine is asked for no token while `allow-other-users` is on, and is
     /// refused as [`OtherUsersOff`](IpcErrorCode::OtherUsersOff) while it is
     /// off.
+    ///
+    /// An accepted Hello of this Koshi's own user with `is_remote: true` marks
+    /// the connection as carrying a caller on another machine
+    /// ([`is_remote_caller`](Self::is_remote_caller)), and its
+    /// `granted_identity` becomes the caller's identity while no earlier Hello
+    /// gave one ([`get_granted_identity`](Self::get_granted_identity)). The
+    /// `is_remote` and `granted_identity` of another user's Hello are not
+    /// recorded.
     ///
     /// A Hello passing its checks settles the connection's version and opens
     /// the gate. Any other kind is accepted while the gate is open and refused
@@ -335,6 +381,7 @@ impl Handshake {
                 maximum_protocol_version,
                 connection_token,
                 is_remote,
+                granted_identity,
             } => {
                 let agreed_protocol_version = self.gate.negotiate_protocol_version(
                     *minimum_protocol_version,
@@ -343,7 +390,7 @@ impl Handshake {
                 match self.peer {
                     // Another user of this machine is asked for no token; the
                     // setting alone decides.
-                    Peer::Local {
+                    Peer {
                         is_same_user: false,
                         is_other_user_access_allowed: false,
                     } => {
@@ -355,16 +402,24 @@ impl Handshake {
                                 .to_string(),
                         });
                     }
-                    Peer::Local {
+                    Peer {
                         is_same_user: false,
                         is_other_user_access_allowed: true,
                     } => {}
-                    Peer::Local {
+                    Peer {
                         is_same_user: true, ..
+                    } => {
+                        self.gate.validate_connection_token(connection_token)?;
+                        if *is_remote {
+                            let remote_caller = self.remote_caller.get_or_insert(RemoteCaller {
+                                granted_identity: None,
+                            });
+                            if remote_caller.granted_identity.is_none() {
+                                remote_caller.granted_identity = granted_identity.clone();
+                            }
+                        }
                     }
-                    | Peer::Remote => self.gate.validate_connection_token(connection_token)?,
                 }
-                self.is_remote_caller |= *is_remote;
                 self.gate
                     .set_agreed_protocol_version(agreed_protocol_version);
                 Ok(())

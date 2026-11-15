@@ -97,8 +97,9 @@ pub struct PaneDiscovery {
 pub struct ClientDiscovery {
     /// Stable client id.
     pub client_id: ClientId,
-    /// The name the session gave the client at attach, such as
-    /// `C-swift-otter`.
+    /// The name the session gave the client at attach
+    /// ([`resolve_client_label`](crate::client::resolve_client_label)), such
+    /// as `bob`, `host-2` or `C-swift-otter`.
     pub label: String,
     /// The index the session gave the client at attach, held by no other
     /// attached client. The client prints as
@@ -118,9 +119,8 @@ pub struct ClientDiscovery {
     pub focused_pane_id: Option<PaneId>,
     /// The client's modal input state.
     pub lock_mode: LockMode,
-    /// Where the client connected from. `None` when the row carries no
-    /// `origin` field; `None` is not [`ClientOrigin::Local`].
-    pub origin: Option<ClientOrigin>,
+    /// Where the client connected from.
+    pub origin: ClientOrigin,
     /// The pane region the client reported, exactly as it arrived, or `None`
     /// from a client that reported none.
     pub pane_area: Option<PaneArea>,

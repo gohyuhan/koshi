@@ -291,6 +291,7 @@ fn a_grant_block_with_no_listen_address_names_the_line_to_set_and_share_open() {
         rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
+         Everyone attached to a session this grant reaches sees the name alice.\n\
          koshi.kdl names no remote listen address, so this token cannot be used to connect \
          yet. Set `remote-listen \"<ip>:<port>\"` in koshi.kdl, run `koshi restart-servers`, \
          then run `koshi share open`.\n"
@@ -310,6 +311,7 @@ fn a_grant_block_with_remote_access_left_off_names_share_open() {
         rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
+         Everyone attached to a session this grant reaches sees the name alice.\n\
          remote access stays off. Run `koshi share open` to open the port. This token cannot \
          be used to connect until the port opens.\n"
     );
@@ -336,6 +338,7 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
         format!(
             "anyone holding this token can run anything you can.\n\
              f00d\n\
+             Everyone attached to a session this grant reaches sees the name alice.\n\
              connect from another machine:\n\
              \x20 koshi attach --remote 192.0.2.20:7654 --certificate-fingerprint \
              sha256:{TEST_CERTIFICATE_FINGERPRINT} --save-as desk [SESSION]\n\
@@ -362,6 +365,7 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
          working.\n\
          anyone holding this token can run anything you can.\n\
          f00d\n\
+         Everyone attached to a session this grant reaches sees the name alice.\n\
          koshi.kdl names no remote listen address, so this token cannot be used to connect \
          yet. Set `remote-listen \"<ip>:<port>\"` in koshi.kdl, run `koshi restart-servers`, \
          then run `koshi share open`.\n"
@@ -456,6 +460,40 @@ fn an_empty_listing_is_the_header_row_alone_and_an_empty_json_array() {
 }
 
 #[test]
+fn a_grant_block_names_the_label_people_see_for_its_identity() {
+    let connection_token = ConnectionToken::from_secret("f00d");
+    for (token_identity, expected_name_line) in [
+        (
+            "bob",
+            "Everyone attached to a session this grant reaches sees the name bob.\n",
+        ),
+        (
+            "Bob\tSmith\u{1b}\n",
+            "Everyone attached to a session this grant reaches sees the name Bob Smith.\n",
+        ),
+        (
+            "   ",
+            "Everyone attached to a session this grant reaches sees a generated name.\n",
+        ),
+    ] {
+        let secret_block = output::render_share_grant(
+            &connection_token,
+            token_identity,
+            &TokenScope::HostWide,
+            false,
+        );
+
+        assert_eq!(
+            secret_block,
+            format!(
+                "anyone holding this token can run anything you can.\nf00d\n{expected_name_line}"
+            ),
+            "identity {token_identity:?}"
+        );
+    }
+}
+
+#[test]
 fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
     // The block renders whole on its own, and names nothing about connecting.
     let connection_token = ConnectionToken::from_secret("f00d");
@@ -465,7 +503,8 @@ fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
     assert_eq!(
         secret_block,
         "anyone holding this token can run anything you can.\n\
-         f00d\n"
+         f00d\n\
+         Everyone attached to a session this grant reaches sees the name alice.\n"
     );
     assert!(
         !secret_block.contains("connect"),
@@ -1424,6 +1463,7 @@ fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
         output_recorder.get_written_text(),
         "anyone holding this token can run anything you can.\n\
          f00d\n\
+         Everyone attached to a session this grant reaches sees the name alice.\n\
          remote access stays off. Run `koshi share open` to open the port. This token cannot \
          be used to connect until the port opens.\n"
     );
@@ -1454,7 +1494,8 @@ fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
     assert_eq!(
         *flushed_output_before_prompt.borrow(),
         "anyone holding this token can run anything you can.\n\
-         f00d\n",
+         f00d\n\
+         Everyone attached to a session this grant reaches sees the name alice.\n",
         "the whole secret block was flushed before the offer ran"
     );
 }
@@ -1462,10 +1503,7 @@ fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
 // --- Where a share verb may run ---
 
 /// One attached client record at `client_id`, connected from `client_origin`.
-fn build_client_discovery(
-    client_id: ClientId,
-    client_origin: Option<ClientOrigin>,
-) -> ClientDiscovery {
+fn build_client_discovery(client_id: ClientId, client_origin: ClientOrigin) -> ClientDiscovery {
     ClientDiscovery {
         client_id,
         label: "C-swift-otter".to_string(),
@@ -1517,13 +1555,18 @@ fn build_in_session_context(session_id: SessionId) -> InSessionContext {
 }
 
 #[test]
-fn a_pane_of_a_session_nobody_watches_from_elsewhere_keeps_share() {
+fn a_pane_of_a_session_watched_only_from_this_machine_keeps_share() {
     let session_id = SessionId::new();
     let session_overview = build_session_overview_with_clients(
         session_id,
         vec![
-            build_client_discovery(ClientId::new(), Some(ClientOrigin::Local)),
-            build_client_discovery(ClientId::new(), Some(ClientOrigin::Local)),
+            build_client_discovery(ClientId::new(), ClientOrigin::Local { is_same_user: true }),
+            build_client_discovery(
+                ClientId::new(),
+                ClientOrigin::Local {
+                    is_same_user: false,
+                },
+            ),
         ],
     );
 
@@ -1539,8 +1582,8 @@ fn a_pane_of_a_remotely_watched_session_refuses_share() {
     let session_overview = build_session_overview_with_clients(
         session_id,
         vec![
-            build_client_discovery(ClientId::new(), Some(ClientOrigin::Local)),
-            build_client_discovery(ClientId::new(), Some(ClientOrigin::Remote)),
+            build_client_discovery(ClientId::new(), ClientOrigin::Local { is_same_user: true }),
+            build_client_discovery(ClientId::new(), ClientOrigin::Remote),
         ],
     );
 
@@ -1564,25 +1607,30 @@ fn a_pane_of_a_remotely_watched_session_refuses_share() {
 }
 
 #[test]
-fn a_client_whose_origin_the_session_did_not_answer_refuses_share() {
-    // A row with no origin refuses as a row naming another machine does.
+fn a_session_answer_that_does_not_decode_refuses_share() {
     let session_id = SessionId::new();
-    let session_overview = build_session_overview_with_clients(
-        session_id,
-        vec![build_client_discovery(ClientId::new(), None)],
-    );
 
     let share_error =
         refuse_while_watched_from_another_machine(&build_in_session_context(session_id), |_| {
-            Ok(session_overview.clone())
+            Err(CliError::IpcUnavailable {
+                detail: "missing field `origin`".to_string(),
+            })
         })
-        .expect_err("an unanswered origin refuses the verb");
+        .expect_err("an answer that does not decode refuses the verb");
 
     let CliError::CommandRejected { reason, help } = share_error else {
         panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
-    assert_eq!(help, Some(WATCHED_FROM_ANOTHER_MACHINE_HELP.to_string()));
+    assert_eq!(
+        help,
+        Some(
+            "this session could not say who is attached to it, so whether anyone sees this \
+             pane from another machine is unknown: IPC unavailable: missing field `origin`. \
+             Run `koshi share` from a terminal outside koshi."
+                .to_string()
+        )
+    );
 }
 
 #[test]

@@ -87,6 +87,7 @@ use ratatui::layout::{Position, Rect};
 
 use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig};
 use koshi_config::types::RgbColor;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     ClearSelectionArgs, ClosePaneArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs,
     FocusTabArgs, FocusTarget, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
@@ -5946,7 +5947,8 @@ fn a_host_resize_of_one_client_redraws_its_images_and_writes_no_image_to_another
         sixel_client_frame.client_snapshot.active_tab_id,
         Some(build_one_pixel_cell_size()),
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));

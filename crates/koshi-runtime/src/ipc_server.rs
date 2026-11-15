@@ -745,8 +745,8 @@ impl Drop for IpcServer {
 ///
 /// `allow_other_users_setting` is the live read of the `allow-other-users`
 /// setting, and is `None` for a session only its own user may reach. Each
-/// connection is gated as [`Peer::Local`] with the user the OS reports for it
-/// and the setting read at accept. The handshake refuses another local user
+/// connection is gated as a [`Peer`] holding whether the user the OS reports
+/// for it is this koshi's own user, and the setting read at accept. The handshake refuses another local user
 /// arriving while the setting is off with `OtherUsersOff`. A connection whose
 /// user cannot be read is closed without being served.
 ///
@@ -806,7 +806,7 @@ fn run_accept_loop(
                     ),
                 );
             }
-            let peer = Peer::Local {
+            let peer = Peer {
                 is_same_user,
                 is_other_user_access_allowed: allow_other_users_setting
                     .is_some_and(|is_enabled| is_enabled()),
@@ -1260,7 +1260,8 @@ fn serve_connection(
                         pane_area,
                         cell_size,
                         attached_at: SystemTime::now(),
-                        is_remote: handshake.is_remote_caller(),
+                        client_origin: handshake.get_client_origin(),
+                        granted_identity: handshake.get_granted_identity().map(str::to_string),
                         max_frames_per_second,
                         placement_preview_target,
                         response_sender,

@@ -59,15 +59,12 @@ use koshi_pty::working_directory::get_local_hostname;
 #[cfg(test)]
 mod tests;
 
-/// Whether any client attached to the session is on another machine.
-///
-/// True for a row naming [`ClientOrigin::Remote`], and for a row naming no
-/// origin at all: a session server built before that field existed serves such
-/// a row, and it does not say the client is local.
+/// Whether any client attached to the session is on another machine: a row
+/// naming [`ClientOrigin::Remote`].
 fn has_client_from_another_machine(client_discoveries: &[ClientDiscovery]) -> bool {
     client_discoveries
         .iter()
-        .any(|client_discovery| client_discovery.origin != Some(ClientOrigin::Local))
+        .any(|client_discovery| client_discovery.origin == ClientOrigin::Remote)
 }
 
 /// Refuse a `share` verb run in a pane of a session that a client on another
@@ -81,9 +78,9 @@ fn has_client_from_another_machine(client_discoveries: &[ClientDiscovery]) -> bo
 ///
 /// # Errors
 /// [`CliError::CommandRejected`] with [`RejectReason::Unauthorized`] on two
-/// conditions: the session lists a client that is not
-/// [`ClientOrigin::Local`], and `fetch_session_overview` fails. Nothing is read from or
-/// written to the token store.
+/// conditions: the session lists a client of [`ClientOrigin::Remote`], and
+/// `fetch_session_overview` fails, an answer that does not decode included.
+/// Nothing is read from or written to the token store.
 fn refuse_while_watched_from_another_machine(
     in_session_context: &InSessionContext,
     fetch_session_overview: impl FnOnce(SessionId) -> Result<SessionOverview, CliError>,

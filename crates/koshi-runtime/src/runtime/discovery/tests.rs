@@ -223,7 +223,8 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
         tab_id,
         None,
         attachment_time,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -263,7 +264,8 @@ fn the_overview_carries_each_clients_label_and_index() {
         tab_id,
         None,
         attachment_time,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -311,7 +313,8 @@ fn the_overview_reports_where_each_client_connected_from() {
         tab_id,
         None,
         attachment_time,
-        true,
+        ClientOrigin::Remote,
+        None,
         None,
     );
 
@@ -328,11 +331,11 @@ fn the_overview_reports_where_each_client_connected_from() {
     // client that typed it is on this machine.
     assert_eq!(
         find_client_origin(local_client_id),
-        Some(Some(ClientOrigin::Local))
+        Some(ClientOrigin::Local { is_same_user: true })
     );
     assert_eq!(
         find_client_origin(remote_client_id),
-        Some(Some(ClientOrigin::Remote))
+        Some(ClientOrigin::Remote)
     );
 }
 
@@ -369,7 +372,8 @@ fn discovery_reports_the_raw_pane_area() {
         tab_id,
         None,
         attachment_time,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 

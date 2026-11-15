@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::action::ActionReference;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget, MoveFloatingPaneArgs,
     ToggleLockModeArgs,
@@ -479,7 +480,8 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
         pane_area: None,
         cell_size: None,
         attached_at: SystemTime::UNIX_EPOCH,
-        is_remote: false,
+        client_origin: ClientOrigin::Local { is_same_user: true },
+        granted_identity: None,
         max_frames_per_second: 120,
         response_sender: attach_response_sender,
         placement_preview_target: None,

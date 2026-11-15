@@ -89,7 +89,7 @@ fn attach_test_client(
         viewport_size,
         pane_area,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

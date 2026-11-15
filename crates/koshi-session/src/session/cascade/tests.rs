@@ -74,7 +74,7 @@ fn build_focused_client(session_id: SessionId, tab_id: TabId, focused_pane_id: P
         TEST_VIEWPORT_SIZE,
         None,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     );

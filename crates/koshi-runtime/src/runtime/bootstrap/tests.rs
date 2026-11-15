@@ -13,6 +13,7 @@ use crate::runtime::event::AttachAccepted;
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
+use koshi_core::client::ClientOrigin;
 use koshi_core::event::{Event, InputModeChanged, PaneFocused};
 use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_core::ids::ClientId;
@@ -75,7 +76,8 @@ fn attach_test_client(
             None,
             None,
             SystemTime::UNIX_EPOCH,
-            false,
+            ClientOrigin::Local { is_same_user: true },
+            None,
             60,
             None,
         )
@@ -527,7 +529,8 @@ fn the_first_client_emits_one_pane_focus_for_the_tab_it_views() {
         tab_ids[1],
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 
@@ -767,7 +770,8 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(
@@ -798,7 +802,8 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     assert_eq!(
@@ -847,7 +852,8 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
     // The same id arriving again is a re-attach: it updates the view in place
@@ -860,7 +866,8 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         tab_id,
         None,
         SystemTime::UNIX_EPOCH,
-        false,
+        ClientOrigin::Local { is_same_user: true },
+        None,
         None,
     );
 

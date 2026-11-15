@@ -40,7 +40,7 @@ fn build_test_client(
         viewport_size,
         pane_area,
         tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-test-client".to_string(),
         0,
     )
@@ -1019,7 +1019,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         },
         None,
         first_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-brave-otter".to_owned(),
         3,
     );
@@ -1045,7 +1045,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         },
         None,
         second_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-calm-heron".to_owned(),
         5,
     );
@@ -1104,7 +1104,10 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         recovered_zoomed_client.get_attached_at(),
         SystemTime::UNIX_EPOCH
     );
-    assert_eq!(recovered_zoomed_client.get_origin(), ClientOrigin::Local);
+    assert_eq!(
+        recovered_zoomed_client.get_origin(),
+        ClientOrigin::Local { is_same_user: true }
+    );
     assert_eq!(recovered_zoomed_client.get_label(), "C-brave-otter");
     assert_eq!(recovered_zoomed_client.get_color_index(), 3);
     assert_eq!(
@@ -1298,7 +1301,7 @@ fn floating_cell_size_uses_the_earliest_measured_client_whichever_tab_it_views()
         },
         None,
         web_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-carol".to_string(),
         0,
     );
@@ -1312,7 +1315,7 @@ fn floating_cell_size_uses_the_earliest_measured_client_whichever_tab_it_views()
         },
         None,
         db_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-alice".to_string(),
         1,
     );
@@ -1327,7 +1330,7 @@ fn floating_cell_size_uses_the_earliest_measured_client_whichever_tab_it_views()
         },
         None,
         web_tab_id,
-        ClientOrigin::Local,
+        ClientOrigin::Local { is_same_user: true },
         "C-bob".to_string(),
         2,
     );
