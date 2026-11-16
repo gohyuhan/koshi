@@ -372,6 +372,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
             ],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -525,6 +526,18 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         FloatingPane::Shown {
             floating_pane_id: build_floating_pane_id(lower_floating_slot_pane_id),
             pane_id: lower_floating_slot_pane_id,
+        },
+    ];
+    expected_render_snapshot.session_snapshot.peers = vec![
+        PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index: 1,
+            typed_pane_id: Some(empty_pane_id),
+        },
+        PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index: 4,
+            typed_pane_id: None,
         },
     ];
     assert_eq!(

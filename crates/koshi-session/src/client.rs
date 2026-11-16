@@ -268,6 +268,15 @@ pub struct Client {
     /// The resume file does not carry it.
     #[serde(skip)]
     dropped_input_request_count: u64,
+    /// Whether this client's viewer keeps its keys in one of its local input
+    /// modes: the floating pane tray, the notification center, pane placement
+    /// mode, the pane move chooser, or floating pane move mode. Its keys then
+    /// reach no pane, and its entry in every other client's peer list names no
+    /// pane ([`get_typed_pane_id_for_peers`](Self::get_typed_pane_id_for_peers)).
+    /// Each attach sets it from the viewer's `Attach`. The resume file does not
+    /// carry it.
+    #[serde(skip)]
+    is_viewer_local_input_mode_on: bool,
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
@@ -377,6 +386,7 @@ impl Client {
             checked_typed_pane_id: None,
             input_pane_moved_by_others_count: 0,
             dropped_input_request_count: 0,
+            is_viewer_local_input_mode_on: false,
             is_mouse_selection_enabled: false,
             scroll_offset_by_pane_id: HashMap::new(),
             selection_by_pane_id: HashMap::new(),
@@ -768,6 +778,29 @@ impl Client {
             self.input_pane_moved_by_others_count =
                 self.input_pane_moved_by_others_count.saturating_add(1);
         }
+    }
+
+    /// Record whether this client's viewer keeps its keys in one of its local
+    /// input modes. Marks no view change: this client's own frame does not
+    /// show it.
+    pub fn set_viewer_local_input_mode_on(&mut self, is_viewer_local_input_mode_on: bool) {
+        self.is_viewer_local_input_mode_on = is_viewer_local_input_mode_on;
+    }
+
+    /// The pane this client's keys reach, as every other client's peer list
+    /// names it: the checked pane
+    /// ([`get_checked_typed_pane_id`](Self::get_checked_typed_pane_id)), or
+    /// `None` while the viewer keeps its keys in a local input mode
+    /// ([`set_viewer_local_input_mode_on`](Self::set_viewer_local_input_mode_on)).
+    ///
+    /// Example: checked pane 5 with the floating pane tray open gives `None`;
+    /// the same client with the tray closed gives pane 5.
+    #[must_use]
+    pub fn get_typed_pane_id_for_peers(&self) -> Option<PaneId> {
+        if self.is_viewer_local_input_mode_on {
+            return None;
+        }
+        self.checked_typed_pane_id
     }
 
     /// How many key and paste requests of this client the session dropped.

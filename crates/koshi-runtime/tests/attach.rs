@@ -113,6 +113,7 @@ fn attach_test_client_with_resume_token(
                 max_frames_per_second: 60,
                 placement_preview_target: None,
                 painted_input_view: None,
+                is_viewer_local_input_mode_on: false,
             },
         },
     );
@@ -357,6 +358,7 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
                                 "viewport_size": { "column_count": 80, "row_count": 24 },
                                 "max_frames_per_second": 60,
                                 "painted_input_view": null,
+                                "is_viewer_local_input_mode_on": false,
                                 "tier": "admin"
                             }
                         }

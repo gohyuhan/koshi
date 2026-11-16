@@ -4117,6 +4117,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             60,
             None,
             None,
+            false,
         )
         .expect("the first dial attaches");
     forward_mouse_at(
@@ -4141,6 +4142,7 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
             60,
             None,
             None,
+            false,
         )
         .expect("the second dial attaches");
 

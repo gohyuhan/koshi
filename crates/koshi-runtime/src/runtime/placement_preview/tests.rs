@@ -436,6 +436,7 @@ fn an_attach_naming_a_placement_target_gives_its_first_frame_the_targets_preview
                 destination_tab_id: preview_fixture.destination_tab_id,
             }),
             None,
+            false,
         )
         .expect("the session takes the attach");
     let render_snapshot = preview_fixture
@@ -496,6 +497,7 @@ fn an_attach_naming_no_placement_target_gives_the_client_no_preview() {
             60,
             None,
             None,
+            false,
         )
         .expect("the session takes the attach");
 

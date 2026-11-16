@@ -117,6 +117,29 @@ pub struct Surface {
 /// - The Hello carries `granted_identity`: the grant identity the router sets
 ///   for a caller on another machine. A Hello without it reads as `None`, and
 ///   a session of 5 reads a Hello with it.
+/// - The `Keyboard` and `Paste` requests carry
+///   `painted_input_pane_moved_by_others_count`: the move count of the newest
+///   frame the client wrote before it read the input. 5 has no such field.
+/// - The `fired_action` of the `SubmitCommand` and `ConfirmPanePlacement`
+///   requests is an object of `action_reference` and
+///   `painted_input_pane_moved_by_others_count`. 5 carried the action
+///   reference alone.
+/// - The `Attach` request carries `painted_input_view`: the input fields of
+///   the newest frame the caller painted on an earlier connection, or `null`.
+///   5 has no such field.
+/// - The viewing client of a painted frame carries `typed_pane_id`,
+///   `input_pane_moved_by_others_count`, `dropped_input_request_count` and
+///   `last_settled_lock_command_id`. 5 has the first three nowhere, and
+///   carried the last as `last_applied_lock_command_id`.
+/// - A `CommandRejected` event can carry the reject reason `ViewChanged`. 5
+///   has no such reason.
+/// - The `Attach` request carries `is_viewer_local_input_mode_on`: whether the
+///   caller keeps its keys in a local input mode. 5 has no such field.
+/// - The `SetViewerLocalInputMode` request says whether an attached client
+///   keeps its keys in a local input mode. 5 has no such request.
+/// - The session of a painted frame carries `peers`: every other attached
+///   client, with its `client_id`, `color_index` and `typed_pane_id`. A frame
+///   without it fails to decode. 5 has no such field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

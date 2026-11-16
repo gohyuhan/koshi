@@ -905,17 +905,21 @@ impl Server {
     /// pane that takes the client's input now ([`Server::find_typed_pane`],
     /// [`Client::update_checked_typed_pane`]). A changed pane counts as a move
     /// by others unless `sending_client_id` names that client: the event that
-    /// made the changes arrived on another connection, or on none.
+    /// made the changes arrived on another connection, or on none. A client
+    /// whose pane as peers see it ([`Client::get_typed_pane_id_for_peers`])
+    /// changed joins its session's
+    /// [`presence_changed_client_ids`](SessionViewChanges::presence_changed_client_ids).
     ///
     /// A call in which no session changed takes each session's empty view
     /// changes, asks no client for its pane, and solves no layout.
     ///
     /// Example: client `B` types in pane 3, and client `A` closes pane 3 with
     /// `<leader>p x`. `B`'s input moves to pane 4, and the call with
-    /// `sending_client_id` `Some(A)` raises `B`'s count by one. `A`'s own input
-    /// moved too, and `A`'s count stays as it was.
+    /// `sending_client_id` `Some(A)` raises `B`'s count by one and lists `B`
+    /// as presence changed. `A`'s own input moved too, and `A`'s count stays
+    /// as it was.
     pub(crate) fn record_view_changes(&mut self, sending_client_id: Option<ClientId>) {
-        let view_changes_by_session_id: HashMap<SessionId, SessionViewChanges> = self
+        let mut view_changes_by_session_id: HashMap<SessionId, SessionViewChanges> = self
             .session_by_id
             .iter_mut()
             .map(|(&session_id, session)| (session_id, session.take_view_changes()))
@@ -931,8 +935,17 @@ impl Server {
             }
             let typed_pane_id = self.find_typed_pane(client_id);
             let is_moved_by_others = sending_client_id != Some(client_id);
-            if let Some(client) = self.get_client_mut(client_id) {
-                client.update_checked_typed_pane(typed_pane_id, is_moved_by_others);
+            let Some(client) = self.get_client_mut(client_id) else {
+                continue;
+            };
+            let typed_pane_id_for_peers = client.get_typed_pane_id_for_peers();
+            client.update_checked_typed_pane(typed_pane_id, is_moved_by_others);
+            if client.get_typed_pane_id_for_peers() == typed_pane_id_for_peers {
+                continue;
+            }
+            let session_id = client.get_session_id();
+            if let Some(view_changes) = view_changes_by_session_id.get_mut(&session_id) {
+                view_changes.presence_changed_client_ids.insert(client_id);
             }
         }
         for (session_id, view_changes) in view_changes_by_session_id {
@@ -972,8 +985,9 @@ impl Server {
 
     /// Whether `view_changes_by_session_id` lists a state that a frame of
     /// `client_id` shows: the tab bar, the floating panes or the pane sizing of
-    /// the client's session, the client's own view, or the layout of its
-    /// active tab. `false` for a client attached to no session.
+    /// the client's session, the client's own view, the peer entry of another
+    /// client of the session, or the layout of its active tab. `false` for a
+    /// client attached to no session.
     fn is_client_frame_changed(
         &self,
         client_id: ClientId,
@@ -989,6 +1003,10 @@ impl Server {
             || view_changes.is_floating_set_changed
             || view_changes.is_pane_sizing_changed
             || view_changes.changed_client_ids.contains(&client_id)
+            || view_changes
+                .presence_changed_client_ids
+                .iter()
+                .any(|presence_changed_client_id| *presence_changed_client_id != client_id)
             || session
                 .clients
                 .get_client_by_id(client_id)

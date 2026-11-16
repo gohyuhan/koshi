@@ -651,6 +651,13 @@ pub struct SessionViewChanges {
     /// The clients whose own view changed, that attached, or that detached,
     /// in id order (`ClientRegistry::take_changed_client_ids`).
     pub changed_client_ids: BTreeSet<ClientId>,
+    /// The clients whose entry in every other client's peer list changed, in
+    /// id order: the entry appeared or went away
+    /// ([`Session::mark_client_presence_changed`]), or the pane the client's
+    /// keys reach as peers see it ([`Client::get_typed_pane_id_for_peers`])
+    /// changed. A frame of every other client of the session shows the
+    /// change; the client's own frame does not.
+    pub presence_changed_client_ids: BTreeSet<ClientId>,
     /// A tab was added, removed, or moved in the tab bar.
     pub is_tab_bar_changed: bool,
     /// A floating pane was added or removed, or a floating pane's tree or
@@ -675,12 +682,15 @@ impl SessionViewChanges {
         let SessionViewChanges {
             layout_changed_tab_ids,
             changed_client_ids,
+            presence_changed_client_ids,
             is_tab_bar_changed,
             is_floating_set_changed,
             is_pane_sizing_changed,
         } = next_view_changes;
         self.layout_changed_tab_ids.extend(layout_changed_tab_ids);
         self.changed_client_ids.extend(changed_client_ids);
+        self.presence_changed_client_ids
+            .extend(presence_changed_client_ids);
         self.is_tab_bar_changed |= is_tab_bar_changed;
         self.is_floating_set_changed |= is_floating_set_changed;
         self.is_pane_sizing_changed |= is_pane_sizing_changed;
@@ -964,6 +974,45 @@ impl Session {
         let displaced_client = self.clients.attach_client(client);
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
         displaced_client
+    }
+
+    /// Record whether the viewer of `client_id` keeps its keys in one of its
+    /// local input modes ([`Client::set_viewer_local_input_mode_on`]). When the
+    /// pane its keys reach as peers see it
+    /// ([`Client::get_typed_pane_id_for_peers`]) changes, `client_id` joins
+    /// [`SessionViewChanges::presence_changed_client_ids`]. Changes nothing for
+    /// a client the session does not hold.
+    ///
+    /// Example: client `2` types in pane 5 and opens its floating pane tray.
+    /// `set_client_viewer_local_input_mode(2, true)` makes its peer entry name
+    /// no pane, and every other client's next frame shows that.
+    pub fn set_client_viewer_local_input_mode(
+        &mut self,
+        client_id: ClientId,
+        is_viewer_local_input_mode_on: bool,
+    ) {
+        let Some(client) = self.clients.get_client_mut_by_id(client_id) else {
+            return;
+        };
+        let typed_pane_id_for_peers = client.get_typed_pane_id_for_peers();
+        client.set_viewer_local_input_mode_on(is_viewer_local_input_mode_on);
+        if client.get_typed_pane_id_for_peers() != typed_pane_id_for_peers {
+            self.mark_client_presence_changed(client_id);
+        }
+    }
+
+    /// Add `client_id` to [`SessionViewChanges::presence_changed_client_ids`]:
+    /// the next frame of every other client of the session is due again. The
+    /// client need not be attached: a client that just left marks its entry
+    /// gone.
+    ///
+    /// Example: client `2` attaches next to client `1`. After
+    /// `mark_client_presence_changed(2)`, the next frame of client `1` lists
+    /// client `2`.
+    pub fn mark_client_presence_changed(&mut self, client_id: ClientId) {
+        self.view_changes
+            .presence_changed_client_ids
+            .insert(client_id);
     }
 
     /// Detach the client `client_id`, returning the removed record (`None` if it

@@ -275,6 +275,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             tab_snapshots: Vec::new(),
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: FrameClient {
@@ -1227,6 +1228,7 @@ fn coming_back_to_a_session_that_restarts_again_waits_for_its_next_image_and_joi
         None,
         None,
         None,
+        false,
     )
     .expect("the next image hands the client record back");
 
@@ -1473,6 +1475,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
         None,
         None,
         None,
+        false,
         MIN_LINK_TIMEOUT_MS,
     )
     .expect("the session joins");
@@ -1519,7 +1522,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
 }
 
 #[test]
-fn a_remote_join_names_its_placement_target_and_painted_input_view_and_pings_every_third_of_the_link_timeout_until_answered(
+fn a_remote_join_names_its_placement_target_painted_input_view_and_local_input_mode_and_pings_every_third_of_the_link_timeout_until_answered(
 ) {
     let (client_connection, serving_connection) = connect_test_socket_pair();
     let (client_frame_reader, client_frame_writer) = client_connection.split();
@@ -1552,6 +1555,7 @@ fn a_remote_join_names_its_placement_target_and_painted_input_view_and_pings_eve
             None,
             Some(placement_preview_target),
             Some(painted_input_view),
+            true,
             MIN_LINK_TIMEOUT_MS,
         );
         let _ = join_result_sender.send(join_result.map(|joined_session| {
@@ -1635,6 +1639,7 @@ fn a_remote_join_names_its_placement_target_and_painted_input_view_and_pings_eve
         link_timeout_ms,
         placement_preview_target: attached_placement_preview_target,
         painted_input_view: attached_painted_input_view,
+        is_viewer_local_input_mode_on,
         ..
     } = *prepared_kind
     else {
@@ -1644,12 +1649,14 @@ fn a_remote_join_names_its_placement_target_and_painted_input_view_and_pings_eve
         (
             link_timeout_ms,
             attached_placement_preview_target,
-            attached_painted_input_view
+            attached_painted_input_view,
+            is_viewer_local_input_mode_on
         ),
         (
             Some(MIN_LINK_TIMEOUT_MS),
             Some(placement_preview_target),
-            Some(painted_input_view)
+            Some(painted_input_view),
+            true
         )
     );
     let join_ping = IpcRequest {
@@ -1705,6 +1712,7 @@ fn coming_back_after_a_restart_presents_the_resume_token_and_keeps_the_one_it_mi
         None,
         None,
         None,
+        false,
     )
     .expect("the stand-in session handed the client record back");
     assert_eq!(joined_session.attach_answer.client_id, client_id);
@@ -1737,6 +1745,7 @@ fn coming_back_after_a_restart_presents_the_resume_token_and_keeps_the_one_it_mi
             max_frames_per_second: DEFAULT_MAX_FRAMES_PER_SECOND,
             placement_preview_target: None,
             painted_input_view: None,
+            is_viewer_local_input_mode_on: false,
         }),
         "the restart path claims the client record with its token and reports this terminal's capability"
     );
@@ -1767,6 +1776,7 @@ fn attach_asks_for_the_frame_rate_its_settings_name() {
             None,
             None,
             None,
+            false,
         );
         let IpcRequestKind::Attach {
             max_frames_per_second: sent_max_frames_per_second,
@@ -1792,6 +1802,7 @@ fn attach_advertises_the_selected_native_protocol() {
         None,
         None,
         None,
+        false,
     );
     let sixel_attach_request = build_attach_prepare_request(
         None,
@@ -1808,6 +1819,7 @@ fn attach_advertises_the_selected_native_protocol() {
         None,
         None,
         None,
+        false,
     );
 
     let IpcRequestKind::Attach {
@@ -1865,6 +1877,7 @@ fn a_restarted_session_that_refuses_the_join_ends_with_that_refusal() {
         None,
         None,
         None,
+        false,
     );
     assert_eq!(
         rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
@@ -1907,6 +1920,7 @@ fn a_restarted_session_that_closes_before_answering_the_join_ends_as_restarting(
         None,
         None,
         None,
+        false,
     );
     stand_in_session_thread
         .join()
@@ -1940,6 +1954,7 @@ fn a_restarted_session_whose_new_socket_takes_no_connection_ends_as_restarting()
         None,
         None,
         None,
+        false,
     );
 
     assert_eq!(
@@ -1984,6 +1999,7 @@ fn a_restarted_session_that_never_answers_the_join_ends_as_restarting_at_the_dea
         None,
         None,
         None,
+        false,
     );
     let rejoin_returned_at = Instant::now();
 
@@ -2055,6 +2071,7 @@ fn a_restarted_session_that_mints_a_new_client_is_joined_as_that_client() {
         None,
         None,
         None,
+        false,
     )
     .expect("the restarted session is joined as the client it minted");
     assert_eq!(joined_session.attach_answer.client_id, minted_client_id);
@@ -2110,7 +2127,8 @@ fn a_viewer_whose_restarted_session_mints_a_new_client_goes_on_as_that_client() 
 }
 
 #[test]
-fn a_viewer_in_pane_placement_mode_names_its_placement_target_in_the_attach_after_a_restart() {
+fn a_viewer_in_pane_placement_mode_names_its_placement_target_and_local_input_mode_in_the_attach_after_a_restart(
+) {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
@@ -2143,6 +2161,7 @@ fn a_viewer_in_pane_placement_mode_names_its_placement_target_in_the_attach_afte
     assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
     let IpcRequestKind::Attach {
         placement_preview_target: attached_placement_preview_target,
+        is_viewer_local_input_mode_on,
         ..
     } = recorded_attach_request
         .lock()
@@ -2153,9 +2172,54 @@ fn a_viewer_in_pane_placement_mode_names_its_placement_target_in_the_attach_afte
         panic!("the recorded request is an attach");
     };
     assert_eq!(
-        attached_placement_preview_target,
-        Some(placement_preview_target)
+        (
+            attached_placement_preview_target,
+            is_viewer_local_input_mode_on
+        ),
+        (Some(placement_preview_target), true)
     );
+}
+
+/// A viewer whose notification center is open when the session restarts
+/// closes the center with the link. The attach after the restart says that no
+/// local input mode is on.
+#[test]
+fn a_viewer_with_its_notification_center_open_closes_it_and_names_no_local_input_mode_in_the_attach_after_a_restart(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let recorded_attach_request =
+        spawn_restarted_session(runtime_directory.path(), session_id, None, Ok(client_id));
+    let mut client = build_test_client();
+    client.notification_history.open_notification_center(true);
+    assert_eq!(
+        client.find_viewer_local_input_mode(),
+        Some(LockMode::NotificationCenter)
+    );
+
+    let (attachment_ending, client) = run_local_attachment_through_restart(
+        runtime_directory.path(),
+        session_id,
+        client_id,
+        client,
+        &mut build_test_screen(),
+    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
+    let IpcRequestKind::Attach {
+        is_viewer_local_input_mode_on,
+        ..
+    } = recorded_attach_request
+        .lock()
+        .expect("the slot outlives every panic")
+        .clone()
+        .expect("the viewer joined the restarted session")
+    else {
+        panic!("the recorded request is an attach");
+    };
+    assert!(!is_viewer_local_input_mode_on);
+    assert_eq!(client.find_viewer_local_input_mode(), None);
 }
 
 /// A viewer whose newest painted frame showed pane 3 taking its input, with
@@ -2281,6 +2345,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
         None,
         None,
         None,
+        false,
     );
 
     assert_eq!(
@@ -2406,6 +2471,7 @@ fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_i
         None,
         None,
         None,
+        false,
     );
     assert_eq!(
         rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
@@ -2440,6 +2506,7 @@ fn a_restart_into_an_incompatible_build_with_no_resume_token_carries_no_claim() 
         None,
         None,
         None,
+        false,
     );
     assert_eq!(
         rejoin_result.map(|joined_session| joined_session.attach_answer.client_id),
@@ -2555,6 +2622,7 @@ fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts()
         None,
         None,
         None,
+        false,
         30_000,
     );
     let reconnect_returned_at = Instant::now();
@@ -2596,6 +2664,7 @@ fn a_restart_into_an_incompatible_build_with_no_router_running_returns_at_once()
         None,
         None,
         None,
+        false,
         30_000,
     );
 
@@ -2960,6 +3029,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -3112,6 +3182,7 @@ fn build_test_uplink(request_sender: mpsc::Sender<IpcRequest>) -> Uplink {
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         sent_placement_preview_target: None,
+        sent_is_viewer_local_input_mode_on: false,
     }
 }
 
@@ -3126,8 +3197,77 @@ fn build_test_control_socket() -> TestControlSocket {
             registry: ActionRegistry::new(),
             next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
             sent_placement_preview_target: None,
+            sent_is_viewer_local_input_mode_on: false,
         },
     }
+}
+
+/// The old link last named a placement target and said `true`. The new
+/// connection's Attach named no target and `false`: reports of no target and
+/// of `false` send nothing, and a report of `true` sends one request, the
+/// first number of the new connection.
+#[test]
+fn a_new_connection_starts_from_what_its_attach_named() {
+    let (old_request_sender, _old_request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(old_request_sender);
+    uplink.send_placement_preview_target(Some(PanePlacementPreviewTarget {
+        source_pane_id: PaneId::new(),
+        destination_tab_id: TabId::new(),
+    }));
+    uplink.send_viewer_local_input_mode(true);
+    let (request_sender, request_receiver) = mpsc::channel();
+
+    uplink.start_connection(
+        UplinkWriter {
+            request_sender,
+            writer_end_receiver: mpsc::channel().1,
+        },
+        None,
+        false,
+    );
+    uplink.send_placement_preview_target(None);
+    uplink.send_viewer_local_input_mode(false);
+    uplink.send_viewer_local_input_mode(true);
+
+    assert_eq!(
+        request_receiver.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::SetViewerLocalInputMode {
+                is_viewer_local_input_mode_on: true,
+            },
+        }]
+    );
+}
+
+/// The reports `false`, `true`, `true`, `false` on a link whose Attach said
+/// `false` send two requests: `true`, then `false`.
+#[test]
+fn the_viewer_local_input_mode_goes_up_only_when_it_changes() {
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    for is_viewer_local_input_mode_on in [false, true, true, false] {
+        uplink.send_viewer_local_input_mode(is_viewer_local_input_mode_on);
+    }
+
+    assert_eq!(
+        request_receiver.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID,
+                request_kind: IpcRequestKind::SetViewerLocalInputMode {
+                    is_viewer_local_input_mode_on: true,
+                },
+            },
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + 1,
+                request_kind: IpcRequestKind::SetViewerLocalInputMode {
+                    is_viewer_local_input_mode_on: false,
+                },
+            },
+        ]
+    );
 }
 
 #[test]
@@ -6199,6 +6339,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -7541,7 +7682,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         if !wait_for_draw_count(&producer_draw_count, 1) {
             return quit_with(String::from("the initial frame was not drawn"));
         }
-        let initial_request_kinds = (0..2)
+        let initial_request_kinds = (0..3)
             .map(|_| {
                 request_receiver
                     .recv_timeout(Duration::from_secs(5))
@@ -7555,12 +7696,15 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
                     destination_tab_id: active_tab_id,
                 }),
             }),
+            Ok(IpcRequestKind::SetViewerLocalInputMode {
+                is_viewer_local_input_mode_on: true,
+            }),
             Ok(IpcRequestKind::PaintedUpdate { update_sequence: 1 }),
         ];
         if initial_request_kinds != expected_initial_request_kinds {
             return quit_with(format!(
-                "the pass that drew the initial frame named the preview target and reported \
-                 the frame painted: {initial_request_kinds:?}"
+                "the pass that drew the initial frame named the preview target, said its keys \
+                 stay local, and reported the frame painted: {initial_request_kinds:?}"
             ));
         }
         for (placement_event_index, placement_confirmation_event) in
@@ -7594,7 +7738,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         else {
             return quit_with(String::from("the placement input confirmed no placement"));
         };
-        let is_expected_request = placement_request.request_id == FIRST_POST_ATTACH_REQUEST_ID + 2
+        let is_expected_request = placement_request.request_id == FIRST_POST_ATTACH_REQUEST_ID + 3
             && confirmed_source_pane_id == source_pane_id
             && confirmed_placement_target == producer_placement_target
             && confirmed_placed_tab_layout == expected_placed_tab_layout
@@ -11041,6 +11185,7 @@ fn quitting_waits_for_a_stalled_writer_no_longer_than_the_quit_write_wait() {
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         sent_placement_preview_target: None,
+        sent_is_viewer_local_input_mode_on: false,
     };
     let quit_started_at = Instant::now();
 
@@ -13080,6 +13225,7 @@ fn an_attach_request_carries_the_link_timeout_it_is_given() {
             link_timeout_ms,
             None,
             None,
+            false,
         );
         let IpcRequestKind::Attach {
             link_timeout_ms: sent_link_timeout_ms,

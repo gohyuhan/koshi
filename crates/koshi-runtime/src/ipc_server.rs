@@ -1242,6 +1242,7 @@ fn serve_connection(
                 max_frames_per_second,
                 placement_preview_target,
                 painted_input_view,
+                is_viewer_local_input_mode_on,
             } => {
                 // A connection that ends before its first request after this
                 // attach reports its client as returning when it came from
@@ -1266,6 +1267,7 @@ fn serve_connection(
                         max_frames_per_second,
                         placement_preview_target,
                         painted_input_view,
+                        is_viewer_local_input_mode_on,
                         response_sender,
                     },
                 );
@@ -1326,17 +1328,18 @@ fn serve_connection(
                 return;
             }
             // A keyboard event, a resize, a cell size, a paste, a mouse round,
-            // a placement preview target, a placement confirm, a ping, a
-            // paint report and a viewer action answer belong on an attached
-            // client's connection, which the `Attach` arm above hands to
-            // `stream_events`. On this control path they name no client and
-            // close the connection.
+            // a placement preview target, a local input mode report, a
+            // placement confirm, a ping, a paint report and a viewer action
+            // answer belong on an attached client's connection, which the
+            // `Attach` arm above hands to `stream_events`. On this control
+            // path they name no client and close the connection.
             IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
             | IpcRequestKind::Mouse(_)
             | IpcRequestKind::SetPanePlacementPreview { .. }
+            | IpcRequestKind::SetViewerLocalInputMode { .. }
             | IpcRequestKind::ConfirmPanePlacement { .. }
             | IpcRequestKind::Ping
             | IpcRequestKind::PaintedUpdate { .. }
@@ -1988,6 +1991,12 @@ fn stream_events(
                     placement_target,
                 }
             }
+            IpcRequestKind::SetViewerLocalInputMode {
+                is_viewer_local_input_mode_on,
+            } => RuntimeEvent::SetViewerLocalInputMode {
+                client_id,
+                is_viewer_local_input_mode_on,
+            },
             IpcRequestKind::ConfirmPanePlacement {
                 command_id,
                 source_pane_id,

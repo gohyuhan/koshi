@@ -101,6 +101,7 @@ fn build_render_snapshot(
             tabs_metadata,
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {

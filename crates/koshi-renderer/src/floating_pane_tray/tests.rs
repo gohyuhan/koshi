@@ -77,6 +77,7 @@ pub(crate) fn build_tray_test_render_snapshot(
                     }
                 })
                 .collect(),
+            peers: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot::from_empty_pane(tiled_pane_id)],
         client_snapshot: ClientSnapshot {

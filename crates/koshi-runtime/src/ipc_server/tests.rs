@@ -216,6 +216,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -1300,6 +1301,7 @@ fn build_attach_request(
             max_frames_per_second: 60,
             placement_preview_target: None,
             painted_input_view: None,
+            is_viewer_local_input_mode_on: false,
         },
     }
 }
@@ -1344,6 +1346,7 @@ fn attach_test_client_with_graphics(
                 max_frames_per_second: 60,
                 placement_preview_target: None,
                 painted_input_view: None,
+                is_viewer_local_input_mode_on: false,
             },
         },
     );
@@ -1407,6 +1410,7 @@ fn an_attach_forwards_its_initial_cell_measurement_and_painted_input_view_before
                 max_frames_per_second: 60,
                 placement_preview_target: None,
                 painted_input_view: Some(painted_input_view),
+                is_viewer_local_input_mode_on: false,
             },
         },
     );
@@ -7731,6 +7735,7 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
                 max_frames_per_second: 60,
                 placement_preview_target: None,
                 painted_input_view: None,
+                is_viewer_local_input_mode_on: false,
             },
         };
 
@@ -7790,6 +7795,7 @@ fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_k
             max_frames_per_second: 60,
             placement_preview_target: None,
             painted_input_view: None,
+            is_viewer_local_input_mode_on: false,
         },
     };
 
@@ -7875,6 +7881,7 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
                 max_frames_per_second,
                 placement_preview_target: None,
                 painted_input_view: None,
+                is_viewer_local_input_mode_on: false,
             },
         };
 

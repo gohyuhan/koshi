@@ -2168,7 +2168,8 @@ impl Drop for JoinedSessionGuard {
 
 /// This client's side of the connection: the writer thread that takes its
 /// requests, the action table a fired binding is resolved against, the
-/// number the next request carries, and the placement target the link names.
+/// number the next request carries, and the placement target and the local
+/// input mode the link last named.
 struct Uplink {
     /// The writer thread every request the loop sends goes to, or `None` once
     /// [`drain_request_queue`](Self::drain_request_queue) closed its queue.
@@ -2183,6 +2184,9 @@ struct Uplink {
     /// placement preview, in the link's Attach or in its last
     /// `SetPanePlacementPreview`, or `None` when it names none.
     sent_placement_preview_target: Option<PanePlacementPreviewTarget>,
+    /// Whether this link last said that the client keeps its keys in a local
+    /// input mode, in its Attach or in its last `SetViewerLocalInputMode`.
+    sent_is_viewer_local_input_mode_on: bool,
 }
 
 /// One writer thread [`spawn_uplink_writer`] started: the queue it writes from,
@@ -2255,6 +2259,38 @@ impl Uplink {
         }
         self.send_request(IpcRequestKind::SetPanePlacementPreview { placement_target });
         self.sent_placement_preview_target = placement_target;
+    }
+
+    /// Point the uplink at `uplink_writer`, a new connection to the session:
+    /// each request the loop sends goes there, numbered from
+    /// [`FIRST_POST_ATTACH_REQUEST_ID`]. The placement
+    /// target and the local input mode this link last named become
+    /// `sent_placement_preview_target` and `sent_is_viewer_local_input_mode_on`,
+    /// the ones the new connection's Attach named. The action table stays.
+    fn start_connection(
+        &mut self,
+        uplink_writer: UplinkWriter,
+        sent_placement_preview_target: Option<PanePlacementPreviewTarget>,
+        sent_is_viewer_local_input_mode_on: bool,
+    ) {
+        self.uplink_writer = Some(uplink_writer);
+        self.next_request_id = FIRST_POST_ATTACH_REQUEST_ID;
+        self.sent_placement_preview_target = sent_placement_preview_target;
+        self.sent_is_viewer_local_input_mode_on = sent_is_viewer_local_input_mode_on;
+    }
+
+    /// Say whether the client keeps its keys in a local input mode
+    /// (`SetViewerLocalInputMode`) when `is_viewer_local_input_mode_on`
+    /// differs from what this link said last. Sends nothing when they are
+    /// equal.
+    fn send_viewer_local_input_mode(&mut self, is_viewer_local_input_mode_on: bool) {
+        if self.sent_is_viewer_local_input_mode_on == is_viewer_local_input_mode_on {
+            return;
+        }
+        self.send_request(IpcRequestKind::SetViewerLocalInputMode {
+            is_viewer_local_input_mode_on,
+        });
+        self.sent_is_viewer_local_input_mode_on = is_viewer_local_input_mode_on;
     }
 
     /// Queue `command` under `command_id`, issued by `client`'s key binding,
@@ -3260,6 +3296,7 @@ fn attach_once(
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         sent_placement_preview_target: None,
+        sent_is_viewer_local_input_mode_on: false,
     };
     // Every frame is drawn at the client's viewport size, read here and on
     // each resize event. A terminal that reports no size, which is what a
@@ -3741,8 +3778,13 @@ fn run_attachment<B: Backend, W: Write>(
             screen.set_held_image_byte_count(image_cache.compute_held_image_byte_count());
         }
         if let Some(attachment_ending) = attachment_ending {
+            // The floating pane tray and the notification center end with the
+            // link. The local input modes still on after that are the ones the
+            // next Attach names.
+            client.close_link_bound_input_modes();
             let placement_preview_target = client.find_placement_preview_target();
             let painted_input_view = client.get_painted_input_view();
+            let is_viewer_local_input_mode_on = client.find_viewer_local_input_mode().is_some();
             // The frame that waits to be painted came from the connection that
             // ended and was never on the screen: the next connection's first
             // frame takes its place.
@@ -3775,6 +3817,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 cell_size,
                                 placement_preview_target,
                                 painted_input_view,
+                                is_viewer_local_input_mode_on,
                                 remote_link_timeout_ms,
                             ) {
                                 Ok(joined_session) => RejoinAnswer::Joined(
@@ -3805,6 +3848,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 cell_size,
                                 placement_preview_target,
                                 painted_input_view,
+                                is_viewer_local_input_mode_on,
                                 remote_link_timeout_ms,
                             ))
                         }),
@@ -3864,9 +3908,11 @@ fn run_attachment<B: Backend, W: Write>(
                 current_connection_index,
                 incoming_sender.clone(),
             );
-            uplink.uplink_writer = Some(spawn_uplink_writer(joined_session.writer));
-            uplink.next_request_id = FIRST_POST_ATTACH_REQUEST_ID;
-            uplink.sent_placement_preview_target = placement_preview_target;
+            uplink.start_connection(
+                spawn_uplink_writer(joined_session.writer),
+                placement_preview_target,
+                is_viewer_local_input_mode_on,
+            );
             let locally_measured_cell_size = terminal::read_local_cell_size();
             report_terminal_size_with_cell_size(
                 client,
@@ -3909,6 +3955,7 @@ fn run_attachment<B: Backend, W: Write>(
             }
         }
         uplink.send_placement_preview_target(client.find_placement_preview_target());
+        uplink.send_viewer_local_input_mode(client.find_viewer_local_input_mode().is_some());
         // Every pass ends here, whether or not it drew a frame: the events it
         // handled may have moved the viewer after that frame was drawn.
         screen.set_cell_size(cell_size_query.get_current_cell_size());
@@ -4075,6 +4122,7 @@ fn dial_session(
                         cell_size,
                         None,
                         None,
+                        false,
                         None,
                     )?;
                     Ok(JoinedSession {
@@ -4097,6 +4145,7 @@ fn dial_session(
                     cell_size,
                     None,
                     None,
+                    false,
                     remote_link_timeout_ms,
                 )
             })
@@ -4139,6 +4188,7 @@ fn dial_remote(
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     painted_input_view: Option<PaintedInputView>,
+    is_viewer_local_input_mode_on: bool,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let stored_saved_server =
@@ -4163,6 +4213,7 @@ fn dial_remote(
         cell_size,
         placement_preview_target,
         painted_input_view,
+        is_viewer_local_input_mode_on,
         remote_link_timeout_ms,
     )
 }
@@ -4181,7 +4232,9 @@ fn dial_remote(
 /// attach's view back. `placement_preview_target` is the placement target the
 /// client previews, and is `None` on a first join. `painted_input_view` is the
 /// input fields of the newest frame the client painted, which its screen
-/// still shows, and is `None` on a first join.
+/// still shows, and is `None` on a first join. `is_viewer_local_input_mode_on`
+/// says whether the client keeps its keys in a local input mode, and is
+/// `false` on a first join.
 ///
 /// The join runs under the deadline that `remote_link` holds until the
 /// session answers `Prepared`. The `Commit` and its answer then run under a
@@ -4225,6 +4278,7 @@ fn join_remote_session(
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     painted_input_view: Option<PaintedInputView>,
+    is_viewer_local_input_mode_on: bool,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, DialError> {
     let link_timeout = Duration::from_millis(u64::from(remote_link_timeout_ms));
@@ -4243,6 +4297,7 @@ fn join_remote_session(
             Some(remote_link_timeout_ms),
             placement_preview_target,
             painted_input_view,
+            is_viewer_local_input_mode_on,
         ))
         .map_err(build_link_failure)?;
     let ping_interval = compute_heartbeat_interval(remote_link_timeout_ms);
@@ -4391,9 +4446,10 @@ fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<
 /// The Attach names `client_id` and presents `resume_token`, the secret the
 /// attach of the connection that ended minted, as the proof of that claim. It
 /// carries `placement_preview_target`, the placement target the client
-/// previews, and `painted_input_view`, the input fields of the newest frame
-/// the client painted. A session that still holds that record hands it back
-/// with its view. The returned client is `client_id` when the session handed
+/// previews, `painted_input_view`, the input fields of the newest frame the
+/// client painted, and `is_viewer_local_input_mode_on`, whether the client
+/// keeps its keys in a local input mode. A session that still holds that
+/// record hands it back with its view. The returned client is `client_id` when the session handed
 /// its record back, and a fresh client the session minted when it cannot: a
 /// restart that could not bring the carried layout back holds no record, a
 /// record whose tab closed is not handed back, and a claim with no token or
@@ -4421,6 +4477,7 @@ fn reconnect_after_restart(
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     painted_input_view: Option<PaintedInputView>,
+    is_viewer_local_input_mode_on: bool,
     remote_link_timeout_ms: u32,
 ) -> Result<JoinedSession, AttachmentEnding> {
     let restart_deadline = Instant::now() + RESTART_WINDOW_DURATION;
@@ -4444,6 +4501,7 @@ fn reconnect_after_restart(
                 cell_size,
                 placement_preview_target,
                 painted_input_view,
+                is_viewer_local_input_mode_on,
             );
             if rejoin_result.as_ref().is_err_and(|rejoin_ending| {
                 matches!(
@@ -4480,6 +4538,7 @@ fn reconnect_after_restart(
                     cell_size,
                     placement_preview_target,
                     painted_input_view,
+                    is_viewer_local_input_mode_on,
                     remote_link_timeout_ms,
                 )
             },
@@ -5508,7 +5567,8 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// here. `placement_preview_target` is the placement target the client
 /// previews, and a first join leaves it `None`. `painted_input_view` is the
 /// input fields of the newest frame the client painted, and a first join
-/// leaves it `None`.
+/// leaves it `None`. `is_viewer_local_input_mode_on` says whether the client
+/// keeps its keys in a local input mode, and a first join leaves it `false`.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the Hello or the `Prepare` could not be
@@ -5534,6 +5594,7 @@ fn join_session(
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     painted_input_view: Option<PaintedInputView>,
+    is_viewer_local_input_mode_on: bool,
     commit_timeout: Option<Duration>,
 ) -> Result<SessionAttachAnswer, DialError> {
     let hello = IpcRequest {
@@ -5550,6 +5611,7 @@ fn join_session(
             None,
             placement_preview_target,
             painted_input_view,
+            is_viewer_local_input_mode_on,
         ))
         .map_err(build_link_failure)?;
 
@@ -5585,8 +5647,11 @@ struct AttachSettings {
 /// where the session writes no `Pong`. `placement_preview_target` is the
 /// placement target the client previews, and is `None` on a first join.
 /// `painted_input_view` is the input fields of the newest frame the client
-/// painted, and is `None` on a first join.
+/// painted, and is `None` on a first join. `is_viewer_local_input_mode_on`
+/// says whether the client keeps its keys in a local input mode, and is
+/// `false` on a first join.
 /// Reports the pane area left by the built-in two-row UI.
+#[allow(clippy::too_many_arguments)]
 fn build_attach_prepare_request(
     resume_client_id: Option<ClientId>,
     resume_token: Option<&ConnectionToken>,
@@ -5595,6 +5660,7 @@ fn build_attach_prepare_request(
     link_timeout_ms: Option<u32>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     painted_input_view: Option<PaintedInputView>,
+    is_viewer_local_input_mode_on: bool,
 ) -> IpcRequest {
     let viewport_size = get_terminal_viewport_size();
     IpcRequest {
@@ -5612,6 +5678,7 @@ fn build_attach_prepare_request(
             max_frames_per_second: attach_settings.max_frames_per_second,
             placement_preview_target,
             painted_input_view,
+            is_viewer_local_input_mode_on,
         })),
     }
 }
@@ -5681,8 +5748,9 @@ fn apply_session_notification_queue(
 /// fresh client the session minted otherwise.
 ///
 /// The Attach carries `placement_preview_target`, the placement target the
-/// client previews, and `painted_input_view`, the input fields of the newest
-/// frame the client painted.
+/// client previews, `painted_input_view`, the input fields of the newest
+/// frame the client painted, and `is_viewer_local_input_mode_on`, whether the
+/// client keeps its keys in a local input mode.
 ///
 /// `connection_token` is the token this client attached under; the wait watches it for a
 /// change. A new socket whose session refuses the join while it replaces its
@@ -5716,6 +5784,7 @@ fn rejoin_session(
     cell_size: Option<PixelCellSize>,
     placement_preview_target: Option<PanePlacementPreviewTarget>,
     painted_input_view: Option<PaintedInputView>,
+    is_viewer_local_input_mode_on: bool,
 ) -> Result<JoinedSession, AttachmentEnding> {
     if connection_token.expose_secret().is_empty() {
         tracing::warn!(
@@ -5754,6 +5823,7 @@ fn rejoin_session(
             cell_size,
             placement_preview_target,
             painted_input_view,
+            is_viewer_local_input_mode_on,
             Some(RESTART_WINDOW_DURATION),
         );
         let attach_answer = match join_result {
