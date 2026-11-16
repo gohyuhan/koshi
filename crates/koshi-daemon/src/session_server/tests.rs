@@ -210,6 +210,7 @@ fn attach_test_client(server: &mut Server) -> AttachAccepted {
         response_sender: attach_response_sender,
         placement_preview_target: None,
         painted_input_view: None,
+        is_viewer_local_input_mode_on: false,
     });
     attach_response_receiver
         .try_recv()
@@ -2533,6 +2534,7 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
             max_frames_per_second: 60,
             placement_preview_target: None,
             painted_input_view: None,
+            is_viewer_local_input_mode_on: false,
         },
     );
     frame_writer

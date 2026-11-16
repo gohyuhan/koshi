@@ -280,6 +280,9 @@ pub enum RuntimeEvent {
         /// earlier connection, or `None` on a first attach. They start the
         /// client's input counts (`Server::subscribe`).
         painted_input_view: Option<PaintedInputView>,
+        /// Whether the caller keeps its keys in one of its local input modes
+        /// as it attaches (`Server::set_viewer_local_input_mode`).
+        is_viewer_local_input_mode_on: bool,
         /// Where the dispatcher sends what it minted.
         response_sender: Sender<Option<AttachAccepted>>,
     },
@@ -309,6 +312,14 @@ pub enum RuntimeEvent {
         client_id: ClientId,
         /// The pane and the destination tab the client previews.
         placement_target: Option<PanePlacementPreviewTarget>,
+    },
+    /// A client says whether its viewer keeps its keys in one of its local
+    /// input modes (`Server::set_viewer_local_input_mode`).
+    SetViewerLocalInputMode {
+        /// The client whose viewer sent it.
+        client_id: ClientId,
+        /// Whether the viewer keeps its keys in a local input mode.
+        is_viewer_local_input_mode_on: bool,
     },
     /// A client confirms one tiled pane placement that it previews
     /// (`Server::confirm_pane_placement`).
@@ -412,7 +423,8 @@ pub enum RuntimeEvent {
 impl RuntimeEvent {
     /// The attached client whose own connection carried this event: the client
     /// a key, paste, mouse round, resize, cell size, outer terminal focus
-    /// loss, placement request, action answer or detach names, and the client
+    /// loss, placement request, local input mode report, action answer or
+    /// detach names, and the client
     /// a command from a key binding or a mouse event names as its source.
     /// `None` for every other event, such as a pane's output, a command or
     /// request from the CLI, an attach, a clipboard copy, and the session's
@@ -435,6 +447,7 @@ impl RuntimeEvent {
             | RuntimeEvent::ClientPaste { client_id, .. }
             | RuntimeEvent::ClientActionAnswer { client_id, .. }
             | RuntimeEvent::SetPanePlacementPreview { client_id, .. }
+            | RuntimeEvent::SetViewerLocalInputMode { client_id, .. }
             | RuntimeEvent::ConfirmPanePlacement { client_id, .. } => Some(*client_id),
             RuntimeEvent::Ipc {
                 command_envelope, ..

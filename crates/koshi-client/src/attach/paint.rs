@@ -7,8 +7,8 @@
 //! [`build_render_snapshot`](crate::attach::paint::build_render_snapshot) is the inverse of
 //! [`build_wire_frame`](koshi_runtime::runtime::frame::build_wire_frame) and
 //! the painted update together, with the four names the answering session
-//! chose filtered on the way in. The session, tab, slot, tab-bar and client
-//! parts already hold shared types, so they copy straight back. Each pane's
+//! chose filtered on the way in. The session, tab, slot, tab-bar, peer and
+//! client parts already hold shared types, so they copy straight back. Each pane's
 //! rows, cursor and scroll position come from the update's pane view, whose
 //! rows the update already decoded.
 //!
@@ -48,7 +48,7 @@ use koshi_ipc::placement::{PanePlacementPreview, PanePlacementSource, PanePlacem
 use koshi_layout::solver::PaneSizing;
 use koshi_renderer::snapshot::{
     ClientSnapshot, FloatingPane, FloatingPaneSlot, ImagePlacementSnapshot, LayoutAreaSnapshot,
-    PaneSlot, PaneSnapshot, PlacementPreview, PlacementSnapshot, PlacementSource,
+    PaneSlot, PaneSnapshot, PeerSnapshot, PlacementPreview, PlacementSnapshot, PlacementSource,
     PlacementTabSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot,
     TabMetadata, TabSnapshot,
 };
@@ -135,6 +135,16 @@ fn build_render_snapshot_with_images(
                         pane_title: pane_title.as_deref().map(sanitize_reported_text),
                         pane_count: *pane_count,
                     },
+                })
+                .collect(),
+            peers: painted_frame
+                .session_snapshot
+                .peers
+                .iter()
+                .map(|frame_peer| PeerSnapshot {
+                    client_id: frame_peer.client_id,
+                    color_index: frame_peer.color_index,
+                    typed_pane_id: frame_peer.typed_pane_id,
                 })
                 .collect(),
         },

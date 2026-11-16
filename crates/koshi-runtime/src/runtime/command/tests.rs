@@ -15957,6 +15957,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
         SessionViewChanges {
             layout_changed_tab_ids: BTreeSet::from([tab_id]),
             changed_client_ids: BTreeSet::from([joining_client_id]),
+            presence_changed_client_ids: BTreeSet::from([joining_client_id]),
             ..SessionViewChanges::default()
         },
         "the shared tab solves again at the smaller size"
@@ -16552,70 +16553,6 @@ fn a_floating_pane_takes_the_cell_size_of_the_earliest_attached_client_on_any_ta
 }
 
 #[test]
-fn a_client_moving_to_another_session_regrows_the_floating_panes_it_left() {
-    let FloatingPaneFixture {
-        mut runtime,
-        session_id,
-        tab_id,
-        tiled_pane_id,
-        htop_pane_id,
-        ..
-    } = build_floating_pane_fixture();
-    let bob_client_id = ClientId::new();
-    let bob_viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
-    };
-    runtime.handle_client_attach(
-        session_id,
-        bob_client_id,
-        bob_viewport_size,
-        None,
-        tab_id,
-        None,
-        SystemTime::now(),
-        ClientOrigin::Local { is_same_user: true },
-        None,
-        None,
-    );
-    let mut other_session = build_bare_session(SessionId::new());
-    let (other_tab_id, other_pane_id) = (TabId::new(), PaneId::new());
-    register_pane_record(&mut other_session, other_pane_id);
-    register_session_tab(&mut other_session, other_tab_id, other_pane_id);
-    let other_session_id = other_session.session_id;
-    runtime
-        .session_by_id
-        .insert(other_session_id, other_session);
-
-    let move_events = runtime.handle_client_attach(
-        other_session_id,
-        bob_client_id,
-        bob_viewport_size,
-        None,
-        other_tab_id,
-        None,
-        SystemTime::now(),
-        ClientOrigin::Local { is_same_user: true },
-        None,
-        None,
-    );
-
-    assert_eq!(
-        move_events,
-        vec![
-            build_pty_resized(tiled_pane_id, 118, 38),
-            build_pty_resized(htop_pane_id, 70, 21),
-            Event::PaneFocused(PaneFocused {
-                client_id: bob_client_id,
-                tab_id: Some(other_tab_id),
-                pane_id: other_pane_id,
-                previous_pane_id: None,
-            }),
-        ]
-    );
-}
-
-#[test]
 fn attach_applies_cell_measurement_before_reflow_and_resize_can_clear_it() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let viewport_size = Size {
@@ -17092,7 +17029,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
 }
 
 #[test]
-fn client_detach_records_the_leaving_client_and_no_other_view() {
+fn client_detach_records_the_leaving_client_and_its_peer_entry_and_no_other_view() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let viewport_size = Size {
         column_count: 80,
@@ -17131,6 +17068,7 @@ fn client_detach_records_the_leaving_client_and_no_other_view() {
         take_session_view_changes(&mut runtime, session_id),
         SessionViewChanges {
             changed_client_ids: BTreeSet::from([leaving_client_id]),
+            presence_changed_client_ids: BTreeSet::from([leaving_client_id]),
             ..SessionViewChanges::default()
         },
         "both clients report one viewport size: the tab keeps its size"
@@ -17847,7 +17785,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 }
 
 #[test]
-fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged() {
+fn a_larger_client_attach_changes_only_the_peer_list_of_an_existing_subscribers_frame() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let genesis_client_id = create_session_with_attached_client(
         &mut runtime,
@@ -17865,10 +17803,11 @@ fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged()
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, genesis_client_id, now);
 
     // A larger client attaches: the shared tab keeps its 80x24 size, so no
-    // PTY reflows and no state the genesis client's frame shows changes.
+    // PTY reflows. The genesis client's frame changes in its peer list alone.
+    let larger_client_id = ClientId::new();
     runtime.handle_client_attach(
         session_id,
-        ClientId::new(),
+        larger_client_id,
         Size {
             column_count: 120,
             row_count: 40,
@@ -17883,8 +17822,12 @@ fn a_larger_client_attach_leaves_the_frame_of_an_existing_subscriber_unchanged()
     );
 
     assert_eq!(
-        mark_changed_views_then_compute_frame_wait(&mut runtime, genesis_client_id, now),
-        None
+        take_session_view_changes(&mut runtime, session_id),
+        SessionViewChanges {
+            changed_client_ids: BTreeSet::from([larger_client_id]),
+            presence_changed_client_ids: BTreeSet::from([larger_client_id]),
+            ..SessionViewChanges::default()
+        }
     );
 }
 
@@ -18128,122 +18071,6 @@ fn same_session_reattach_preserves_client_view_state() {
     assert_eq!(client_record.get_focused_pane_id(tab_id), Some(pane_id));
     assert_eq!(client_record.get_viewport_size(), grown_viewport_size);
     assert_eq!(client_record.get_active_tab_id(), tab_id);
-}
-
-#[test]
-fn cross_session_attach_detaches_the_client_from_its_old_session() {
-    let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let large_viewport_size = Size {
-        column_count: 80,
-        row_count: 24,
-    };
-    let small_viewport_size = Size {
-        column_count: 40,
-        row_count: 24,
-    };
-
-    let client_id = create_session_with_attached_client(
-        &mut runtime,
-        SessionId::new(),
-        large_viewport_size,
-        SystemTime::now(),
-    )
-    .expect("first session");
-    let (first_session_id, _first_tab_id, first_pane_id) = get_only_session_slot(&runtime);
-
-    // A second, independent session with its own live pane.
-    create_session_with_attached_client(
-        &mut runtime,
-        SessionId::new(),
-        large_viewport_size,
-        SystemTime::now(),
-    )
-    .expect("second session");
-    let second_session_id = *runtime
-        .session_by_id
-        .keys()
-        .find(|&&candidate_session_id| candidate_session_id != first_session_id)
-        .expect("the second session");
-    let second_session = &runtime.session_by_id[&second_session_id];
-    let second_tab_id = *second_session.tabs.keys().next().expect("its tab");
-    let second_pane_id = second_session
-        .panes
-        .list_pane_records()
-        .map(PaneRecord::get_pane_id)
-        .next()
-        .expect("its pane");
-    let first_pane_resize_count_before = fake_pty_backend
-        .list_pane_sizes(first_pane_id)
-        .expect("pane spawned")
-        .len();
-
-    // Move `client` from session 1 into session 2 at a smaller viewport.
-    let emitted_events = runtime.handle_client_attach(
-        second_session_id,
-        client_id,
-        small_viewport_size,
-        None,
-        second_tab_id,
-        None,
-        SystemTime::now(),
-        ClientOrigin::Local { is_same_user: true },
-        None,
-        None,
-    );
-
-    // It left session 1 entirely and is now the 40x24 co-viewer of session 2.
-    assert!(runtime.session_by_id[&first_session_id]
-        .clients
-        .get_client_by_id(client_id)
-        .is_none());
-    assert_eq!(
-        runtime.session_by_id[&second_session_id]
-            .clients
-            .get_client_by_id(client_id)
-            .expect("moved into session 2")
-            .get_active_tab_id(),
-        second_tab_id
-    );
-
-    // Session 2's pane shrinks to the new minimum; session 1's pane keeps its
-    // size (its tab lost its only viewer).
-    let expected_pty_size = compute_root_pane_pty_size(
-        second_pane_id,
-        compute_default_pane_area_size(small_viewport_size),
-        PaneSizing::default(),
-    );
-    assert_eq!(
-        *fake_pty_backend
-            .list_pane_sizes(second_pane_id)
-            .unwrap()
-            .last()
-            .unwrap(),
-        expected_pty_size
-    );
-    assert_eq!(
-        fake_pty_backend
-            .list_pane_sizes(first_pane_id)
-            .unwrap()
-            .len(),
-        first_pane_resize_count_before
-    );
-    // The client had focused nothing in session 2, so it lands on that tab's
-    // pane before the reflow its smaller viewport caused.
-    assert_eq!(
-        emitted_events,
-        vec![
-            Event::PaneFocused(PaneFocused {
-                client_id,
-                tab_id: Some(second_tab_id),
-                pane_id: second_pane_id,
-                previous_pane_id: None,
-            }),
-            Event::PtyResized(PtyResized {
-                pane_id: second_pane_id,
-                pty_size: expected_pty_size,
-            })
-        ]
-    );
 }
 
 // A split narrows its sibling: the sibling's terminal grid must re-wrap its

@@ -116,6 +116,7 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: vec![build_pane_snapshot(tiled_pane_id)],
         client_snapshot: ClientSnapshot {

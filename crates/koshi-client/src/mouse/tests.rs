@@ -156,6 +156,7 @@ pub(crate) fn build_mouse_frame(
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {

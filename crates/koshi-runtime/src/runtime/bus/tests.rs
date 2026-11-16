@@ -105,6 +105,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
             tabs_metadata: Vec::new(),
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {

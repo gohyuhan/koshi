@@ -31,8 +31,8 @@ use koshi_core::geometry::FloatingPanePosition;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, LayoutAreaSnapshot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
-    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ImagePlacementSnapshot, LayoutAreaSnapshot, PaneSnapshot, PeerSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_session::client::Client;
 use koshi_session::session::state::Session;
@@ -131,6 +131,7 @@ impl Server {
                     })
                 })
                 .collect(),
+            peers: self.list_peer_snapshots(session, client_id),
         };
 
         let client_placement_preview = self.placement_preview_by_client_id.get(&client_id).filter(
@@ -181,6 +182,38 @@ impl Server {
                 Arc::clone(client_placement_preview.get_placement_preview())
             }),
         })
+    }
+
+    /// Every client attached to `session` but `viewing_client_id`, in
+    /// `color_index` order, each with the pane its keys reach as peers see it
+    /// ([`Client::get_typed_pane_id_for_peers`]). A client restored after a
+    /// restart and not yet attached again (`client_ids_awaiting_reconnect`) is
+    /// left out. Reads each client's checked pane and solves nothing.
+    ///
+    /// Example: clients with indexes `0`, `2` and `1` attached, viewed by the
+    /// client with index `0` → the clients with indexes `1` and `2`, in that
+    /// order.
+    fn list_peer_snapshots(
+        &self,
+        session: &Session,
+        viewing_client_id: ClientId,
+    ) -> Vec<PeerSnapshot> {
+        let mut peer_snapshots: Vec<PeerSnapshot> = session
+            .clients
+            .list_attached_clients()
+            .filter(|peer_client| {
+                let peer_client_id = peer_client.get_client_id();
+                peer_client_id != viewing_client_id
+                    && !self.client_ids_awaiting_reconnect.contains(&peer_client_id)
+            })
+            .map(|peer_client| PeerSnapshot {
+                client_id: peer_client.get_client_id(),
+                color_index: peer_client.get_color_index(),
+                typed_pane_id: peer_client.get_typed_pane_id_for_peers(),
+            })
+            .collect();
+        peer_snapshots.sort_unstable_by_key(|peer_snapshot| peer_snapshot.color_index);
+        peer_snapshots
     }
 
     /// Content snapshot for one pane at scrollback view `scrollback_offset`:

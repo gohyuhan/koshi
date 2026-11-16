@@ -225,6 +225,7 @@ pub(crate) fn build_render_snapshot(
             ],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: vec![
             build_pane_snapshot(content_pane_id),

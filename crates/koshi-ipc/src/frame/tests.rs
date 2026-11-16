@@ -1,6 +1,7 @@
 //! Tests for painted-frame wire encoding, image placement and transfer limits,
 //! and compatibility defaults. They verify that exact field names stay on the
-//! wire, that a frame without its floating pane slots is refused, and that a
+//! wire, that a frame without its floating pane slots or its peer list is
+//! refused, and that a
 //! floating pane slot with no pane slot, or naming a pane outside its layout
 //! area, is refused.
 
@@ -55,7 +56,9 @@ fn build_floating_layout_area(pane_id: PaneId) -> FrameLayoutArea {
 /// reports button-event mouse tracking, which travels as
 /// [`MouseTracking::ButtonMotion`]. The client shows one pinned floating pane,
 /// `pane-5`, at `(0, 0)` `4x5`, whose layout area holds `pane-5` alone over
-/// `4x4`, and minimized `pane-6` with 3 panes and `pane-8` with 1.
+/// `4x4`, and minimized `pane-6` with 3 panes and `pane-8` with 1. Two other
+/// clients are attached: index `0` typing in `pane-4`, and index `7` whose keys
+/// reach no pane.
 pub(crate) fn build_painted_frame() -> PaintedFrame {
     let tab_id = TabId::from_uuid(Uuid::from_u128(2));
     let pane_id = PaneId::from_uuid(Uuid::from_u128(4));
@@ -132,6 +135,18 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(8)),
                     pane_title: None,
                     pane_count: NonZeroUsize::MIN,
+                },
+            ],
+            peers: vec![
+                FramePeer {
+                    client_id: ClientId::from_uuid(Uuid::from_u128(12)),
+                    color_index: 0,
+                    typed_pane_id: Some(pane_id),
+                },
+                FramePeer {
+                    client_id: ClientId::from_uuid(Uuid::from_u128(13)),
+                    color_index: 7,
+                    typed_pane_id: None,
                 },
             ],
         },
@@ -217,6 +232,21 @@ fn a_frame_without_its_floating_pane_lists_is_refused() {
             )
         );
     }
+}
+
+#[test]
+fn a_frame_without_its_peer_list_is_refused() {
+    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+    encoded_json["session_snapshot"]
+        .as_object_mut()
+        .expect("the session snapshot is an object")
+        .remove("peers")
+        .expect("the peer list is present");
+
+    let decode_error = serde_json::from_value::<PaintedFrame>(encoded_json)
+        .expect_err("a frame without its peer list decoded instead of failing");
+
+    assert_eq!(decode_error.to_string(), "missing field `peers`");
 }
 
 #[test]
@@ -516,6 +546,18 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                             "pane_title": null,
                             "pane_count": 1
                         }
+                    }
+                ],
+                "peers": [
+                    {
+                        "client_id": "00000000-0000-0000-0000-00000000000c",
+                        "color_index": 0,
+                        "typed_pane_id": "00000000-0000-0000-0000-000000000004"
+                    },
+                    {
+                        "client_id": "00000000-0000-0000-0000-00000000000d",
+                        "color_index": 7,
+                        "typed_pane_id": null
                     }
                 ]
             },

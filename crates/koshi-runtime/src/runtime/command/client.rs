@@ -141,15 +141,21 @@ impl Server {
     /// newest frame the caller painted on an earlier connection, or `None` on
     /// a first attach.
     ///
+    /// `is_viewer_local_input_mode_on` is recorded on the client before it
+    /// subscribes ([`set_viewer_local_input_mode`](Self::set_viewer_local_input_mode)).
+    /// The next frame of every other client of the session names the client's
+    /// keys as the caller's viewer has them.
+    ///
     /// `client_origin` and `granted_identity` describe the connection, as
     /// [`Self::handle_client_attach`] reads them: a freshly minted client with
     /// no saved view, or whose saved label another client holds, takes its
     /// label from them, and a client record taken back keeps its label.
     // Carries the whole of one attach request: what it claims back (`resume_client_id`,
     // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`,
-    // `cell_size`, `placement_preview_target`, `painted_input_view`), who the
-    // connection carries (`client_origin`, `granted_identity`), and how the
-    // connection is served (`attached_at`, `max_frames_per_second`).
+    // `cell_size`, `placement_preview_target`, `painted_input_view`,
+    // `is_viewer_local_input_mode_on`), who the connection carries
+    // (`client_origin`, `granted_identity`), and how the connection is served
+    // (`attached_at`, `max_frames_per_second`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_ipc_attach(
         &mut self,
@@ -164,6 +170,7 @@ impl Server {
         max_frames_per_second: u16,
         placement_preview_target: Option<PanePlacementPreviewTarget>,
         painted_input_view: Option<PaintedInputView>,
+        is_viewer_local_input_mode_on: bool,
     ) -> Option<AttachAccepted> {
         let session = self.get_sole_session()?;
         let session_id = session.session_id;
@@ -196,10 +203,15 @@ impl Server {
                 .saved_view_store
                 .find_client_id_by_resume_token(resume_token)
             {
-                self.client_ids_awaiting_reconnect
+                let is_listed_as_peer = !self
+                    .client_ids_awaiting_reconnect
                     .remove(&previous_client_id);
                 self.save_client_view(previous_client_id, attached_at);
-                self.remove_client_record(previous_client_id, &mut emitted_events);
+                self.remove_client_record(
+                    previous_client_id,
+                    is_listed_as_peer,
+                    &mut emitted_events,
+                );
             }
         }
         let saved_view = resume_token.and_then(|resume_token| {
@@ -247,6 +259,7 @@ impl Server {
         }
         self.publish_events(&emitted_events);
         self.set_pane_placement_preview(client_id, placement_preview_target);
+        self.set_viewer_local_input_mode(client_id, is_viewer_local_input_mode_on);
 
         let (deliveries, writer_handoff) =
             self.subscribe(client_id, max_frames_per_second, painted_input_view);
@@ -265,6 +278,26 @@ impl Server {
             resume_token,
             pane_area,
         })
+    }
+
+    /// Record whether the viewer of `client_id` keeps its keys in one of its
+    /// local input modes
+    /// ([`Session::set_client_viewer_local_input_mode`](koshi_session::session::state::Session::set_client_viewer_local_input_mode)).
+    /// The pane a keystroke from the client types into
+    /// ([`find_typed_pane`](Self::find_typed_pane)) does not change. A client
+    /// no session holds changes nothing.
+    ///
+    /// Example: client `2` types in pane 5 and opens its notification center.
+    /// The next frame of client `1` names no pane for client `2`; a key that
+    /// client `2` sends after it closes the center still reaches pane 5.
+    pub(crate) fn set_viewer_local_input_mode(
+        &mut self,
+        client_id: ClientId,
+        is_viewer_local_input_mode_on: bool,
+    ) {
+        if let Some(session) = self.get_session_for_client_mut(client_id) {
+            session.set_client_viewer_local_input_mode(client_id, is_viewer_local_input_mode_on);
+        }
     }
 
     /// Put `saved_view` back on `client_id` in `session_id`, then reconcile the
@@ -377,12 +410,12 @@ impl Server {
     }
 
     /// Attach a client to `session_id` viewing `active_tab_id`, then reconcile the
-    /// affected tabs' PTY sizes and mark the view of every subscriber changed.
+    /// affected tabs' PTY sizes. The client's entry in every other client's
+    /// peer list is marked changed
+    /// ([`Session::mark_client_presence_changed`]): the next frame of every
+    /// other client of the session lists it.
     ///
-    /// A client lives in exactly one session. If this id already lives in another
-    /// session it is detached there first — reflowing the tab it leaves — so it
-    /// is never recorded twice. Within the target session an id that is already
-    /// attached is a re-attach: its view updates in place, keeping its per-tab
+    /// An id that `session_id` already holds is a re-attach: its view updates in place, keeping its per-tab
     /// focus, zoom, scrollback offsets, selections, floating view, lock mode,
     /// mouse selection mode, label and `color_index`, and the tab it moves off of
     /// reflows too. A fresh id is registered anew with a label and a
@@ -428,8 +461,7 @@ impl Server {
     /// contributes none), so a smaller client shrinks a tab and a departing one lets it grow: the
     /// tab's live panes reflow to the new size, one [`Event::PtyResized`] each. A tab with no
     /// tab size keeps its sizes. After the tabs, the session's floating panes reflow to the new
-    /// [`Session::get_shared_floating_viewport`], and so do the floating panes of a session the
-    /// client moved out of. An attach naming an unknown session, or a tab the session
+    /// [`Session::get_shared_floating_viewport`]. An attach naming an unknown session, or a tab the session
     /// does not hold, is dropped. `attached_at` is supplied by the producer; the handler never
     /// reads the clock itself.
     // Carries the whole of one attach: where it lands (`session_id`,
@@ -460,36 +492,6 @@ impl Server {
             Some(session) if session.tabs.contains_key(&active_tab_id) => {}
             _ => return Vec::new(),
         }
-        // If the id already lives in a different session, detach it there first
-        // and reflow the tab it leaves. One id is never held in two registries.
-        if let Some(old_session_id) = self
-            .get_session_for_client(client_id)
-            .map(|session| session.session_id)
-        {
-            if old_session_id != session_id {
-                let old_session = self
-                    .session_by_id
-                    .get_mut(&old_session_id)
-                    .expect("session located above");
-                let old_tab_id = old_session
-                    .detach_client(client_id)
-                    .map(|client| client.get_active_tab_id());
-                if let Some(old_tab_id) = old_tab_id {
-                    self.reflow_tab_if_viewed(
-                        pty_backend.as_ref(),
-                        old_session_id,
-                        old_tab_id,
-                        &mut emitted_events,
-                    );
-                    self.reflow_floating_panes(
-                        pty_backend.as_ref(),
-                        old_session_id,
-                        &mut emitted_events,
-                    );
-                }
-            }
-        }
-
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -605,14 +607,20 @@ impl Server {
             }
         }
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
+        self.session_by_id
+            .get_mut(&session_id)
+            .expect("target session validated above")
+            .mark_client_presence_changed(client_id);
 
         emitted_events
     }
 
     /// Update one client's full terminal viewport, reconcile the active tab's
-    /// pane region and PTYs, reflow the session's floating panes to the new
-    /// [`Session::get_shared_floating_viewport`], then mark the view of every
-    /// subscriber changed.
+    /// pane region and PTYs, then reflow the session's floating panes to the
+    /// new [`Session::get_shared_floating_viewport`]. A changed viewport marks
+    /// the client's own view changed. A tab solved again at a new size marks
+    /// the view of every client viewing it, and a floating pane solved again
+    /// marks the view of every client of the session.
     ///
     /// `pane_area` and `cell_size` replace the client's reports, `None`
     /// included. A resize reporting [`PaneArea::Starving`] from the tab's only
@@ -700,8 +708,10 @@ impl Server {
     }
 
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
-    /// was viewing and of the session's floating panes, and mark the view of
-    /// every subscriber changed.
+    /// was viewing and of the session's floating panes. The client's entry in
+    /// every other client's peer list is marked gone
+    /// ([`Session::mark_client_presence_changed`]): the next frame of every
+    /// other client of the session leaves it out.
     ///
     /// Removing the client hands back its record, whose active tab names the
     /// tab whose viewer set shrank. The departing viewer is dropped from that
@@ -739,7 +749,7 @@ impl Server {
 
         let mut emitted_events = Vec::new();
         let session_id_of_removed_client =
-            self.remove_client_record(client_id, &mut emitted_events);
+            self.remove_client_record(client_id, true, &mut emitted_events);
         let is_session_left_without_client = session_id_of_removed_client
             .and_then(|session_id| self.session_by_id.get(&session_id))
             .is_some_and(|session| !session.clients.has_clients());
@@ -758,7 +768,7 @@ impl Server {
     /// Detach the client `client_id`, which may attach again with the resume
     /// token its attach minted: release every mouse button it holds, remove
     /// its record, reflow the tab it was viewing and the session's floating
-    /// panes, and mark the view of every subscriber changed, as
+    /// panes, and mark its entry in every other client's peer list gone, as
     /// [`handle_client_detach`](Self::handle_client_detach) does. Requests no
     /// quit: with `auto-close-session` on, a session this leaves with no
     /// client keeps running.
@@ -774,7 +784,7 @@ impl Server {
             return Vec::new();
         }
         let mut emitted_events = Vec::new();
-        self.remove_client_record(client_id, &mut emitted_events);
+        self.remove_client_record(client_id, true, &mut emitted_events);
         emitted_events
     }
 
@@ -782,11 +792,17 @@ impl Server {
     /// ([`release_client_mouse_buttons`](Self::release_client_mouse_buttons)),
     /// answer every viewer action request that waits for it
     /// ([`answer_departed_client_actions`](Self::answer_departed_client_actions)),
-    /// then remove its record, reflow the tab it was viewing and the session's
-    /// floating panes, and mark the view of every subscriber changed, as
+    /// then remove its record and reflow the tab it was viewing and the
+    /// session's floating panes, as
     /// [`handle_client_detach`](Self::handle_client_detach) states. Pushes one
     /// [`Event::PtyResized`] per reflowed pane onto `emitted_events`. Requests
     /// no quit.
+    ///
+    /// `is_listed_as_peer` is `true` for a client whose entry other clients'
+    /// frames list: its entry is marked gone
+    /// ([`Session::mark_client_presence_changed`]). It is `false` for a record
+    /// restored after a restart that no viewer claimed, which no frame lists,
+    /// and that marks nothing.
     ///
     /// The id of the session that held the client, once its record is removed.
     /// `None` for a client no session holds, which changes nothing but the
@@ -794,6 +810,7 @@ impl Server {
     fn remove_client_record(
         &mut self,
         client_id: ClientId,
+        is_listed_as_peer: bool,
         emitted_events: &mut Vec<Event>,
     ) -> Option<SessionId> {
         self.release_client_mouse_buttons(client_id);
@@ -806,6 +823,9 @@ impl Server {
         let removed_client = session
             .detach_client(client_id)
             .expect("the session found for the client holds it");
+        if is_listed_as_peer {
+            session.mark_client_presence_changed(client_id);
+        }
         let active_tab_id = removed_client.get_active_tab_id();
         self.unsubscribe_client(client_id);
 
@@ -864,7 +884,7 @@ impl Server {
         let mut emitted_events = Vec::new();
         for client_id in unclaimed_client_ids {
             self.save_client_view(client_id, unclaimed_client_deadline);
-            self.remove_client_record(client_id, &mut emitted_events);
+            self.remove_client_record(client_id, false, &mut emitted_events);
         }
         emitted_events
     }

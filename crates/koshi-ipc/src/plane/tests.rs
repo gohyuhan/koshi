@@ -758,6 +758,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                     max_frames_per_second: 60,
                     placement_preview_target: None,
                     painted_input_view: None,
+                    is_viewer_local_input_mode_on: false,
                 },
             })
             .expect("send attach");
@@ -780,6 +781,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                         max_frames_per_second: 60,
                         placement_preview_target: None,
                         painted_input_view: None,
+                        is_viewer_local_input_mode_on: false,
                     },
                 },
                 RequestDisposition::Stop,

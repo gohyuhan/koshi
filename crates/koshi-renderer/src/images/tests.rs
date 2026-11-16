@@ -130,6 +130,7 @@ fn build_render_snapshot(
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
+            peers: Vec::new(),
         },
         pane_snapshots: vec![pane_snapshot],
         client_snapshot: ClientSnapshot {

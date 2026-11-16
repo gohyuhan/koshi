@@ -377,6 +377,7 @@ impl Server {
                 max_frames_per_second,
                 placement_preview_target,
                 painted_input_view,
+                is_viewer_local_input_mode_on,
                 response_sender,
             } => {
                 // The client and its subscription are registered together here:
@@ -394,6 +395,7 @@ impl Server {
                     max_frames_per_second,
                     placement_preview_target,
                     painted_input_view,
+                    is_viewer_local_input_mode_on,
                 ));
             }
             RuntimeEvent::IpcDiscovery { response_sender } => {
@@ -409,6 +411,10 @@ impl Server {
                 client_id,
                 placement_target,
             } => self.set_pane_placement_preview(client_id, placement_target),
+            RuntimeEvent::SetViewerLocalInputMode {
+                client_id,
+                is_viewer_local_input_mode_on,
+            } => self.set_viewer_local_input_mode(client_id, is_viewer_local_input_mode_on),
             RuntimeEvent::ConfirmPanePlacement {
                 client_id,
                 command_id,

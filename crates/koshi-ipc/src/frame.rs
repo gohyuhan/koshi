@@ -97,6 +97,30 @@ pub struct FrameSession {
     /// Every floating pane of the session, in the order they were created,
     /// shown or minimized for the viewing client.
     pub floating_panes: Vec<FrameFloatingPane>,
+    /// Every other client attached to the session, in `color_index` order.
+    /// Empty while the viewing client is the only one. A frame without it
+    /// fails to decode.
+    pub peers: Vec<FramePeer>,
+}
+
+/// One other client attached to the session the viewing client sees.
+///
+/// A client with index `1` whose keys reach a pane travels as
+/// `{"client_id": …, "color_index": 1, "typed_pane_id": …}`, and with its
+/// floating pane tray open as `{"client_id": …, "color_index": 1,
+/// "typed_pane_id": null}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FramePeer {
+    /// The other client's stable id.
+    pub client_id: ClientId,
+    /// The other client's index as the session assigned it, held by no other
+    /// attached client.
+    pub color_index: u32,
+    /// The pane the other client's keys reach, or `None` when they reach no
+    /// pane: it focuses none, that pane is suppressed or hidden behind a pane
+    /// it zoomed, or its viewer keeps its keys in a local input mode, such as
+    /// the floating pane tray.
+    pub typed_pane_id: Option<PaneId>,
 }
 
 /// One floating pane of the session, shown or minimized for the viewing

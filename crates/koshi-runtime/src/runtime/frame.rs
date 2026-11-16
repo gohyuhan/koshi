@@ -22,7 +22,7 @@ use koshi_core::ids::PaneId;
 use koshi_ipc::frame::{
     FrameClient, FrameFloatingPane, FrameFloatingPaneSlot, FrameGraphicsProtocol, FrameImageAction,
     FrameImageDimension, FrameImageDisplay, FrameImagePlacement, FrameImageRecordHeader,
-    FrameImageTransfer, FrameLayoutArea, FramePane, FrameSelection, FrameSession,
+    FrameImageTransfer, FrameLayoutArea, FramePane, FramePeer, FrameSelection, FrameSession,
     FrameSixelBackground, FrameSlot, FrameTab, FrameTabMetadata, PaintedFrame,
     MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
 };
@@ -43,8 +43,9 @@ use koshi_terminal::graphics::{
 /// Turn one painted frame into the form its JSON part travels in.
 ///
 /// Carries the session's identity, its solved active tab, the tab-bar entries,
-/// the floating panes the viewing client shows, every pane's title, modes,
-/// highlight and image placements, and the viewing client's own state.
+/// the floating panes the viewing client shows, the other attached clients,
+/// every pane's title, modes, highlight and image placements, and the viewing
+/// client's own state.
 #[must_use]
 pub fn build_wire_frame(render_snapshot: &RenderSnapshot) -> PaintedFrame {
     let mut next_image_content_id = 1u64;
@@ -110,6 +111,15 @@ pub(crate) fn build_wire_frame_with_content_ids(
                         pane_title: pane_title.clone(),
                         pane_count: *pane_count,
                     },
+                })
+                .collect(),
+            peers: session_snapshot
+                .peers
+                .iter()
+                .map(|peer_snapshot| FramePeer {
+                    client_id: peer_snapshot.client_id,
+                    color_index: peer_snapshot.color_index,
+                    typed_pane_id: peer_snapshot.typed_pane_id,
                 })
                 .collect(),
         },

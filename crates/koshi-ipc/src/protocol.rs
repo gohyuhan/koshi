@@ -504,6 +504,10 @@ pub enum IpcRequestKind {
         /// reach no pane.
         #[serde(deserialize_with = "Option::deserialize")]
         painted_input_view: Option<PaintedInputView>,
+        /// Whether the caller keeps its keys in one of its local input modes
+        /// ([`SetViewerLocalInputMode`](Self::SetViewerLocalInputMode)) as it
+        /// attaches. `false` on a first attach.
+        is_viewer_local_input_mode_on: bool,
     },
     /// The keyboard events an attached client sends for the pane it is typing
     /// into, from one read of its terminal: its keymap bound nothing to each
@@ -592,6 +596,17 @@ pub enum IpcRequestKind {
     SetPanePlacementPreview {
         /// The pane and the destination tab the client previews.
         placement_target: Option<PanePlacementPreviewTarget>,
+    },
+    /// Say whether the client keeps its keys in one of its local input modes:
+    /// the floating pane tray, the notification center, pane placement mode,
+    /// the pane move chooser, or floating pane move mode. While it does, its
+    /// keys reach no pane, and every other client's frame names no pane for
+    /// it ([`FramePeer::typed_pane_id`](crate::frame::FramePeer::typed_pane_id)).
+    /// Nothing answers it. On a connection with no attached client, it closes
+    /// the connection.
+    SetViewerLocalInputMode {
+        /// Whether the client keeps its keys in a local input mode.
+        is_viewer_local_input_mode_on: bool,
     },
     /// Confirm one tiled pane placement that the client previews. The session
     /// solves the destination tab as the placement leaves it, for this client,
@@ -910,6 +925,7 @@ impl IpcRequestKind {
             IpcRequestKind::Discovery => "Discovery",
             IpcRequestKind::Layout { .. } => "Layout",
             IpcRequestKind::SetPanePlacementPreview { .. } => "SetPanePlacementPreview",
+            IpcRequestKind::SetViewerLocalInputMode { .. } => "SetViewerLocalInputMode",
             IpcRequestKind::ConfirmPanePlacement { .. } => "ConfirmPanePlacement",
             IpcRequestKind::RecentEvents => "RecentEvents",
             IpcRequestKind::Restart => "Restart",
@@ -1178,6 +1194,7 @@ impl WireVariants for IpcRequestKind {
         "Discovery",
         "Layout",
         "SetPanePlacementPreview",
+        "SetViewerLocalInputMode",
         "ConfirmPanePlacement",
         "RecentEvents",
         "Restart",

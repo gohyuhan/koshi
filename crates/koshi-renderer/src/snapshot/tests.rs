@@ -92,6 +92,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
         }],
         floating_pane_slots: Vec::new(),
         floating_panes: Vec::new(),
+        peers: Vec::new(),
     };
 
     let pane_snapshot = PaneSnapshot {

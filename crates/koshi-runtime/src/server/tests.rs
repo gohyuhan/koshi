@@ -1729,6 +1729,7 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
             60,
             None,
             None,
+            false,
         )
         .expect("the session hands the record back");
 
@@ -1765,6 +1766,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
     assert_eq!(starving_attachment.pane_area, Some(PaneArea::Starving));
@@ -1782,6 +1784,7 @@ fn handle_ipc_attach_echoes_the_stored_pane_area() {
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
     assert_eq!(unreported_attachment.pane_area, None);
@@ -1806,6 +1809,7 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client instead of refusing");
 
@@ -1839,6 +1843,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             60,
             None,
             None,
+            false,
         )
         .expect("the first attach takes the record");
     assert_eq!(held_attachment.client_id, client_id);
@@ -1856,6 +1861,7 @@ fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
             60,
             None,
             None,
+            false,
         )
         .expect("the second attach mints a client instead of refusing");
 
@@ -1918,6 +1924,7 @@ fn an_attach_naming_no_client_to_come_back_as_mints_one_on_the_first_tab() {
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
 
@@ -2016,6 +2023,7 @@ fn attach_from_origin_with_token(
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client")
 }
@@ -2293,6 +2301,7 @@ fn a_client_awaiting_its_reconnect_keeps_its_index_from_fresh_clients_and_takes_
             60,
             None,
             None,
+            false,
         )
         .expect("the session hands the record back");
 
@@ -3008,6 +3017,7 @@ fn an_attach_that_finds_no_session_spends_no_token() {
         60,
         None,
         None,
+        false,
     );
 
     assert!(refused_attachment.is_none(), "no session is left to join");
@@ -3127,6 +3137,7 @@ fn closing_the_grace_window_detaches_only_the_clients_that_never_came_back() {
             60,
             None,
             None,
+            false,
         )
         .expect("the record is handed back");
 
@@ -3479,6 +3490,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
     let foreign_token_attachment = resumed_server
@@ -3494,6 +3506,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
 
@@ -3521,6 +3534,7 @@ fn after_a_swap_a_carried_client_comes_back_only_with_the_token_its_last_attach_
             60,
             None,
             None,
+            false,
         )
         .expect("the session hands the record back");
 
@@ -3562,6 +3576,7 @@ fn after_a_swap_a_carried_client_with_no_token_hash_is_not_handed_back_by_its_id
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
 
@@ -3695,6 +3710,7 @@ fn a_carried_client_whose_tab_is_gone_is_taken_over_by_its_token_and_keeps_its_v
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
 
@@ -3734,6 +3750,7 @@ fn a_token_proven_claim_on_a_client_a_connection_is_streaming_for_takes_that_cli
             60,
             None,
             None,
+            false,
         )
         .expect("the session mints a client");
 

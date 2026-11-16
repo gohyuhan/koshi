@@ -606,20 +606,28 @@ impl Client {
     /// the keyboard only while the viewer is
     /// [`LinkStatus::Linked`]. A status other than `Linked` closes the
     /// floating pane tray and the notification center
-    /// ([`close_notification_center`](Self::close_notification_center)). A
-    /// change that moves the
+    /// ([`close_link_bound_input_modes`](Self::close_link_bound_input_modes)).
+    /// A change that moves the
     /// keyboard between one of their keymaps and the base keymap drops an open
     /// key sequence, and no pane receives its chords.
     pub(crate) fn set_link_status(&mut self, link_status: LinkStatus) {
         let previous_active_input_mode = self.get_active_input_mode();
         self.link_status = link_status;
         if link_status != LinkStatus::Linked {
-            self.close_floating_pane_tray();
-            self.close_notification_center();
+            self.close_link_bound_input_modes();
         }
         if self.get_active_input_mode() != previous_active_input_mode {
             self.pending_key_sequence = None;
         }
+    }
+
+    /// Close the floating pane tray and the notification center
+    /// ([`close_notification_center`](Self::close_notification_center)): the
+    /// local input modes that end with the link to the session. Pane
+    /// placement mode, the move chooser, and floating pane move mode stay on.
+    pub(crate) fn close_link_bound_input_modes(&mut self) {
+        self.close_floating_pane_tray();
+        self.close_notification_center();
     }
 
     /// The client's own outer-terminal size in cells.

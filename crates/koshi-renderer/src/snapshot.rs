@@ -1000,6 +1000,26 @@ pub struct SessionSnapshot {
     /// `b` and `c` made in that order and `b` minimized, it holds `Shown` `a`,
     /// `Minimized` `b` with `b`'s title, and `Shown` `c`.
     pub floating_panes: Vec<FloatingPane>,
+    /// Every other client attached to the session, in `color_index` order. A
+    /// client the session restored after a restart is left out until it
+    /// attaches again. Empty while the viewing client is the only one.
+    pub peers: Vec<PeerSnapshot>,
+}
+
+/// One other client attached to the session the viewing client sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerSnapshot {
+    /// The other client's stable id.
+    pub client_id: ClientId,
+    /// The other client's index as the session assigned it, held by no other
+    /// attached client.
+    pub color_index: u32,
+    /// The pane the other client's keys reach: the pane it focuses, when its
+    /// own solve gives that pane a content rect. `None` when its keys reach no
+    /// pane: it focuses none, that pane is suppressed or hidden behind a pane
+    /// it zoomed, or its viewer keeps its keys in a local input mode, such as
+    /// the floating pane tray.
+    pub typed_pane_id: Option<PaneId>,
 }
 
 impl SessionSnapshot {

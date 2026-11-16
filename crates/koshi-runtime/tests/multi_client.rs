@@ -3,8 +3,9 @@
 //! left out of that size, what the larger client is shown when the shared size
 //! is smaller than its own terminal, whose lock mode a lock command changes,
 //! which pane cell a mouse press names for the client that sent it, what a
-//! client moving to another session leaves behind here, and when the last
-//! client moving away closes the session it left.
+//! client moving to another session leaves behind here, when the last client
+//! moving away closes the session it left, and the pane each other client
+//! types in as each frame lists it.
 
 mod common;
 
@@ -31,7 +32,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::process::PtySize;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::FrameSlot;
+use koshi_ipc::frame::{FramePeer, FrameSlot};
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction};
 use koshi_ipc::transport::Connection;
 use koshi_runtime::runtime::painted_update::SessionFrame;
@@ -112,6 +113,7 @@ fn attach_test_client_with_pane_area(
                 max_frames_per_second: 60,
                 placement_preview_target: None,
                 painted_input_view: None,
+                is_viewer_local_input_mode_on: false,
             },
         },
     );
@@ -1359,5 +1361,71 @@ fn switching_the_last_client_away_closes_the_session_only_with_auto_close_on() {
     assert!(
         !keep_open_server.is_quit_requested(),
         "the emptied session asked to close",
+    );
+}
+
+/// Alice and Bob view one session with terminals of one size. Alice's frames
+/// list Bob typing in the seeded pane once he attaches. Bob reports that he
+/// keeps his keys in a local input mode: Alice's next frame lists him typing
+/// in no pane. Bob reports that he does not: Alice's next frame lists him in
+/// the seeded pane again. Bob's connection ends: Alice's next frame lists no
+/// peer.
+#[test]
+fn the_peer_list_in_a_viewers_frames_follows_another_viewer_attaching_changing_its_local_input_mode_and_leaving(
+) {
+    let (_server, _fake_pty_backend, ()) = serve_test_session(
+        "peer-list",
+        |runtime_directory, session_id, _fake_pty_backend| {
+            let mut alice_connection = open_session_connection(&runtime_directory, session_id);
+            attach_test_client_with_viewport_size(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
+            let mut bob_connection = open_session_connection(&runtime_directory, session_id);
+            let (bob_client_id, _) =
+                attach_test_client_with_viewport_size(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE);
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
+            let build_bob_peers = |typed_pane_id: Option<PaneId>| {
+                vec![FramePeer {
+                    client_id: bob_client_id,
+                    color_index: 1,
+                    typed_pane_id,
+                }]
+            };
+            let read_until_peers =
+                |viewer_connection: ViewerConnection, expected_peers: Vec<FramePeer>| {
+                    let (viewer_connection, _) = read_session_frames_until_painted_frame(
+                        viewer_connection,
+                        move |received_painted_frame| {
+                            received_painted_frame.painted_frame.session_snapshot.peers
+                                == expected_peers
+                        },
+                    );
+                    viewer_connection
+                };
+
+            let alice_connection =
+                read_until_peers(alice_connection.into(), build_bob_peers(Some(pane_id)));
+            bob_connection
+                .send(&IpcRequest {
+                    request_id: 3,
+                    request_kind: IpcRequestKind::SetViewerLocalInputMode {
+                        is_viewer_local_input_mode_on: true,
+                    },
+                })
+                .expect("send the local input mode report");
+            let alice_connection = read_until_peers(alice_connection, build_bob_peers(None));
+            bob_connection
+                .send(&IpcRequest {
+                    request_id: 4,
+                    request_kind: IpcRequestKind::SetViewerLocalInputMode {
+                        is_viewer_local_input_mode_on: false,
+                    },
+                })
+                .expect("send the local input mode report");
+            let alice_connection =
+                read_until_peers(alice_connection, build_bob_peers(Some(pane_id)));
+            drop(bob_connection);
+            let alice_connection = read_until_peers(alice_connection, Vec::new());
+
+            (vec![alice_connection.ipc_connection], ())
+        },
     );
 }
