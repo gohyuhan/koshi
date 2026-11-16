@@ -19,7 +19,9 @@ use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use crate::snapshot::{ClientSnapshot, FloatingPane, SessionSnapshot, TabMetadata, TabSnapshot};
+use crate::snapshot::{
+    ClientSnapshot, FloatingPane, PeerSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
+};
 
 /// Build a tabline-only snapshot. `tab_names_and_activity` are `(name, active)`.
 /// It carries no
@@ -1705,4 +1707,349 @@ fn a_row_with_no_room_for_the_tray_button_draws_neither_button() {
     assert_eq!(tabline_layout.floating_pane_tray_button_column, None);
     assert_eq!(tabline_layout.notification_button_columns, None);
     assert_eq!(tabline_layout.tab_strip_end_column, 2);
+}
+
+// --- client chips -------------------------------------------------------------
+
+/// Make `tabline_test_frame` the frame of the viewer of index
+/// `viewer_color_index` with one peer per index of `peer_color_indexes`, in
+/// that order, none typing into a pane.
+fn set_attached_clients(
+    tabline_test_frame: &mut TablineTestFrame,
+    viewer_color_index: u32,
+    peer_color_indexes: &[u32],
+) {
+    tabline_test_frame
+        .render_snapshot
+        .client_snapshot
+        .color_index = viewer_color_index;
+    tabline_test_frame.render_snapshot.session_snapshot.peers = peer_color_indexes
+        .iter()
+        .map(|color_index| PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index: *color_index,
+            typed_pane_id: None,
+        })
+        .collect();
+}
+
+/// The one-tab frame of session `s` attached by the viewer of index
+/// `viewer_color_index` and the peers of `peer_color_indexes`.
+fn build_attached_clients_frame(
+    viewer_color_index: u32,
+    peer_color_indexes: &[u32],
+) -> TablineTestFrame {
+    let mut tabline_test_frame =
+        build_tabline_frame("s", &[("one", true)], None, LockMode::Normal, false);
+    set_attached_clients(
+        &mut tabline_test_frame,
+        viewer_color_index,
+        peer_color_indexes,
+    );
+    tabline_test_frame
+}
+
+fn build_client_chip_span(
+    color_index: u32,
+    is_viewer_chip: bool,
+    start_column: u16,
+) -> ClientChipSpan {
+    ClientChipSpan {
+        color_index,
+        is_viewer_chip,
+        start_column,
+    }
+}
+
+/// The chips of the viewer of index `0` and the peers of indexes `1` and
+/// `2` on an 80-cell row: the buttons sit at `68` and `71`.
+fn list_three_chips_at_eighty_columns() -> Vec<ClientChipSpan> {
+    vec![
+        build_client_chip_span(0, true, 57),
+        build_client_chip_span(1, false, 61),
+        build_client_chip_span(2, false, 65),
+    ]
+}
+
+#[test]
+fn the_client_chips_sit_left_of_the_buttons_and_end_the_tab_strip_one_cell_before_them() {
+    let tabline_test_frame = build_attached_clients_frame(0, &[1, 2]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
+
+    assert_eq!(tabline_layout.right_block_start_column, 74);
+    assert_eq!(tabline_layout.floating_pane_tray_button_column, Some(71));
+    assert_eq!(tabline_layout.notification_button_columns, Some(68..71));
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        list_three_chips_at_eighty_columns()
+    );
+    assert_eq!(tabline_layout.hidden_client_mark, None);
+    assert_eq!(tabline_layout.tab_strip_end_column, 56);
+    assert_eq!(
+        format_rendered_cells(&render_tabline(&tabline_test_frame, 80), 0, 56..74),
+        "  1   2   3  ●  ⧉ "
+    );
+}
+
+#[test]
+fn a_chip_paints_its_clients_colors_and_the_viewers_own_number_bold_and_underlined() {
+    let render_buffer = render_tabline(&build_attached_clients_frame(0, &[1, 2]), 80);
+    let theme = Theme::default();
+
+    for (column_index, color_index) in [
+        (57, 0),
+        (58, 0),
+        (59, 0),
+        (61, 1),
+        (62, 1),
+        (63, 1),
+        (65, 2),
+        (66, 2),
+        (67, 2),
+    ] {
+        let client_color = theme.compute_client_color(color_index);
+        assert_eq!(
+            (
+                render_buffer[(column_index, 0)].fg,
+                render_buffer[(column_index, 0)].bg
+            ),
+            (client_color.text_color, client_color.fill_color),
+            "the cell at column {column_index}"
+        );
+    }
+    assert_eq!(
+        render_buffer[(58, 0)].modifier,
+        Modifier::BOLD | Modifier::UNDERLINED
+    );
+    for column_index in [57, 59, 61, 62, 63, 65, 66, 67] {
+        assert_eq!(render_buffer[(column_index, 0)].modifier, Modifier::empty());
+    }
+    for column_index in [56, 60, 64] {
+        assert_eq!(
+            render_buffer[(column_index, 0)].bg,
+            Color::from(theme.bar_background_color)
+        );
+    }
+}
+
+#[test]
+fn a_two_digit_client_number_widens_its_chip_to_four_cells() {
+    let tabline_test_frame = build_attached_clients_frame(11, &[0]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
+
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        vec![
+            build_client_chip_span(11, true, 60),
+            build_client_chip_span(0, false, 65),
+        ]
+    );
+    assert_eq!(
+        format_rendered_cells(&render_tabline(&tabline_test_frame, 80), 0, 60..68),
+        " 12   1 "
+    );
+}
+
+#[test]
+fn chips_past_half_of_the_room_left_of_the_buttons_count_into_the_hidden_client_mark() {
+    let tabline_test_frame = build_attached_clients_frame(0, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
+
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        (0..8_u16)
+            .map(|chip_index| build_client_chip_span(
+                u32::from(chip_index),
+                chip_index == 0,
+                34 + 4 * chip_index
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        tabline_layout.hidden_client_mark,
+        Some(HiddenClientMark {
+            start_column: 66,
+            client_count: 1,
+        })
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 33);
+    let render_buffer = render_tabline(&tabline_test_frame, 80);
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 0, 34..68),
+        " 1   2   3   4   5   6   7   8  +1"
+    );
+    let hidden_client_mark_style = compute_scroll_arrow_style(&Theme::default());
+    assert_eq!(
+        (render_buffer[(66, 0)].fg, render_buffer[(67, 0)].fg),
+        (
+            hidden_client_mark_style
+                .fg
+                .expect("the arrow style sets a text color"),
+            hidden_client_mark_style
+                .fg
+                .expect("the arrow style sets a text color")
+        )
+    );
+}
+
+#[test]
+fn twelve_cells_of_half_room_draw_two_chips_and_a_mark_for_the_other_three() {
+    let tabline_test_frame = build_attached_clients_frame(0, &[1, 2, 3, 4]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(36));
+
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        vec![
+            build_client_chip_span(0, true, 14),
+            build_client_chip_span(1, false, 18),
+        ]
+    );
+    assert_eq!(
+        tabline_layout.hidden_client_mark,
+        Some(HiddenClientMark {
+            start_column: 22,
+            client_count: 3,
+        })
+    );
+    assert_eq!(
+        format_rendered_cells(&render_tabline(&tabline_test_frame, 36), 0, 14..24),
+        " 1   2  +3"
+    );
+}
+
+#[test]
+fn the_largest_client_index_takes_a_twelve_cell_chip_and_moves_into_the_mark_when_it_does_not_fit()
+{
+    let tabline_test_frame = build_attached_clients_frame(0, &[u32::MAX]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(32));
+
+    assert_eq!(compute_client_chip_width(u32::MAX), 12);
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        vec![build_client_chip_span(0, true, 14)]
+    );
+    assert_eq!(
+        tabline_layout.hidden_client_mark,
+        Some(HiddenClientMark {
+            start_column: 18,
+            client_count: 1,
+        })
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 13);
+    assert_eq!(
+        format_rendered_cells(&render_tabline(&tabline_test_frame, 32), 0, 14..20),
+        " 1  +1"
+    );
+}
+
+#[test]
+fn a_row_with_room_for_the_mark_alone_draws_the_mark_with_every_client_counted() {
+    let tabline_test_frame = build_attached_clients_frame(0, &[1]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(22));
+
+    assert_eq!(tabline_layout.client_chip_spans, Vec::new());
+    assert_eq!(
+        tabline_layout.hidden_client_mark,
+        Some(HiddenClientMark {
+            start_column: 8,
+            client_count: 2,
+        })
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 7);
+    assert_eq!(
+        format_rendered_cells(&render_tabline(&tabline_test_frame, 22), 0, 8..10),
+        "+2"
+    );
+}
+
+#[test]
+fn a_row_with_no_room_for_the_mark_draws_what_a_lone_client_draws() {
+    let tabline_test_frame = build_attached_clients_frame(0, &[1]);
+    let lone_client_frame = build_attached_clients_frame(0, &[]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(14));
+
+    assert_eq!(tabline_layout.client_chip_spans, Vec::new());
+    assert_eq!(tabline_layout.hidden_client_mark, None);
+    assert_eq!(tabline_layout.tab_strip_end_column, 2);
+    assert_eq!(
+        render_tabline(&tabline_test_frame, 14),
+        render_tabline(&lone_client_frame, 14)
+    );
+}
+
+#[test]
+fn a_lone_client_draws_no_chip_and_its_tab_strip_ends_at_the_buttons() {
+    let tabline_test_frame = build_attached_clients_frame(5, &[]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
+
+    assert_eq!(tabline_layout.client_chip_spans, Vec::new());
+    assert_eq!(tabline_layout.hidden_client_mark, None);
+    assert_eq!(tabline_layout.tab_strip_end_column, 68);
+}
+
+#[test]
+fn the_tab_strip_scrolls_inside_the_cells_the_chips_leave() {
+    let tab_names_and_activity: Vec<(&str, bool)> = (0..9)
+        .map(|tab_metadata_index| ("tab", tab_metadata_index == 0))
+        .collect();
+    let mut tabline_test_frame =
+        build_tabline_frame("s", &tab_names_and_activity, None, LockMode::Normal, false);
+    set_attached_clients(&mut tabline_test_frame, 0, &[1, 2]);
+    let badge_column_count = compute_version_badge_column_count();
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
+
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        list_three_chips_at_eighty_columns()
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 56);
+    assert_eq!(tabline_layout.first_visible_tab_index, 0);
+    assert_eq!(tabline_layout.left_scroll_arrow_column, None);
+    assert_eq!(tabline_layout.right_scroll_arrow_column, Some(55));
+    let expected_visible_tab_spans: Vec<VisibleTabSpan> = (0..9_u16)
+        .map(|tab_position| {
+            build_visible_tab_span(
+                usize::from(tab_position),
+                5 + badge_column_count + 10 * tab_position,
+                9,
+            )
+        })
+        .take_while(|visible_tab_span| {
+            visible_tab_span.start_column + visible_tab_span.column_count <= 55
+        })
+        .collect();
+    assert_eq!(tabline_layout.visible_tab_spans, expected_visible_tab_spans);
+}
+
+#[test]
+fn a_chip_width_counts_the_digits_of_the_client_number_and_two_blank_cells() {
+    assert_eq!(
+        [0, 9, 10, u64::MAX].map(count_decimal_digits),
+        [1, 1, 2, 20]
+    );
+    assert_eq!(
+        [0, 8, 9, 11, u32::MAX].map(compute_client_chip_width),
+        [3, 3, 4, 4, 12]
+    );
+}
+
+#[test]
+fn packing_stops_at_the_first_chip_that_does_not_fit() {
+    assert_eq!(
+        pack_client_chips([(0, true), (9, false), (10, false)].into_iter(), 9),
+        (vec![(0, true, 0), (9, false, 4)], 8)
+    );
+    assert_eq!(
+        pack_client_chips([(0, true), (1, false)].into_iter(), 2),
+        (Vec::new(), 0)
+    );
 }

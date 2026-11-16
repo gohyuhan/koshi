@@ -19,6 +19,7 @@ use std::time::SystemTime;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
+use ratatui::style::Color;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -41,7 +42,7 @@ use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, DrawnNotifications, FloatingPane,
     FloatingPaneMoveDraft, FloatingPaneSlot, FloatingPaneTray, GridView, KeymapHints,
     LayoutAreaSnapshot, MouseFrame, NotificationButton, NotificationCenter, NotificationToast,
-    PaneSlot, PaneSnapshot, PlacementHandleHover, RenderSnapshot, ScrollbackMetadata,
+    PaneSlot, PaneSnapshot, PeerSnapshot, PlacementHandleHover, RenderSnapshot, ScrollbackMetadata,
     SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
@@ -376,7 +377,8 @@ fn every_cell_classifies_as_what_was_painted() {
                         "statusline classified off its row at ({column_index}, {row_index})"
                     );
                     assert_eq!(
-                        painted_cell.bg, theme.bar_background_color,
+                        painted_cell.bg,
+                        Color::from(theme.bar_background_color),
                         "statusline cell ({column_index}, {row_index}) is not the bar background"
                     );
                 }
@@ -1080,6 +1082,106 @@ fn a_tab_ribbon_spells_the_tab_it_hits() {
             tab_metadata.tab_name
         );
     }
+}
+
+#[test]
+fn every_client_chip_cell_hits_the_tabline_and_a_click_on_tab_3_hits_tab_3() {
+    let (mut render_snapshot, ..) = build_tiled_frame();
+    render_snapshot.session_snapshot.peers = [1, 2]
+        .map(|color_index| PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index,
+            typed_pane_id: None,
+        })
+        .to_vec();
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let screen_buffer = paint_render_snapshot(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+    );
+    let mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        ViewerChrome::default(),
+        DrawnNotifications::default(),
+    );
+    let frame_layout = mouse_frame.build_frame_layout();
+    let theme = Theme::default();
+    let chip_fill_colors: Vec<Color> = (0..3)
+        .map(|color_index| theme.compute_client_color(color_index).fill_color)
+        .collect();
+
+    let chip_column_indexes: Vec<u16> = (0..TEST_VIEWPORT_SIZE.column_count)
+        .filter(|column_index| chip_fill_colors.contains(&screen_buffer[(*column_index, 0)].bg))
+        .collect();
+
+    assert_eq!(
+        chip_column_indexes,
+        vec![37, 38, 39, 41, 42, 43, 45, 46, 47]
+    );
+    assert_eq!(get_row_text(&screen_buffer, 0, 37, 48), " 1   2   3 ");
+    for column_index in chip_column_indexes {
+        assert_eq!(
+            resolve_hit_region(
+                frame_layout,
+                Point {
+                    column: column_index,
+                    row: 0,
+                },
+            ),
+            HitRegion::Tabline,
+            "the chip cell at column {column_index}"
+        );
+    }
+
+    let peeking_viewer_chrome = ViewerChrome {
+        tabline_offset: Some(2),
+        ..ViewerChrome::default()
+    };
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let peeking_screen_buffer =
+        paint_render_snapshot(&render_snapshot, &committed_regions, peeking_viewer_chrome);
+    let peeking_mouse_frame = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions,
+        peeking_viewer_chrome,
+        DrawnNotifications::default(),
+    );
+    let third_tab_id = render_snapshot.session_snapshot.tabs_metadata[2].tab_id;
+    let third_tab_column_indexes: Vec<u16> = (0..TEST_VIEWPORT_SIZE.column_count)
+        .filter(|&column_index| {
+            resolve_hit_region(
+                peeking_mouse_frame.build_frame_layout(),
+                Point {
+                    column: column_index,
+                    row: 0,
+                },
+            ) == HitRegion::Tab {
+                tab_id: third_tab_id,
+            }
+        })
+        .collect();
+    let first_column_index = *third_tab_column_indexes
+        .first()
+        .expect("tab 3 is in the window");
+    let last_column_index = *third_tab_column_indexes
+        .last()
+        .expect("tab 3 is in the window");
+    assert_eq!(
+        third_tab_column_indexes,
+        (first_column_index..=last_column_index).collect::<Vec<u16>>()
+    );
+    assert!(last_column_index < 36, "tab 3 ends left of the chips");
+    assert_eq!(
+        get_row_text(
+            &peeking_screen_buffer,
+            0,
+            first_column_index,
+            last_column_index + 1
+        ),
+        " #3  c "
+    );
 }
 
 #[test]

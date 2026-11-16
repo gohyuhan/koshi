@@ -3,6 +3,8 @@
 
 use koshi_core::notification::NotificationSeverity;
 
+use crate::theme::ClientColor;
+
 use super::*;
 
 #[cfg(test)]
@@ -71,7 +73,15 @@ pub(super) fn compute_scroll_arrow_style(theme: &Theme) -> Style {
 /// The background filling a koshi-owned bar row whole — the tab bar and the
 /// statusline — laid down before any text.
 pub(crate) fn compute_bar_style(theme: &Theme) -> Style {
-    Style::default().bg(theme.bar_background_color)
+    Style::default().bg(Color::from(theme.bar_background_color))
+}
+
+/// A client chip in the tab strip, and a cursor marker in a pane: the client's
+/// text color over its fill color.
+pub(super) fn compute_client_color_style(client_color: ClientColor) -> Style {
+    Style::default()
+        .fg(client_color.text_color)
+        .bg(client_color.fill_color)
 }
 
 /// The filled strip marking a collapsed stack member's koshi-owned header: the

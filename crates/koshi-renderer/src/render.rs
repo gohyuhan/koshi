@@ -5,7 +5,10 @@
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
 //! border highlighted), and the **statusline** — a koshi-owned row with
-//! per-mode keybinding hints. Placement previews tint the moving and destination
+//! per-mode keybinding hints. While another client is attached, the tabline
+//! also shows one numbered chip per attached client, and a pane that another
+//! client types in shows that client's cursor as one cell in that client's
+//! color ([`Theme::compute_client_color`]). Placement previews tint the moving and destination
 //! panes separately, color their outlines, and explain their proposed positions.
 //! The committed region solve supplies all three zones.
 //!
@@ -76,12 +79,16 @@ const FULLSCREEN_TAG_TEXT: &str = " [fullscreen] ";
 mod floating;
 mod floating_pane_tray;
 mod notification;
+mod peer_cursor_marker;
 mod placement;
 
 use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use floating_pane_tray::draw_floating_pane_tray;
 use notification::{draw_notification_center, draw_notification_toast};
+use peer_cursor_marker::{
+    draw_peer_cursor_markers, get_peer_cursor_marker_order_key, list_frame_peer_cursor_markers,
+};
 use placement::draw_pane_placement_presentation;
 
 /// The rows of the buffer that one [`render_frame`] call draws.
@@ -253,9 +260,9 @@ pub fn build_frame_geometry<'a>(
 /// 2. Draws one bordered box per visible pane: the terminal title in the top
 ///    border, `[fullscreen]` after it while the viewer zooms the pane, and the
 ///    scroll position in the bottom border when the pane is scrolled back.
-/// 3. Draws each visible terminal pane's cells into its content rect, and
-///    tints the content of the pane whose placement handle the pointer rests
-///    on.
+/// 3. Draws each visible terminal pane's cells into its content rect, tints
+///    the content of the pane whose placement handle the pointer rests on,
+///    and paints each peer cursor marker in its peer's colors.
 /// 4. Keeps pane cells under native images or writes the unavailable-image
 ///    text over unavailable coverage.
 /// 5. Draws the one-row title strip for every collapsed stack member.
@@ -285,7 +292,8 @@ pub fn build_frame_geometry<'a>(
 ///     cell.
 /// 12. Draws the tabline in the first committed region, over that margin, with
 ///     the tray button ` ⧉ ` and the notification button ` ● ` while the row
-///     has room for them.
+///     has room for them, and the client chips left of them while another
+///     client is attached.
 /// 13. Draws the statusline in the second committed region, over that margin.
 /// 14. Gives each cell of `viewport_area` whose symbol ratatui measures at
 ///     another width than [`compute_text_display_width`] gives it that width as
@@ -405,6 +413,13 @@ pub fn render_frame(
     draw_placement_hover_tints(
         placed_active_layout_area,
         viewer_chrome,
+        drawn_rows,
+        screen_buffer,
+    );
+    draw_peer_cursor_markers(
+        render_snapshot,
+        placed_active_layout_area,
+        theme,
         drawn_rows,
         screen_buffer,
     );
@@ -542,15 +557,19 @@ pub fn render_frame(
 /// A pane row differs when the grid views of the two snapshots hold different
 /// shared rows at its index ([`Arc::ptr_eq`]). That row lands on the buffer
 /// row of its pane's content area, tiled or floating, when that area shows
-/// it. Each pane's cursor, mouse modes, alternate screen state, top line
-/// number and `has_selection` are drawn into no cell and may differ, and so
-/// may the placement preview and the session's peer list, which
-/// [`render_frame`] does not read. Every other field must be equal, each grid
-/// view must keep its row count, column count and scroll offset, and each pane
-/// must show the same scroll position text.
+/// it. Each pane's mouse modes, alternate screen state, top line number and
+/// `has_selection` are drawn into no cell and may differ, and so may the
+/// placement preview, which [`render_frame`] does not read. Each pane's
+/// cursor and the session's peer list may differ too: the rows of each peer
+/// cursor marker that one frame paints and the other does not are listed,
+/// and the tabline rows when the peers' `color_index` list differs. Every
+/// other field must be equal, each grid view must keep its row count, column
+/// count and scroll offset, and each pane must show the same scroll position
+/// text.
 ///
 /// Example: one pane whose content area starts at buffer row 2, with grid row
-/// 8 alone replaced, gives `[10]`.
+/// 8 alone replaced, gives `[10]`. A peer whose cursor in that pane moves
+/// from grid row 3 to grid row 4, with no grid row replaced, gives `[5, 6]`.
 #[must_use]
 pub fn list_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
@@ -566,7 +585,7 @@ pub fn list_changed_screen_rows(
                 tabs_metadata,
                 floating_pane_slots,
                 floating_panes,
-                peers: _,
+                peers,
             },
         pane_snapshots,
         client_snapshot,
@@ -633,6 +652,40 @@ pub fn list_changed_screen_rows(
                 }
             }
         }
+    }
+    let is_peer_color_index_list_unchanged = previous_session_snapshot
+        .peers
+        .iter()
+        .map(|peer_snapshot| peer_snapshot.color_index)
+        .eq(peers.iter().map(|peer_snapshot| peer_snapshot.color_index));
+    if !is_peer_color_index_list_unchanged {
+        if let Some(tabline_rect) =
+            find_region_area(next_frame_geometry.committed_regions, 0, viewport_area)
+        {
+            changed_screen_rows.extend(tabline_rect.top()..tabline_rect.bottom());
+        }
+    }
+    let previous_peer_cursor_markers =
+        list_frame_peer_cursor_markers(previous_render_snapshot, next_frame_geometry);
+    let next_peer_cursor_markers =
+        list_frame_peer_cursor_markers(next_frame_geometry.render_snapshot, next_frame_geometry);
+    for (peer_cursor_markers, other_peer_cursor_markers) in [
+        (&previous_peer_cursor_markers, &next_peer_cursor_markers),
+        (&next_peer_cursor_markers, &previous_peer_cursor_markers),
+    ] {
+        changed_screen_rows.extend(
+            peer_cursor_markers
+                .iter()
+                .filter(|peer_cursor_marker| {
+                    other_peer_cursor_markers
+                        .binary_search_by_key(
+                            &get_peer_cursor_marker_order_key(peer_cursor_marker),
+                            get_peer_cursor_marker_order_key,
+                        )
+                        .is_err()
+                })
+                .map(|peer_cursor_marker| peer_cursor_marker.position.y),
+        );
     }
     changed_screen_rows.sort_unstable();
     changed_screen_rows.dedup();
@@ -769,27 +822,12 @@ pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Positio
             )
         }
     };
-    if content_area.width == 0 || content_area.height == 0 {
-        return None;
-    }
-
     let pane_snapshot = render_snapshot.find_pane_snapshot(focused_pane_id)?;
-    let terminal_grid_view = pane_snapshot.terminal_grid_view.as_ref()?;
     // A view scrolled back into history shows no hardware cursor.
-    if terminal_grid_view.view_row_offset > 0 {
+    if pane_snapshot.terminal_grid_view.as_ref()?.view_row_offset > 0 {
         return None;
     }
-    if !pane_snapshot.cursor_snapshot.is_visible {
-        return None;
-    }
-
-    // The content area's origin plus the pane-local column/row is the screen
-    // position, clamped to the content area's last cell.
-    let screen_column = (content_area.x + pane_snapshot.cursor_snapshot.column_index)
-        .min(content_area.right().saturating_sub(1));
-    let screen_row = (content_area.y + pane_snapshot.cursor_snapshot.row_index)
-        .min(content_area.bottom().saturating_sub(1));
-    let cursor_position = Position::new(screen_column, screen_row);
+    let cursor_position = find_shown_cursor_cell(pane_snapshot, content_area)?;
     if !visible_content_area.contains(cursor_position)
         || covering_floating_panes
             .iter()
@@ -801,6 +839,46 @@ pub fn get_cursor_position(frame_geometry: &FrameGeometry<'_>) -> Option<Positio
         return None;
     }
     Some(cursor_position)
+}
+
+/// The buffer cell where the cursor of `pane_snapshot` shows in its content
+/// area `content_area`: the cursor's column and row, each clamped to the
+/// area's last one, with the row moved down by the grid view's scroll offset.
+/// `None` when `content_area` holds no cell, the pane has no terminal grid,
+/// the program hid the cursor, or the moved row lies past the area's last row.
+///
+/// Example: a 24-row area at `(0, 1)` with the cursor at row `5`, column `12`
+/// gives `(12, 6)` at scroll offset `0`, `(12, 9)` at offset `3`, and `None`
+/// at offset `20` and at offset `usize::MAX`.
+fn find_shown_cursor_cell(
+    pane_snapshot: &PaneSnapshot,
+    content_area: RatatuiRect,
+) -> Option<Position> {
+    if content_area.width == 0 || content_area.height == 0 {
+        return None;
+    }
+    let terminal_grid_view = pane_snapshot.terminal_grid_view.as_ref()?;
+    if !pane_snapshot.cursor_snapshot.is_visible {
+        return None;
+    }
+    let live_row_index = pane_snapshot
+        .cursor_snapshot
+        .row_index
+        .min(content_area.height - 1);
+    let shown_row_index =
+        usize::from(live_row_index).saturating_add(terminal_grid_view.view_row_offset);
+    if shown_row_index >= usize::from(content_area.height) {
+        return None;
+    }
+    let shown_row_index = shown_row_index as u16;
+    let column_index = pane_snapshot
+        .cursor_snapshot
+        .column_index
+        .min(content_area.width - 1);
+    Some(Position::new(
+        content_area.x + column_index,
+        content_area.y + shown_row_index,
+    ))
 }
 
 /// How the outer terminal's cursor should look this frame:

@@ -57,8 +57,8 @@ fn placement_background_colors_distinguish_the_moving_and_destination_panes() {
         Color::Rgb(22, 12, 33)
     );
     assert_eq!(
-        compute_placement_background_color(Color::Reset, theme.focused_border_color, 24),
-        Color::Reset
+        compute_placement_background_color((1, 2, 3), Color::Reset, 24),
+        Color::Rgb(1, 2, 3)
     );
 }
 
@@ -103,7 +103,7 @@ fn draw_placement_message_uses_full_sentence_and_detail_when_the_pane_has_room()
         RatatuiRect::new(0, 0, 40, 7),
         &placement_message,
         theme.accent_color,
-        theme.bar_background_color,
+        Color::from(theme.bar_background_color),
         &theme,
         &mut screen_buffer,
     );
@@ -127,7 +127,7 @@ fn draw_placement_message_uses_compact_sentence_in_a_narrow_pane() {
         RatatuiRect::new(0, 0, 14, 3),
         &placement_message,
         theme.accent_color,
-        theme.bar_background_color,
+        Color::from(theme.bar_background_color),
         &theme,
         &mut screen_buffer,
     );
@@ -150,7 +150,7 @@ fn draw_placement_message_uses_an_ellipsis_when_only_one_cell_fits() {
         RatatuiRect::new(0, 0, 1, 3),
         &placement_message,
         theme.accent_color,
-        theme.bar_background_color,
+        Color::from(theme.bar_background_color),
         &theme,
         &mut screen_buffer,
     );

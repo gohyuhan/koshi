@@ -115,7 +115,7 @@ fn a_custom_ramp_recolors_the_active_tab() {
 #[test]
 fn a_custom_bar_background_recolors_the_bar_fill() {
     let custom_theme = Theme {
-        bar_background_color: Color::Rgb(0x01, 0x02, 0x03),
+        bar_background_color: (0x01, 0x02, 0x03),
         ..Theme::default()
     };
     let custom_bar_style = compute_bar_style(&custom_theme);

@@ -22,10 +22,10 @@ use crate::theme::Theme;
 
 use super::{
     clear_drawn_rows, compute_pane_area, compute_pane_border_style, compute_symbol_display_width,
-    draw_pane_border, draw_pane_contents, draw_panes, draw_placement_hover_tints,
-    draw_stack_headers, draw_too_small_overlay, get_area_origin, get_area_rect,
-    list_visible_layout_area_panes, place_cell_rect, place_screen_rect, set_line_clipped,
-    write_text_clipped, DrawnRows, LayoutAreaSurface, PlacedLayoutArea,
+    draw_pane_border, draw_pane_contents, draw_panes, draw_peer_cursor_markers,
+    draw_placement_hover_tints, draw_stack_headers, draw_too_small_overlay, get_area_origin,
+    get_area_rect, list_visible_layout_area_panes, place_cell_rect, place_screen_rect,
+    set_line_clipped, write_text_clipped, DrawnRows, LayoutAreaSurface, PlacedLayoutArea,
 };
 
 /// The grab handle a floating pane draws on its titlebar strip.
@@ -148,13 +148,13 @@ pub(crate) fn list_placed_floating_panes<'a>(
 ///    with its pin state.
 /// 3. Draws the layout area at the layout origin as the tiled layer draws a
 ///    tab ([`LayoutAreaSurface::FloatingPane`]): the pane boxes with their
-///    labels and scroll positions, the pane cells, the placement hover tint
-///    and the stack headers. The pane cells and the tint are cut to the
-///    visible area. No pane draws a placement handle, and while that hover
-///    is `FloatingHandle`, every pane takes the placement hover style and
-///    tint. While every pane of the layout area is suppressed, it draws
-///    `Terminal too small — enlarge window` centered in the visible cells
-///    below the strip instead ([`draw_too_small_overlay`]).
+///    labels and scroll positions, the pane cells, the placement hover tint,
+///    the peer cursor markers and the stack headers. The pane cells and the
+///    tint are cut to the visible area. No pane draws a placement handle, and
+///    while that hover is `FloatingHandle`, every pane takes the placement
+///    hover style and tint. While every pane of the layout area is suppressed,
+///    it draws `Terminal too small — enlarge window` centered in the visible
+///    cells below the strip instead ([`draw_too_small_overlay`]).
 ///
 /// Every step runs only over the rows `drawn_rows` draws. A box on no drawn
 /// row is not drawn.
@@ -240,6 +240,13 @@ pub(super) fn draw_floating_pane(
         screen_buffer,
     );
     draw_placement_hover_tints(placed_layout_area, viewer_chrome, drawn_rows, screen_buffer);
+    draw_peer_cursor_markers(
+        render_snapshot,
+        placed_layout_area,
+        theme,
+        drawn_rows,
+        screen_buffer,
+    );
     draw_stack_headers(
         render_snapshot,
         placed_layout_area,

@@ -215,6 +215,12 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
     let mut render_snapshot = build_region_test_render_snapshot();
     render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
     render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
+    render_snapshot.client_snapshot.color_index = 3;
+    render_snapshot.session_snapshot.peers = vec![PeerSnapshot {
+        client_id: ClientId::new(),
+        color_index: 1,
+        typed_pane_id: None,
+    }];
     let viewer_chrome = ViewerChrome {
         link_status: LinkStatus::Redialing(Reconnecting {
             attempt: 3,
@@ -243,6 +249,8 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
             notification_button: NotificationButton {
                 unread_entry_count: 0,
             },
+            viewer_color_index: 3,
+            peers: &render_snapshot.session_snapshot.peers,
         }
     );
     assert!(
@@ -258,5 +266,12 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
             render_snapshot.session_snapshot.tabs_metadata.as_slice(),
         ),
         "the tab metadata is borrowed from the snapshot"
+    );
+    assert!(
+        std::ptr::eq(
+            tabline_inputs.peers,
+            render_snapshot.session_snapshot.peers.as_slice(),
+        ),
+        "the peer list is borrowed from the snapshot"
     );
 }

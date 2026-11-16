@@ -46,5 +46,5 @@ fn resolve_theme_maps_every_palette_role() {
         Color::Rgb(0x1c, 0x1d, 0x1e)
     );
     assert_eq!(theme.letterbox_color, Color::Rgb(0x1f, 0x20, 0x21));
-    assert_eq!(theme.bar_background_color, Color::Rgb(0x25, 0x26, 0x27));
+    assert_eq!(theme.bar_background_color, (0x25, 0x26, 0x27));
 }

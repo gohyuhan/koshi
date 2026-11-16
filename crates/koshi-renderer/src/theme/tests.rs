@@ -4,6 +4,10 @@
 
 use super::*;
 
+use std::ops::Range;
+use std::path::Path;
+
+use koshi_config::theme::parse_theme;
 use koshi_config::types::{ColorPalette, RgbColor};
 
 #[test]
@@ -179,7 +183,7 @@ fn the_default_theme_is_the_config_crates_default_palette() {
         to_ratatui_rgb_color(palette.letterbox)
     );
     assert_eq!(
-        theme.bar_background_color,
+        Color::from(theme.bar_background_color),
         to_ratatui_rgb_color(palette.bar_bg)
     );
 }
@@ -200,7 +204,7 @@ fn every_default_color_outside_the_ramp_is_exact() {
         Color::Rgb(0x30, 0x0f, 0x4a)
     );
     assert_eq!(theme.letterbox_color, Color::Rgb(0x58, 0x58, 0x58));
-    assert_eq!(theme.bar_background_color, Color::Rgb(0x00, 0x00, 0x00));
+    assert_eq!(theme.bar_background_color, (0x00, 0x00, 0x00));
 }
 
 #[test]
@@ -227,4 +231,171 @@ fn ramp_interpolation_handles_the_maximum_element_count() {
         theme.get_ramp_color(1, usize::MAX),
         theme.get_ramp_color(0, usize::MAX)
     );
+}
+
+// --- client colors -----------------------------------------------------------
+
+const BLACK_TEXT_COLOR: Color = Color::Rgb(0x00, 0x00, 0x00);
+const WHITE_TEXT_COLOR: Color = Color::Rgb(0xff, 0xff, 0xff);
+
+/// The `(fill, text)` colors of each client index of `color_indexes` over
+/// the bar of `theme`.
+fn list_client_colors(theme: &Theme, color_indexes: Range<u32>) -> Vec<(Color, Color)> {
+    color_indexes
+        .map(|color_index| {
+            let client_color = theme.compute_client_color(color_index);
+            (client_color.fill_color, client_color.text_color)
+        })
+        .collect()
+}
+
+#[test]
+fn over_the_default_black_bar_the_first_twelve_clients_take_these_exact_colors() {
+    assert_eq!(
+        list_client_colors(&Theme::default(), 0..12),
+        vec![
+            (Color::Rgb(0xff, 0x00, 0x00), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x00, 0xff, 0x4a), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x95, 0x00, 0xff), WHITE_TEXT_COLOR),
+            (Color::Rgb(0xff, 0xdf, 0x00), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x00, 0xd4, 0xff), BLACK_TEXT_COLOR),
+            (Color::Rgb(0xff, 0x00, 0x8a), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x40, 0xff, 0x00), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x3c, 0x33, 0xff), WHITE_TEXT_COLOR),
+            (Color::Rgb(0xff, 0x55, 0x00), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x00, 0xff, 0xa0), BLACK_TEXT_COLOR),
+            (Color::Rgb(0xea, 0x00, 0xff), BLACK_TEXT_COLOR),
+            (Color::Rgb(0xca, 0xff, 0x00), BLACK_TEXT_COLOR),
+        ]
+    );
+}
+
+#[test]
+fn over_a_light_bar_a_fill_below_three_to_one_steps_darker_until_it_reaches_it() {
+    let light_bar_theme = Theme {
+        bar_background_color: (0xef, 0xf1, 0xf5),
+        ..Theme::default()
+    };
+
+    assert_eq!(
+        list_client_colors(&light_bar_theme, 0..6),
+        vec![
+            (Color::Rgb(0xff, 0x00, 0x00), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x00, 0x9e, 0x2e), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x95, 0x00, 0xff), WHITE_TEXT_COLOR),
+            (Color::Rgb(0x9e, 0x8a, 0x00), BLACK_TEXT_COLOR),
+            (Color::Rgb(0x00, 0x95, 0xb3), BLACK_TEXT_COLOR),
+            (Color::Rgb(0xff, 0x00, 0x8a), BLACK_TEXT_COLOR),
+        ]
+    );
+}
+
+#[test]
+fn convert_hsl_to_rgb_gives_the_css_color_at_full_saturation() {
+    assert_eq!(convert_hsl_to_rgb(0.0, 50), (255, 0, 0));
+    assert_eq!(convert_hsl_to_rgb(240.0, 60), (51, 51, 255));
+    assert_eq!(convert_hsl_to_rgb(77.0, 100), (255, 255, 255));
+    assert_eq!(convert_hsl_to_rgb(120.0, 0), (0, 0, 0));
+}
+
+#[test]
+fn relative_luminance_and_contrast_ratio_give_the_wcag_values() {
+    assert_eq!(compute_relative_luminance((255, 0, 0)), 0.2126);
+    assert_eq!(compute_relative_luminance((0, 0, 0)), 0.0);
+    assert_eq!(compute_contrast_ratio(1.0, 0.0), 21.0);
+    assert_eq!(compute_contrast_ratio(0.0, 1.0), 21.0);
+}
+
+/// The bar background of the default palette and of every theme in
+/// `themes-example/`, each with its file name.
+fn list_shipped_bar_background_colors() -> Vec<(String, (u8, u8, u8))> {
+    let default_bar_background_color = ColorPalette::default().bar_bg;
+    let mut bar_background_colors = vec![(
+        "the default palette".to_string(),
+        (
+            default_bar_background_color.red,
+            default_bar_background_color.green,
+            default_bar_background_color.blue,
+        ),
+    )];
+    let themes_directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes-example");
+    for theme_directory_entry in
+        std::fs::read_dir(&themes_directory).expect("themes-example directory exists")
+    {
+        let theme_path = theme_directory_entry
+            .expect("readable directory entry")
+            .path();
+        if theme_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("kdl")
+        {
+            continue;
+        }
+        let theme_file_name = theme_path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned();
+        let theme_source_text =
+            std::fs::read_to_string(&theme_path).expect("theme file is readable");
+        let (parsed_theme, _) =
+            parse_theme(&theme_path, &theme_source_text).unwrap_or_else(|parse_error| {
+                panic!("{theme_file_name} does not parse: {parse_error}")
+            });
+        let bar_background_color = parsed_theme
+            .colors
+            .and_then(|colors| colors.bar_bg)
+            .unwrap_or_else(|| panic!("{theme_file_name} does not set `bar-bg`"));
+        bar_background_colors.push((
+            theme_file_name,
+            (
+                bar_background_color.red,
+                bar_background_color.green,
+                bar_background_color.blue,
+            ),
+        ));
+    }
+    bar_background_colors
+}
+
+#[test]
+fn over_every_shipped_bar_the_first_hundred_clients_reach_three_to_one_fill_and_four_and_a_half_to_one_text(
+) {
+    let bar_background_colors = list_shipped_bar_background_colors();
+    assert_eq!(bar_background_colors.len(), 26);
+    for (theme_name, bar_background_color) in bar_background_colors {
+        let theme = Theme {
+            bar_background_color,
+            ..Theme::default()
+        };
+        let bar_luminance = compute_relative_luminance(bar_background_color);
+        for color_index in 0..100 {
+            let client_color = theme.compute_client_color(color_index);
+            let (
+                Color::Rgb(fill_red, fill_green, fill_blue),
+                Color::Rgb(text_red, text_green, text_blue),
+            ) = (client_color.fill_color, client_color.text_color)
+            else {
+                panic!("client {color_index} over {theme_name} is not two RGB colors");
+            };
+            let fill_luminance = compute_relative_luminance((fill_red, fill_green, fill_blue));
+            let fill_contrast_ratio = compute_contrast_ratio(fill_luminance, bar_luminance);
+            assert!(
+                fill_contrast_ratio >= 3.0,
+                "client {color_index} over {theme_name}: fill {:?} has {fill_contrast_ratio:.3}:1",
+                client_color.fill_color
+            );
+            let text_contrast_ratio = compute_contrast_ratio(
+                compute_relative_luminance((text_red, text_green, text_blue)),
+                fill_luminance,
+            );
+            assert!(
+                text_contrast_ratio >= 4.5,
+                "client {color_index} over {theme_name}: text {:?} on fill {:?} has {text_contrast_ratio:.3}:1",
+                client_color.text_color,
+                client_color.fill_color
+            );
+        }
+    }
 }

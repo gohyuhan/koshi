@@ -6,7 +6,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
 
-use crate::snapshot::{KeymapHints, NotificationButton, Reconnecting, TabMetadata};
+use crate::snapshot::{KeymapHints, NotificationButton, PeerSnapshot, Reconnecting, TabMetadata};
 
 /// The compiled-in region geometry, in solve order: a one-row tabline on the
 /// top edge, then a one-row statusline on the bottom edge.
@@ -46,8 +46,8 @@ pub(crate) struct StatuslineInputs<'a> {
 ///
 /// This value excludes colors and pane data. A session named `work` with tabs
 /// `shell` and `logs` carries those names, their active markers, the mode
-/// values, the tray button state and the notification button state, but no
-/// pane slot or terminal grid.
+/// values, the tray button state, the notification button state and the
+/// indexes of the attached clients, but no pane slot or terminal grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TablineInputs<'a> {
     /// The session display name shown in the left block.
@@ -64,6 +64,13 @@ pub(crate) struct TablineInputs<'a> {
     pub(crate) tabline_offset: Option<usize>,
     /// The notification button the tabline draws left of the tray button.
     pub(crate) notification_button: NotificationButton,
+    /// The viewing client's own index, which its chip shows as
+    /// `viewer_color_index + 1`.
+    pub(crate) viewer_color_index: u32,
+    /// Every other client attached to the session, in `color_index` order.
+    /// Empty while the viewing client is the only one, and then the tabline
+    /// draws no client chip.
+    pub(crate) peers: &'a [PeerSnapshot],
 }
 
 #[cfg(test)]
