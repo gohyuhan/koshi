@@ -62,7 +62,7 @@ use crate::region::StatuslineInputs;
 use crate::snapshot::{
     CommittedRegions, CursorStyle, GridView, KeymapHints, LayoutAreaSnapshot,
     PanePlacementPresentation, PaneSnapshot, PlacementHandleHover, Reconnecting, RenderSnapshot,
-    SelectionSpans, ViewerChrome,
+    SelectionSpans, SessionSnapshot, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
@@ -544,10 +544,10 @@ pub fn render_frame(
 /// row of its pane's content area, tiled or floating, when that area shows
 /// it. Each pane's cursor, mouse modes, alternate screen state, top line
 /// number and `has_selection` are drawn into no cell and may differ, and so
-/// may the placement preview, which [`render_frame`] does not read. Every
-/// other field must be equal, each grid view must keep its row count, column
-/// count and scroll offset, and each pane must show the same scroll position
-/// text.
+/// may the placement preview and the session's peer list, which
+/// [`render_frame`] does not read. Every other field must be equal, each grid
+/// view must keep its row count, column count and scroll offset, and each pane
+/// must show the same scroll position text.
 ///
 /// Example: one pane whose content area starts at buffer row 2, with grid row
 /// 8 alone replaced, gives `[10]`.
@@ -558,12 +558,27 @@ pub fn list_changed_screen_rows(
 ) -> Option<Vec<u16>> {
     let viewport_area = next_frame_geometry.viewport_area;
     let RenderSnapshot {
-        session_snapshot,
+        session_snapshot:
+            SessionSnapshot {
+                session_id,
+                session_name,
+                active_tab_snapshot,
+                tabs_metadata,
+                floating_pane_slots,
+                floating_panes,
+                peers: _,
+            },
         pane_snapshots,
         client_snapshot,
         placement_preview: _,
     } = next_frame_geometry.render_snapshot;
-    if previous_render_snapshot.session_snapshot != *session_snapshot
+    let previous_session_snapshot = &previous_render_snapshot.session_snapshot;
+    if previous_session_snapshot.session_id != *session_id
+        || previous_session_snapshot.session_name != *session_name
+        || previous_session_snapshot.active_tab_snapshot != *active_tab_snapshot
+        || previous_session_snapshot.tabs_metadata != *tabs_metadata
+        || previous_session_snapshot.floating_pane_slots != *floating_pane_slots
+        || previous_session_snapshot.floating_panes != *floating_panes
         || previous_render_snapshot.client_snapshot != *client_snapshot
         || previous_render_snapshot.pane_snapshots.len() != pane_snapshots.len()
     {
@@ -586,8 +601,7 @@ pub fn list_changed_screen_rows(
             continue;
         };
         let pane_id = next_pane_snapshot.pane_id;
-        let tiled_content_area = session_snapshot
-            .active_tab_snapshot
+        let tiled_content_area = active_tab_snapshot
             .layout_area
             .find_visible_pane_slot(pane_id)
             .and_then(|pane_slot| pane_slot.content_rect)

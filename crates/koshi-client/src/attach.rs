@@ -3954,8 +3954,6 @@ fn run_attachment<B: Backend, W: Write>(
                 break leave_after_quit(uplink);
             }
         }
-        uplink.send_placement_preview_target(client.find_placement_preview_target());
-        uplink.send_viewer_local_input_mode(client.find_viewer_local_input_mode().is_some());
         // Every pass ends here, whether or not it drew a frame: the events it
         // handled may have moved the viewer after that frame was drawn.
         screen.set_cell_size(cell_size_query.get_current_cell_size());
@@ -3968,6 +3966,11 @@ fn run_attachment<B: Backend, W: Write>(
         ) {
             adopt_painted_mouse_frame(client, &mut last_mouse_frame, mouse_frame);
         }
+        // The placement target and the local input mode are read after the
+        // refresh. A waiting frame that the refresh paints can end a local
+        // input mode.
+        uplink.send_placement_preview_target(client.find_placement_preview_target());
+        uplink.send_viewer_local_input_mode(client.find_viewer_local_input_mode().is_some());
         if let Err(io_error) = screen.update_shift_mouse_capture(client, terminal_writer) {
             tracing::warn!(%io_error, "could not update Shift mouse reporting");
             break AttachmentEnding::TerminalGone;

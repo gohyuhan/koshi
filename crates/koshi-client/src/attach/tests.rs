@@ -8833,6 +8833,119 @@ fn a_release_owed_outside_a_mouse_event_leaves_in_the_next_round() {
     );
 }
 
+/// The notification center is open and pane placement mode previews pane
+/// `source_pane_id` into the active tab, and the session was told both. A
+/// frame with every pane suppressed and an unavailable preview is rejected by
+/// the terminal and waits. The next pass paints it, which closes the center
+/// and ends placement mode, and that pass reports both.
+#[test]
+fn a_frame_painted_on_retry_reports_the_local_modes_it_ended_in_the_same_pass() {
+    let draw_count = Arc::new(AtomicUsize::new(0));
+    let mut screen = Screen::from_backend_and_viewport_size(
+        FailingBackend::from_terminal_size_with_draw_count(
+            TEST_VIEWPORT_SIZE,
+            Arc::clone(&draw_count),
+        ),
+        TEST_VIEWPORT_SIZE,
+    );
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let source_pane_id = PaneId::new();
+    let mut no_room_frame = build_test_painted_frame();
+    let active_tab_id = no_room_frame.client_snapshot.active_tab_id;
+    no_room_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .is_every_pane_suppressed = true;
+    client.notification_history.open_notification_center(true);
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: Some(active_tab_id),
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command_id: None,
+    });
+    screen.paint_driver.backend.should_fail_draw = true;
+    assert_eq!(
+        screen.draw_painted_frame_with_placement_preview(
+            &mut client,
+            Box::new(no_room_frame),
+            Some(Arc::new(PlacementPreview::Unavailable {
+                source_pane_id,
+                destination_tab_id: active_tab_id,
+            })),
+        ),
+        None,
+        "the backend rejects the frame"
+    );
+    screen.paint_driver.backend.should_fail_draw = false;
+    let rejected_draw_count = draw_count.load(Ordering::Relaxed);
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    uplink.sent_placement_preview_target = Some(PanePlacementPreviewTarget {
+        source_pane_id,
+        destination_tab_id: active_tab_id,
+    });
+    uplink.sent_is_viewer_local_input_mode_on = true;
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    let producer_sender = incoming_sender.clone();
+    let producer_draw_count = Arc::clone(&draw_count);
+    let producer_thread = thread::spawn(move || {
+        producer_sender
+            .send(build_session_event_incoming(SessionEvent::Pong))
+            .expect("the attachment loop accepts the pong");
+        let is_waiting_frame_drawn =
+            wait_for_draw_count(&producer_draw_count, rejected_draw_count + 1);
+        producer_sender
+            .send(build_session_event_incoming(SessionEvent::Detached))
+            .expect("the attachment loop accepts the detach");
+        is_waiting_frame_drawn
+    });
+
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        SessionId::new(),
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        TEXT_ONLY_ATTACH_SETTINGS,
+        &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+        &mut Vec::new(),
+        incoming_sender,
+        incoming_receiver,
+    );
+
+    assert!(
+        producer_thread.join().expect("the producer finished"),
+        "the pass after the rejection paints the waiting frame"
+    );
+    assert_eq!(attachment_ending, AttachmentEnding::Detached);
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(client.placement_state.placement_mode, None);
+    assert_eq!(
+        request_receiver
+            .try_iter()
+            .map(|ipc_request| ipc_request.request_kind)
+            .collect::<Vec<_>>(),
+        vec![
+            IpcRequestKind::SetPanePlacementPreview {
+                placement_target: None,
+            },
+            IpcRequestKind::SetViewerLocalInputMode {
+                is_viewer_local_input_mode_on: false,
+            },
+        ],
+        "the pass that paints the frame reports the modes that frame ended"
+    );
+}
+
 /// Run an attachment for `client` with `screen`, while a producer sends
 /// `first_incoming`, reads the first request the loop writes, and then
 /// ends the terminal. Returns how the attachment ended and the kind of that

@@ -66,8 +66,8 @@ use koshi_terminal::state::CursorShape;
 use super::tabline::format_version_badge_text;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, CursorStyle, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, KeymapHints, LinkStatus, PaneSlot, PaneSnapshot, ScrollbackMetadata,
-    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    ImagePlacementSnapshot, KeymapHints, LinkStatus, PaneSlot, PaneSnapshot, PeerSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
@@ -5570,6 +5570,12 @@ fn a_change_drawn_into_no_cell_lists_no_rows() {
     next_pane_snapshot.view_top_row_index = 7;
     next_pane_snapshot.has_selection = true;
     next_pane_snapshot.scrollback_metadata.retained_line_count = 12;
+    let typed_pane_id = next_render_snapshot.pane_snapshots[0].pane_id;
+    next_render_snapshot.session_snapshot.peers = vec![PeerSnapshot {
+        client_id: ClientId::new(),
+        color_index: 1,
+        typed_pane_id: Some(typed_pane_id),
+    }];
 
     assert_eq!(
         list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),

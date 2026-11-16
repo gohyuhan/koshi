@@ -1851,8 +1851,8 @@ impl FrameInputs {
     /// [`list_changed_screen_rows`] gives them. `next_frame_geometry` is the
     /// geometry of the frame drawn from `next_frame_inputs`. `None` when any
     /// input other than the render snapshot differs, when either frame draws a
-    /// placement state, or when the render snapshots differ in anything other
-    /// than pane rows.
+    /// placement state, or when [`list_changed_screen_rows`] gives `None` for
+    /// the two render snapshots.
     fn list_changed_screen_rows(
         &self,
         next_frame_inputs: &FrameInputs,
