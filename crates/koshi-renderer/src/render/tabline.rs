@@ -1,8 +1,8 @@
 //! The tab bar: the session block on the left, the mode tag on the right, the
 //! floating pane tray button left of the mode tag, the notification button
 //! left of the tray button, the client chips left of the buttons while another
-//! client is attached, and between them the tabs that fit the row with their
-//! scroll arrows.
+//! client is attached ([`super::client_chip`]), and between them the tabs that
+//! fit the row with their scroll arrows.
 
 use std::ops::Range;
 
@@ -10,12 +10,12 @@ use ratatui::widgets::{Clear, Widget};
 
 use super::*;
 
-use koshi_core::client::compute_client_number;
-
 use crate::notification::{find_notification_button_columns, format_notification_button_text};
 use crate::region::TablineInputs;
 use crate::snapshot::TabMetadata;
 use crate::theme::ClientColor;
+
+use super::client_chip::{draw_client_chip_group, solve_client_chip_group, ClientChipGroup};
 
 #[cfg(test)]
 mod tests;
@@ -89,27 +89,13 @@ pub(super) fn draw_tabline(
             FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
         );
     }
-    for (client_chip_span, client_color) in
-        tabline_layout.client_chip_spans.iter().zip(client_colors)
-    {
-        set_line_clipped(
-            screen_buffer,
-            client_chip_span.start_column,
+    if let Some(client_chip_group) = &tabline_layout.client_chip_group {
+        draw_client_chip_group(
+            client_chip_group,
+            client_colors,
+            compute_scroll_arrow_style(theme),
             tabline_area.y,
-            &build_client_chip_line(*client_chip_span, *client_color),
-            tabline_area.right() - client_chip_span.start_column,
-        );
-    }
-    if let Some(hidden_client_mark) = tabline_layout.hidden_client_mark {
-        set_line_clipped(
             screen_buffer,
-            hidden_client_mark.start_column,
-            tabline_area.y,
-            &Line::from(Span::styled(
-                format!("+{}", hidden_client_mark.client_count),
-                compute_scroll_arrow_style(theme),
-            )),
-            tabline_area.right() - hidden_client_mark.start_column,
         );
     }
     if let Some(notification_button_columns) = &tabline_layout.notification_button_columns {
@@ -215,13 +201,11 @@ pub(crate) struct TablineLayout {
     /// the button.
     pub notification_button_columns: Option<Range<u16>>,
     /// The client chips, left to right: the viewing client's own chip, then
-    /// one chip per peer in `color_index` order. Empty while the viewing
-    /// client is the only attached client, and when the viewing client's own
-    /// chip does not fit.
-    pub client_chip_spans: Vec<ClientChipSpan>,
-    /// The `+N` mark right of the client chips. `None` while every attached
-    /// client has a chip, and when the row has no room for the mark.
-    pub hidden_client_mark: Option<HiddenClientMark>,
+    /// one chip per peer in `color_index` order, and the `+N` mark right of
+    /// them when not every attached client has a chip. `None` while the
+    /// viewing client is the only attached client, and when the row has no
+    /// room for the mark.
+    pub client_chip_group: Option<ClientChipGroup>,
     /// The column where the session block and the tab strip end: one blank
     /// cell before the first client chip or the `+N` mark, else the
     /// notification button's first column, else the tray button's column,
@@ -238,30 +222,6 @@ pub(crate) struct TablineLayout {
     /// The column of the right scroll arrow, or `None` when no tab is hidden
     /// off the right.
     pub right_scroll_arrow_column: Option<u16>,
-}
-
-/// One client chip of the tab strip: ` 3 `, the client number with one
-/// blank cell on each side. The number is `color_index + 1`
-/// ([`compute_client_number`]), so index `11` draws ` 12 ` in four cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClientChipSpan {
-    /// The index of the client the chip names.
-    pub color_index: u32,
-    /// Whether the chip names the viewing client, which draws its number bold
-    /// and underlined.
-    pub is_viewer_chip: bool,
-    /// The column of the chip's first cell.
-    pub start_column: u16,
-}
-
-/// The `+N` mark right of the client chips: `N` attached clients, the
-/// viewing client included, have no chip drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HiddenClientMark {
-    /// The column of the `+`.
-    pub start_column: u16,
-    /// The count of attached clients with no chip drawn, at least `1`.
-    pub client_count: usize,
 }
 
 /// The columns occupied by one visible tab ribbon.
@@ -316,10 +276,10 @@ pub(crate) fn solve_tabline_layout(
         .map(|notification_button_columns| notification_button_columns.start)
         .or(floating_pane_tray_button_column)
         .unwrap_or(right_block_start_column);
-    let (client_chip_spans, hidden_client_mark, client_chip_group_start_column) =
+    let client_chip_group =
         solve_client_chips(tabline_inputs, tabline_area.x, leftmost_button_column);
-    let tab_strip_end_column = match client_chip_group_start_column {
-        Some(group_start_column) => group_start_column.saturating_sub(1),
+    let tab_strip_end_column = match &client_chip_group {
+        Some(client_chip_group) => client_chip_group.start_column.saturating_sub(1),
         None => leftmost_button_column,
     };
     let session_block_room = tab_strip_end_column.saturating_sub(tabline_area.x);
@@ -336,8 +296,7 @@ pub(crate) fn solve_tabline_layout(
         right_block_start_column,
         floating_pane_tray_button_column,
         notification_button_columns: notification_button_columns.clone(),
-        client_chip_spans: client_chip_spans.clone(),
-        hidden_client_mark,
+        client_chip_group: client_chip_group.clone(),
         tab_strip_end_column,
         first_visible_tab_index: 0,
         visible_tab_spans: Vec::new(),
@@ -369,8 +328,7 @@ pub(crate) fn solve_tabline_layout(
             right_block_start_column,
             floating_pane_tray_button_column,
             notification_button_columns,
-            client_chip_spans,
-            hidden_client_mark,
+            client_chip_group,
             tab_strip_end_column,
             first_visible_tab_index: 0,
             visible_tab_spans: unscrolled_visible_tab_spans,
@@ -418,8 +376,7 @@ pub(crate) fn solve_tabline_layout(
         right_block_start_column,
         floating_pane_tray_button_column,
         notification_button_columns,
-        client_chip_spans,
-        hidden_client_mark,
+        client_chip_group,
         tab_strip_end_column,
         first_visible_tab_index,
         visible_tab_spans,
@@ -428,21 +385,16 @@ pub(crate) fn solve_tabline_layout(
     }
 }
 
-/// The client chips and the `+N` mark of the tab strip, right-aligned so the
-/// last one ends at `group_end_column`, and the column where the first one
-/// starts. `tabline_area_column` is the row's first column. Nothing, and
-/// `None`, while `tabline_inputs.peers` is empty.
+/// The client chips and the `+N` mark of the tab strip, right-aligned so that
+/// the last one ends at `group_end_column` ([`solve_client_chip_group`]).
+/// `tabline_area_column` is the row's first column. `None` while
+/// `tabline_inputs.peers` is empty, and when the mark alone does not fit.
 ///
 /// The chips are the viewing client's own, then one per peer in list order.
 /// One blank cell separates two chips, and a chip and the mark. The group
 /// takes at most half of the cells from `tabline_area_column` up to
-/// `group_end_column`, rounded down:
-///
-/// 1. When every chip fits, every chip is drawn and no mark.
-/// 2. Otherwise the chips are drawn in order, and the mark `+N` follows
-///    them. `N` counts the clients with no chip, and the mark takes `+` and
-///    the digits of `N`. The chips drawn are the most that fit together with
-///    their mark. When the mark alone does not fit, nothing is drawn.
+/// `group_end_column`, rounded down. `N` counts the viewing client too when
+/// its own chip does not fit.
 ///
 /// Example: with 12 cells of half room, a viewer of index `0` and peers of
 /// indexes `1` to `4` draw ` 1 ` and ` 2 ` and `+3`: ` 1   2  +3`. With 6
@@ -452,127 +404,22 @@ fn solve_client_chips(
     tabline_inputs: TablineInputs<'_>,
     tabline_area_column: u16,
     group_end_column: u16,
-) -> (Vec<ClientChipSpan>, Option<HiddenClientMark>, Option<u16>) {
+) -> Option<ClientChipGroup> {
     if tabline_inputs.peers.is_empty() {
-        return (Vec::new(), None, None);
+        return None;
     }
-    let group_room = group_end_column.saturating_sub(tabline_area_column) / 2;
     let chip_clients = std::iter::once((tabline_inputs.viewer_color_index, true)).chain(
         tabline_inputs
             .peers
             .iter()
             .map(|peer_snapshot| (peer_snapshot.color_index, false)),
     );
-    let client_count = tabline_inputs.peers.len() + 1;
-    let (mut packed_chips, mut chips_width) = pack_client_chips(chip_clients, group_room);
-    let mut hidden_client_mark_width = 0;
-    while packed_chips.len() < client_count {
-        let hidden_client_count = client_count - packed_chips.len();
-        hidden_client_mark_width = 1 + count_decimal_digits(hidden_client_count as u64);
-        let separator_width = if packed_chips.is_empty() { 0 } else { 1 };
-        if chips_width + separator_width + hidden_client_mark_width <= group_room {
-            break;
-        }
-        if packed_chips.pop().is_none() {
-            return (Vec::new(), None, None);
-        }
-        chips_width = match packed_chips.last() {
-            Some((color_index, _, chip_offset)) => {
-                chip_offset + compute_client_chip_width(*color_index)
-            }
-            None => 0,
-        };
-    }
-    let separator_width = if !packed_chips.is_empty() && hidden_client_mark_width > 0 {
-        1
-    } else {
-        0
-    };
-    let group_width = chips_width + separator_width + hidden_client_mark_width;
-    let group_start_column = group_end_column - group_width;
-    let hidden_client_mark = (hidden_client_mark_width > 0).then(|| HiddenClientMark {
-        start_column: group_start_column + chips_width + separator_width,
-        client_count: client_count - packed_chips.len(),
-    });
-    let client_chip_spans = packed_chips
-        .into_iter()
-        .map(
-            |(color_index, is_viewer_chip, chip_offset)| ClientChipSpan {
-                color_index,
-                is_viewer_chip,
-                start_column: group_start_column + chip_offset,
-            },
-        )
-        .collect();
-    (
-        client_chip_spans,
-        hidden_client_mark,
-        Some(group_start_column),
+    solve_client_chip_group(
+        chip_clients,
+        tabline_inputs.peers.len() + 1,
+        group_end_column.saturating_sub(tabline_area_column) / 2,
+        group_end_column,
     )
-}
-
-/// The chips of `chip_clients`, each `(color_index, is_viewer_chip)`, that
-/// fit `room_width` cells in order, with one blank cell between two chips,
-/// stopping at the first chip that does not fit: each with its offset from the
-/// first chip's column, and the cells they take together. Chips of indexes
-/// `0`, `9` and `10` in 9 cells give offsets `0` and `4` and width `8`.
-fn pack_client_chips(
-    chip_clients: impl Iterator<Item = (u32, bool)>,
-    room_width: u16,
-) -> (Vec<(u32, bool, u16)>, u16) {
-    let mut packed_chips = Vec::new();
-    let mut chips_width: u16 = 0;
-    for (color_index, is_viewer_chip) in chip_clients {
-        let chip_offset = if packed_chips.is_empty() {
-            0
-        } else {
-            chips_width + 1
-        };
-        let chip_end_offset = chip_offset + compute_client_chip_width(color_index);
-        if chip_end_offset > room_width {
-            break;
-        }
-        packed_chips.push((color_index, is_viewer_chip, chip_offset));
-        chips_width = chip_end_offset;
-    }
-    (packed_chips, chips_width)
-}
-
-/// The cells the chip of the client of index `color_index` takes: the digits
-/// of its number ([`compute_client_number`]) and one blank cell on each side.
-/// Index `0` gives `3`, index `11` gives `4`, and index `4294967295`
-/// gives `12`.
-fn compute_client_chip_width(color_index: u32) -> u16 {
-    count_decimal_digits(compute_client_number(color_index)) + 2
-}
-
-/// The digits `decimal_number` takes in decimal: `0` and `9` give `1`, `10`
-/// gives `2`, and `u64::MAX` gives `20`.
-fn count_decimal_digits(decimal_number: u64) -> u16 {
-    decimal_number
-        .checked_ilog10()
-        .map_or(1, |decimal_log| decimal_log as u16 + 1)
-}
-
-/// The chip line of `client_chip_span` in `client_color`: the client number
-/// with one blank cell on each side, its number bold and underlined when the
-/// chip names the viewing client. Index `2` gives ` 3 `.
-fn build_client_chip_line(
-    client_chip_span: ClientChipSpan,
-    client_color: ClientColor,
-) -> Line<'static> {
-    let chip_style = compute_client_color_style(client_color);
-    let client_number_text = compute_client_number(client_chip_span.color_index).to_string();
-    let client_number_style = if client_chip_span.is_viewer_chip {
-        chip_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-    } else {
-        chip_style
-    };
-    Line::from(vec![
-        Span::styled(" ", chip_style),
-        Span::styled(client_number_text, client_number_style),
-        Span::styled(" ", chip_style),
-    ])
 }
 
 /// Place tabs from index `first_visible_tab_index` into the half-open column

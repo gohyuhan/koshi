@@ -161,8 +161,9 @@ pub(crate) fn list_placed_floating_panes<'a>(
 ///    with its pin state.
 /// 3. Draws the layout area at the layout origin as the tiled layer draws a
 ///    tab ([`LayoutAreaSurface::FloatingPane`]): the pane boxes with their
-///    labels and scroll positions, the pane cells, the placement hover tint,
-///    the peer cursor markers and the stack headers. The pane cells and the
+///    labels, pane chips and scroll positions, the pane cells, the placement
+///    hover tint, the peer cursor markers and the stack headers with their
+///    pane chips. The titlebar strip draws no pane chip. The pane cells and the
 ///    tint are cut to the visible area. No pane draws a placement handle, and
 ///    while that hover is `FloatingHandle`, every pane takes the placement
 ///    hover style and tint. While every pane of the layout area is suppressed,
@@ -171,9 +172,10 @@ pub(crate) fn list_placed_floating_panes<'a>(
 ///
 /// The floating pane is the one at `floating_pane_index` of
 /// `frame_geometry`'s placed floating panes, drawn in `frame_geometry`'s
-/// theme with its viewer chrome. Its tint areas and peer cursor markers are
-/// those `frame_geometry` holds for its layer. Every step runs only over the
-/// rows `drawn_rows` draws. A box on no drawn row is not drawn.
+/// theme with its viewer chrome. Its tint areas, peer cursor markers and pane
+/// chip groups are those `frame_geometry` holds for its layer. Every step
+/// runs only over the rows `drawn_rows` draws. A box on no drawn row is not
+/// drawn.
 pub(super) fn draw_floating_pane(
     frame_geometry: &FrameGeometry<'_>,
     floating_pane_index: usize,
@@ -240,6 +242,9 @@ pub(super) fn draw_floating_pane(
         },
         layout_origin: placed_floating_pane.layout_origin,
         content_clip_area: placed_floating_pane.visible_area,
+        pane_chip_groups: frame_geometry
+            .pane_chip_groups
+            .list_layer_groups(frame_layer),
     };
     draw_panes(
         render_snapshot,

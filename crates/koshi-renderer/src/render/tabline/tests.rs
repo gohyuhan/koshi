@@ -9,6 +9,7 @@ use super::*;
 use koshi_core::ids::FloatingPaneId;
 use std::num::NonZeroUsize;
 
+use crate::render::client_chip::{ClientChipSpan, HiddenClientMark};
 use crate::render::tests::{compute_version_badge_column_count, format_rendered_cells};
 use crate::snapshot::{
     LinkStatus, NotificationButton, NotificationCenter, Reconnecting, ViewerChrome,
@@ -1783,10 +1784,13 @@ fn the_client_chips_sit_left_of_the_buttons_and_end_the_tab_strip_one_cell_befor
     assert_eq!(tabline_layout.floating_pane_tray_button_column, Some(71));
     assert_eq!(tabline_layout.notification_button_columns, Some(68..71));
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        list_three_chips_at_eighty_columns()
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 57,
+            client_chip_spans: list_three_chips_at_eighty_columns(),
+            hidden_client_mark: None,
+        })
     );
-    assert_eq!(tabline_layout.hidden_client_mark, None);
     assert_eq!(tabline_layout.tab_strip_end_column, 56);
     assert_eq!(
         format_rendered_cells(&render_tabline(&tabline_test_frame, 80), 0, 56..74),
@@ -1845,11 +1849,15 @@ fn a_two_digit_client_number_widens_its_chip_to_four_cells() {
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
 
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        vec![
-            build_client_chip_span(11, true, 60),
-            build_client_chip_span(0, false, 65),
-        ]
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 60,
+            client_chip_spans: vec![
+                build_client_chip_span(11, true, 60),
+                build_client_chip_span(0, false, 65),
+            ],
+            hidden_client_mark: None,
+        })
     );
     assert_eq!(
         format_rendered_cells(&render_tabline(&tabline_test_frame, 80), 0, 60..68),
@@ -1864,20 +1872,20 @@ fn chips_past_half_of_the_room_left_of_the_buttons_count_into_the_hidden_client_
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
 
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        (0..8_u16)
-            .map(|chip_index| build_client_chip_span(
-                u32::from(chip_index),
-                chip_index == 0,
-                34 + 4 * chip_index
-            ))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        tabline_layout.hidden_client_mark,
-        Some(HiddenClientMark {
-            start_column: 66,
-            client_count: 1,
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 34,
+            client_chip_spans: (0..8_u16)
+                .map(|chip_index| build_client_chip_span(
+                    u32::from(chip_index),
+                    chip_index == 0,
+                    34 + 4 * chip_index
+                ))
+                .collect(),
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 66,
+                client_count: 1,
+            }),
         })
     );
     assert_eq!(tabline_layout.tab_strip_end_column, 33);
@@ -1907,17 +1915,17 @@ fn twelve_cells_of_half_room_draw_two_chips_and_a_mark_for_the_other_three() {
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(36));
 
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        vec![
-            build_client_chip_span(0, true, 14),
-            build_client_chip_span(1, false, 18),
-        ]
-    );
-    assert_eq!(
-        tabline_layout.hidden_client_mark,
-        Some(HiddenClientMark {
-            start_column: 22,
-            client_count: 3,
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 14,
+            client_chip_spans: vec![
+                build_client_chip_span(0, true, 14),
+                build_client_chip_span(1, false, 18),
+            ],
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 22,
+                client_count: 3,
+            }),
         })
     );
     assert_eq!(
@@ -1933,16 +1941,15 @@ fn the_largest_client_index_takes_a_twelve_cell_chip_and_moves_into_the_mark_whe
 
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(32));
 
-    assert_eq!(compute_client_chip_width(u32::MAX), 12);
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        vec![build_client_chip_span(0, true, 14)]
-    );
-    assert_eq!(
-        tabline_layout.hidden_client_mark,
-        Some(HiddenClientMark {
-            start_column: 18,
-            client_count: 1,
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 14,
+            client_chip_spans: vec![build_client_chip_span(0, true, 14)],
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 18,
+                client_count: 1,
+            }),
         })
     );
     assert_eq!(tabline_layout.tab_strip_end_column, 13);
@@ -1959,14 +1966,14 @@ fn the_hidden_client_mark_takes_the_digits_of_the_clients_without_a_chip() {
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(24));
 
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        vec![build_client_chip_span(0, true, 6)]
-    );
-    assert_eq!(
-        tabline_layout.hidden_client_mark,
-        Some(HiddenClientMark {
-            start_column: 10,
-            client_count: 9,
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 6,
+            client_chip_spans: vec![build_client_chip_span(0, true, 6)],
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 10,
+                client_count: 9,
+            }),
         })
     );
     assert_eq!(tabline_layout.tab_strip_end_column, 5);
@@ -1982,12 +1989,15 @@ fn a_row_with_room_for_the_mark_alone_draws_the_mark_with_every_client_counted()
 
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(22));
 
-    assert_eq!(tabline_layout.client_chip_spans, Vec::new());
     assert_eq!(
-        tabline_layout.hidden_client_mark,
-        Some(HiddenClientMark {
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
             start_column: 8,
-            client_count: 2,
+            client_chip_spans: Vec::new(),
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 8,
+                client_count: 2,
+            }),
         })
     );
     assert_eq!(tabline_layout.tab_strip_end_column, 7);
@@ -2004,8 +2014,7 @@ fn a_row_with_no_room_for_the_mark_draws_what_a_lone_client_draws() {
 
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(14));
 
-    assert_eq!(tabline_layout.client_chip_spans, Vec::new());
-    assert_eq!(tabline_layout.hidden_client_mark, None);
+    assert_eq!(tabline_layout.client_chip_group, None);
     assert_eq!(tabline_layout.tab_strip_end_column, 2);
     assert_eq!(
         render_tabline(&tabline_test_frame, 14),
@@ -2019,8 +2028,7 @@ fn a_lone_client_draws_no_chip_and_its_tab_strip_ends_at_the_buttons() {
 
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
 
-    assert_eq!(tabline_layout.client_chip_spans, Vec::new());
-    assert_eq!(tabline_layout.hidden_client_mark, None);
+    assert_eq!(tabline_layout.client_chip_group, None);
     assert_eq!(tabline_layout.tab_strip_end_column, 68);
 }
 
@@ -2037,8 +2045,12 @@ fn the_tab_strip_scrolls_inside_the_cells_the_chips_leave() {
     let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(80));
 
     assert_eq!(
-        tabline_layout.client_chip_spans,
-        list_three_chips_at_eighty_columns()
+        tabline_layout.client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 57,
+            client_chip_spans: list_three_chips_at_eighty_columns(),
+            hidden_client_mark: None,
+        })
     );
     assert_eq!(tabline_layout.tab_strip_end_column, 56);
     assert_eq!(tabline_layout.first_visible_tab_index, 0);
@@ -2057,28 +2069,4 @@ fn the_tab_strip_scrolls_inside_the_cells_the_chips_leave() {
         })
         .collect();
     assert_eq!(tabline_layout.visible_tab_spans, expected_visible_tab_spans);
-}
-
-#[test]
-fn a_chip_width_counts_the_digits_of_the_client_number_and_two_blank_cells() {
-    assert_eq!(
-        [0, 9, 10, u64::MAX].map(count_decimal_digits),
-        [1, 1, 2, 20]
-    );
-    assert_eq!(
-        [0, 8, 9, 11, u32::MAX].map(compute_client_chip_width),
-        [3, 3, 4, 4, 12]
-    );
-}
-
-#[test]
-fn packing_stops_at_the_first_chip_that_does_not_fit() {
-    assert_eq!(
-        pack_client_chips([(0, true), (9, false), (10, false)].into_iter(), 9),
-        (vec![(0, true, 0), (9, false, 4)], 8)
-    );
-    assert_eq!(
-        pack_client_chips([(0, true), (1, false)].into_iter(), 2),
-        (Vec::new(), 0)
-    );
 }

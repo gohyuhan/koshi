@@ -124,6 +124,15 @@ pub(crate) fn build_one_pane_floating_pane_slot(
     )
 }
 
+/// A peer of index `color_index` whose keys reach `typed_pane_id`.
+pub(crate) fn build_peer_snapshot(color_index: u32, typed_pane_id: Option<PaneId>) -> PeerSnapshot {
+    PeerSnapshot {
+        client_id: ClientId::new(),
+        color_index,
+        typed_pane_id,
+    }
+}
+
 /// Build a snapshot from explicit pieces. `pane_layouts` are `(pane_id, outer rect, visible)`;
 /// a visible pane's content rect is the outer rect inset by its one-cell border.
 pub(crate) fn build_render_snapshot(
@@ -2444,6 +2453,42 @@ fn stack_header_without_title_still_shows_arrow_and_indicator() {
     );
     // The collapsed member carries no title: `build_render_snapshot` sets
     // `pane_title` to `None`.
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .stack_headers = vec![StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect: build_cell_rect(0, 1, 30, 1),
+        member_index: 0,
+        member_count: 2,
+    }];
+    let render_buffer = render_test_snapshot(&render_snapshot, 30, 8);
+
+    assert_eq!(
+        format_rendered_row_text(&render_buffer, 1),
+        format!("▸ {}[1/2]", " ".repeat(23))
+    );
+}
+
+#[test]
+fn a_stack_header_drawn_over_a_visible_pane_box_blanks_every_cell_of_its_row() {
+    let active_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active_pane_id, build_cell_rect(0, 2, 30, 4), true),
+            (collapsed_pane_id, build_cell_rect(0, 1, 30, 1), true),
+        ],
+        Some(active_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 30,
+            row_count: 8,
+        },
+    );
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -5550,6 +5595,7 @@ fn list_core_changed_screen_rows(
     list_changed_screen_rows(
         previous_render_snapshot,
         previous_frame_geometry.get_peer_cursor_markers(),
+        previous_frame_geometry.get_pane_chip_groups(),
         &build_frame_geometry(
             next_render_snapshot,
             &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
