@@ -150,6 +150,7 @@ fn render_tabline(tabline_test_frame: &TablineTestFrame, column_count: u16) -> B
     draw_tabline(
         build_tabline_inputs(tabline_test_frame),
         &render_theme,
+        &list_client_colors(&tabline_test_frame.render_snapshot, &render_theme),
         tabline_area,
         &mut render_buffer,
     );
@@ -1105,6 +1106,7 @@ fn a_row_below_the_buffer_leaves_every_cell_untouched() {
     draw_tabline(
         build_tabline_inputs(&tabline_frame),
         &render_theme,
+        &list_client_colors(&tabline_frame.render_snapshot, &render_theme),
         below_tabline_area,
         &mut render_buffer,
     );
@@ -1814,7 +1816,10 @@ fn a_chip_paints_its_clients_colors_and_the_viewers_own_number_bold_and_underlin
                 render_buffer[(column_index, 0)].fg,
                 render_buffer[(column_index, 0)].bg
             ),
-            (client_color.text_color, client_color.fill_color),
+            (
+                Color::from(client_color.text_color),
+                Color::from(client_color.fill_color)
+            ),
             "the cell at column {column_index}"
         );
     }
@@ -1944,6 +1949,30 @@ fn the_largest_client_index_takes_a_twelve_cell_chip_and_moves_into_the_mark_whe
     assert_eq!(
         format_rendered_cells(&render_tabline(&tabline_test_frame, 32), 0, 14..20),
         " 1  +1"
+    );
+}
+
+#[test]
+fn the_hidden_client_mark_takes_the_digits_of_the_clients_without_a_chip() {
+    let tabline_test_frame = build_attached_clients_frame(0, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+    let tabline_layout = solve_tabline_layout(&tabline_test_frame, build_tabline_area(24));
+
+    assert_eq!(
+        tabline_layout.client_chip_spans,
+        vec![build_client_chip_span(0, true, 6)]
+    );
+    assert_eq!(
+        tabline_layout.hidden_client_mark,
+        Some(HiddenClientMark {
+            start_column: 10,
+            client_count: 9,
+        })
+    );
+    assert_eq!(tabline_layout.tab_strip_end_column, 5);
+    assert_eq!(
+        format_rendered_cells(&render_tabline(&tabline_test_frame, 24), 0, 6..12),
+        " 1  +9"
     );
 }
 

@@ -300,8 +300,8 @@ fn paint_render_snapshot_with_notifications(
             committed_regions,
             viewer_chrome,
             viewport_area,
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -1109,7 +1109,7 @@ fn every_client_chip_cell_hits_the_tabline_and_a_click_on_tab_3_hits_tab_3() {
     let frame_layout = mouse_frame.build_frame_layout();
     let theme = Theme::default();
     let chip_fill_colors: Vec<Color> = (0..3)
-        .map(|color_index| theme.compute_client_color(color_index).fill_color)
+        .map(|color_index| Color::from(theme.compute_client_color(color_index).fill_color))
         .collect();
 
     let chip_column_indexes: Vec<u16> = (0..TEST_VIEWPORT_SIZE.column_count)
@@ -1193,6 +1193,7 @@ fn the_cursor_lands_in_the_focused_pane_content() {
         &committed_regions,
         ViewerChrome::default(),
         build_viewport_area(TEST_VIEWPORT_SIZE),
+        &Theme::default(),
     ))
     .expect("the focused pane has a cursor");
     let mouse_frame = MouseFrame::from_snapshot(

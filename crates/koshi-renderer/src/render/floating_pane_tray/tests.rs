@@ -57,8 +57,8 @@ fn render_tray_frame_rows(
             &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
             viewer_chrome,
             build_viewport_area(render_snapshot),
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -414,7 +414,8 @@ fn the_cursor_under_the_open_tray_is_hidden_and_shows_once_the_tray_closes() {
             &render_snapshot,
             &committed_regions,
             build_open_tray_viewer_chrome(0),
-            viewport_area
+            viewport_area,
+            &Theme::default()
         )),
         None
     );
@@ -423,7 +424,8 @@ fn the_cursor_under_the_open_tray_is_hidden_and_shows_once_the_tray_closes() {
             &render_snapshot,
             &committed_regions,
             ViewerChrome::default(),
-            viewport_area
+            viewport_area,
+            &Theme::default()
         )),
         Some(Position::new(21, 2))
     );

@@ -94,7 +94,7 @@ use koshi_core::command::{
     ScrollPaneArgs, SetSelectionArgs, TabTarget, TiledPlacementTarget, VisualCommand,
 };
 use koshi_core::geometry::{Direction, Rect as CoreRect, Size, SplitDirection};
-use koshi_core::ids::{CommandId, PaneId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
@@ -113,8 +113,8 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::notification::NotificationCenterEntries;
 use koshi_renderer::snapshot::{
-    CommittedRegions, GridView, LayoutAreaSnapshot, PaneSlot, PlacementSnapshot, PlacementSource,
-    PlacementTabSnapshot, RenderSnapshot, TabSnapshot, ViewerChrome,
+    CommittedRegions, GridView, LayoutAreaSnapshot, PaneSlot, PeerSnapshot, PlacementSnapshot,
+    PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::{build_image_cell_snapshot, build_image_paints};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
@@ -519,6 +519,7 @@ fn build_source_image_pixel_map(
         &build_committed_regions(viewport_size),
         viewer_chrome,
         Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
+        &koshi_renderer::theme::Theme::default(),
     )) {
         for target_row_offset in 0..image_paint.target_area.height {
             for target_column_offset in 0..image_paint.target_area.width {
@@ -1091,7 +1092,8 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
                 &render_snapshots[0],
                 &build_committed_regions(TEST_VIEWPORT_SIZE),
                 ViewerChrome::default(),
-                Rect::new(0, 0, 80, 24)
+                Rect::new(0, 0, 80, 24),
+                &koshi_renderer::theme::Theme::default()
             ))
             .len()
                 >= 2,
@@ -1145,6 +1147,7 @@ fn a_native_paint_snapshots_only_the_cells_under_its_images() {
             TEST_VIEWPORT_SIZE.column_count,
             TEST_VIEWPORT_SIZE.row_count,
         ),
+        &koshi_renderer::theme::Theme::default(),
     ))
     .iter()
     .map(|image_paint| image_paint.target_area)
@@ -1465,6 +1468,7 @@ fn assert_partial_native_frame_write_recovers(
         &committed_regions,
         ViewerChrome::default(),
         render_area,
+        &koshi_renderer::theme::Theme::default(),
     ));
     let image_cell_snapshot = build_image_cell_snapshot(
         &build_frame_geometry(
@@ -1472,6 +1476,7 @@ fn assert_partial_native_frame_write_recovers(
             &committed_regions,
             ViewerChrome::default(),
             render_area,
+            &koshi_renderer::theme::Theme::default(),
         ),
         render_area,
     )
@@ -4129,8 +4134,8 @@ fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
                 ..ViewerChrome::default()
             },
             viewport_area,
+            &theme,
         ),
-        &theme,
         &koshi_renderer::snapshot::KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -4900,7 +4905,6 @@ impl ListedRowPaintCheck {
                 |frame_buffer, drawn_rows| {
                     SnapshotWidget {
                         frame_geometry: &frame_geometry,
-                        theme: &frame_inputs.theme,
                         keymap_hints: &frame_inputs.keymap_hints,
                         pending_key_sequence: frame_inputs.pending_key_sequence.as_ref(),
                         image_mode: frame_inputs.image_mode,
@@ -4944,6 +4948,7 @@ fn build_frame_inputs_geometry(frame_inputs: &FrameInputs) -> FrameGeometry<'_> 
             frame_inputs.terminal_size.column_count,
             frame_inputs.terminal_size.row_count,
         ),
+        &frame_inputs.theme,
     )
 }
 
@@ -5287,6 +5292,7 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
         terminal_size: TEST_VIEWPORT_SIZE,
         has_placement_state: false,
         notification_revision: 0,
+        peer_cursor_markers: FramePeerCursorMarkers::default(),
     };
     let changes: [FrameInputsChange; 10] = [
         ("the region solve", |frame_inputs| {
@@ -6041,6 +6047,56 @@ fn every_layout_change_leaves_the_outer_terminal_showing_exactly_the_frame_image
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn a_peer_cursor_that_moves_under_an_image_leaves_the_outer_terminal_showing_the_whole_image() {
+    for graphics_support in list_native_graphics_supports() {
+        let (mut server, client_id, image_pane_id) = build_test_server_with_pane();
+        let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+            client_id,
+            cell_size: build_one_pixel_cell_size(),
+        });
+        server.handle_pty_output(
+            image_pane_id,
+            &build_opaque_image_input(GraphicsProtocol::Kitty),
+        );
+        let mut client = build_launch_client(client_id);
+        let mut outer_terminal = EmulatedOuterTerminal::from_graphics_support(graphics_support);
+        let mut render_snapshot = outer_terminal.receive_frame(&server, &mut client, client_id);
+        render_snapshot.client_snapshot.focused_pane_id = None;
+        render_snapshot.session_snapshot.peers = vec![PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index: 1,
+            typed_pane_id: Some(image_pane_id),
+        }];
+
+        // The image starts at the pane's first cell, so the peer's cursor at
+        // row 0, column 0 and then column 1 lies under it.
+        for cursor_column_index in [0, 1] {
+            let cursor_snapshot = &mut render_snapshot
+                .pane_snapshots
+                .iter_mut()
+                .find(|pane_snapshot| pane_snapshot.pane_id == image_pane_id)
+                .expect("the frame carries the image pane")
+                .cursor_snapshot;
+            cursor_snapshot.row_index = 0;
+            cursor_snapshot.column_index = cursor_column_index;
+            cursor_snapshot.is_visible = true;
+            outer_terminal.paint_until_settled(&client, &render_snapshot);
+
+            let expected_image_pixels = build_expected_image_pixels(&client, &render_snapshot);
+            assert!(
+                !expected_image_pixels.is_empty(),
+                "{graphics_support:?}: the frame shows no image"
+            );
+            assert_eq!(
+                outer_terminal.list_shown_image_pixels(),
+                expected_image_pixels,
+                "{graphics_support:?}, the peer cursor at column {cursor_column_index}"
+            );
         }
     }
 }

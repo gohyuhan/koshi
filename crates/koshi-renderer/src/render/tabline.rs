@@ -33,10 +33,11 @@ mod tests;
 /// draws the button with no reverse video. A button that the row has no room
 /// for is not drawn, and the notification button is not drawn with no tray
 /// button. While another client is attached, the client chips sit left of the
-/// buttons: each chip is ` 3 ` in its client's colors
-/// ([`Theme::compute_client_color`](crate::theme::Theme::compute_client_color)),
-/// the viewing client's own chip first with its number bold and underlined,
-/// then `+N` in the scroll arrows' style when N clients have no chip.
+/// buttons: each chip is ` 3 ` in its client's colors from `client_colors`,
+/// the colors of the viewing client and then of each peer in list order
+/// ([`list_client_colors`](super::list_client_colors)). The viewing client's
+/// own chip comes first with its number bold and underlined, then `+N` in the
+/// scroll arrows' style when N clients have no chip.
 /// Only the tab list between them carries block backgrounds — each tab is a
 /// two-block ribbon on its own stop of the theme's chrome ramp (light-purple →
 /// light-blue by default). A tab that does not fit is dropped whole, and a `◀`
@@ -48,6 +49,7 @@ mod tests;
 pub(super) fn draw_tabline(
     tabline_inputs: TablineInputs<'_>,
     theme: &Theme,
+    client_colors: &[ClientColor],
     tabline_area: RatatuiRect,
     screen_buffer: &mut Buffer,
 ) {
@@ -87,15 +89,14 @@ pub(super) fn draw_tabline(
             FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,
         );
     }
-    for client_chip_span in &tabline_layout.client_chip_spans {
+    for (client_chip_span, client_color) in
+        tabline_layout.client_chip_spans.iter().zip(client_colors)
+    {
         set_line_clipped(
             screen_buffer,
             client_chip_span.start_column,
             tabline_area.y,
-            &build_client_chip_line(
-                *client_chip_span,
-                theme.compute_client_color(client_chip_span.color_index),
-            ),
+            &build_client_chip_line(*client_chip_span, *client_color),
             tabline_area.right() - client_chip_span.start_column,
         );
     }
@@ -438,13 +439,15 @@ pub(crate) fn solve_tabline_layout(
 /// `group_end_column`, rounded down:
 ///
 /// 1. When every chip fits, every chip is drawn and no mark.
-/// 2. Otherwise the mark `+N` takes `+` and the digits of the attached
-///    client count, the viewing client included. The chips that fit before
-///    the mark are drawn, stopping at the first that does not, and `N` counts
-///    the rest. When the mark alone does not fit, nothing is drawn.
+/// 2. Otherwise the chips are drawn in order, and the mark `+N` follows
+///    them. `N` counts the clients with no chip, and the mark takes `+` and
+///    the digits of `N`. The chips drawn are the most that fit together with
+///    their mark. When the mark alone does not fit, nothing is drawn.
 ///
 /// Example: with 12 cells of half room, a viewer of index `0` and peers of
-/// indexes `1` to `4` draw ` 1 ` and ` 2 ` and `+3`: ` 1   2  +3`.
+/// indexes `1` to `4` draw ` 1 ` and ` 2 ` and `+3`: ` 1   2  +3`. With 6
+/// cells, a viewer of index `0` and peers of indexes `1` to `9` draw ` 1 `
+/// and `+9`: ` 1  +9`.
 fn solve_client_chips(
     tabline_inputs: TablineInputs<'_>,
     tabline_area_column: u16,
@@ -454,26 +457,31 @@ fn solve_client_chips(
         return (Vec::new(), None, None);
     }
     let group_room = group_end_column.saturating_sub(tabline_area_column) / 2;
-    let list_chip_clients = || {
-        std::iter::once((tabline_inputs.viewer_color_index, true)).chain(
-            tabline_inputs
-                .peers
-                .iter()
-                .map(|peer_snapshot| (peer_snapshot.color_index, false)),
-        )
-    };
+    let chip_clients = std::iter::once((tabline_inputs.viewer_color_index, true)).chain(
+        tabline_inputs
+            .peers
+            .iter()
+            .map(|peer_snapshot| (peer_snapshot.color_index, false)),
+    );
     let client_count = tabline_inputs.peers.len() + 1;
-    let (mut packed_chips, mut chips_width) = pack_client_chips(list_chip_clients(), group_room);
+    let (mut packed_chips, mut chips_width) = pack_client_chips(chip_clients, group_room);
     let mut hidden_client_mark_width = 0;
-    if packed_chips.len() < client_count {
-        hidden_client_mark_width = 1 + count_decimal_digits(client_count as u64);
-        if hidden_client_mark_width > group_room {
+    while packed_chips.len() < client_count {
+        let hidden_client_count = client_count - packed_chips.len();
+        hidden_client_mark_width = 1 + count_decimal_digits(hidden_client_count as u64);
+        let separator_width = if packed_chips.is_empty() { 0 } else { 1 };
+        if chips_width + separator_width + hidden_client_mark_width <= group_room {
+            break;
+        }
+        if packed_chips.pop().is_none() {
             return (Vec::new(), None, None);
         }
-        (packed_chips, chips_width) = pack_client_chips(
-            list_chip_clients(),
-            group_room.saturating_sub(hidden_client_mark_width + 1),
-        );
+        chips_width = match packed_chips.last() {
+            Some((color_index, _, chip_offset)) => {
+                chip_offset + compute_client_chip_width(*color_index)
+            }
+            None => 0,
+        };
     }
     let separator_width = if !packed_chips.is_empty() && hidden_client_mark_width > 0 {
         1
@@ -538,10 +546,10 @@ fn compute_client_chip_width(color_index: u32) -> u16 {
     count_decimal_digits(compute_client_number(color_index)) + 2
 }
 
-/// The digits `value` takes in decimal: `0` and `9` give `1`, `10` gives `2`,
-/// and `u64::MAX` gives `20`.
-fn count_decimal_digits(value: u64) -> u16 {
-    value
+/// The digits `decimal_number` takes in decimal: `0` and `9` give `1`, `10`
+/// gives `2`, and `u64::MAX` gives `20`.
+fn count_decimal_digits(decimal_number: u64) -> u16 {
+    decimal_number
         .checked_ilog10()
         .map_or(1, |decimal_log| decimal_log as u16 + 1)
 }

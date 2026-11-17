@@ -24,7 +24,7 @@ use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
 };
 use koshi_terminal::grid::state::{Cell, Grid};
-use koshi_terminal::style::Style;
+use koshi_terminal::style::{Color as CellColor, Style};
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::notification::tests::build_test_notification_view;
@@ -33,8 +33,9 @@ use crate::render::tests::{build_core_regions, format_rendered_cells, get_pane_s
 use crate::render::{build_frame_geometry, list_placed_floating_panes, DrawnRows};
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot,
-    KeymapHints, LayoutAreaSnapshot, PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata,
-    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    KeymapHints, LayoutAreaSnapshot, PaneSlot, PaneSnapshot, PeerSnapshot, PlacementHandleHover,
+    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ViewerChrome,
 };
 use crate::theme::Theme;
 
@@ -223,6 +224,7 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
             &build_regions(),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         build_screen_area(),
     )
@@ -277,6 +279,7 @@ fn a_snapshot_of_part_of_the_viewport_holds_the_cells_of_the_whole_viewport_ther
             &build_regions(),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         build_screen_area(),
     )
@@ -289,6 +292,7 @@ fn a_snapshot_of_part_of_the_viewport_holds_the_cells_of_the_whole_viewport_ther
             &build_regions(),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         part_area,
     )
@@ -320,7 +324,8 @@ fn a_snapshot_of_part_of_the_viewport_holds_the_cells_of_the_whole_viewport_ther
                 &snapshot,
                 &build_regions(),
                 ViewerChrome::default(),
-                build_screen_area()
+                build_screen_area(),
+                &Theme::default()
             ),
             RatatuiRect::new(38, 6, 5, 5)
         )
@@ -368,6 +373,7 @@ fn image_cell_snapshot_matches_screen_reverse_and_selection() {
             &build_regions(),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         build_screen_area(),
     )
@@ -444,6 +450,7 @@ fn image_order_is_one_global_sequence_across_panes() {
         &build_regions(),
         ViewerChrome::default(),
         build_screen_area(),
+        &Theme::default(),
     ));
     assert_eq!(
         image_paints
@@ -490,6 +497,7 @@ fn a_scrolled_crop_keeps_the_full_image_scale() {
         &build_regions(),
         ViewerChrome::default(),
         build_screen_area(),
+        &Theme::default(),
     ));
     assert_eq!(
         image_paints
@@ -538,6 +546,7 @@ fn image_paint_keeps_geometry_and_rgba_record() {
             width: 40,
             height: 8,
         },
+        &Theme::default(),
     ));
 
     assert_eq!(image_paints.len(), 1);
@@ -594,6 +603,7 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
             width: 40,
             height: 8,
         },
+        &Theme::default(),
     ));
 
     assert_eq!(image_paints.len(), 2);
@@ -680,6 +690,7 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
             width: 40,
             height: 8,
         },
+        &Theme::default(),
     ));
 
     assert_eq!(image_paints.len(), 1);
@@ -744,6 +755,7 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
             width: 40,
             height: 8,
         },
+        &Theme::default(),
     ));
 
     assert_eq!(image_paints.len(), 1);
@@ -902,7 +914,8 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
         ),
         &build_regions(),
         ViewerChrome::default(),
-        viewport_area
+        viewport_area,
+        &Theme::default()
     ))
     .is_empty());
     assert!(build_image_paints(&build_frame_geometry(
@@ -916,7 +929,8 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
         ),
         &build_regions(),
         ViewerChrome::default(),
-        viewport_area
+        viewport_area,
+        &Theme::default()
     ))
     .is_empty());
     assert!(build_image_paints(&build_frame_geometry(
@@ -930,7 +944,8 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
         ),
         &build_regions(),
         ViewerChrome::default(),
-        viewport_area
+        viewport_area,
+        &Theme::default()
     ))
     .is_empty());
 }
@@ -967,6 +982,7 @@ fn image_paints_sort_overlaps_by_z_index() {
             width: 40,
             height: 8,
         },
+        &Theme::default(),
     ));
 
     assert_eq!(
@@ -1015,6 +1031,7 @@ fn unsupported_image_text_fills_the_visible_coverage() {
             width: 40,
             height: 8,
         },
+        &Theme::default(),
     ));
     let mut screen_buffer = Buffer::empty(RatatuiRect {
         x: 0,
@@ -1078,8 +1095,8 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
             &build_regions(),
             ViewerChrome::default(),
             viewport_area,
+            &render_theme,
         ),
-        &render_theme,
         &keymap_hints,
         None,
         ImageRenderMode::Placeholder,
@@ -1110,8 +1127,8 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
             &build_regions(),
             ViewerChrome::default(),
             viewport_area,
+            &render_theme,
         ),
-        &render_theme,
         &keymap_hints,
         None,
         ImageRenderMode::Placeholder,
@@ -1135,8 +1152,8 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
             &build_regions(),
             ViewerChrome::default(),
             viewport_area,
+            &render_theme,
         ),
-        &render_theme,
         &keymap_hints,
         None,
         ImageRenderMode::Native,
@@ -1161,8 +1178,8 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
             &build_regions(),
             ViewerChrome::default(),
             viewport_area,
+            &render_theme,
         ),
-        &render_theme,
         &keymap_hints,
         None,
         ImageRenderMode::Native,
@@ -1183,8 +1200,8 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
             &build_regions(),
             ViewerChrome::default(),
             viewport_area,
+            &render_theme,
         ),
-        &render_theme,
         &keymap_hints,
         None,
         ImageRenderMode::Native,
@@ -1314,6 +1331,7 @@ fn a_floating_panes_image_paint_targets_its_content_cells_from_the_pane_area_ori
         &committed_regions,
         ViewerChrome::default(),
         build_screen_area(),
+        &Theme::default(),
     ));
 
     // Content `(9, 2)` in the pane area starting at `(0, 1)` is screen
@@ -1346,6 +1364,7 @@ fn an_image_a_floating_pane_meets_is_left_out_and_an_image_it_misses_is_painted(
         &build_regions(),
         ViewerChrome::default(),
         build_screen_area(),
+        &Theme::default(),
     ));
 
     // The floating pane covers columns `4` to `9`: it meets the image at
@@ -1379,6 +1398,7 @@ fn a_later_floating_pane_hides_an_earlier_ones_image_and_an_earlier_one_hides_no
         &build_regions(),
         ViewerChrome::default(),
         build_screen_area(),
+        &Theme::default(),
     ));
 
     // The lower pane's image at `(1, 2)` `4x2` meets the upper pane's outer
@@ -1415,6 +1435,7 @@ fn while_pane_placement_shows_no_floating_image_is_painted_and_no_tiled_image_is
             ..ViewerChrome::default()
         },
         build_screen_area(),
+        &Theme::default(),
     ));
 
     assert_eq!(
@@ -1448,6 +1469,7 @@ fn a_floating_panes_image_is_cut_where_its_content_passes_the_pane_area() {
         &build_core_regions(40, 8),
         ViewerChrome::default(),
         build_screen_area(),
+        &Theme::default(),
     ));
 
     // The pane area is `(0, 1)` `40x6`, so it ends after column `39` and row
@@ -1488,6 +1510,7 @@ fn the_image_cell_snapshot_writes_no_floating_pane_cell_past_the_pane_area() {
             &build_core_regions(40, 8),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         build_screen_area(),
     )
@@ -1525,6 +1548,7 @@ fn a_snapshot_of_part_of_the_viewport_places_each_floating_pane_as_the_whole_vie
             &build_core_regions(40, 8),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         build_screen_area(),
     )
@@ -1537,6 +1561,7 @@ fn a_snapshot_of_part_of_the_viewport_places_each_floating_pane_as_the_whole_vie
             &build_core_regions(40, 8),
             ViewerChrome::default(),
             build_screen_area(),
+            &Theme::default(),
         ),
         part_area,
     )
@@ -1589,6 +1614,7 @@ fn the_image_cell_snapshot_writes_each_floating_pane_over_the_tiled_cells() {
                 &build_regions(),
                 viewer_chrome,
                 build_screen_area(),
+                &Theme::default(),
             ),
             build_screen_area(),
         )
@@ -1630,6 +1656,7 @@ fn a_tiled_image_a_floating_pane_meets_shows_no_unavailable_text_in_native_mode(
                     &build_regions(),
                     ViewerChrome::default(),
                     build_screen_area(),
+                    &Theme::default(),
                 ),
                 image_mode,
                 &[],
@@ -1735,6 +1762,7 @@ fn an_image_the_open_tray_meets_is_left_out_and_paints_again_once_the_tray_close
             &committed_regions,
             viewer_chrome,
             screen_area,
+            &Theme::default(),
         )));
         paint_targets.sort_by_key(|(_, target_area, _)| target_area.x);
         paint_targets
@@ -1796,6 +1824,7 @@ fn an_image_the_open_notification_center_or_the_drawn_toast_meets_is_left_out() 
             &committed_regions,
             viewer_chrome,
             screen_area,
+            &Theme::default(),
         )));
         paint_targets.sort_by_key(|(_, target_area, _)| target_area.x);
         paint_targets
@@ -1836,5 +1865,258 @@ fn an_image_the_open_notification_center_or_the_drawn_toast_meets_is_left_out() 
     assert_eq!(
         list_sorted_paint_targets(ViewerChrome::default()),
         [outside_paint_target, inside_paint_target]
+    );
+}
+
+// --- peer cursor markers and the placement hover tint --------------------------
+
+/// Add a peer of index `color_index` whose keys reach `typed_pane_id`, and
+/// show that pane's cursor at row `cursor_row_index`, column
+/// `cursor_column_index`.
+fn push_typing_peer(
+    render_snapshot: &mut RenderSnapshot,
+    color_index: u32,
+    typed_pane_id: PaneId,
+    cursor_row_index: u16,
+    cursor_column_index: u16,
+) {
+    render_snapshot.session_snapshot.peers.push(PeerSnapshot {
+        client_id: ClientId::new(),
+        color_index,
+        typed_pane_id: Some(typed_pane_id),
+    });
+    let cursor_snapshot =
+        &mut get_pane_snapshot_mut(render_snapshot, typed_pane_id).cursor_snapshot;
+    cursor_snapshot.row_index = cursor_row_index;
+    cursor_snapshot.column_index = cursor_column_index;
+    cursor_snapshot.is_visible = true;
+}
+
+/// The image cell snapshot of the whole `40x8` frame of `render_snapshot`,
+/// drawn with `viewer_chrome` in the default theme.
+fn build_whole_frame_cell_snapshot(
+    render_snapshot: &RenderSnapshot,
+    viewer_chrome: ViewerChrome,
+) -> ImageCellSnapshot {
+    build_image_cell_snapshot(
+        &build_frame_geometry(
+            render_snapshot,
+            &build_regions(),
+            viewer_chrome,
+            build_screen_area(),
+            &Theme::default(),
+        ),
+        build_screen_area(),
+    )
+    .expect("the snapshot fits")
+}
+
+/// A blank cell of style `cell_style`.
+fn build_blank_cell_state(cell_style: Style) -> ImageCellState {
+    ImageCellState {
+        style: cell_style,
+        ..ImageCellState::default()
+    }
+}
+
+/// `Style::default()` on the placement hover tint `(0x3a, 0x3a, 0x3a)`.
+fn build_tinted_blank_style() -> Style {
+    let mut tinted_blank_style = Style::default();
+    tinted_blank_style.set_background_color(CellColor::Rgb(0x3a, 0x3a, 0x3a));
+    tinted_blank_style
+}
+
+#[test]
+fn a_peer_cursor_marker_cell_takes_the_peers_colors_and_loses_reverse_video_in_the_snapshot() {
+    let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
+    render_snapshot.client_snapshot.focused_pane_id = None;
+    let tiled_pane_id = render_snapshot.pane_snapshots[0].pane_id;
+    let mut grid_cell_style = Style::default();
+    grid_cell_style.set_reverse(true);
+    grid_cell_style.set_bold(true);
+    update_pane_grid(&mut render_snapshot.pane_snapshots[0], |tiled_grid| {
+        for column_index in [3, 4] {
+            *tiled_grid
+                .get_cell_mut(2, column_index)
+                .expect("the cell is in the grid") = Cell::from_character('x', 1, grid_cell_style);
+        }
+    });
+    push_typing_peer(&mut render_snapshot, 1, tiled_pane_id, 2, 3);
+
+    let image_cell_snapshot =
+        build_whole_frame_cell_snapshot(&render_snapshot, ViewerChrome::default());
+
+    // The cursor at row 2, column 3 of the content area at `(1, 1)` sits on
+    // `(4, 3)`. The client of index 1 draws black text on `#00ff4a`.
+    let mut marker_cell_style = grid_cell_style;
+    marker_cell_style.set_foreground_color(CellColor::Rgb(0x00, 0x00, 0x00));
+    marker_cell_style.set_background_color(CellColor::Rgb(0x00, 0xff, 0x4a));
+    marker_cell_style.set_reverse(false);
+    assert_eq!(
+        image_cell_snapshot.find_cell(4, 3),
+        Some(&ImageCellState {
+            character: 'x',
+            cell_width: 1,
+            combining_characters: Vec::new(),
+            style: marker_cell_style,
+        })
+    );
+    assert_eq!(
+        image_cell_snapshot.find_cell(5, 3),
+        Some(&ImageCellState {
+            character: 'x',
+            cell_width: 1,
+            combining_characters: Vec::new(),
+            style: grid_cell_style,
+        })
+    );
+}
+
+#[test]
+fn a_floating_pane_covers_a_tiled_peer_cursor_marker_and_shows_its_own_in_the_snapshot() {
+    let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
+    render_snapshot.client_snapshot.focused_pane_id = None;
+    let tiled_pane_id = render_snapshot.pane_snapshots[0].pane_id;
+    let floating_slot_pane_id = push_floating_pane(
+        &mut render_snapshot,
+        build_cell_rect(4, 0, 6, 5),
+        Vec::new(),
+    );
+    push_typing_peer(&mut render_snapshot, 1, tiled_pane_id, 1, 4);
+    push_typing_peer(&mut render_snapshot, 2, floating_slot_pane_id, 0, 1);
+
+    let image_cell_snapshot =
+        build_whole_frame_cell_snapshot(&render_snapshot, ViewerChrome::default());
+
+    // The floating pane's first content cell `(5, 2)` covers the tiled
+    // cursor at row 1, column 4. The floating pane's cursor at row 0, column
+    // 1 sits on `(6, 2)`, where the client of index 2 draws white text on
+    // `#9500ff`.
+    let mut floating_marker_style = Style::default();
+    floating_marker_style.set_foreground_color(CellColor::Rgb(0xff, 0xff, 0xff));
+    floating_marker_style.set_background_color(CellColor::Rgb(0x95, 0x00, 0xff));
+    assert_eq!(
+        image_cell_snapshot.find_cell(5, 2),
+        Some(&ImageCellState::default())
+    );
+    assert_eq!(
+        image_cell_snapshot.find_cell(6, 2),
+        Some(&build_blank_cell_state(floating_marker_style))
+    );
+}
+
+#[test]
+fn a_hovered_tiled_placement_handle_tints_the_cells_of_its_pane_in_the_snapshot() {
+    let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
+    let tiled_pane_id = render_snapshot.pane_snapshots[0].pane_id;
+    let mut grid_cell_style = Style::default();
+    grid_cell_style.set_foreground_color(CellColor::Rgb(1, 2, 3));
+    update_pane_grid(&mut render_snapshot.pane_snapshots[0], |tiled_grid| {
+        *tiled_grid
+            .get_cell_mut(0, 0)
+            .expect("the cell is in the grid") = Cell::from_character('a', 1, grid_cell_style);
+    });
+    let hovered_viewer_chrome = ViewerChrome {
+        placement_handle_hover: Some(PlacementHandleHover::TiledHandle {
+            pane_id: tiled_pane_id,
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let image_cell_snapshot =
+        build_whole_frame_cell_snapshot(&render_snapshot, hovered_viewer_chrome);
+
+    // The content area runs from `(1, 1)` to `(38, 6)`.
+    let mut tinted_cell_style = grid_cell_style;
+    tinted_cell_style.set_background_color(CellColor::Rgb(0x3a, 0x3a, 0x3a));
+    assert_eq!(
+        image_cell_snapshot.find_cell(1, 1),
+        Some(&ImageCellState {
+            character: 'a',
+            cell_width: 1,
+            combining_characters: Vec::new(),
+            style: tinted_cell_style,
+        })
+    );
+    assert_eq!(
+        image_cell_snapshot.find_cell(38, 6),
+        Some(&build_blank_cell_state(build_tinted_blank_style()))
+    );
+    assert_eq!(
+        image_cell_snapshot.find_cell(0, 0),
+        Some(&ImageCellState::default())
+    );
+    assert_eq!(
+        build_whole_frame_cell_snapshot(&render_snapshot, ViewerChrome::default()).find_cell(1, 1),
+        Some(&ImageCellState {
+            character: 'a',
+            cell_width: 1,
+            combining_characters: Vec::new(),
+            style: grid_cell_style,
+        })
+    );
+}
+
+#[test]
+fn a_hovered_floating_pane_grab_handle_tints_its_pane_cells_in_the_snapshot() {
+    let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
+    push_floating_pane(
+        &mut render_snapshot,
+        build_cell_rect(4, 0, 6, 5),
+        Vec::new(),
+    );
+    let floating_pane_slot = &render_snapshot.session_snapshot.floating_pane_slots[0];
+    let hovered_viewer_chrome = ViewerChrome {
+        placement_handle_hover: Some(PlacementHandleHover::FloatingHandle {
+            floating_pane_id: floating_pane_slot.floating_pane_id,
+            is_pinned: floating_pane_slot.is_pinned,
+        }),
+        ..ViewerChrome::default()
+    };
+
+    let image_cell_snapshot =
+        build_whole_frame_cell_snapshot(&render_snapshot, hovered_viewer_chrome);
+
+    // `(5, 2)` is the floating pane's first content cell, `(4, 1)` the
+    // top-left corner of its box, and `(10, 1)` a tiled cell beside it.
+    assert_eq!(
+        image_cell_snapshot.find_cell(5, 2),
+        Some(&build_blank_cell_state(build_tinted_blank_style()))
+    );
+    assert_eq!(
+        image_cell_snapshot.find_cell(4, 1),
+        Some(&ImageCellState::default())
+    );
+    assert_eq!(
+        image_cell_snapshot.find_cell(10, 1),
+        Some(&ImageCellState::default())
+    );
+}
+
+#[test]
+fn a_peer_cursor_marker_outside_the_snapshot_area_changes_no_cell_of_it() {
+    let mut render_snapshot = build_tiled_image_render_snapshot(Vec::new());
+    render_snapshot.client_snapshot.focused_pane_id = None;
+    let tiled_pane_id = render_snapshot.pane_snapshots[0].pane_id;
+    push_typing_peer(&mut render_snapshot, 1, tiled_pane_id, 2, 3);
+    let snapshot_area = RatatuiRect::new(10, 2, 5, 3);
+
+    let image_cell_snapshot = build_image_cell_snapshot(
+        &build_frame_geometry(
+            &render_snapshot,
+            &build_regions(),
+            ViewerChrome::default(),
+            build_screen_area(),
+            &Theme::default(),
+        ),
+        snapshot_area,
+    )
+    .expect("the snapshot fits");
+
+    // The marker sits on `(4, 3)`, left of the snapshot area.
+    assert_eq!(image_cell_snapshot.screen_area, snapshot_area);
+    assert_eq!(
+        image_cell_snapshot.cell_states,
+        vec![ImageCellState::default(); 15]
     );
 }

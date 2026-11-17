@@ -2052,22 +2052,31 @@ fn a_typed_character_lists_only_its_row_after_the_painted_updates_travel() {
     let viewport_size = second_received_render_snapshot
         .client_snapshot
         .viewport_size;
+    let committed_regions =
+        koshi_renderer::snapshot::CommittedRegions::build_core(viewport_size, 0);
+    let viewport_area =
+        ratatui::layout::Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count);
+    let frame_theme = koshi_renderer::theme::Theme::default();
+    let first_frame_geometry = koshi_renderer::build_frame_geometry(
+        &first_received_render_snapshot,
+        &committed_regions,
+        koshi_renderer::snapshot::ViewerChrome::default(),
+        viewport_area,
+        &frame_theme,
+    );
 
     // The `12x4` tab centers in the `20x4` pane area at `(4, 1)`, so grid row
     // 1 lands on buffer row 3.
     assert_eq!(
         koshi_renderer::list_changed_screen_rows(
             &first_received_render_snapshot,
+            first_frame_geometry.get_peer_cursor_markers(),
             &koshi_renderer::build_frame_geometry(
                 &second_received_render_snapshot,
-                &koshi_renderer::snapshot::CommittedRegions::build_core(viewport_size, 0),
+                &committed_regions,
                 koshi_renderer::snapshot::ViewerChrome::default(),
-                ratatui::layout::Rect::new(
-                    0,
-                    0,
-                    viewport_size.column_count,
-                    viewport_size.row_count
-                )
+                viewport_area,
+                &koshi_renderer::theme::Theme::default(),
             )
         ),
         Some(vec![3])

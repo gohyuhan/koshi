@@ -31,10 +31,12 @@ const MINIMUM_CLIENT_FILL_CONTRAST_RATIO: f64 = 3.0;
 /// and the cursor marker in a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientColor {
-    /// The background of the chip and of the marker cell.
-    pub fill_color: Color,
-    /// The text over `fill_color`: black `#000000` or white `#ffffff`.
-    pub text_color: Color,
+    /// The background of the chip and of the marker cell, as `(r, g, b)`
+    /// channels.
+    pub fill_color: (u8, u8, u8),
+    /// The text over `fill_color`, as `(r, g, b)` channels: black
+    /// `(0, 0, 0)` or white `(255, 255, 255)`.
+    pub text_color: (u8, u8, u8),
 }
 
 /// Every color the renderer's chrome styles draw with. The style helper
@@ -173,12 +175,12 @@ impl Theme {
         let text_color = if compute_contrast_ratio(0.0, fill_luminance)
             >= compute_contrast_ratio(1.0, fill_luminance)
         {
-            Color::Rgb(0x00, 0x00, 0x00)
+            (0x00, 0x00, 0x00)
         } else {
-            Color::Rgb(0xff, 0xff, 0xff)
+            (0xff, 0xff, 0xff)
         };
         ClientColor {
-            fill_color: Color::from(fill_rgb),
+            fill_color: fill_rgb,
             text_color,
         }
     }

@@ -68,9 +68,11 @@ use crate::snapshot::{
     SelectionSpans, SessionSnapshot, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
-use crate::theme::Theme;
+use crate::theme::{ClientColor, Theme};
 
-const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
+/// The background, as `(r, g, b)` channels, that the placement hover tint
+/// gives each pane content cell it covers.
+pub(crate) const PLACEMENT_HOVER_TINT_COLOR: (u8, u8, u8) = (0x3a, 0x3a, 0x3a);
 
 /// The tag a pane that the viewing client zooms writes after its title in
 /// its top border, with one blank cell on each side.
@@ -86,9 +88,9 @@ use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use floating_pane_tray::draw_floating_pane_tray;
 use notification::{draw_notification_center, draw_notification_toast};
-use peer_cursor_marker::{
-    draw_peer_cursor_markers, get_peer_cursor_marker_order_key, list_frame_peer_cursor_markers,
-};
+pub use peer_cursor_marker::FramePeerCursorMarkers;
+pub(crate) use peer_cursor_marker::PeerCursorMarker;
+use peer_cursor_marker::{draw_peer_cursor_markers, list_frame_peer_cursor_markers};
 use placement::draw_pane_placement_presentation;
 
 /// The rows of the buffer that one [`render_frame`] call draws.
@@ -129,11 +131,12 @@ impl<'rows> DrawnRows<'rows> {
     }
 }
 
-/// Where one paint places its surfaces: the frame `render_snapshot` drawn over
-/// `viewport_area` with `committed_regions` and `viewer_chrome`, solved once
-/// by [`build_frame_geometry`]. [`render_frame`], [`get_cursor_position`],
-/// [`list_changed_screen_rows`], [`build_image_paints`](crate::build_image_paints)
-/// and [`build_image_cell_snapshot`](crate::build_image_cell_snapshot) read the
+/// Where one paint places its surfaces and the colors it paints them in: the
+/// frame `render_snapshot` drawn over `viewport_area` with `committed_regions`,
+/// `viewer_chrome` and `theme`, solved once by [`build_frame_geometry`].
+/// [`render_frame`], [`get_cursor_position`], [`list_changed_screen_rows`],
+/// [`build_image_paints`](crate::build_image_paints) and
+/// [`build_image_cell_snapshot`](crate::build_image_cell_snapshot) read the
 /// frame and its placements from it.
 #[derive(Debug)]
 pub struct FrameGeometry<'a> {
@@ -142,6 +145,8 @@ pub struct FrameGeometry<'a> {
     /// The region solve that places the tabline, the statusline and the pane
     /// area.
     pub(crate) committed_regions: &'a CommittedRegions,
+    /// The colors this viewer paints koshi's chrome in.
+    pub(crate) theme: &'a Theme,
     /// The viewer's own chrome, painted with the frame.
     pub(crate) viewer_chrome: ViewerChrome,
     /// The buffer area the frame is painted over.
@@ -163,6 +168,38 @@ pub struct FrameGeometry<'a> {
     /// The viewer's toast ([`find_drawn_notification_toast_layout`]). `None`
     /// while no toast shows or the frame draws none of its cells.
     pub(crate) notification_toast_layout: Option<NotificationToastLayout>,
+    /// The color of the viewing client, then of each peer of the session in
+    /// list order, in `theme` ([`list_client_colors`]). Empty while the
+    /// session has no peer.
+    pub(crate) client_colors: Vec<ClientColor>,
+    /// The pane content cells the placement hover tint covers
+    /// ([`find_placement_hover_tint`]). `None` while the tint covers no pane.
+    pub(crate) placement_hover_tint: Option<PlacementHoverTint>,
+    /// The peer cursor markers the frame draws on each layer
+    /// ([`list_frame_peer_cursor_markers`]).
+    pub(crate) peer_cursor_markers: FramePeerCursorMarkers,
+}
+
+/// One layer of panes in a frame. Layers sort back to front: the active
+/// tab's tiled layout, then each floating pane this viewer draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FrameLayer {
+    /// The active tab's tiled layout.
+    ActiveTab,
+    /// The floating pane at `floating_pane_index` of the frame's placed
+    /// floating panes, back to front.
+    FloatingPane { floating_pane_index: usize },
+}
+
+/// The pane content cells that the placement hover tint covers, all on one
+/// layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlacementHoverTint {
+    /// The layer of the tinted panes.
+    frame_layer: FrameLayer,
+    /// The content area of each tinted pane, cut to the cells its layer shows
+    /// pane contents in.
+    tint_areas: Vec<RatatuiRect>,
 }
 
 impl<'a> FrameGeometry<'a> {
@@ -177,6 +214,32 @@ impl<'a> FrameGeometry<'a> {
     #[must_use]
     pub fn get_committed_regions(&self) -> &'a CommittedRegions {
         self.committed_regions
+    }
+
+    /// The colors this viewer paints koshi's chrome in.
+    #[must_use]
+    pub fn get_theme(&self) -> &'a Theme {
+        self.theme
+    }
+
+    /// The peer cursor markers the frame draws on each layer.
+    #[must_use]
+    pub fn get_peer_cursor_markers(&self) -> &FramePeerCursorMarkers {
+        &self.peer_cursor_markers
+    }
+
+    /// The cells the placement hover tint covers on `frame_layer`. Empty when
+    /// the tint covers no pane of that layer.
+    pub(crate) fn list_placement_hover_tint_areas(
+        &self,
+        frame_layer: FrameLayer,
+    ) -> &[RatatuiRect] {
+        match &self.placement_hover_tint {
+            Some(placement_hover_tint) if placement_hover_tint.frame_layer == frame_layer => {
+                &placement_hover_tint.tint_areas
+            }
+            _ => &[],
+        }
     }
 
     /// The buffer cell where the tiled layout's `(0, 0)` cell lands: the
@@ -206,35 +269,57 @@ impl<'a> FrameGeometry<'a> {
 }
 
 /// Solve where `render_snapshot` places its surfaces when it is painted over
-/// `viewport_area` with `committed_regions` and `viewer_chrome`: the centered
-/// tiled layout, the floating panes this viewer draws, the open floating pane
-/// tray, the open notification center and the toast. Each is solved once.
+/// `viewport_area` with `committed_regions`, `viewer_chrome` and `theme`: the
+/// centered tiled layout, the floating panes this viewer draws, the open
+/// floating pane tray, the open notification center, the toast, the colors
+/// of the attached clients, the placement hover tint and the peer cursor
+/// markers. Each is solved once.
 #[must_use]
 pub fn build_frame_geometry<'a>(
     render_snapshot: &'a RenderSnapshot,
     committed_regions: &'a CommittedRegions,
     viewer_chrome: ViewerChrome,
     viewport_area: RatatuiRect,
+    theme: &'a Theme,
 ) -> FrameGeometry<'a> {
-    FrameGeometry {
+    let effective_layout_rect = compute_content_rect(
+        compute_pane_area(committed_regions, viewport_area),
+        render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .solved_size,
+    );
+    let placed_floating_panes = list_placed_floating_panes(
         render_snapshot,
         committed_regions,
         viewer_chrome,
         viewport_area,
-        effective_layout_rect: compute_content_rect(
-            compute_pane_area(committed_regions, viewport_area),
-            render_snapshot
-                .session_snapshot
-                .active_tab_snapshot
-                .layout_area
-                .solved_size,
-        ),
-        placed_floating_panes: list_placed_floating_panes(
-            render_snapshot,
-            committed_regions,
-            viewer_chrome,
-            viewport_area,
-        ),
+    );
+    let layout_origin = get_area_origin(effective_layout_rect);
+    let client_colors = list_client_colors(render_snapshot, theme);
+    let placement_hover_tint = find_placement_hover_tint(
+        render_snapshot,
+        viewer_chrome,
+        layout_origin,
+        viewport_area,
+        &placed_floating_panes,
+    );
+    let peer_cursor_markers = list_frame_peer_cursor_markers(
+        render_snapshot,
+        &client_colors,
+        layout_origin,
+        viewport_area,
+        &placed_floating_panes,
+    );
+    FrameGeometry {
+        render_snapshot,
+        committed_regions,
+        theme,
+        viewer_chrome,
+        viewport_area,
+        effective_layout_rect,
+        placed_floating_panes,
         floating_pane_tray_layout: find_drawn_floating_pane_tray_layout(
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
         ),
@@ -244,6 +329,93 @@ pub fn build_frame_geometry<'a>(
         notification_toast_layout: find_drawn_notification_toast_layout(
             render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
         ),
+        client_colors,
+        placement_hover_tint,
+        peer_cursor_markers,
+    }
+}
+
+/// The color of the viewing client of `render_snapshot`, then of each peer of
+/// its session in list order, in `theme` ([`Theme::compute_client_color`]).
+/// Empty while the session has no peer. Example: a viewer of index `0` and
+/// one peer of index `1` over the default theme give `#ff0000` and
+/// `#00ff4a` fills, each with black text.
+pub(crate) fn list_client_colors(
+    render_snapshot: &RenderSnapshot,
+    theme: &Theme,
+) -> Vec<ClientColor> {
+    let peers = &render_snapshot.session_snapshot.peers;
+    if peers.is_empty() {
+        return Vec::new();
+    }
+    std::iter::once(render_snapshot.client_snapshot.color_index)
+        .chain(peers.iter().map(|peer_snapshot| peer_snapshot.color_index))
+        .map(|color_index| theme.compute_client_color(color_index))
+        .collect()
+}
+
+/// The pane content cells that the placement hover tint covers in the frame
+/// of `render_snapshot` drawn with `viewer_chrome`:
+///
+/// 1. While `viewer_chrome.placement_handle_hover` is
+///    [`TiledHandle`](PlacementHandleHover::TiledHandle) of a pane with a
+///    visible slot and a content rect on the active tab, that content rect,
+///    placed at `layout_origin` and cut to `viewport_area`.
+/// 2. While it is [`FloatingHandle`](PlacementHandleHover::FloatingHandle) of
+///    one of `placed_floating_panes` with its pin state, the content rect of
+///    each visible pane of that floating pane, cut to its visible area.
+///
+/// `None` in every other case.
+fn find_placement_hover_tint(
+    render_snapshot: &RenderSnapshot,
+    viewer_chrome: ViewerChrome,
+    layout_origin: Point,
+    viewport_area: RatatuiRect,
+    placed_floating_panes: &[PlacedFloatingPane<'_>],
+) -> Option<PlacementHoverTint> {
+    match viewer_chrome.placement_handle_hover? {
+        PlacementHandleHover::TiledHandle { pane_id } => {
+            let content_rect = render_snapshot
+                .session_snapshot
+                .active_tab_snapshot
+                .layout_area
+                .find_visible_pane_slot(pane_id)?
+                .content_rect?;
+            Some(PlacementHoverTint {
+                frame_layer: FrameLayer::ActiveTab,
+                tint_areas: vec![
+                    place_cell_rect(content_rect, layout_origin).intersection(viewport_area)
+                ],
+            })
+        }
+        PlacementHandleHover::FloatingHandle { .. } => {
+            let (floating_pane_index, placed_floating_pane) = placed_floating_panes
+                .iter()
+                .enumerate()
+                .find(|(_, placed_floating_pane)| {
+                    placed_floating_pane.is_grab_handle_hovered(viewer_chrome)
+                })?;
+            let tint_areas = placed_floating_pane
+                .drawn_floating_pane_slot
+                .floating_pane_slot
+                .layout_area
+                .pane_slots
+                .iter()
+                .filter(|pane_slot| pane_slot.is_visible)
+                .filter_map(|pane_slot| pane_slot.content_rect)
+                .map(|content_rect| {
+                    place_cell_rect(content_rect, placed_floating_pane.layout_origin)
+                        .intersection(placed_floating_pane.visible_area)
+                })
+                .collect();
+            Some(PlacementHoverTint {
+                frame_layer: FrameLayer::FloatingPane {
+                    floating_pane_index,
+                },
+                tint_areas,
+            })
+        }
+        PlacementHandleHover::TiledTopBorder { .. } => None,
     }
 }
 
@@ -300,11 +472,12 @@ pub fn build_frame_geometry<'a>(
 ///     its forced width. Example: a cell that holds `U+17D8` takes 1 column, not
 ///     the 3 that ratatui measures.
 ///
-/// `theme`, `keymap_hints` and `pending_key_sequence` come from the viewer:
-/// the colors it paints koshi's chrome in, the statusline data for the mode it
-/// is in, and the multi-chord sequence it has open. The `viewer_chrome` of
-/// `frame_geometry` holds the pane its pointer is over, where its tab strip is
-/// scrolled and whether it is dialing the session again.
+/// `keymap_hints` and `pending_key_sequence` come from the viewer: the
+/// statusline data for the mode it is in, and the multi-chord sequence it has
+/// open. The `theme` of `frame_geometry` holds the colors it paints koshi's
+/// chrome in, and its `viewer_chrome` holds the pane its pointer is over,
+/// where its tab strip is scrolled and whether it is dialing the session
+/// again.
 /// The attached client passes the same `frame_geometry` to this function and
 /// to [`get_cursor_position`]. For example, a left region of 20 columns on a
 /// `120x40` viewport leaves the pane rectangle at `x = 20`.
@@ -338,7 +511,6 @@ pub fn build_frame_geometry<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
     frame_geometry: &FrameGeometry<'_>,
-    theme: &Theme,
     keymap_hints: &KeymapHints,
     pending_key_sequence: Option<&KeySequence>,
     image_render_mode: ImageRenderMode,
@@ -351,6 +523,7 @@ pub fn render_frame(
 ) {
     let render_snapshot = frame_geometry.render_snapshot;
     let committed_regions = frame_geometry.committed_regions;
+    let theme = frame_geometry.theme;
     let viewer_chrome = frame_geometry.viewer_chrome;
     let viewport_area = frame_geometry.viewport_area;
     if viewport_area.width == 0 || viewport_area.height == 0 {
@@ -411,15 +584,14 @@ pub fn render_frame(
         screen_buffer,
     );
     draw_placement_hover_tints(
-        placed_active_layout_area,
-        viewer_chrome,
+        frame_geometry.list_placement_hover_tint_areas(FrameLayer::ActiveTab),
         drawn_rows,
         screen_buffer,
     );
     draw_peer_cursor_markers(
-        render_snapshot,
-        placed_active_layout_area,
-        theme,
+        frame_geometry
+            .peer_cursor_markers
+            .list_layer_markers(FrameLayer::ActiveTab),
         drawn_rows,
         screen_buffer,
     );
@@ -463,10 +635,8 @@ pub fn render_frame(
     // its images.
     for (floating_pane_index, placed_floating_pane) in placed_floating_panes.iter().enumerate() {
         draw_floating_pane(
-            render_snapshot,
-            placed_floating_pane,
-            viewer_chrome,
-            theme,
+            frame_geometry,
+            floating_pane_index,
             drawn_rows,
             screen_buffer,
         );
@@ -528,7 +698,13 @@ pub fn render_frame(
         let tabline_inputs = render_snapshot
             .build_frame_layout(viewer_chrome)
             .get_tabline_inputs();
-        draw_tabline(tabline_inputs, theme, tabline_rect, screen_buffer);
+        draw_tabline(
+            tabline_inputs,
+            theme,
+            &frame_geometry.client_colors,
+            tabline_rect,
+            screen_buffer,
+        );
     }
 
     if let Some(statusline_rect) = find_region_area(committed_regions, 1, viewport_area)
@@ -561,8 +737,11 @@ pub fn render_frame(
 /// `has_selection` are drawn into no cell and may differ, and so may the
 /// placement preview, which [`render_frame`] does not read. Each pane's
 /// cursor and the session's peer list may differ too: the rows of each peer
-/// cursor marker that one frame paints and the other does not are listed,
-/// and the tabline rows when the peers' `color_index` list differs. Every
+/// cursor marker that one of `previous_peer_cursor_markers` and the next
+/// frame's markers ([`FrameGeometry::get_peer_cursor_markers`]) holds and the
+/// other does not are listed, and the tabline rows when the peers'
+/// `color_index` list differs. `previous_peer_cursor_markers` are the
+/// markers of the frame drawn from `previous_render_snapshot`. Every
 /// other field must be equal, each grid view must keep its row count, column
 /// count and scroll offset, and each pane must show the same scroll position
 /// text.
@@ -573,6 +752,7 @@ pub fn render_frame(
 #[must_use]
 pub fn list_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
+    previous_peer_cursor_markers: &FramePeerCursorMarkers,
     next_frame_geometry: &FrameGeometry<'_>,
 ) -> Option<Vec<u16>> {
     let viewport_area = next_frame_geometry.viewport_area;
@@ -665,28 +845,10 @@ pub fn list_changed_screen_rows(
             changed_screen_rows.extend(tabline_rect.top()..tabline_rect.bottom());
         }
     }
-    let previous_peer_cursor_markers =
-        list_frame_peer_cursor_markers(previous_render_snapshot, next_frame_geometry);
-    let next_peer_cursor_markers =
-        list_frame_peer_cursor_markers(next_frame_geometry.render_snapshot, next_frame_geometry);
-    for (peer_cursor_markers, other_peer_cursor_markers) in [
-        (&previous_peer_cursor_markers, &next_peer_cursor_markers),
-        (&next_peer_cursor_markers, &previous_peer_cursor_markers),
-    ] {
-        changed_screen_rows.extend(
-            peer_cursor_markers
-                .iter()
-                .filter(|peer_cursor_marker| {
-                    other_peer_cursor_markers
-                        .binary_search_by_key(
-                            &get_peer_cursor_marker_order_key(peer_cursor_marker),
-                            get_peer_cursor_marker_order_key,
-                        )
-                        .is_err()
-                })
-                .map(|peer_cursor_marker| peer_cursor_marker.position.y),
-        );
-    }
+    changed_screen_rows.extend(
+        previous_peer_cursor_markers
+            .list_unshared_marker_rows(&next_frame_geometry.peer_cursor_markers),
+    );
     changed_screen_rows.sort_unstable();
     changed_screen_rows.dedup();
     Some(changed_screen_rows)
@@ -1267,32 +1429,16 @@ pub fn is_placement_target_pane(
     }
 }
 
-/// Tint the content of each visible pane of `placed_layout_area` whose
-/// placement handle the pointer rests on
-/// ([`LayoutAreaSurface::is_placement_handle_hovered`]), cut to its
-/// `content_clip_area`, on each row `drawn_rows` draws.
+/// Tint each of `tint_areas`
+/// ([`FrameGeometry::list_placement_hover_tint_areas`]) on each row
+/// `drawn_rows` draws.
 fn draw_placement_hover_tints(
-    placed_layout_area: PlacedLayoutArea<'_>,
-    viewer_chrome: ViewerChrome,
+    tint_areas: &[RatatuiRect],
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
-    for pane_slot in &placed_layout_area.layout_area.pane_slots {
-        let is_handle_hovered = placed_layout_area
-            .layout_area_surface
-            .is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome);
-        if !pane_slot.is_visible || !is_handle_hovered {
-            continue;
-        }
-        let Some(content_rect) = pane_slot.content_rect else {
-            continue;
-        };
-        draw_placement_hover_tint(
-            place_cell_rect(content_rect, placed_layout_area.layout_origin)
-                .intersection(placed_layout_area.content_clip_area),
-            drawn_rows,
-            screen_buffer,
-        );
+    for tint_area in tint_areas {
+        draw_placement_hover_tint(*tint_area, drawn_rows, screen_buffer);
     }
 }
 
@@ -1307,7 +1453,8 @@ fn draw_placement_hover_tint(
     let content_area = content_area.intersection(screen_buffer.area);
     for row_index in drawn_rows.list_rows_between(content_area.top(), content_area.bottom()) {
         for column_index in content_area.left()..content_area.right() {
-            screen_buffer[(column_index, row_index)].set_bg(PLACEMENT_HOVER_TINT_COLOR);
+            screen_buffer[(column_index, row_index)]
+                .set_bg(Color::from(PLACEMENT_HOVER_TINT_COLOR));
         }
     }
 }

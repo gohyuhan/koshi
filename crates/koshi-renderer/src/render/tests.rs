@@ -66,8 +66,8 @@ use koshi_terminal::state::CursorShape;
 use super::tabline::format_version_badge_text;
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, CursorStyle, FloatingPaneSlot, GridView,
-    ImagePlacementSnapshot, KeymapHints, LinkStatus, PaneSlot, PaneSnapshot, ScrollbackMetadata,
-    SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
+    ImagePlacementSnapshot, KeymapHints, LinkStatus, PaneSlot, PaneSnapshot, PeerSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
@@ -302,8 +302,8 @@ pub(crate) fn render_frame_to_buffer(
             committed_regions,
             viewer_chrome,
             viewport_area,
+            theme,
         ),
-        theme,
         keymap_hints,
         None,
         ImageRenderMode::Placeholder,
@@ -369,8 +369,8 @@ fn render_placement_preview(
             &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
             viewer_chrome,
             viewport_area,
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -530,7 +530,8 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
             &render_snapshot,
             &committed_regions,
             ViewerChrome::default(),
-            build_viewport_area(&render_snapshot)
+            build_viewport_area(&render_snapshot),
+            &Theme::default()
         )),
         Some(Position::new(21, 2))
     );
@@ -743,6 +744,7 @@ fn get_whole_viewport_cursor_position(render_snapshot: &RenderSnapshot) -> Optio
         &committed_regions,
         ViewerChrome::default(),
         viewport_area,
+        &Theme::default(),
     ))
 }
 
@@ -2171,8 +2173,8 @@ fn reused_buffer_is_blanked_before_painting() {
             &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
             ViewerChrome::default(),
             viewport_area,
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -3583,8 +3585,8 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
             &build_core_regions(60, 12),
             ViewerChrome::default(),
             RatatuiRect::new(0, 0, 60, 12),
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -3626,8 +3628,8 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
             &build_core_regions(60, 12),
             ViewerChrome::default(),
             viewport_area,
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -4929,6 +4931,7 @@ fn get_core_cursor_position(
         &build_core_regions(viewport_area.width, viewport_area.height),
         viewer_chrome,
         viewport_area,
+        &Theme::default(),
     ))
 }
 
@@ -5418,8 +5421,8 @@ fn render_core_frame_rows(
             &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
             viewer_chrome,
             build_viewport_area(render_snapshot),
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         image_render_mode,
@@ -5526,20 +5529,33 @@ fn write_x_at_row_start(grid: &mut Grid, row_index: u16) {
         .expect("the row is inside the grid") = Cell::from_character('x', 1, TermStyle::default());
 }
 
-/// [`list_changed_screen_rows`] from `previous_render_snapshot` to
-/// `next_render_snapshot` over the compiled-in region solve of the next
-/// client's viewport, with the default viewer chrome.
+/// [`list_changed_screen_rows`] from `previous_render_snapshot`, with the
+/// peer cursor markers of its own frame, to `next_render_snapshot`, each over
+/// the compiled-in region solve of its client's viewport, with the default
+/// viewer chrome.
 fn list_core_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
     next_render_snapshot: &RenderSnapshot,
 ) -> Option<Vec<u16>> {
+    let previous_committed_regions =
+        CommittedRegions::build_core(previous_render_snapshot.client_snapshot.viewport_size, 0);
+    let frame_theme = Theme::default();
+    let previous_frame_geometry = build_frame_geometry(
+        previous_render_snapshot,
+        &previous_committed_regions,
+        ViewerChrome::default(),
+        build_viewport_area(previous_render_snapshot),
+        &frame_theme,
+    );
     list_changed_screen_rows(
         previous_render_snapshot,
+        previous_frame_geometry.get_peer_cursor_markers(),
         &build_frame_geometry(
             next_render_snapshot,
             &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
             ViewerChrome::default(),
             build_viewport_area(next_render_snapshot),
+            &Theme::default(),
         ),
     )
 }
@@ -5981,6 +5997,65 @@ fn the_visible_layout_area_pane_walk_keeps_slot_order_and_leaves_out_hidden_rect
                     height: 3,
                 },
             ),
+        ]
+    );
+}
+
+/// A one-pane `20x5` frame of the viewer of index `viewer_color_index` with
+/// one peer per entry of `peer_color_indices`, in that order.
+fn build_frame_with_peers(viewer_color_index: u32, peer_color_indices: &[u32]) -> RenderSnapshot {
+    let pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "s",
+        &[("a", true)],
+        &[(pane_id, build_cell_rect(0, 1, 20, 3), true)],
+        Some(pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 20,
+            row_count: 5,
+        },
+    );
+    render_snapshot.client_snapshot.color_index = viewer_color_index;
+    for &color_index in peer_color_indices {
+        render_snapshot.session_snapshot.peers.push(PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index,
+            typed_pane_id: None,
+        });
+    }
+    render_snapshot
+}
+
+#[test]
+fn list_client_colors_is_empty_while_the_session_has_no_peer() {
+    let render_snapshot = build_frame_with_peers(0, &[]);
+
+    assert_eq!(
+        list_client_colors(&render_snapshot, &Theme::default()),
+        Vec::new()
+    );
+}
+
+#[test]
+fn list_client_colors_gives_the_viewer_then_each_peer_in_list_order() {
+    let render_snapshot = build_frame_with_peers(1, &[2, 0]);
+
+    assert_eq!(
+        list_client_colors(&render_snapshot, &Theme::default()),
+        vec![
+            ClientColor {
+                fill_color: (0x00, 0xff, 0x4a),
+                text_color: (0x00, 0x00, 0x00),
+            },
+            ClientColor {
+                fill_color: (0x95, 0x00, 0xff),
+                text_color: (0xff, 0xff, 0xff),
+            },
+            ClientColor {
+                fill_color: (0xff, 0x00, 0x00),
+                text_color: (0x00, 0x00, 0x00),
+            },
         ]
     );
 }

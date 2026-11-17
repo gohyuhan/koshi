@@ -18,14 +18,14 @@ use crate::snapshot::{
     CommittedRegions, DrawnFloatingPaneSlot, PaneSnapshot, PlacementHandleHover, RenderSnapshot,
     ViewerChrome,
 };
-use crate::theme::Theme;
 
 use super::{
     clear_drawn_rows, compute_pane_area, compute_pane_border_style, compute_symbol_display_width,
     draw_pane_border, draw_pane_contents, draw_panes, draw_peer_cursor_markers,
     draw_placement_hover_tints, draw_stack_headers, draw_too_small_overlay, get_area_origin,
     get_area_rect, list_visible_layout_area_panes, place_cell_rect, place_screen_rect,
-    set_line_clipped, write_text_clipped, DrawnRows, LayoutAreaSurface, PlacedLayoutArea,
+    set_line_clipped, write_text_clipped, DrawnRows, FrameGeometry, FrameLayer, LayoutAreaSurface,
+    PlacedLayoutArea,
 };
 
 /// The grab handle a floating pane draws on its titlebar strip.
@@ -83,6 +83,19 @@ impl<'a> PlacedFloatingPane<'a> {
                 content_area.intersection(visible_area),
             )
         })
+    }
+
+    /// Whether the pointer rests on this floating pane's grab handle:
+    /// `viewer_chrome.placement_handle_hover` is
+    /// [`FloatingHandle`](PlacementHandleHover::FloatingHandle) of its
+    /// floating pane id and pin state.
+    pub(crate) fn is_grab_handle_hovered(&self, viewer_chrome: ViewerChrome) -> bool {
+        let floating_pane_slot = self.drawn_floating_pane_slot.floating_pane_slot;
+        viewer_chrome.placement_handle_hover
+            == Some(PlacementHandleHover::FloatingHandle {
+                floating_pane_id: floating_pane_slot.floating_pane_id,
+                is_pinned: floating_pane_slot.is_pinned,
+            })
     }
 
     /// The content rect of `pane_id`, a visible pane of this floating pane's
@@ -156,16 +169,24 @@ pub(crate) fn list_placed_floating_panes<'a>(
 ///    it draws `Terminal too small — enlarge window` centered in the visible
 ///    cells below the strip instead ([`draw_too_small_overlay`]).
 ///
-/// Every step runs only over the rows `drawn_rows` draws. A box on no drawn
-/// row is not drawn.
+/// The floating pane is the one at `floating_pane_index` of
+/// `frame_geometry`'s placed floating panes, drawn in `frame_geometry`'s
+/// theme with its viewer chrome. Its tint areas and peer cursor markers are
+/// those `frame_geometry` holds for its layer. Every step runs only over the
+/// rows `drawn_rows` draws. A box on no drawn row is not drawn.
 pub(super) fn draw_floating_pane(
-    render_snapshot: &RenderSnapshot,
-    placed_floating_pane: &PlacedFloatingPane<'_>,
-    viewer_chrome: ViewerChrome,
-    theme: &Theme,
+    frame_geometry: &FrameGeometry<'_>,
+    floating_pane_index: usize,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
 ) {
+    let render_snapshot = frame_geometry.render_snapshot;
+    let theme = frame_geometry.theme;
+    let viewer_chrome = frame_geometry.viewer_chrome;
+    let placed_floating_pane = &frame_geometry.placed_floating_panes[floating_pane_index];
+    let frame_layer = FrameLayer::FloatingPane {
+        floating_pane_index,
+    };
     let floating_pane_slot = placed_floating_pane
         .drawn_floating_pane_slot
         .floating_pane_slot;
@@ -174,11 +195,7 @@ pub(super) fn draw_floating_pane(
         return;
     }
     clear_overlay_area(outer_area, drawn_rows, screen_buffer);
-    let is_grab_handle_hovered = viewer_chrome.placement_handle_hover
-        == Some(PlacementHandleHover::FloatingHandle {
-            floating_pane_id: floating_pane_slot.floating_pane_id,
-            is_pinned: floating_pane_slot.is_pinned,
-        });
+    let is_grab_handle_hovered = placed_floating_pane.is_grab_handle_hovered(viewer_chrome);
     if drawn_rows.is_row_drawn(outer_area.y) {
         let strip_style = compute_pane_border_style(
             render_snapshot,
@@ -239,11 +256,15 @@ pub(super) fn draw_floating_pane(
         drawn_rows,
         screen_buffer,
     );
-    draw_placement_hover_tints(placed_layout_area, viewer_chrome, drawn_rows, screen_buffer);
+    draw_placement_hover_tints(
+        frame_geometry.list_placement_hover_tint_areas(frame_layer),
+        drawn_rows,
+        screen_buffer,
+    );
     draw_peer_cursor_markers(
-        render_snapshot,
-        placed_layout_area,
-        theme,
+        frame_geometry
+            .peer_cursor_markers
+            .list_layer_markers(frame_layer),
         drawn_rows,
         screen_buffer,
     );

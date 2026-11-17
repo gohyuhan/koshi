@@ -48,8 +48,8 @@ fn render_notification_frame(
             &CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
             viewer_chrome,
             viewport_area,
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         ImageRenderMode::Placeholder,
@@ -706,6 +706,7 @@ fn the_cursor_under_the_open_center_or_the_drawn_toast_is_hidden() {
             &committed_regions,
             viewer_chrome,
             viewport_area,
+            &Theme::default(),
         ))
     };
 

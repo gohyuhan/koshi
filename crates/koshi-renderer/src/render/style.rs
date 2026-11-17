@@ -80,8 +80,8 @@ pub(crate) fn compute_bar_style(theme: &Theme) -> Style {
 /// text color over its fill color.
 pub(super) fn compute_client_color_style(client_color: ClientColor) -> Style {
     Style::default()
-        .fg(client_color.text_color)
-        .bg(client_color.fill_color)
+        .fg(Color::from(client_color.text_color))
+        .bg(Color::from(client_color.fill_color))
 }
 
 /// The filled strip marking a collapsed stack member's koshi-owned header: the

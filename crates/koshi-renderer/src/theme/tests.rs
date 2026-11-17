@@ -244,7 +244,10 @@ fn list_client_colors(theme: &Theme, color_indexes: Range<u32>) -> Vec<(Color, C
     color_indexes
         .map(|color_index| {
             let client_color = theme.compute_client_color(color_index);
-            (client_color.fill_color, client_color.text_color)
+            (
+                Color::from(client_color.fill_color),
+                Color::from(client_color.text_color),
+            )
         })
         .collect()
 }
@@ -372,14 +375,7 @@ fn over_every_shipped_bar_the_first_hundred_clients_reach_three_to_one_fill_and_
         let bar_luminance = compute_relative_luminance(bar_background_color);
         for color_index in 0..100 {
             let client_color = theme.compute_client_color(color_index);
-            let (
-                Color::Rgb(fill_red, fill_green, fill_blue),
-                Color::Rgb(text_red, text_green, text_blue),
-            ) = (client_color.fill_color, client_color.text_color)
-            else {
-                panic!("client {color_index} over {theme_name} is not two RGB colors");
-            };
-            let fill_luminance = compute_relative_luminance((fill_red, fill_green, fill_blue));
+            let fill_luminance = compute_relative_luminance(client_color.fill_color);
             let fill_contrast_ratio = compute_contrast_ratio(fill_luminance, bar_luminance);
             assert!(
                 fill_contrast_ratio >= 3.0,
@@ -387,7 +383,7 @@ fn over_every_shipped_bar_the_first_hundred_clients_reach_three_to_one_fill_and_
                 client_color.fill_color
             );
             let text_contrast_ratio = compute_contrast_ratio(
-                compute_relative_luminance((text_red, text_green, text_blue)),
+                compute_relative_luminance(client_color.text_color),
                 fill_luminance,
             );
             assert!(

@@ -1,6 +1,7 @@
 //! Tests for the peer cursor markers: the cell each one paints and its
 //! colors, the thirteen states in which a viewer draws none, the layers that
-//! cover one, and the rows a frame redraws when a marker comes, goes or moves.
+//! cover one, the markers each layer lists, and the rows a frame redraws when
+//! a marker comes, goes or moves.
 //!
 //! Most frames are the viewer Alice (index 0) over two tiled panes side by
 //! side, each 30x26 with a 28x24 content area: left at buffer (1, 2) and
@@ -33,6 +34,7 @@ use crate::snapshot::{
     CommittedRegions, FloatingPane, FloatingPaneSlot, GridView, KeymapHints, PanePlacementMessage,
     PanePlacementPresentation, PeerSnapshot, SelectionSpans, ViewerChrome,
 };
+use crate::theme::Theme;
 
 /// Alice's terminal: the tab strip on row 0, the hint row on row 27, and a
 /// 60x26 pane area from row 1.
@@ -114,15 +116,15 @@ fn list_core_peer_cursor_markers(
     viewer_chrome: ViewerChrome,
 ) -> Vec<PeerCursorMarker> {
     let committed_regions = build_core_regions();
-    list_frame_peer_cursor_markers(
+    build_frame_geometry(
         render_snapshot,
-        &build_frame_geometry(
-            render_snapshot,
-            &committed_regions,
-            viewer_chrome,
-            build_viewport_area(),
-        ),
+        &committed_regions,
+        viewer_chrome,
+        build_viewport_area(),
+        &Theme::default(),
     )
+    .peer_cursor_markers
+    .peer_cursor_markers
 }
 
 /// `render_snapshot` painted over the compiled-in regions in the default
@@ -137,29 +139,54 @@ fn render_core_frame(render_snapshot: &RenderSnapshot, viewer_chrome: ViewerChro
     )
 }
 
-/// The rows a frame redraws from `previous_render_snapshot` to
-/// `next_render_snapshot` over the compiled-in regions.
+/// The rows a frame redraws from `previous_render_snapshot`, with the
+/// markers of its own frame, to `next_render_snapshot` over the compiled-in
+/// regions.
 fn list_core_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
     next_render_snapshot: &RenderSnapshot,
 ) -> Option<Vec<u16>> {
     let committed_regions = build_core_regions();
+    let frame_theme = Theme::default();
+    let previous_frame_geometry = build_frame_geometry(
+        previous_render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        build_viewport_area(),
+        &frame_theme,
+    );
     list_changed_screen_rows(
         previous_render_snapshot,
+        previous_frame_geometry.get_peer_cursor_markers(),
         &build_frame_geometry(
             next_render_snapshot,
             &committed_regions,
             ViewerChrome::default(),
             build_viewport_area(),
+            &Theme::default(),
         ),
     )
 }
 
-/// Bob's marker at `position`.
+/// Bob's marker at `position` on the active tab's tiled layout.
 fn build_bob_marker(position: Position) -> PeerCursorMarker {
     PeerCursorMarker {
+        frame_layer: FrameLayer::ActiveTab,
         position,
         color_index: BOB_COLOR_INDEX,
+        client_color: Theme::default().compute_client_color(BOB_COLOR_INDEX),
+    }
+}
+
+/// Bob's marker at `position` on the first floating pane this viewer draws.
+fn build_bob_floating_pane_marker(position: Position) -> PeerCursorMarker {
+    PeerCursorMarker {
+        frame_layer: FrameLayer::FloatingPane {
+            floating_pane_index: 0,
+        },
+        position,
+        color_index: BOB_COLOR_INDEX,
+        client_color: Theme::default().compute_client_color(BOB_COLOR_INDEX),
     }
 }
 
@@ -173,7 +200,10 @@ fn get_cell_colors(render_buffer: &Buffer, position: Position) -> (Color, Color)
 /// default theme.
 fn get_client_colors(color_index: u32) -> (Color, Color) {
     let client_color = Theme::default().compute_client_color(color_index);
-    (client_color.text_color, client_color.fill_color)
+    (
+        Color::from(client_color.text_color),
+        Color::from(client_color.fill_color),
+    )
 }
 
 /// Add a one-pane floating pane at `outer_rect` whose pane `float_pane_id`
@@ -251,6 +281,7 @@ fn at_scroll_offset_zero_the_marker_is_the_cell_the_hardware_cursor_takes_in_tha
         &committed_regions,
         ViewerChrome::default(),
         build_viewport_area(),
+        &Theme::default(),
     ));
 
     assert_eq!(hardware_cursor_position, Some(BOB_MARKER_POSITION));
@@ -410,17 +441,18 @@ fn a_cursor_past_a_shrunk_content_area_marks_the_last_row() {
 fn a_marker_paints_only_on_a_row_the_frame_draws() {
     let (render_snapshot, _, _) = build_two_pane_frame();
     let committed_regions = build_core_regions();
+    let frame_theme = Theme::default();
     let frame_geometry = build_frame_geometry(
         &render_snapshot,
         &committed_regions,
         ViewerChrome::default(),
         build_viewport_area(),
+        &frame_theme,
     );
     let render_rows = |listed_rows: &[u16]| {
         let mut render_buffer = Buffer::empty(build_viewport_area());
         render_frame(
             &frame_geometry,
-            &Theme::default(),
             &KeymapHints::default(),
             None,
             ImageRenderMode::Placeholder,
@@ -459,7 +491,7 @@ fn a_peer_typing_in_a_shown_floating_pane_marks_the_cell_where_this_viewer_place
     let float_marker_position = Position { x: 14, y: 10 };
     assert_eq!(
         list_core_peer_cursor_markers(&render_snapshot, ViewerChrome::default()),
-        vec![build_bob_marker(float_marker_position)]
+        vec![build_bob_floating_pane_marker(float_marker_position)]
     );
     assert_eq!(
         get_cell_colors(
@@ -467,6 +499,55 @@ fn a_peer_typing_in_a_shown_floating_pane_marks_the_cell_where_this_viewer_place
             float_marker_position
         ),
         get_client_colors(BOB_COLOR_INDEX)
+    );
+}
+
+#[test]
+fn each_layer_lists_only_the_markers_on_its_own_panes() {
+    let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
+    let float_pane_id = PaneId::new();
+    push_one_pane_floating_pane(
+        &mut render_snapshot,
+        float_pane_id,
+        build_cell_rect(10, 5, 30, 12),
+    );
+    render_snapshot.session_snapshot.peers = vec![
+        build_peer_snapshot(BOB_COLOR_INDEX, Some(left_pane_id)),
+        build_peer_snapshot(2, Some(float_pane_id)),
+    ];
+    let committed_regions = build_core_regions();
+    let frame_theme = Theme::default();
+    let frame_geometry = build_frame_geometry(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        build_viewport_area(),
+        &frame_theme,
+    );
+    let peer_cursor_markers = frame_geometry.get_peer_cursor_markers();
+
+    assert_eq!(
+        peer_cursor_markers.list_layer_markers(FrameLayer::ActiveTab),
+        [build_bob_marker(BOB_MARKER_POSITION)]
+    );
+    assert_eq!(
+        peer_cursor_markers.list_layer_markers(FrameLayer::FloatingPane {
+            floating_pane_index: 0
+        }),
+        [PeerCursorMarker {
+            frame_layer: FrameLayer::FloatingPane {
+                floating_pane_index: 0,
+            },
+            position: Position { x: 14, y: 10 },
+            color_index: 2,
+            client_color: Theme::default().compute_client_color(2),
+        }]
+    );
+    assert_eq!(
+        peer_cursor_markers.list_layer_markers(FrameLayer::FloatingPane {
+            floating_pane_index: 1
+        }),
+        [] as [PeerCursorMarker; 0]
     );
 }
 
@@ -483,7 +564,7 @@ fn a_floating_pane_cursor_below_the_pane_area_draws_no_marker() {
         vec![build_peer_snapshot(BOB_COLOR_INDEX, Some(float_pane_id))];
     assert_eq!(
         list_core_peer_cursor_markers(&render_snapshot, ViewerChrome::default()),
-        vec![build_bob_marker(Position { x: 44, y: 25 })]
+        vec![build_bob_floating_pane_marker(Position { x: 44, y: 25 })]
     );
 
     get_pane_snapshot_mut(&mut render_snapshot, float_pane_id)
@@ -538,8 +619,8 @@ fn a_marker_on_the_pane_a_placement_preview_moves_takes_the_tint_and_another_kee
                 &committed_regions,
                 ViewerChrome::default(),
                 build_viewport_area(),
+                &Theme::default(),
             ),
-            &Theme::default(),
             &KeymapHints::default(),
             None,
             ImageRenderMode::Placeholder,
