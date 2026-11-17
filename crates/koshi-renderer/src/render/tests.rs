@@ -2472,6 +2472,42 @@ fn stack_header_without_title_still_shows_arrow_and_indicator() {
 }
 
 #[test]
+fn a_stack_header_drawn_over_a_visible_pane_box_blanks_every_cell_of_its_row() {
+    let active_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active_pane_id, build_cell_rect(0, 2, 30, 4), true),
+            (collapsed_pane_id, build_cell_rect(0, 1, 30, 1), true),
+        ],
+        Some(active_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 30,
+            row_count: 8,
+        },
+    );
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .stack_headers = vec![StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect: build_cell_rect(0, 1, 30, 1),
+        member_index: 0,
+        member_count: 2,
+    }];
+    let render_buffer = render_test_snapshot(&render_snapshot, 30, 8);
+
+    assert_eq!(
+        format_rendered_row_text(&render_buffer, 1),
+        format!("▸ {}[1/2]", " ".repeat(23))
+    );
+}
+
+#[test]
 fn narrow_stack_header_indicator_does_not_bleed_left() {
     let active_pane_id = PaneId::new();
     let collapsed_pane_id = PaneId::new();

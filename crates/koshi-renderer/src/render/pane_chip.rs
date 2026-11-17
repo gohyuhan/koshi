@@ -22,13 +22,17 @@ use super::{
 mod tests;
 
 /// The chips of the peers whose keys reach one pane, placed on one row of
-/// that pane's layer: its top border, or its stack header.
+/// that pane's layer: its stack header when the layer draws one for the pane,
+/// else its top border.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PaneChipGroup {
     /// The layer of the pane.
     pub(crate) frame_layer: FrameLayer,
     /// The pane whose top border or stack header carries the chips.
     pub(crate) pane_id: PaneId,
+    /// Whether the chips sit on the pane's stack header, and not on its top
+    /// border.
+    pub(crate) is_on_stack_header: bool,
     /// The buffer row of the chips.
     pub(crate) row_index: u16,
     /// The chips and the `+N` mark.
@@ -108,6 +112,8 @@ pub(super) fn find_layer_pane_chip_group(
 /// The cells of one row that the chip group of one pane may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PaneChipRoom {
+    /// Whether the row is the pane's stack header, and not its top border.
+    is_on_stack_header: bool,
     /// The buffer row.
     row_index: u16,
     /// The first column the group may take.
@@ -216,6 +222,7 @@ pub(super) fn list_frame_pane_chip_groups(
             pane_chip_groups.push(PaneChipGroup {
                 frame_layer,
                 pane_id,
+                is_on_stack_header: pane_chip_room.is_on_stack_header,
                 row_index: pane_chip_room.row_index,
                 client_chip_group,
                 client_colors: pane_peers
@@ -231,15 +238,16 @@ pub(super) fn list_frame_pane_chip_groups(
 /// The cells of the row where `layout_area`, placed at `layout_origin`, puts
 /// the chips of `pane_id`, cut to `viewport_area`:
 ///
-/// 1. A visible slot of `pane_id`: its top border row, from the cell after
-///    the top-left corner up to the `─` before the top-right corner, which
-///    stays a border cell. Half of its width is half of the cells between the
-///    two corners. A `30`-column box at column `0` gives columns `1` to
-///    `27`.
-/// 2. Otherwise a stack header of `pane_id`: its row, from its first cell up
-///    to the blank cell before `[n/total]`, which stays blank. Half of its
-///    width is half of the cells left of `[n/total]`. A `30`-column header
-///    at column `0` showing `[2/3]` gives columns `0` to `23`.
+/// 1. A stack header of `pane_id`: its row, from its first cell up to the
+///    blank cell before `[n/total]`, which stays blank. Half of its width is
+///    half of the cells left of `[n/total]`. A `30`-column header at column
+///    `0` showing `[2/3]` gives columns `0` to `23`. A pane that also has a
+///    visible slot, as in a frame of a placement animation, takes this row.
+/// 2. Otherwise a visible slot of `pane_id`: its top border row, from the cell
+///    after the top-left corner up to the `─` before the top-right corner,
+///    which stays a border cell. Half of its width is half of the cells
+///    between the two corners. A `30`-column box at column `0` gives columns
+///    `1` to `27`.
 ///
 /// `None` when `layout_area` has neither, when the row lies outside the rows
 /// of `viewport_area`, or when no column of the row is left.
@@ -249,22 +257,11 @@ fn find_pane_chip_room(
     pane_id: PaneId,
     viewport_area: RatatuiRect,
 ) -> Option<PaneChipRoom> {
-    let pane_chip_room = if let Some(pane_slot) = layout_area.find_visible_pane_slot(pane_id) {
-        let pane_area = place_cell_rect(pane_slot.outer_rect, layout_origin);
-        if pane_area.is_empty() {
-            return None;
-        }
-        PaneChipRoom {
-            row_index: pane_area.y,
-            start_column: pane_area.x.saturating_add(1),
-            end_column: pane_area.right().saturating_sub(2),
-            half_row_width: pane_area.width.saturating_sub(2) / 2,
-        }
-    } else {
-        let stack_header = layout_area
-            .stack_headers
-            .iter()
-            .find(|stack_header| stack_header.pane_id == pane_id)?;
+    let pane_chip_room = if let Some(stack_header) = layout_area
+        .stack_headers
+        .iter()
+        .find(|stack_header| stack_header.pane_id == pane_id)
+    {
         let header_area = place_cell_rect(stack_header.header_rect, layout_origin);
         if header_area.is_empty() {
             return None;
@@ -274,10 +271,24 @@ fn find_pane_chip_room(
             &format_stack_header_indicator(stack_header),
         );
         PaneChipRoom {
+            is_on_stack_header: true,
             row_index: header_area.y,
             start_column: header_area.x,
             end_column: indicator_start_column.saturating_sub(1),
             half_row_width: (indicator_start_column - header_area.x) / 2,
+        }
+    } else {
+        let pane_slot = layout_area.find_visible_pane_slot(pane_id)?;
+        let pane_area = place_cell_rect(pane_slot.outer_rect, layout_origin);
+        if pane_area.is_empty() {
+            return None;
+        }
+        PaneChipRoom {
+            is_on_stack_header: false,
+            row_index: pane_area.y,
+            start_column: pane_area.x.saturating_add(1),
+            end_column: pane_area.right().saturating_sub(2),
+            half_row_width: pane_area.width.saturating_sub(2) / 2,
         }
     };
     if pane_chip_room.row_index < viewport_area.top()

@@ -90,7 +90,7 @@ mod peer_cursor_marker;
 mod placement;
 
 use client_chip::draw_client_chip_group;
-use floating::draw_floating_pane;
+use floating::{clear_overlay_area, draw_floating_pane};
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use floating_pane_tray::draw_floating_pane_tray;
 use notification::{draw_notification_center, draw_notification_toast};
@@ -1248,7 +1248,8 @@ fn draw_panes(
         draw_pane_border(pane_rect, border_style, drawn_rows, screen_buffer);
 
         let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
-        let pane_chip_group = find_layer_pane_chip_group(pane_chip_groups, pane_slot.pane_id);
+        let pane_chip_group = find_layer_pane_chip_group(pane_chip_groups, pane_slot.pane_id)
+            .filter(|pane_chip_group| !pane_chip_group.is_on_stack_header);
 
         let top_border = compute_tiled_pane_top_border(pane_slot.outer_rect);
         let is_top_border_drawn = drawn_rows.is_row_drawn(pane_rect.y);
@@ -1790,7 +1791,9 @@ fn get_cell_color(cell_color: CellColor) -> Color {
 /// strip of `viewer_chrome.placement_source_pane_id` takes the focus color,
 /// and the strip of a placement candidate
 /// ([`LayoutAreaSurface::is_placement_candidate`]) takes the placement hover
-/// color. `layout_origin` shifts each strip into the frame. A strip on no row
+/// color. Each strip first blanks every cell of its row
+/// ([`clear_overlay_area`]), then fills the row with its style.
+/// `layout_origin` shifts each strip into the frame. A strip on no row
 /// `drawn_rows` draws is not drawn.
 fn draw_stack_headers(
     render_snapshot: &RenderSnapshot,
@@ -1824,8 +1827,7 @@ fn draw_stack_headers(
                 compute_stack_header_style(theme)
             };
 
-        // Fill the whole row first: the gap between the pane label and indicator
-        // carries the strip background too.
+        clear_overlay_area(header_rect, drawn_rows, screen_buffer);
         screen_buffer.set_style(header_rect, stack_header_style);
 
         let pane_label = render_snapshot

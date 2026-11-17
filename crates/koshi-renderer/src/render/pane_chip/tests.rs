@@ -12,7 +12,7 @@
 
 use super::*;
 
-use koshi_core::geometry::{Direction, Size, SplitDirection};
+use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -222,6 +222,7 @@ fn build_bob_group(
     PaneChipGroup {
         frame_layer,
         pane_id,
+        is_on_stack_header: false,
         row_index,
         client_chip_group: ClientChipGroup {
             start_column: chip_start_column,
@@ -367,6 +368,7 @@ fn a_pane_whose_half_row_has_no_room_for_two_chips_counts_them_into_the_mark() {
         vec![PaneChipGroup {
             frame_layer: FrameLayer::ActiveTab,
             pane_id: left_pane_id,
+            is_on_stack_header: false,
             row_index: 1,
             client_chip_group: ClientChipGroup {
                 start_column: 6,
@@ -546,12 +548,10 @@ fn state_6_a_peer_in_a_member_collapsed_in_this_viewers_stack_puts_the_chip_left
 
     assert_eq!(
         list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default()),
-        vec![build_bob_group(
-            FrameLayer::ActiveTab,
-            watch_pane_id,
-            26,
-            21
-        )]
+        vec![PaneChipGroup {
+            is_on_stack_header: true,
+            ..build_bob_group(FrameLayer::ActiveTab, watch_pane_id, 26, 21)
+        }]
     );
     let render_buffer = render_core_frame(&render_snapshot, ViewerChrome::default());
     assert_eq!(
@@ -582,6 +582,74 @@ fn a_stack_header_title_longer_than_its_room_ends_one_cell_before_the_chip() {
         ),
         "▸ cargo watch --exec  2  [2/2]"
     );
+}
+
+#[test]
+fn a_pane_with_a_visible_box_and_a_stack_header_draws_its_chip_on_the_header_only() {
+    let (mut render_snapshot, _, watch_pane_id) = build_stack_frame(30);
+    show_watch_pane_box(
+        &mut render_snapshot,
+        watch_pane_id,
+        build_cell_rect(0, 20, 30, 5),
+    );
+    get_pane_snapshot_mut(&mut render_snapshot, watch_pane_id).pane_title =
+        Some("cargo watch --exec test".to_string());
+
+    assert_eq!(
+        list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default()),
+        vec![PaneChipGroup {
+            is_on_stack_header: true,
+            ..build_bob_group(FrameLayer::ActiveTab, watch_pane_id, 26, 21)
+        }]
+    );
+    let render_buffer = render_core_frame(&render_snapshot, ViewerChrome::default());
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 21, 0..30),
+        "┌─── cargo watch --exec test─┐"
+    );
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 26, 0..30),
+        "▸ cargo watch --exec  2  [2/2]"
+    );
+}
+
+#[test]
+fn a_pane_box_under_its_own_stack_header_leaves_the_position_count_whole() {
+    let (mut render_snapshot, _, watch_pane_id) = build_stack_frame(30);
+    show_watch_pane_box(
+        &mut render_snapshot,
+        watch_pane_id,
+        build_cell_rect(0, 25, 30, 1),
+    );
+
+    assert_eq!(
+        format_rendered_cells(
+            &render_core_frame(&render_snapshot, ViewerChrome::default()),
+            26,
+            0..30
+        ),
+        format!("▸ cargo watch{} 2  [2/2]", " ".repeat(8))
+    );
+}
+
+/// Make the slot of `watch_pane_id` in `render_snapshot` a visible box at
+/// `outer_rect`, as a frame of a placement animation draws a pane that
+/// collapses into its stack.
+fn show_watch_pane_box(
+    render_snapshot: &mut RenderSnapshot,
+    watch_pane_id: PaneId,
+    outer_rect: Rect,
+) {
+    let watch_pane_slot = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots
+        .iter_mut()
+        .find(|pane_slot| pane_slot.pane_id == watch_pane_id)
+        .expect("the stack frame holds a slot for cargo watch");
+    watch_pane_slot.outer_rect = outer_rect;
+    watch_pane_slot.is_visible = true;
 }
 
 #[test]
