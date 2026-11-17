@@ -1741,6 +1741,123 @@ fn a_key_reaches_the_focused_floating_pane_only_while_its_client_has_room_to_dra
     );
 }
 
+/// Split `source_pane_id` toward `direction` as a keybinding of `client_id`
+/// does, and return the pane the split creates.
+fn split_pane_for_client(
+    server: &mut Server,
+    client_id: ClientId,
+    source_pane_id: PaneId,
+    direction: Direction,
+) -> PaneId {
+    let previous_pane_ids: Vec<PaneId> = server.live_pane_ids.iter().copied().collect();
+    let command_result = server.dispatch(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::from_key_binding(client_id),
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Split {
+                source_pane_id: Some(source_pane_id),
+                tab_id: None,
+                direction,
+            },
+            working_directory: None,
+            spawn_spec: None,
+            client_id: Some(client_id),
+        }),
+    ));
+    let created_pane_ids: Vec<PaneId> = server
+        .live_pane_ids
+        .iter()
+        .copied()
+        .filter(|pane_id| !previous_pane_ids.contains(pane_id))
+        .collect();
+    assert_eq!(
+        created_pane_ids.len(),
+        1,
+        "test setup: the split created one pane: {command_result:?}"
+    );
+    created_pane_ids[0]
+}
+
+/// Two columns of two panes each need six rows, so a `120x5` pane area
+/// suppresses every tiled pane and the frame shows the terminal-too-small
+/// overlay, while that pane area still has a floating viewport. The floating
+/// pane that had the focus is minimized, the client's input reaches no pane,
+/// and `l` reaches no PTY.
+#[test]
+fn a_key_reaches_no_pane_while_every_tiled_pane_is_suppressed_after_a_floating_pane_had_the_focus()
+{
+    let (mut server, fake_pty_backend, client_id, mut viewer) = build_test_server();
+    let top_left_pane_id = get_only_pane_id(&server);
+    let top_right_pane_id =
+        split_pane_for_client(&mut server, client_id, top_left_pane_id, Direction::Right);
+    split_pane_for_client(&mut server, client_id, top_right_pane_id, Direction::Down);
+    split_pane_for_client(&mut server, client_id, top_left_pane_id, Direction::Down);
+    let htop_pane_id = create_floating_pane(
+        &mut server,
+        CommandSource::from_key_binding(client_id),
+        build_floating_new_pane_args(None, None, false),
+    );
+    assert_eq!(
+        server.find_typed_pane(client_id),
+        Some(htop_pane_id),
+        "test setup: the floating pane takes the keys"
+    );
+
+    server.handle_client_resize(
+        client_id,
+        Size {
+            column_count: 120,
+            row_count: 7,
+        },
+        None,
+        None,
+    );
+
+    assert!(
+        server
+            .build_snapshot(client_id)
+            .expect("snapshot")
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .is_every_pane_suppressed,
+        "test setup: every tiled pane is suppressed at a 120x5 pane area"
+    );
+    let attached_client = server
+        .get_session_for_client(client_id)
+        .expect("session")
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client");
+    assert_eq!(
+        attached_client.get_floating_viewport(),
+        Some(Size {
+            column_count: 120,
+            row_count: 5,
+        })
+    );
+    assert_eq!(attached_client.get_focused_floating_pane_id(), None);
+    assert_eq!(server.find_typed_pane(client_id), None);
+
+    apply_key_press(
+        &mut server,
+        &mut viewer,
+        build_key_chord(BindingModifierFlags::NONE, 'l'),
+        Instant::now(),
+    );
+
+    let live_pane_ids: Vec<PaneId> = server.live_pane_ids.iter().copied().collect();
+    assert_eq!(live_pane_ids.len(), 5);
+    for pane_id in live_pane_ids {
+        assert_eq!(
+            fake_pty_backend
+                .list_pane_write_bytes(pane_id)
+                .expect("writes"),
+            Vec::<Vec<u8>>::new()
+        );
+    }
+}
+
 /// Zoom is per-client: one client zooming a pane does not silence another
 /// client's keys. Client A zooms its pane. Client B, tiled on the same tab,
 /// keeps typing into the pane B can still see. The key guard asks whether the

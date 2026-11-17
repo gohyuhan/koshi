@@ -720,7 +720,8 @@ impl<'a> FrameLayout<'a> {
     /// their tab state, but it does not yield a pane slot or terminal grid.
     /// The lock mode is the viewer's `active_input_mode` when one is set, and
     /// the client's `lock_mode` otherwise. The tray button is highlighted while
-    /// the lock mode is `FloatingPaneTray`.
+    /// the lock mode is `FloatingPaneTray`. The client chips come from the
+    /// client's `color_index` and the session's `peers`.
     #[must_use]
     pub(crate) fn get_tabline_inputs(&self) -> TablineInputs<'a> {
         TablineInputs {
@@ -737,6 +738,8 @@ impl<'a> FrameLayout<'a> {
             },
             tabline_offset: self.viewer_chrome.tabline_offset,
             notification_button: self.viewer_chrome.notification_button,
+            viewer_color_index: self.client_snapshot.color_index,
+            peers: &self.session_snapshot.peers,
         }
     }
 

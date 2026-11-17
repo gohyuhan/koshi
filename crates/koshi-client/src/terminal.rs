@@ -54,7 +54,7 @@ use koshi_renderer::theme::Theme;
 use koshi_renderer::{
     build_frame_geometry, build_image_cell_snapshot, build_image_paints, get_cursor_position,
     get_cursor_style, list_changed_screen_rows, render_frame, DrawnRows, FrameGeometry,
-    ImagePlacementKey, ImageRenderMode,
+    FramePeerCursorMarkers, ImagePlacementKey, ImageRenderMode,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
@@ -116,8 +116,6 @@ pub(crate) struct SnapshotWidget<'a> {
     /// chrome it is painted with, placed over the area this widget renders
     /// into.
     pub(crate) frame_geometry: &'a FrameGeometry<'a>,
-    /// The colors this viewer paints koshi's chrome in.
-    pub(crate) theme: &'a Theme,
     /// The hint-bar data for the mode this viewer is in.
     pub(crate) keymap_hints: &'a KeymapHints,
     /// The multi-chord sequence this viewer has open.
@@ -145,7 +143,6 @@ impl Widget for SnapshotWidget<'_> {
     fn render(self, render_area: Rect, render_buffer: &mut Buffer) {
         render_frame(
             self.frame_geometry,
-            self.theme,
             self.keymap_hints,
             self.pending_key_sequence,
             self.image_mode,
@@ -170,7 +167,7 @@ impl Widget for SnapshotWidget<'_> {
                 placement_display_tab_snapshot,
                 self.frame_geometry.get_render_snapshot(),
                 placement_target,
-                self.theme,
+                self.frame_geometry.get_theme(),
                 self.frame_geometry.get_committed_regions(),
                 render_area,
                 render_buffer,
@@ -1843,16 +1840,20 @@ pub(crate) struct FrameInputs {
     /// The count of changes to what the notification center, the toast and
     /// the notification button draw.
     notification_revision: u64,
+    /// The peer cursor markers of the frame drawn from these inputs
+    /// ([`FrameGeometry::get_peer_cursor_markers`]).
+    peer_cursor_markers: FramePeerCursorMarkers,
 }
 
 impl FrameInputs {
     /// The rows in which the cells of a frame drawn from `next_frame_inputs`
     /// can differ from those of a frame drawn from these inputs, as
-    /// [`list_changed_screen_rows`] gives them. `next_frame_geometry` is the
-    /// geometry of the frame drawn from `next_frame_inputs`. `None` when any
-    /// input other than the render snapshot differs, when either frame draws a
-    /// placement state, or when [`list_changed_screen_rows`] gives `None` for
-    /// the two render snapshots.
+    /// [`list_changed_screen_rows`] gives them from these inputs' render
+    /// snapshot and peer cursor markers. `next_frame_geometry` is the geometry
+    /// of the frame drawn from `next_frame_inputs`. `None` when any input
+    /// other than the render snapshot and the peer cursor markers differs, when
+    /// either frame draws a placement state, or when
+    /// [`list_changed_screen_rows`] gives `None` for the two render snapshots.
     fn list_changed_screen_rows(
         &self,
         next_frame_inputs: &FrameInputs,
@@ -1870,6 +1871,7 @@ impl FrameInputs {
             terminal_size,
             has_placement_state,
             notification_revision,
+            peer_cursor_markers: _,
         } = next_frame_inputs;
         if self.has_placement_state
             || *has_placement_state
@@ -1885,7 +1887,11 @@ impl FrameInputs {
         {
             return None;
         }
-        list_changed_screen_rows(&self.render_snapshot, next_frame_geometry)
+        list_changed_screen_rows(
+            &self.render_snapshot,
+            &self.peer_cursor_markers,
+            next_frame_geometry,
+        )
     }
 }
 
@@ -1982,6 +1988,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
         committed_regions,
         frame_paint.chrome,
         render_area,
+        client.get_theme(),
     );
     let is_focused_pane_softened = displayed_snapshot
         .client_snapshot
@@ -2055,6 +2062,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
             || frame_paint.placement_target.is_some()
             || frame_paint.placement_presentation.is_some(),
         notification_revision: frame_paint.notification_revision,
+        peer_cursor_markers: frame_geometry.get_peer_cursor_markers().clone(),
     };
     let changed_rows = shown_frame_inputs.take().and_then(|last_frame_inputs| {
         last_frame_inputs.list_changed_screen_rows(&frame_inputs, &frame_geometry)
@@ -2077,7 +2085,6 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
                 |frame_buffer, drawn_rows| {
                     SnapshotWidget {
                         frame_geometry: &frame_geometry,
-                        theme: &frame_inputs.theme,
                         keymap_hints: &frame_inputs.keymap_hints,
                         pending_key_sequence: frame_inputs.pending_key_sequence.as_ref(),
                         image_mode,

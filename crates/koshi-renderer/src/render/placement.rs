@@ -137,16 +137,13 @@ pub(super) fn draw_pane_placement_presentation(
 }
 
 fn compute_placement_background_color(
-    background_color: Color,
+    background_rgb: (u8, u8, u8),
     tint_color: Color,
     tint_percentage: u16,
 ) -> Color {
-    let (
-        Color::Rgb(background_red, background_green, background_blue),
-        Color::Rgb(tint_red, tint_green, tint_blue),
-    ) = (background_color, tint_color)
-    else {
-        return background_color;
+    let (background_red, background_green, background_blue) = background_rgb;
+    let Color::Rgb(tint_red, tint_green, tint_blue) = tint_color else {
+        return Color::from(background_rgb);
     };
     let tint_percentage = tint_percentage.min(100);
     let blend_channel = |background_channel: u8, tint_channel: u8| -> u8 {

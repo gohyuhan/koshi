@@ -17,9 +17,12 @@ use ratatui::style::Style;
 use koshi_core::ids::PaneId;
 use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
-use koshi_terminal::style::Style as CellStyle;
+use koshi_terminal::style::{Color as CellColor, Style as CellStyle};
 
-use crate::render::{list_visible_layout_area_panes, FrameGeometry, PlacedFloatingPane};
+use crate::render::{
+    list_visible_layout_area_panes, FrameGeometry, FrameLayer, PeerCursorMarker,
+    PlacedFloatingPane, PLACEMENT_HOVER_TINT_COLOR,
+};
 use crate::snapshot::{
     ImagePlacementSnapshot, PanePlacementPresentation, PaneSnapshot, RenderSnapshot,
 };
@@ -109,7 +112,12 @@ impl ImageCellSnapshot {
 /// every visible tiled pane, then those of each floating pane this viewer
 /// draws, back to front. A floating pane first resets every cell of its outer
 /// area to a blank cell, then writes the cells of each visible pane of its
-/// tree, cut to its visible area.
+/// tree, cut to its visible area. After the panes of each layer, the cells
+/// that the placement hover tint covers on that layer take the tint as their
+/// background, and each peer cursor marker cell on that layer takes its
+/// marker's text and fill colors and loses reverse video, as
+/// [`render_frame`](crate::render_frame) paints them. The tint areas and the
+/// markers come from `frame_geometry`.
 /// The viewer chrome decides which floating panes are drawn, as it does for
 /// [`render_frame`](crate::render_frame). The snapshot's `screen_area` is
 /// `snapshot_area` clipped to the viewport area, and each of its cells holds
@@ -156,7 +164,21 @@ pub fn build_image_cell_snapshot(
             &mut cell_states,
         )?;
     }
-    for placed_floating_pane in &frame_geometry.placed_floating_panes {
+    write_placement_hover_tint_cell_states(
+        frame_geometry.list_placement_hover_tint_areas(FrameLayer::ActiveTab),
+        screen_area,
+        &mut cell_states,
+    )?;
+    write_peer_cursor_marker_cell_states(
+        frame_geometry
+            .peer_cursor_markers
+            .list_layer_markers(FrameLayer::ActiveTab),
+        screen_area,
+        &mut cell_states,
+    )?;
+    for (floating_pane_index, placed_floating_pane) in
+        frame_geometry.placed_floating_panes.iter().enumerate()
+    {
         let outer_cell_area = placed_floating_pane.outer_area.intersection(screen_area);
         for screen_row in outer_cell_area.top()..outer_cell_area.bottom() {
             for screen_column in outer_cell_area.left()..outer_cell_area.right() {
@@ -175,11 +197,80 @@ pub fn build_image_cell_snapshot(
                 &mut cell_states,
             )?;
         }
+        let frame_layer = FrameLayer::FloatingPane {
+            floating_pane_index,
+        };
+        write_placement_hover_tint_cell_states(
+            frame_geometry.list_placement_hover_tint_areas(frame_layer),
+            screen_area,
+            &mut cell_states,
+        )?;
+        write_peer_cursor_marker_cell_states(
+            frame_geometry
+                .peer_cursor_markers
+                .list_layer_markers(frame_layer),
+            screen_area,
+            &mut cell_states,
+        )?;
     }
     Some(ImageCellSnapshot {
         screen_area,
         cell_states,
     })
+}
+
+/// Set the background of each cell of `cell_states`, the row-major cells of
+/// `screen_area`, inside one of `tint_areas` to the placement hover tint
+/// color `(0x3a, 0x3a, 0x3a)`. Each cell keeps its text, foreground and
+/// attributes. Returns `None` only when a cell index does not fit in
+/// `usize`.
+fn write_placement_hover_tint_cell_states(
+    tint_areas: &[RatatuiRect],
+    screen_area: RatatuiRect,
+    cell_states: &mut [ImageCellState],
+) -> Option<()> {
+    let (tint_red, tint_green, tint_blue) = PLACEMENT_HOVER_TINT_COLOR;
+    for tint_area in tint_areas {
+        let cell_area = tint_area.intersection(screen_area);
+        for screen_row in cell_area.top()..cell_area.bottom() {
+            for screen_column in cell_area.left()..cell_area.right() {
+                let cell_index = compute_cell_index(screen_area, screen_column, screen_row)?;
+                cell_states[cell_index]
+                    .style
+                    .set_background_color(CellColor::Rgb(tint_red, tint_green, tint_blue));
+            }
+        }
+    }
+    Some(())
+}
+
+/// Give each cell of `cell_states`, the row-major cells of `screen_area`,
+/// that one of `peer_cursor_markers` paints the marker's text and fill
+/// colors and no reverse video. Each cell keeps its text and its other
+/// attributes. A marker outside `screen_area` changes nothing. Returns
+/// `None` only when a cell index does not fit in `usize`.
+fn write_peer_cursor_marker_cell_states(
+    peer_cursor_markers: &[PeerCursorMarker],
+    screen_area: RatatuiRect,
+    cell_states: &mut [ImageCellState],
+) -> Option<()> {
+    for peer_cursor_marker in peer_cursor_markers {
+        if !screen_area.contains(peer_cursor_marker.position) {
+            continue;
+        }
+        let cell_index = compute_cell_index(
+            screen_area,
+            peer_cursor_marker.position.x,
+            peer_cursor_marker.position.y,
+        )?;
+        let (text_red, text_green, text_blue) = peer_cursor_marker.client_color.text_color;
+        let (fill_red, fill_green, fill_blue) = peer_cursor_marker.client_color.fill_color;
+        let cell_style = &mut cell_states[cell_index].style;
+        cell_style.set_foreground_color(CellColor::Rgb(text_red, text_green, text_blue));
+        cell_style.set_background_color(CellColor::Rgb(fill_red, fill_green, fill_blue));
+        cell_style.set_reverse(false);
+    }
+    Some(())
 }
 
 /// Write the cell facts of `pane_snapshot`'s grid into `cell_states`, the

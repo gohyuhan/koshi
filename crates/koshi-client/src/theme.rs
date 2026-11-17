@@ -32,11 +32,12 @@ pub fn resolve_theme(theme_config: &ThemeConfig) -> Theme {
         stack_header_text_color: convert_rgb_color(theme_colors.stack_header_fg),
         stack_header_background_color: convert_rgb_color(theme_colors.stack_header_bg),
         letterbox_color: convert_rgb_color(theme_colors.letterbox),
-        bar_background_color: convert_rgb_color(theme_colors.bar_bg),
+        bar_background_color: extract_rgb_channels(theme_colors.bar_bg),
     }
 }
 
-/// A config color's `(r, g, b)` channels, for the theme's ramp endpoints.
+/// A config color's `(r, g, b)` channels, for the theme's ramp endpoints and
+/// its bar background.
 fn extract_rgb_channels(rgb_color: RgbColor) -> (u8, u8, u8) {
     (rgb_color.red, rgb_color.green, rgb_color.blue)
 }

@@ -7,7 +7,8 @@
 //! zoomed pane whose label carries `[fullscreen]`, each with its pane cells,
 //! border style, labels, scroll position and unavailable-image text cut to
 //! its own pane. A hovered grab handle styles and tints every pane of the
-//! tree and draws no placement handle. A floating pane whose every pane is
+//! tree and draws no placement handle. A hovered tiled placement handle tints
+//! no cell of a floating pane over its pane. A floating pane whose every pane is
 //! suppressed draws its strip and `Terminal too small — enlarge window` below
 //! it, and a one-row floating pane draws its strip alone. A narrow strip drops
 //! the pin toggle, then the minimize button, then the close button. A glyph
@@ -23,6 +24,8 @@
 use koshi_test_support::fixtures::build_floating_pane_id;
 
 use super::*;
+
+use crate::theme::Theme;
 
 use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier};
@@ -258,8 +261,8 @@ fn render_core_frame(
             &CommittedRegions::build_core(viewport_size, 0),
             viewer_chrome,
             viewport_area,
+            &Theme::default(),
         ),
-        &Theme::default(),
         &KeymapHints::default(),
         None,
         image_render_mode,
@@ -757,6 +760,42 @@ fn a_hovered_grab_handle_styles_every_pane_of_the_floating_pane_and_draws_no_pla
             Color::Rgb(0x3a, 0x3a, 0x3a)
         );
         assert_eq!(unhovered_render_buffer[content_cell].bg, Color::Reset);
+    }
+}
+
+#[test]
+fn a_hovered_tiled_placement_handle_tints_its_pane_and_not_the_floating_pane_over_it() {
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .pane_id;
+    push_vim_beside_htop_floating_pane(&mut render_snapshot, false);
+
+    let render_buffer = render_core_frame(
+        &render_snapshot,
+        ViewerChrome {
+            placement_handle_hover: Some(PlacementHandleHover::TiledHandle {
+                pane_id: tiled_pane_id,
+            }),
+            ..ViewerChrome::default()
+        },
+        ImageRenderMode::Placeholder,
+    );
+
+    // `(1, 2)` and `(1, 9)` are content cells of the tiled pane left of the
+    // floating pane, `(3, 4)` a content cell of `vim` and `(21, 4)` one of
+    // `htop`.
+    for tiled_content_cell in [(1, 2), (1, 9)] {
+        assert_eq!(
+            render_buffer[tiled_content_cell].bg,
+            Color::Rgb(0x3a, 0x3a, 0x3a)
+        );
+    }
+    for floating_content_cell in [(3, 4), (21, 4)] {
+        assert_eq!(render_buffer[floating_content_cell].bg, Color::Reset);
     }
 }
 
