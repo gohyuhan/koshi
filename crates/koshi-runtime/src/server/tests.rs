@@ -20,8 +20,9 @@ use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{
-    ClosePaneArgs, Command, CommandSource, NewPaneArgs, NewPanePlacement, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget, ToggleLockModeArgs,
+    ClosePaneArgs, Command, CommandSource, DetachArgs, NewPaneArgs, NewPanePlacement,
+    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget,
+    ToggleLockModeArgs,
 };
 use koshi_core::event::{
     InputModeChanged, PaneClosing, PaneFocused, PanePlacementCommitted, PaneProcessExited,
@@ -705,6 +706,7 @@ fn a_session_post_to_a_subscriber_whose_receiver_is_gone_loses_its_recorded_clie
         session_id,
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
     );
 
     assert!(!server.event_bus.has_subscriber(subscriber_id));
@@ -4470,6 +4472,7 @@ fn a_session_post_reaches_every_attached_client_once_and_stays_in_the_session_qu
         session_id,
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
     );
 
     let notification_queue = &server.list_sessions()[&session_id].notification_queue;
@@ -4541,7 +4544,7 @@ fn a_post_to_a_session_this_process_does_not_hold_changes_nothing() {
         .notification_queue
         .clone();
 
-    server.post_session_notification(SessionId::new(), NotificationSeverity::Error, "lost");
+    server.post_session_notification(SessionId::new(), NotificationSeverity::Error, "lost", None);
 
     assert_eq!(
         server.list_sessions()[&session_id].notification_queue,
@@ -4561,6 +4564,7 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
         session_id,
         NotificationSeverity::Warning,
         "koshi.kdl: unknown key `tab-bar`",
+        None,
     );
     let _delivery_backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
     let expected_render_snapshot = server.build_snapshot(client_id).expect("frame");
@@ -4589,5 +4593,412 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
             held_command_rejections: Vec::new(),
             dropped_command_rejection_count: 0,
         }]
+    );
+}
+
+/// The text and the subject of each `NotificationPosted` that
+/// `delivery_receiver` holds, oldest first. Every other delivery is dropped.
+fn take_posted_notices(delivery_receiver: &DeliveryReceiver) -> Vec<(String, Option<ClientId>)> {
+    delivery_receiver
+        .try_iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::NotificationPosted { posted_entry, .. } => {
+                Some((posted_entry.text, posted_entry.subject_client_id))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text and the subject of each entry `notification_queue` holds, oldest
+/// first.
+fn list_queued_notices(notification_queue: &NotificationQueue) -> Vec<(String, Option<ClientId>)> {
+    notification_queue
+        .list_queued_entries()
+        .map(|queued_entry| (queued_entry.text.clone(), queued_entry.subject_client_id))
+        .collect()
+}
+
+/// `text` as a notice that reports on `subject_client_id`.
+fn build_notice(text: &str, subject_client_id: ClientId) -> (String, Option<ClientId>) {
+    (text.to_string(), Some(subject_client_id))
+}
+
+/// A connection end for `client_id` as the driver takes it from a reading
+/// loop that streamed: `is_returning` is what the connection said about
+/// attaching again.
+fn build_client_detached(client_id: ClientId, is_returning: bool) -> RuntimeEvent {
+    RuntimeEvent::ClientDetached {
+        client_id,
+        detached_at: SystemTime::now(),
+        is_streamed: true,
+        is_returning,
+    }
+}
+
+#[test]
+fn a_remote_attach_posts_joined_remotely_to_every_other_client_and_hands_the_joiner_its_entry_in_its_queue(
+) {
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+
+    let bob_attachment = attach_from_origin_with_token(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("bob"),
+        SystemTime::now(),
+    );
+
+    let joined_notice = build_notice("bob (2) joined remotely", bob_attachment.client_id);
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![joined_notice.clone()]
+    );
+    assert_eq!(
+        list_queued_notices(&bob_attachment.notification_queue),
+        vec![joined_notice]
+    );
+    assert_eq!(take_posted_notices(&bob_attachment.deliveries), Vec::new());
+}
+
+#[test]
+fn an_attach_from_another_account_posts_joined_from_another_account_on_this_machine() {
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+
+    let other_account_attachment = attach_from_origin_with_token(
+        &mut server,
+        None,
+        ClientOrigin::Local {
+            is_same_user: false,
+        },
+        None,
+        SystemTime::now(),
+    );
+
+    let other_account_label = get_client_label(&server, other_account_attachment.client_id);
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![build_notice(
+            &format!("{other_account_label} (2) joined from another account on this machine"),
+            other_account_attachment.client_id
+        )]
+    );
+}
+
+#[test]
+fn the_host_account_posts_for_its_last_and_first_terminal_while_another_person_is_present() {
+    let now = SystemTime::now();
+    let (mut server, first_host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let second_host_attachment = attach_with_token(&mut server, None, now);
+
+    let _ = server.handle_client_detach(second_host_attachment.client_id);
+    let _ = server.handle_client_detach(first_host_client_id);
+    let returning_host_attachment = attach_with_token(&mut server, None, now);
+    let _ = attach_with_token(&mut server, None, now);
+
+    assert_eq!(
+        take_posted_notices(&bob_attachment.deliveries),
+        vec![
+            build_notice("host (1) left", first_host_client_id),
+            build_notice("host (1) joined", returning_host_attachment.client_id),
+        ]
+    );
+}
+
+#[test]
+fn a_host_terminal_with_nobody_else_present_posts_nothing() {
+    let (mut server, host_client_id) = boot_server();
+
+    let _ = server.handle_client_detach(host_client_id);
+    let _ = attach_with_token(&mut server, None, SystemTime::now());
+
+    let session = server.get_sole_session().expect("the session");
+    assert_eq!(list_queued_notices(&session.notification_queue), Vec::new());
+}
+
+#[test]
+fn a_connection_that_does_not_attach_again_posts_left_and_one_that_may_posts_disconnected() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let _ = take_posted_notices(&bob_attachment.deliveries);
+    let _ = take_posted_notices(&carol_attachment.deliveries);
+
+    let _ = server.handle_runtime_event(build_client_detached(bob_attachment.client_id, false));
+    let _ = server.handle_runtime_event(build_client_detached(carol_attachment.client_id, true));
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![
+            build_notice("bob (2) left", bob_attachment.client_id),
+            build_notice("carol (3) disconnected", carol_attachment.client_id),
+        ]
+    );
+    assert_eq!(take_posted_notices(&bob_attachment.deliveries), Vec::new());
+    assert_eq!(
+        take_posted_notices(&carol_attachment.deliveries),
+        vec![build_notice("bob (2) left", bob_attachment.client_id)]
+    );
+}
+
+#[test]
+fn a_detach_command_posts_left_once_and_the_connection_end_after_it_posts_nothing() {
+    let (mut server, host_client_id) = boot_server();
+    let bob_attachment = attach_from_origin_with_token(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("bob"),
+        SystemTime::now(),
+    );
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+
+    let _ = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::KeyBinding {
+            client_id: bob_attachment.client_id,
+        },
+        Command::Detach(DetachArgs::default()),
+    ));
+    let _ = server.handle_runtime_event(build_client_detached(bob_attachment.client_id, false));
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![build_notice("bob (2) left", bob_attachment.client_id)]
+    );
+}
+
+#[test]
+fn detach_all_posts_left_for_each_client_in_client_id_order() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let _ = server.handle_client_detach(host_client_id);
+    let notice_count_before = server
+        .get_sole_session()
+        .expect("the session")
+        .notification_queue
+        .list_queued_entries()
+        .count();
+
+    let _ = server.submit_command(CommandEnvelope::from_parts(
+        CommandId::new(),
+        CommandSource::KeyBinding {
+            client_id: bob_attachment.client_id,
+        },
+        Command::DetachAll,
+    ));
+
+    let mut expected_notices = vec![
+        build_notice("bob (2) left", bob_attachment.client_id),
+        build_notice("carol (3) left", carol_attachment.client_id),
+    ];
+    expected_notices.sort_by_key(|(_, subject_client_id)| *subject_client_id);
+    let session = server.get_sole_session().expect("the session");
+    assert_eq!(
+        list_queued_notices(&session.notification_queue)[notice_count_before..].to_vec(),
+        expected_notices
+    );
+}
+
+#[test]
+fn a_dropped_link_posts_disconnected_and_its_redial_posts_reconnected_under_the_same_number() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+
+    let _ = server.handle_runtime_event(build_client_detached(bob_attachment.client_id, true));
+    let returning_bob_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", returning_bob_attachment.client_id),
+        ]
+    );
+    assert_eq!(
+        take_posted_notices(&returning_bob_attachment.deliveries),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_redial_before_the_drop_is_read_posts_disconnected_then_reconnected() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+
+    let returning_bob_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", returning_bob_attachment.client_id),
+        ]
+    );
+    assert_eq!(take_posted_notices(&bob_attachment.deliveries), Vec::new());
+}
+
+/// `server` carried across an image swap and resumed: every client it held
+/// awaits its re-attach.
+fn swap_server_image(server: &mut Server) -> Server {
+    let pty_size_by_pane_id = server.pty_size_by_pane_id.clone();
+    let (_header, body) = server.carry_out(&[]).expect("a session to carry");
+    resume_carried_server(body, pty_size_by_pane_id)
+}
+
+/// Attach to `server` from another machine as `claimed_attachment`'s client,
+/// presenting its token, and hand back what the session answered.
+fn claim_remote_client(server: &mut Server, claimed_attachment: &AttachAccepted) -> AttachAccepted {
+    server
+        .handle_ipc_attach(
+            Some(claimed_attachment.client_id),
+            Some(claimed_attachment.resume_token.clone()),
+            TEST_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            ClientOrigin::Remote,
+            None,
+            60,
+            None,
+            None,
+            false,
+        )
+        .expect("the session hands the record back")
+}
+
+#[test]
+fn a_resume_claim_and_a_token_takeover_of_a_record_awaiting_its_reattach_post_nothing() {
+    let now = SystemTime::now();
+    let (mut server, _host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let mut resumed_server = swap_server_image(&mut server);
+    let notices_before = list_queued_notices(
+        &resumed_server
+            .get_sole_session()
+            .expect("the session")
+            .notification_queue,
+    );
+
+    let presence_notices_before: Vec<(String, Option<ClientId>)> = notices_before
+        .iter()
+        .filter(|(_, subject_client_id)| subject_client_id.is_some())
+        .cloned()
+        .collect();
+    assert_eq!(
+        presence_notices_before,
+        vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
+            build_notice("carol (3) joined remotely", carol_attachment.client_id),
+        ]
+    );
+
+    let claimed_bob_attachment = claim_remote_client(&mut resumed_server, &bob_attachment);
+    let carol_takeover_attachment = attach_from_origin_with_token(
+        &mut resumed_server,
+        Some(carol_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("carol"),
+        now,
+    );
+
+    assert_eq!(claimed_bob_attachment.client_id, bob_attachment.client_id);
+    assert_ne!(
+        carol_takeover_attachment.client_id,
+        carol_attachment.client_id
+    );
+    let session = resumed_server.get_sole_session().expect("the session");
+    assert_eq!(
+        list_queued_notices(&session.notification_queue),
+        notices_before
+    );
+}
+
+#[test]
+fn the_grace_window_closing_posts_disconnected_for_each_unclaimed_client_against_the_clients_present(
+) {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let dave_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("dave"), now);
+    let mut resumed_server = swap_server_image(&mut server);
+    let claimed_dave_attachment = claim_remote_client(&mut resumed_server, &dave_attachment);
+
+    let _ = resumed_server.handle_drop_unclaimed_clients(now);
+
+    let mut expected_notices = vec![
+        build_notice("host (1) disconnected", host_client_id),
+        build_notice("bob (2) disconnected", bob_attachment.client_id),
+    ];
+    expected_notices.sort_by_key(|(_, subject_client_id)| *subject_client_id);
+    assert_eq!(
+        take_posted_notices(&claimed_dave_attachment.deliveries),
+        expected_notices
+    );
+}
+
+#[test]
+fn the_grace_window_closing_posts_nothing_for_a_host_terminal_whose_only_other_person_also_awaits()
+{
+    let now = SystemTime::now();
+    let (mut server, _host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let mut resumed_server = swap_server_image(&mut server);
+    let notices_before = list_queued_notices(
+        &resumed_server
+            .get_sole_session()
+            .expect("the session")
+            .notification_queue,
+    );
+
+    let _ = resumed_server.handle_drop_unclaimed_clients(now);
+
+    let mut expected_notices = notices_before;
+    expected_notices.push(build_notice(
+        "bob (2) disconnected",
+        bob_attachment.client_id,
+    ));
+    let session = resumed_server.get_sole_session().expect("the session");
+    assert_eq!(
+        list_queued_notices(&session.notification_queue),
+        expected_notices
     );
 }

@@ -35,6 +35,7 @@ fn a_post_takes_the_next_sequence_under_the_queue_owner_and_epoch() {
         .post_core_entry(
             NotificationSeverity::Error,
             "pane …a1b2 killed by signal 9",
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(10),
         )
@@ -43,6 +44,7 @@ fn a_post_takes_the_next_sequence_under_the_queue_owner_and_epoch() {
         .post_core_entry(
             NotificationSeverity::Info,
             "pane …c3d4 exited 101",
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(11),
         )
@@ -61,6 +63,7 @@ fn a_post_takes_the_next_sequence_under_the_queue_owner_and_epoch() {
             text: "pane …a1b2 killed by signal 9".to_string(),
             created_at: compute_time_after_unix_epoch(10),
             repeat_count: 1,
+            subject_client_id: None,
         }
     );
     assert_eq!(second_entry.notification_id.sequence, 1);
@@ -80,6 +83,7 @@ fn a_post_equal_to_the_newest_entry_merges_into_it() {
     notification_queue.post_core_entry(
         NotificationSeverity::Warning,
         "below minimum size",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -88,6 +92,7 @@ fn a_post_equal_to_the_newest_entry_merges_into_it() {
         .post_core_entry(
             NotificationSeverity::Warning,
             "below minimum size",
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(2),
         )
@@ -101,6 +106,48 @@ fn a_post_equal_to_the_newest_entry_merges_into_it() {
 }
 
 #[test]
+fn a_post_merges_into_the_newest_entry_only_when_it_reports_on_the_same_client() {
+    let mut notification_queue = create_session_queue();
+    let first_bob_client_id = ClientId::new();
+    let second_bob_client_id = ClientId::new();
+
+    for (subject_client_id, created_at_seconds) in [
+        (Some(first_bob_client_id), 1),
+        (Some(second_bob_client_id), 2),
+        (Some(second_bob_client_id), 3),
+        (None, 4),
+    ] {
+        notification_queue.post_core_entry(
+            NotificationSeverity::Info,
+            "bob (2) left",
+            subject_client_id,
+            NonZeroU32::MIN,
+            compute_time_after_unix_epoch(created_at_seconds),
+        );
+    }
+
+    let listed_entries: Vec<(u64, Option<ClientId>, u32)> = notification_queue
+        .list_queued_entries()
+        .map(|queued_entry| {
+            (
+                queued_entry.notification_id.sequence,
+                queued_entry.subject_client_id,
+                queued_entry.repeat_count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed_entries,
+        vec![
+            (0, Some(first_bob_client_id), 1),
+            (1, Some(second_bob_client_id), 2),
+            (2, None, 1),
+        ]
+    );
+    assert_eq!(notification_queue.get_revision(), 4);
+}
+
+#[test]
 fn an_entry_between_two_equal_posts_keeps_all_three() {
     let mut notification_queue = create_session_queue();
 
@@ -108,6 +155,7 @@ fn an_entry_between_two_equal_posts_keeps_all_three() {
         notification_queue.post_core_entry(
             NotificationSeverity::Info,
             text,
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(1),
         );
@@ -133,12 +181,14 @@ fn the_same_text_at_another_severity_is_a_new_entry() {
     notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -154,6 +204,7 @@ fn a_full_queue_evicts_its_oldest_entry_and_keeps_its_sequences_without_a_gap() 
         notification_queue.post_core_entry(
             NotificationSeverity::Info,
             &format!("entry {posted_entry_index}"),
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(1),
         );
@@ -175,6 +226,7 @@ fn a_post_removes_refused_characters_and_cuts_the_text_to_its_bound() {
         .post_core_entry(
             NotificationSeverity::Warning,
             "file\u{1b}[2J.kdl",
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(1),
         )
@@ -183,6 +235,7 @@ fn a_post_removes_refused_characters_and_cuts_the_text_to_its_bound() {
         .post_core_entry(
             NotificationSeverity::Warning,
             &"a".repeat(5000),
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(1),
         )
@@ -202,12 +255,14 @@ fn a_repeat_is_compared_after_the_text_is_sanitized() {
     notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a\u{7f}",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
     let merged_entry = notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(2),
     );
@@ -221,6 +276,7 @@ fn a_repeat_count_saturates() {
     notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -229,6 +285,7 @@ fn a_repeat_count_saturates() {
     let merged_entry = notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(2),
     );
@@ -245,6 +302,7 @@ fn a_post_of_several_repeats_counts_each_one() {
         .post_core_entry(
             NotificationSeverity::Warning,
             "a",
+            None,
             three_posts,
             compute_time_after_unix_epoch(1),
         )
@@ -253,6 +311,7 @@ fn a_post_of_several_repeats_counts_each_one() {
         .post_core_entry(
             NotificationSeverity::Warning,
             "a",
+            None,
             three_posts,
             compute_time_after_unix_epoch(2),
         )
@@ -273,6 +332,7 @@ fn a_post_of_several_repeats_saturates_the_repeat_count() {
     notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MAX,
         compute_time_after_unix_epoch(1),
     );
@@ -280,6 +340,7 @@ fn a_post_of_several_repeats_saturates_the_repeat_count() {
     let merged_entry = notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MAX,
         compute_time_after_unix_epoch(2),
     );
@@ -294,6 +355,7 @@ fn a_queue_survives_a_serde_round_trip() {
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -310,6 +372,7 @@ fn validating_a_queue_accepts_its_own_entries() {
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -324,6 +387,7 @@ fn validating_a_queue_refuses_an_entry_of_another_queue() {
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -354,6 +418,7 @@ fn validating_a_queue_refuses_more_entries_than_the_bound() {
     notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "a",
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );

@@ -987,7 +987,7 @@ fn step_four_names_the_missing_or_misshapen_field() {
 }
 
 #[test]
-fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its_history_and_a_generated_label_and_each_local_origin_an_unknown_account(
+fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its_history_and_a_generated_label_each_local_origin_an_unknown_account_and_each_queued_entry_no_subject(
 ) {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
@@ -1027,7 +1027,11 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its
                         "shown_floating_pane_ids": [],
                         "focused_floating_pane_id": null
                     }
-                }}
+                }},
+                "notification_queue": {"queued_entries": [
+                    {"severity": "Error", "text": "pane …a1b2 killed by signal 9"},
+                    {"severity": "Warning", "text": "koshi.kdl: unknown key `tab-bar`"}
+                ]}
             }
         },
         "carried_pane_state_by_pane_id": {},
@@ -1121,7 +1125,19 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its
                             "shown_floating_pane_ids": [],
                             "focused_floating_pane_id": null
                         }
-                    }}
+                    }},
+                    "notification_queue": {"queued_entries": [
+                        {
+                            "severity": "Error",
+                            "text": "pane …a1b2 killed by signal 9",
+                            "subject_client_id": null
+                        },
+                        {
+                            "severity": "Warning",
+                            "text": "koshi.kdl: unknown key `tab-bar`",
+                            "subject_client_id": null
+                        }
+                    ]}
                 }
             },
             "carried_pane_state_by_pane_id": {},
@@ -1162,12 +1178,14 @@ fn step_five_moves_each_client_after_the_first_holder_of_an_index_to_the_lowest_
                 "C": build_client_record(1),
                 "D": build_client_record(0),
                 "E": build_client_record(5)
-            }}
+            }},
+            "notification_queue": {"queued_entries": []}
         },
         "T": {
             "floating_set": {"members": []},
             "tabs": {},
-            "clients": {"client_by_id": {"F": build_client_record(0)}}
+            "clients": {"client_by_id": {"F": build_client_record(0)}},
+            "notification_queue": {"queued_entries": []}
         }
     }});
 
@@ -1353,6 +1371,30 @@ fn step_five_names_the_missing_or_misshapen_field() {
                 "floating_pane_view_by_pane_id": {}
             }}}})),
             "body.session_by_id.S.clients.client_by_id.C.color_index must be a whole number",
+        ),
+        (
+            build_step_five_session(serde_json::json!({})),
+            "body.session_by_id.S.notification_queue is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"notification_queue": 7})),
+            "body.session_by_id.S.notification_queue must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"notification_queue": {}})),
+            "body.session_by_id.S.notification_queue.queued_entries is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"notification_queue": {
+                "queued_entries": 7
+            }})),
+            "body.session_by_id.S.notification_queue.queued_entries must be an array",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"notification_queue": {
+                "queued_entries": [7]
+            }})),
+            "body.session_by_id.S.notification_queue.queued_entries[0] must be an object",
         ),
         (
             build_saved_view_body(serde_json::json!(7)),

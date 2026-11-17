@@ -1338,6 +1338,7 @@ fn two_viewers_of_one_session_keep_their_own_toast_setting_and_clear_state() {
         .post_core_entry(
             NotificationSeverity::Error,
             "pane …a1b2 killed by signal 9",
+            None,
             NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )

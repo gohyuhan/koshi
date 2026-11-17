@@ -1888,12 +1888,14 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );

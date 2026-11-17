@@ -647,6 +647,7 @@ fn every_other_frame_keeps_the_stream_reading() {
         .post_core_entry(
             NotificationSeverity::Info,
             "saved",
+            None,
             NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )
@@ -16082,6 +16083,7 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
         .post_core_entry(
             NotificationSeverity::Error,
             "pane …a1b2 killed by signal 9",
+            None,
             NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )
@@ -16089,6 +16091,7 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
     session_notification_queue.post_core_entry(
         NotificationSeverity::Warning,
         "koshi.kdl: unknown key `tab-bar`",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
@@ -16208,6 +16211,7 @@ fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
     foreign_notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );

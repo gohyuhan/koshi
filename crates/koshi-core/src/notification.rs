@@ -5,9 +5,10 @@
 //! whose entries only that client shows, or a session, whose entries every
 //! client attached to it shows. The queue assigns each entry its
 //! [`NotificationId`], its [`NotificationSource`] and its `created_at`; the
-//! caller supplies its [`NotificationSeverity`] and its text. Example: the
-//! session posts `pane …a1b2 killed by signal 9` as an `Error`, and every
-//! attached client shows `[Koshi] pane …a1b2 killed by signal 9`.
+//! caller supplies its [`NotificationSeverity`], its text and the client it
+//! reports on, if any. Example: the session posts
+//! `pane …a1b2 killed by signal 9` as an `Error`, and every attached client
+//! shows `[Koshi] pane …a1b2 killed by signal 9`.
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
@@ -109,6 +110,9 @@ pub struct NotificationEntry {
     /// How many posts merged into this entry, from 1. Saturates at
     /// [`u32::MAX`].
     pub repeat_count: u32,
+    /// The client the entry reports on: `Some` for a join or leave notice,
+    /// which names that client, and `None` for every other entry.
+    pub subject_client_id: Option<ClientId>,
 }
 
 /// A bounded queue of entries, oldest first, kept by one owner for one epoch.
@@ -202,16 +206,17 @@ impl NotificationQueue {
 
     /// Post `text` from koshi itself at `severity` `post_count` times in a
     /// row, the last post arriving at `created_at`, and return the entry the
-    /// posts made or changed.
+    /// posts made or changed. `subject_client_id` is the client the entry
+    /// reports on, or `None`.
     ///
     /// `text` loses every character [`sanitize_text_to_byte_count`] removes
     /// and is cut to [`MAX_NOTIFICATION_TEXT_BYTE_COUNT`] bytes. When the
-    /// newest entry has the same source, severity and text, the posts merge
-    /// into it: its `repeat_count` rises by `post_count` and its `created_at`
-    /// becomes `created_at`, and no entry is added. Otherwise a new entry with
-    /// `repeat_count` `post_count` takes the next sequence, and a queue
-    /// already holding [`MAX_QUEUED_NOTIFICATION_COUNT`] entries first evicts
-    /// its oldest. Either way the revision rises by `post_count`.
+    /// newest entry has the same source, severity, text and subject, the posts
+    /// merge into it: its `repeat_count` rises by `post_count` and its
+    /// `created_at` becomes `created_at`, and no entry is added. Otherwise a
+    /// new entry with `repeat_count` `post_count` takes the next sequence,
+    /// and a queue already holding [`MAX_QUEUED_NOTIFICATION_COUNT`] entries
+    /// first evicts its oldest. Either way the revision rises by `post_count`.
     ///
     /// Example: posting `a`, `a`, `b`, `a` once each gives the entries `a` ×2,
     /// `b`, `a`. Posting `a` 3 times, then `a` once, gives the entry `a` ×4.
@@ -219,6 +224,7 @@ impl NotificationQueue {
         &mut self,
         severity: NotificationSeverity,
         text: &str,
+        subject_client_id: Option<ClientId>,
         post_count: NonZeroU32,
         created_at: SystemTime,
     ) -> &NotificationEntry {
@@ -228,6 +234,7 @@ impl NotificationQueue {
             newest_entry.source == NotificationSource::Core
                 && newest_entry.severity == severity
                 && newest_entry.text == sanitized_text
+                && newest_entry.subject_client_id == subject_client_id
         });
         if is_repeat {
             let newest_entry = self
@@ -256,6 +263,7 @@ impl NotificationQueue {
             text: sanitized_text,
             created_at,
             repeat_count: post_count.get(),
+            subject_client_id,
         });
         self.queued_entries.back().expect("the entry pushed above")
     }

@@ -25,7 +25,9 @@
 //! preview: an entry the viewer posts, an entry a `NotificationPosted` brings,
 //! and an entry newer than every entry taken before from the same session
 //! queue. The entries of the first queue the viewer takes from a session
-//! preview nothing.
+//! preview nothing, and neither does an entry whose subject is this viewer's
+//! current client or the client it replaced: a viewer that dials again does
+//! not toast its own `bob (2) disconnected` and `bob (2) reconnected`.
 
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant, SystemTime};
@@ -206,6 +208,10 @@ impl std::fmt::Display for NotificationTakeError {
 pub(crate) struct NotificationHistory {
     /// The viewer's own queue, owned by its client.
     client_queue: NotificationQueue,
+    /// The owner of the viewer's own queue before the current one: the client
+    /// this viewer was before the session handed it its current client.
+    /// `None` while the viewer has held one client only.
+    previous_client_queue_owner: Option<NotificationQueueOwner>,
     /// What the viewer last took from its session's queue, or `None` before
     /// it took any.
     session_queue_mark: Option<SessionQueueMark>,
@@ -242,6 +248,7 @@ impl NotificationHistory {
     pub(crate) fn from_client_id(client_id: ClientId) -> Self {
         NotificationHistory {
             client_queue: NotificationQueue::from_owner(NotificationQueueOwner::Client(client_id)),
+            previous_client_queue_owner: None,
             session_queue_mark: None,
             merged_entries: NotificationCenterEntries::default(),
             dropped_entry_count: 0,
@@ -262,7 +269,8 @@ impl NotificationHistory {
 
     /// Record `client_id` as the owner of the viewer's own queue. A
     /// `client_id` other than the queue's owner starts a new, empty own queue
-    /// in a new epoch; the history keeps every entry it holds.
+    /// in a new epoch, and the queue's owner becomes the previous client; the
+    /// history keeps every entry it holds.
     ///
     /// Example: a viewer rejoins as a new client after a session restart. Its
     /// next post takes sequence 0 under the new client, and the entries it
@@ -270,8 +278,21 @@ impl NotificationHistory {
     pub(crate) fn set_client_id(&mut self, client_id: ClientId) {
         let owner = NotificationQueueOwner::Client(client_id);
         if self.client_queue.get_owner() != owner {
+            self.previous_client_queue_owner = Some(self.client_queue.get_owner());
             self.client_queue = NotificationQueue::from_owner(owner);
         }
+    }
+
+    /// Whether `notification_entry` reports on this viewer: its subject is
+    /// the client that owns the viewer's own queue, or the client that owned
+    /// the queue before it.
+    fn is_about_this_viewer(&self, notification_entry: &NotificationEntry) -> bool {
+        let Some(subject_client_id) = notification_entry.subject_client_id else {
+            return false;
+        };
+        let subject_queue_owner = NotificationQueueOwner::Client(subject_client_id);
+        self.client_queue.get_owner() == subject_queue_owner
+            || self.previous_client_queue_owner == Some(subject_queue_owner)
     }
 
     /// Every entry the history holds, oldest arrival first.
@@ -644,7 +665,7 @@ impl NotificationHistory {
         }
         let posted_entry = self
             .client_queue
-            .post_core_entry(severity, text, post_count, created_at)
+            .post_core_entry(severity, text, None, post_count, created_at)
             .clone();
         let held_entry_index = self.find_merged_entry_index(posted_entry.notification_id);
         self.take_arrival(posted_entry, held_entry_index, should_show_toasts);
@@ -679,7 +700,8 @@ impl NotificationHistory {
     ///
     /// With `should_show_toasts`, each newer entry queues a toast preview
     /// while the center is closed, except in the first queue taken from its
-    /// owner.
+    /// owner, and except an entry about this viewer
+    /// ([`is_about_this_viewer`](Self::is_about_this_viewer)).
     ///
     /// # Errors
     /// [`NotificationTakeError::InvalidQueue`] when the queue fails
@@ -730,7 +752,9 @@ impl NotificationHistory {
                 repeat_count: received_entry.repeat_count,
             });
             let held_entry_index = self.find_merged_entry_index(received_entry.notification_id);
-            self.take_arrival(received_entry, held_entry_index, should_preview_new_entries);
+            let should_preview_entry =
+                should_preview_new_entries && !self.is_about_this_viewer(&received_entry);
+            self.take_arrival(received_entry, held_entry_index, should_preview_entry);
         }
         self.session_queue_mark = Some(SessionQueueMark {
             owner,
@@ -755,7 +779,8 @@ impl NotificationHistory {
     /// and text. The dropped count adds the sequences the post skips, as
     /// [`take_session_queue`](Self::take_session_queue) counts them. With
     /// `should_show_toasts`, the arrival queues a toast preview while the
-    /// center is closed.
+    /// center is closed, unless the entry is about this viewer
+    /// ([`is_about_this_viewer`](Self::is_about_this_viewer)).
     ///
     /// # Errors
     /// [`NotificationTakeError::PostWithoutQueue`] before any queue was
@@ -799,10 +824,12 @@ impl NotificationHistory {
         self.count_skipped_sequences(&posted_entry, &mut next_expected_sequence);
         if is_new {
             let held_entry_index = self.find_merged_entry_index(posted_entry.notification_id);
+            let should_preview_entry =
+                should_show_toasts && !self.is_about_this_viewer(&posted_entry);
             self.take_arrival(
                 sanitize_received_entry(posted_entry),
                 held_entry_index,
-                should_show_toasts,
+                should_preview_entry,
             );
         }
         Ok(())

@@ -520,12 +520,30 @@ the label changes to `restore all`.
 ## Notification center
 
 Koshi states each message of its own as a notification: a pane that a signal
-killed, a config warning, or a key whose command the session refused. The
-notification center lists the notifications of this client, and a toast shows
-each new one for a short time. If this client reads its session slower than
+killed, a config warning, a key whose command the session refused, or a
+terminal that joins or leaves the session. The notification center lists the
+notifications of this client, and a toast shows each new one for a short time. If this client reads its session slower than
 the session writes, the session keeps each refusal of this client's commands
 until the client catches up. Then equal refusals in a row show as one
 notification with their count: `[Koshi] Warning ×3`.
+
+When a terminal attaches to the session or leaves it, every other terminal of
+the session gets an `Info` notification with that terminal's label and
+number:
+
+- `bob (2) joined remotely` for a terminal on another machine;
+- `bob (2) joined from another account on this machine` for a terminal of
+  another user of this machine;
+- `bob (2) left` for a terminal that detaches, quits, or closes;
+- `bob (2) disconnected` for a terminal whose link dropped, or that does not
+  attach again within 60 seconds of a session restart;
+- `bob (2) reconnected` for a terminal that attaches again after it
+  disconnected.
+
+A terminal of the account that runs the session gets a notification only as
+that account's first or last terminal while another person is attached:
+`host (1) joined`, `host (1) left`. A terminal shows no toast for a
+notification about itself, and that notification still counts as unread.
 
 The tabline shows the notification button `●` left of the tray button, also
 while this client holds no notification. A tabline with no room for the tray

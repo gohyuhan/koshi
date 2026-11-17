@@ -140,6 +140,9 @@ pub struct Surface {
 /// - The session of a painted frame carries `peers`: every other attached
 ///   client, with its `client_id`, `color_index` and `typed_pane_id`. A frame
 ///   without it fails to decode. 5 has no such field.
+/// - A notification entry carries `subject_client_id`: the client a join or
+///   leave notice reports on, or `null` for every other entry. 5 has no such
+///   field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -287,7 +290,9 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// takes `0` and a generated `C-<adjective>-<noun>` label. A client's
 /// `Local` origin carries `is_same_user`, and a format 5 client whose origin
 /// is `Local` takes `is_same_user: false` until its connection comes back and
-/// sets the value it reports. A session
+/// sets the value it reports. Each queued notification entry holds
+/// `subject_client_id`, the client a join or leave notice reports on, and a
+/// format 5 entry takes `null`. A session
 /// of format 5 keeps its clients, and the body keeps its saved views and resume-token
 /// hashes. Format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views

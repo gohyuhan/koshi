@@ -491,7 +491,7 @@ pub(crate) fn build_fixed_test_uuid() -> uuid::Uuid {
 
 /// The wire form of one session notification entry at fixed ids: sequence 0
 /// of the session queue, an `Error` that reads `pane …a1b2 killed by signal
-/// 9`, at the Unix epoch, posted once.
+/// 9`, at the Unix epoch, posted once, reporting on no client.
 pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
     json!({
@@ -504,7 +504,8 @@ pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
         "severity": "Error",
         "text": "pane …a1b2 killed by signal 9",
         "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
-        "repeat_count": 1
+        "repeat_count": 1,
+        "subject_client_id": null
     })
 }
 
