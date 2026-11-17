@@ -2071,6 +2071,7 @@ fn a_typed_character_lists_only_its_row_after_the_painted_updates_travel() {
         koshi_renderer::list_changed_screen_rows(
             &first_received_render_snapshot,
             first_frame_geometry.get_peer_cursor_markers(),
+            first_frame_geometry.get_pane_chip_groups(),
             &koshi_renderer::build_frame_geometry(
                 &second_received_render_snapshot,
                 &committed_regions,

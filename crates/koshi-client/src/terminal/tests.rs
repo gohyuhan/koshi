@@ -5293,6 +5293,7 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
         has_placement_state: false,
         notification_revision: 0,
         peer_cursor_markers: FramePeerCursorMarkers::default(),
+        pane_chip_groups: FramePaneChipGroups::default(),
     };
     let changes: [FrameInputsChange; 10] = [
         ("the region solve", |frame_inputs| {

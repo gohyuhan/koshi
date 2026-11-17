@@ -7,9 +7,11 @@
 //! border highlighted), and the **statusline** — a koshi-owned row with
 //! per-mode keybinding hints. While another client is attached, the tabline
 //! also shows one numbered chip per attached client, and a pane that another
-//! client types in shows that client's cursor as one cell in that client's
-//! color ([`Theme::compute_client_color`]). Placement previews tint the moving and destination
-//! panes separately, color their outlines, and explain their proposed positions.
+//! client types in shows that client's number chip on its top border and that
+//! client's cursor as one cell in that client's color
+//! ([`Theme::compute_client_color`]). Placement previews tint the moving and
+//! destination panes separately, color their outlines, and explain their
+//! proposed positions.
 //! The committed region solve supplies all three zones.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
@@ -49,6 +51,7 @@ use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{PaneId, TabId};
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
+use koshi_layout::solver::StackHeader;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
@@ -78,16 +81,21 @@ pub(crate) const PLACEMENT_HOVER_TINT_COLOR: (u8, u8, u8) = (0x3a, 0x3a, 0x3a);
 /// its top border, with one blank cell on each side.
 const FULLSCREEN_TAG_TEXT: &str = " [fullscreen] ";
 
+mod client_chip;
 mod floating;
 mod floating_pane_tray;
 mod notification;
+mod pane_chip;
 mod peer_cursor_marker;
 mod placement;
 
+use client_chip::draw_client_chip_group;
 use floating::draw_floating_pane;
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use floating_pane_tray::draw_floating_pane_tray;
 use notification::{draw_notification_center, draw_notification_toast};
+pub use pane_chip::FramePaneChipGroups;
+use pane_chip::{find_layer_pane_chip_group, list_frame_pane_chip_groups, PaneChipGroup};
 pub use peer_cursor_marker::FramePeerCursorMarkers;
 pub(crate) use peer_cursor_marker::PeerCursorMarker;
 use peer_cursor_marker::{draw_peer_cursor_markers, list_frame_peer_cursor_markers};
@@ -178,6 +186,9 @@ pub struct FrameGeometry<'a> {
     /// The peer cursor markers the frame draws on each layer
     /// ([`list_frame_peer_cursor_markers`]).
     pub(crate) peer_cursor_markers: FramePeerCursorMarkers,
+    /// The pane chip groups the frame draws on each layer
+    /// ([`list_frame_pane_chip_groups`]).
+    pub(crate) pane_chip_groups: FramePaneChipGroups,
 }
 
 /// One layer of panes in a frame. Layers sort back to front: the active
@@ -228,6 +239,12 @@ impl<'a> FrameGeometry<'a> {
         &self.peer_cursor_markers
     }
 
+    /// The pane chip groups the frame draws on each layer.
+    #[must_use]
+    pub fn get_pane_chip_groups(&self) -> &FramePaneChipGroups {
+        &self.pane_chip_groups
+    }
+
     /// The cells the placement hover tint covers on `frame_layer`. Empty when
     /// the tint covers no pane of that layer.
     pub(crate) fn list_placement_hover_tint_areas(
@@ -272,8 +289,8 @@ impl<'a> FrameGeometry<'a> {
 /// `viewport_area` with `committed_regions`, `viewer_chrome` and `theme`: the
 /// centered tiled layout, the floating panes this viewer draws, the open
 /// floating pane tray, the open notification center, the toast, the colors
-/// of the attached clients, the placement hover tint and the peer cursor
-/// markers. Each is solved once.
+/// of the attached clients, the placement hover tint, the peer cursor markers
+/// and the pane chip groups. Each is solved once.
 #[must_use]
 pub fn build_frame_geometry<'a>(
     render_snapshot: &'a RenderSnapshot,
@@ -312,6 +329,13 @@ pub fn build_frame_geometry<'a>(
         viewport_area,
         &placed_floating_panes,
     );
+    let pane_chip_groups = list_frame_pane_chip_groups(
+        render_snapshot,
+        &client_colors,
+        layout_origin,
+        viewport_area,
+        &placed_floating_panes,
+    );
     FrameGeometry {
         render_snapshot,
         committed_regions,
@@ -332,6 +356,7 @@ pub fn build_frame_geometry<'a>(
         client_colors,
         placement_hover_tint,
         peer_cursor_markers,
+        pane_chip_groups,
     }
 }
 
@@ -430,14 +455,18 @@ fn find_placement_hover_tint(
 ///
 /// 1. Blanks every cell of `viewport_area`.
 /// 2. Draws one bordered box per visible pane: the terminal title in the top
-///    border, `[fullscreen]` after it while the viewer zooms the pane, and the
-///    scroll position in the bottom border when the pane is scrolled back.
+///    border, `[fullscreen]` after it while the viewer zooms the pane, the
+///    number chip of each peer whose keys reach the pane at the right of the
+///    top border, and the scroll position in the bottom border when the pane
+///    is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect, tints
 ///    the content of the pane whose placement handle the pointer rests on,
 ///    and paints each peer cursor marker in its peer's colors.
 /// 4. Keeps pane cells under native images or writes the unavailable-image
 ///    text over unavailable coverage.
-/// 5. Draws the one-row title strip for every collapsed stack member.
+/// 5. Draws the one-row title strip for every collapsed stack member, with
+///    the number chip of each peer whose keys reach that member left of its
+///    `[n/total]`.
 /// 6. Tints each visible affected pane with a role color and colors its outline.
 ///    The moving pane and the uncovered area of one visible destination pane
 ///    show preview text when both areas are visible.
@@ -566,6 +595,9 @@ pub fn render_frame(
         layout_area_surface: LayoutAreaSurface::ActiveTab,
         layout_origin,
         content_clip_area: screen_buffer.area,
+        pane_chip_groups: frame_geometry
+            .pane_chip_groups
+            .list_layer_groups(FrameLayer::ActiveTab),
     };
 
     draw_panes(
@@ -739,20 +771,27 @@ pub fn render_frame(
 /// cursor and the session's peer list may differ too: the rows of each peer
 /// cursor marker that one of `previous_peer_cursor_markers` and the next
 /// frame's markers ([`FrameGeometry::get_peer_cursor_markers`]) holds and the
-/// other does not are listed, and the tabline rows when the peers'
-/// `color_index` list differs. `previous_peer_cursor_markers` are the
-/// markers of the frame drawn from `previous_render_snapshot`. Every
-/// other field must be equal, each grid view must keep its row count, column
-/// count and scroll offset, and each pane must show the same scroll position
-/// text.
+/// other does not are listed, the row of each pane chip group that one of
+/// `previous_pane_chip_groups` and the next frame's groups
+/// ([`FrameGeometry::get_pane_chip_groups`]) holds and the other does not,
+/// and the tabline rows when the peers' `color_index` list differs.
+/// `previous_peer_cursor_markers` and `previous_pane_chip_groups` are the
+/// markers and the groups of the frame drawn from `previous_render_snapshot`.
+/// Every other field must be equal, each grid view must keep its row count,
+/// column count and scroll offset, and each pane must show the same scroll
+/// position text.
 ///
 /// Example: one pane whose content area starts at buffer row 2, with grid row
 /// 8 alone replaced, gives `[10]`. A peer whose cursor in that pane moves
 /// from grid row 3 to grid row 4, with no grid row replaced, gives `[5, 6]`.
+/// A peer whose keys move from a pane whose top border is on buffer row 1 to
+/// a pane whose top border is on buffer row 14 gives those two rows and the
+/// rows of the marker it moves.
 #[must_use]
 pub fn list_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
     previous_peer_cursor_markers: &FramePeerCursorMarkers,
+    previous_pane_chip_groups: &FramePaneChipGroups,
     next_frame_geometry: &FrameGeometry<'_>,
 ) -> Option<Vec<u16>> {
     let viewport_area = next_frame_geometry.viewport_area;
@@ -848,6 +887,9 @@ pub fn list_changed_screen_rows(
     changed_screen_rows.extend(
         previous_peer_cursor_markers
             .list_unshared_marker_rows(&next_frame_geometry.peer_cursor_markers),
+    );
+    changed_screen_rows.extend(
+        previous_pane_chip_groups.list_unshared_group_rows(&next_frame_geometry.pane_chip_groups),
     );
     changed_screen_rows.sort_unstable();
     changed_screen_rows.dedup();
@@ -1141,6 +1183,9 @@ pub(super) struct PlacedLayoutArea<'a> {
     /// The cells the pane contents and their tints may cover. The borders,
     /// the titles and the stack headers are cut to the buffer only.
     pub(super) content_clip_area: RatatuiRect,
+    /// The pane chip groups on this layout area's layer, sorted by pane id
+    /// ([`FramePaneChipGroups::list_layer_groups`]).
+    pub(super) pane_chip_groups: &'a [PaneChipGroup],
 }
 
 /// Draw a bordered box for every visible pane of `placed_layout_area`,
@@ -1156,9 +1201,12 @@ pub(super) struct PlacedLayoutArea<'a> {
 /// gives. On the active tab, the top border of the pane that shows its
 /// placement handle ([`is_placement_handle_shown`]) draws the handle `⠿⠿⠿` on
 /// the handle cells that function gives, so `user@host` reads
-/// `┌⠿⠿⠿ user@host ─┐`. While `viewer_chrome.is_pane_placement_visible` is
-/// `true`, the pointer hover color is not drawn: hovering `pane-123` does not
-/// change its border color. `layout_origin` shifts each pane into the frame. A
+/// `┌⠿⠿⠿ user@host ─┐`. A pane with a pane chip group on its top border in
+/// `placed_layout_area` draws the group's chips in their peers' colors and its
+/// `+N` mark in the border style, after the label and the handle, and its
+/// label ends one cell before the group: `┌─── vim ──── 2 ─┐`. While
+/// `viewer_chrome.is_pane_placement_visible` is `true`, the pointer hover
+/// color is not drawn: hovering `pane-123` does not change its border color. `layout_origin` shifts each pane into the frame. A
 /// box that covers no row `drawn_rows` draws is not drawn. The label, the
 /// handle and the scroll position are drawn only when `drawn_rows` draws their
 /// row.
@@ -1177,6 +1225,7 @@ fn draw_panes(
         layout_area_surface,
         layout_origin,
         content_clip_area: _,
+        pane_chip_groups,
     } = placed_layout_area;
     for pane_slot in &layout_area.pane_slots {
         let pane_rect = place_cell_rect(pane_slot.outer_rect, layout_origin);
@@ -1199,6 +1248,7 @@ fn draw_panes(
         draw_pane_border(pane_rect, border_style, drawn_rows, screen_buffer);
 
         let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
+        let pane_chip_group = find_layer_pane_chip_group(pane_chip_groups, pane_slot.pane_id);
 
         let top_border = compute_tiled_pane_top_border(pane_slot.outer_rect);
         let is_top_border_drawn = drawn_rows.is_row_drawn(pane_rect.y);
@@ -1207,8 +1257,18 @@ fn draw_panes(
                 let pane_title = pane_snapshot
                     .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
                     .unwrap_or("");
+                let mut label_area = place_cell_rect(title_rect, layout_origin);
+                if let Some(pane_chip_group) = pane_chip_group {
+                    let label_end_column = pane_chip_group
+                        .client_chip_group
+                        .start_column
+                        .saturating_sub(1);
+                    label_area.width = label_area
+                        .width
+                        .min(label_end_column.saturating_sub(label_area.x));
+                }
                 draw_pane_label(
-                    place_cell_rect(title_rect, layout_origin),
+                    label_area,
                     pane_title,
                     layout_area.is_pane_zoomed(pane_slot.pane_id),
                     border_style,
@@ -1230,6 +1290,16 @@ fn draw_panes(
                     border_style,
                 );
             }
+        }
+
+        if let Some(pane_chip_group) = pane_chip_group.filter(|_| is_top_border_drawn) {
+            draw_client_chip_group(
+                &pane_chip_group.client_chip_group,
+                &pane_chip_group.client_colors,
+                border_style,
+                pane_chip_group.row_index,
+                screen_buffer,
+            );
         }
 
         if let Some(pane_snapshot) =
@@ -1713,9 +1783,12 @@ fn get_cell_color(cell_color: CellColor) -> Color {
 
 /// Draw one header strip for each collapsed stack member of
 /// `placed_layout_area`: a collapse arrow and the pane title on the left, and
-/// a `[position/total]` indicator on the right. The strip of
-/// `viewer_chrome.placement_source_pane_id` takes the focus color, and the
-/// strip of a placement candidate
+/// a `[position/total]` indicator on the right. A member with a pane chip
+/// group on its stack header in `placed_layout_area` draws the group's chips
+/// in their peers' colors and its `+N` mark in the strip's style, and its
+/// title ends one cell before the group: `▸ cargo watch    2  [2/3]`. The
+/// strip of `viewer_chrome.placement_source_pane_id` takes the focus color,
+/// and the strip of a placement candidate
 /// ([`LayoutAreaSurface::is_placement_candidate`]) takes the placement hover
 /// color. `layout_origin` shifts each strip into the frame. A strip on no row
 /// `drawn_rows` draws is not drawn.
@@ -1759,36 +1832,73 @@ fn draw_stack_headers(
             .find_pane_snapshot(stack_header.pane_id)
             .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
             .unwrap_or("");
+        let pane_chip_group =
+            find_layer_pane_chip_group(placed_layout_area.pane_chip_groups, stack_header.pane_id);
+        let pane_label_width = match pane_chip_group {
+            Some(pane_chip_group) => pane_chip_group
+                .client_chip_group
+                .start_column
+                .saturating_sub(1)
+                .saturating_sub(header_rect.x)
+                .min(header_rect.width),
+            None => header_rect.width,
+        };
         let pane_label_line = Line::from(format!("▸ {pane_label}"));
         set_line_clipped(
             screen_buffer,
             header_rect.x,
             header_rect.y,
             &pane_label_line,
-            header_rect.width,
+            pane_label_width,
         );
 
         // Right-align `[N/total]`, with its start column clamped to
         // `header_rect.x`. A strip narrower than the indicator writes only inside
         // the strip.
-        let indicator_line = Line::from(format!(
-            "[{}/{}]",
-            stack_header.member_index + 1,
-            stack_header.member_count
-        ));
-        let indicator_width = get_line_width(&indicator_line);
-        let indicator_start_column = header_rect
-            .right()
-            .saturating_sub(indicator_width)
-            .max(header_rect.x);
+        let indicator_text = format_stack_header_indicator(stack_header);
+        let indicator_start_column =
+            compute_stack_header_indicator_start_column(header_rect, &indicator_text);
         set_line_clipped(
             screen_buffer,
             indicator_start_column,
             header_rect.y,
-            &indicator_line,
+            &Line::from(indicator_text),
             header_rect.right() - indicator_start_column,
         );
+
+        if let Some(pane_chip_group) = pane_chip_group {
+            draw_client_chip_group(
+                &pane_chip_group.client_chip_group,
+                &pane_chip_group.client_colors,
+                stack_header_style,
+                pane_chip_group.row_index,
+                screen_buffer,
+            );
+        }
     }
+}
+
+/// The position indicator of `stack_header`: its member index plus one, then
+/// its member count. The second of three members gives `[2/3]`.
+pub(super) fn format_stack_header_indicator(stack_header: &StackHeader) -> String {
+    format!(
+        "[{}/{}]",
+        stack_header.member_index.saturating_add(1),
+        stack_header.member_count
+    )
+}
+
+/// The column where `indicator_text` starts on the stack header
+/// `header_area`: right-aligned, and at `header_area.x` at least. `[2/3]` on a
+/// header of columns `0` to `29` starts at `25`.
+pub(super) fn compute_stack_header_indicator_start_column(
+    header_area: RatatuiRect,
+    indicator_text: &str,
+) -> u16 {
+    header_area
+        .right()
+        .saturating_sub(get_text_width(indicator_text))
+        .max(header_area.x)
 }
 
 /// The mode indicator shown in the tabline: every active mode label joined with

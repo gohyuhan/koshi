@@ -1,17 +1,19 @@
 //! Tests for the peer cursor markers: the cell each one paints and its
 //! colors, the thirteen states in which a viewer draws none, the layers that
 //! cover one, the markers each layer lists, and the rows a frame redraws when
-//! a marker comes, goes or moves.
+//! a marker comes, goes or moves, beside the row of the pane chip that comes
+//! or goes with it.
 //!
 //! Most frames are the viewer Alice (index 0) over two tiled panes side by
 //! side, each 30x26 with a 28x24 content area: left at buffer (1, 2) and
 //! right, which Alice focuses, at (31, 2). The peer Bob (index 1) types in
-//! left, whose cursor sits at row 5, column 12: buffer cell (13, 7).
+//! left, whose cursor sits at row 5, column 12: buffer cell (13, 7). His pane
+//! chip ` 2 ` sits on left's top border: buffer row 1, columns 25 to 27.
 
 use super::*;
 
 use koshi_core::geometry::{Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::ids::PaneId;
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -24,15 +26,15 @@ use crate::images::ImageRenderMode;
 use crate::notification::tests::build_test_notification_view;
 use crate::notification::NotificationCenterEntries;
 use crate::render::tests::{
-    build_floating_pane_slot, build_one_pane_floating_pane_slot, build_render_snapshot,
-    get_pane_snapshot_mut, render_frame_to_buffer,
+    build_floating_pane_slot, build_one_pane_floating_pane_slot, build_peer_snapshot,
+    build_render_snapshot, get_pane_snapshot_mut, render_frame_to_buffer,
 };
 use crate::render::{
     build_frame_geometry, get_cursor_position, list_changed_screen_rows, render_frame,
 };
 use crate::snapshot::{
     CommittedRegions, FloatingPane, FloatingPaneSlot, GridView, KeymapHints, PanePlacementMessage,
-    PanePlacementPresentation, PeerSnapshot, SelectionSpans, ViewerChrome,
+    PanePlacementPresentation, SelectionSpans, ViewerChrome,
 };
 use crate::theme::Theme;
 
@@ -52,15 +54,6 @@ const BOB_CURSOR_COLUMN_INDEX: u16 = 12;
 
 /// The buffer cell of Bob's cursor: the left pane's content starts at (1, 2).
 const BOB_MARKER_POSITION: Position = Position { x: 13, y: 7 };
-
-/// A peer of index `color_index` whose keys reach `typed_pane_id`.
-fn build_peer_snapshot(color_index: u32, typed_pane_id: Option<PaneId>) -> PeerSnapshot {
-    PeerSnapshot {
-        client_id: ClientId::new(),
-        color_index,
-        typed_pane_id,
-    }
-}
 
 /// The two-pane frame the module doc describes: each pane shows a blank
 /// 24x28 grid with its cursor at row 5, column 12. Returns the frame and the
@@ -140,8 +133,8 @@ fn render_core_frame(render_snapshot: &RenderSnapshot, viewer_chrome: ViewerChro
 }
 
 /// The rows a frame redraws from `previous_render_snapshot`, with the
-/// markers of its own frame, to `next_render_snapshot` over the compiled-in
-/// regions.
+/// markers and the pane chip groups of its own frame, to
+/// `next_render_snapshot` over the compiled-in regions.
 fn list_core_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
     next_render_snapshot: &RenderSnapshot,
@@ -158,6 +151,7 @@ fn list_core_changed_screen_rows(
     list_changed_screen_rows(
         previous_render_snapshot,
         previous_frame_geometry.get_peer_cursor_markers(),
+        previous_frame_geometry.get_pane_chip_groups(),
         &build_frame_geometry(
             next_render_snapshot,
             &committed_regions,
@@ -819,8 +813,7 @@ fn state_8_a_hidden_cursor_and_a_pane_with_no_grid_draw_no_marker() {
 }
 
 #[test]
-fn state_9_a_view_scrolled_past_the_cursor_row_draws_no_marker_and_live_brings_back_only_the_marker(
-) {
+fn state_9_a_view_scrolled_past_the_cursor_row_draws_no_marker_and_live_brings_back_the_marker() {
     let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
     get_pane_snapshot_mut(&mut render_snapshot, left_pane_id)
         .terminal_grid_view
@@ -845,7 +838,10 @@ fn state_9_a_view_scrolled_past_the_cursor_row_draws_no_marker_and_live_brings_b
             }
         }
     }
-    assert_eq!(differing_pane_area_cells, vec![(13, 7)]);
+    assert_eq!(
+        differing_pane_area_cells,
+        vec![(25, 1), (26, 1), (27, 1), (13, 7)]
+    );
 }
 
 #[test]
@@ -936,23 +932,24 @@ fn state_13_the_terminal_too_small_overlay_draws_no_marker_and_no_chip() {
 // --- the rows a frame redraws ------------------------------------------------
 
 #[test]
-fn a_peer_whose_keys_leave_a_pane_redraws_the_row_of_the_marker_it_removes() {
+fn a_peer_whose_keys_leave_a_pane_redraws_the_rows_of_the_marker_and_the_pane_chip_it_removes() {
     let (previous_render_snapshot, _, _) = build_two_pane_frame();
     let mut next_render_snapshot = previous_render_snapshot.clone();
     next_render_snapshot.session_snapshot.peers[0].typed_pane_id = None;
 
     assert_eq!(
         list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
-        Some(vec![7])
+        Some(vec![1, 7])
     );
     assert_eq!(
         list_core_changed_screen_rows(&next_render_snapshot, &previous_render_snapshot),
-        Some(vec![7])
+        Some(vec![1, 7])
     );
 }
 
 #[test]
-fn a_peer_whose_keys_move_to_another_pane_redraws_the_rows_of_the_marker_it_removes_and_adds() {
+fn a_peer_whose_keys_move_to_another_pane_redraws_the_rows_of_the_marker_and_the_pane_chip_it_removes_and_adds(
+) {
     let (mut previous_render_snapshot, _, _) = build_two_pane_frame();
     let float_pane_id = PaneId::new();
     push_one_pane_floating_pane(
@@ -965,7 +962,7 @@ fn a_peer_whose_keys_move_to_another_pane_redraws_the_rows_of_the_marker_it_remo
 
     assert_eq!(
         list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
-        Some(vec![7, 17])
+        Some(vec![1, 7, 14, 17])
     );
 }
 
@@ -984,8 +981,8 @@ fn a_peer_cursor_that_moves_with_no_row_change_redraws_the_old_and_the_new_marke
 }
 
 #[test]
-fn a_peer_that_attaches_redraws_the_tab_strip_and_a_peer_that_leaves_typing_redraws_its_marker_row()
-{
+fn a_peer_that_attaches_redraws_the_tab_strip_and_a_peer_that_leaves_typing_redraws_its_marker_and_pane_chip_rows(
+) {
     let (typing_render_snapshot, _, _) = build_two_pane_frame();
     let mut alone_render_snapshot = typing_render_snapshot.clone();
     alone_render_snapshot.session_snapshot.peers.clear();
@@ -998,11 +995,11 @@ fn a_peer_that_attaches_redraws_the_tab_strip_and_a_peer_that_leaves_typing_redr
     );
     assert_eq!(
         list_core_changed_screen_rows(&typing_render_snapshot, &alone_render_snapshot),
-        Some(vec![0, 7])
+        Some(vec![0, 1, 7])
     );
     assert_eq!(
         list_core_changed_screen_rows(&alone_render_snapshot, &typing_render_snapshot),
-        Some(vec![0, 7])
+        Some(vec![0, 1, 7])
     );
 }
 

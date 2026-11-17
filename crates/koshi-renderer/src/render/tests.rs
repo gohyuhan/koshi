@@ -124,6 +124,15 @@ pub(crate) fn build_one_pane_floating_pane_slot(
     )
 }
 
+/// A peer of index `color_index` whose keys reach `typed_pane_id`.
+pub(crate) fn build_peer_snapshot(color_index: u32, typed_pane_id: Option<PaneId>) -> PeerSnapshot {
+    PeerSnapshot {
+        client_id: ClientId::new(),
+        color_index,
+        typed_pane_id,
+    }
+}
+
 /// Build a snapshot from explicit pieces. `pane_layouts` are `(pane_id, outer rect, visible)`;
 /// a visible pane's content rect is the outer rect inset by its one-cell border.
 pub(crate) fn build_render_snapshot(
@@ -5550,6 +5559,7 @@ fn list_core_changed_screen_rows(
     list_changed_screen_rows(
         previous_render_snapshot,
         previous_frame_geometry.get_peer_cursor_markers(),
+        previous_frame_geometry.get_pane_chip_groups(),
         &build_frame_geometry(
             next_render_snapshot,
             &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
