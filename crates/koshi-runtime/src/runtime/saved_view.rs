@@ -80,6 +80,10 @@ pub struct SavedView {
     /// client detached ([`Client::get_unannounced_arrival`]), or `None` when
     /// they saw it arrive.
     pub unannounced_arrival: Option<ArrivalNotice>,
+    /// The client the client followed when it detached
+    /// ([`Client::get_followed_client_id`]), or `None` when it followed
+    /// nobody.
+    pub followed_client_id: Option<ClientId>,
 }
 
 /// One filed view: the sha256 of each token that takes it back, when it stops
@@ -186,6 +190,7 @@ impl SavedViewStore {
                 floating_pane_view_by_floating_pane_id: client.list_floating_pane_views(),
                 shown_floating_pane_ids: client.list_shown_floating_pane_ids().to_vec(),
                 unannounced_arrival: client.get_unannounced_arrival(),
+                followed_client_id: client.get_followed_client_id(),
             },
         });
         while self.saved_view_records.len() > MAX_SAVED_VIEW_RECORD_COUNT {

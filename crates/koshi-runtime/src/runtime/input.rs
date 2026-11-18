@@ -47,7 +47,8 @@ use koshi_input::keyboard::encode_key_input;
 use koshi_layout::content::find_content_rect;
 
 impl Server {
-    /// React to input reaching `pane_id`'s child from `client_id`: drop the
+    /// React to input reaching `pane_id`'s child from `client_id`: end the
+    /// client's follow (`Server::clear_followed_client_id`), drop the
     /// client's highlight in that pane, then return the client's view to live
     /// output.
     ///
@@ -56,6 +57,7 @@ impl Server {
     /// A forwarded mouse report drops the highlight itself and does not call
     /// this.
     pub(crate) fn handle_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
+        self.clear_followed_client_id(client_id);
         self.clear_selection_on_pane_input(client_id, pane_id);
         self.snap_view_to_bottom_on_input(client_id, pane_id);
     }

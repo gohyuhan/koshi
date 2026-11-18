@@ -209,6 +209,39 @@ pub enum ArrivalNotice {
     Reconnected,
 }
 
+/// The parts of one client's view that a follow copies onto the follower
+/// ([`Client::build_followed_view`], [`Client::apply_followed_view`]). Two
+/// views are equal exactly when a follower of the one sees what the other
+/// sees, positions of floating panes aside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowedView {
+    /// The tab the client views.
+    pub active_tab_id: TabId,
+    /// The client's focus history in `active_tab_id`, newest first.
+    pub focus_history: Vec<PaneId>,
+    /// The pane the client zooms in `active_tab_id`, or `None` when it sees
+    /// the tab tiled.
+    pub zoomed_pane_id: Option<PaneId>,
+    /// The floating panes the client shows, oldest first. The last one holds
+    /// the client's focus; an empty list focuses no floating pane.
+    pub shown_floating_pane_ids: Vec<FloatingPaneId>,
+    /// The client's focus history and zoom inside each floating pane of its
+    /// session, keyed by floating pane id.
+    pub floating_pane_focus_by_floating_pane_id: HashMap<FloatingPaneId, FloatingPaneFocus>,
+    /// The client's scroll offset of each pane the view was built for, in
+    /// lines above the live bottom: `0` at the live bottom.
+    pub scroll_offset_by_pane_id: HashMap<PaneId, usize>,
+}
+
+/// One client's focus history and zoom inside one floating pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingPaneFocus {
+    /// The panes the client focused inside the floating pane, newest first.
+    pub focus_history: Vec<PaneId>,
+    /// The pane the client zooms inside the floating pane, or `None`.
+    pub zoomed_pane_id: Option<PaneId>,
+}
+
 /// One attached client: a single terminal connected to a session, holding the
 /// identity the server gave it at attach and the view state that is the
 /// client's alone. Two clients on the same session — and even viewing the same
@@ -242,6 +275,10 @@ pub struct Client {
     /// its attach answer, and `None` once the session announced the client,
     /// or when the client needs no announcement.
     unannounced_arrival: Option<ArrivalNotice>,
+    /// The client of the same session whose view this client follows: after
+    /// each event the session copies that client's view onto this one
+    /// ([`FollowedView`]). `None` when this client follows nobody.
+    followed_client_id: Option<ClientId>,
     /// The panes this client focused in each tab, newest first, each pane
     /// once. The first pane is the one this client focuses in that tab, and
     /// the active tab's first pane takes this client's input while no
@@ -400,6 +437,7 @@ impl Client {
             label,
             color_index,
             unannounced_arrival: None,
+            followed_client_id: None,
             focus_history_by_tab_id: HashMap::new(),
             lock_mode: LockMode::Normal,
             last_settled_lock_command_id: None,
@@ -673,10 +711,211 @@ impl Client {
 
     /// Highlight `selection` in `pane_id` for this client, replacing any highlight
     /// it already had there. Other panes' highlights are untouched — each pane
-    /// keeps its own.
+    /// keeps its own. A client that follows another client stops following
+    /// ([`set_followed_client_id`](Self::set_followed_client_id) with `None`).
     pub fn set_selection(&mut self, pane_id: PaneId, selection: Selection) {
         let previous_selection = self.selection_by_pane_id.insert(pane_id, selection);
         self.is_view_changed |= previous_selection != Some(selection);
+        self.set_followed_client_id(None);
+    }
+
+    /// The client whose view this client follows, or `None` when it follows
+    /// nobody.
+    #[must_use]
+    pub fn get_followed_client_id(&self) -> Option<ClientId> {
+        self.followed_client_id
+    }
+
+    /// Make this client follow `followed_client_id`, or nobody with `None`.
+    /// A value that differs from the one held marks this client's view
+    /// changed.
+    pub fn set_followed_client_id(&mut self, followed_client_id: Option<ClientId>) {
+        self.is_view_changed |= self.followed_client_id != followed_client_id;
+        self.followed_client_id = followed_client_id;
+    }
+
+    /// The parts of this client's view that a follow copies
+    /// ([`FollowedView`]): its active tab, its focus history and zoom there,
+    /// the floating panes it shows, its focus history and zoom inside each
+    /// floating pane, and its scroll offset of each pane of
+    /// `scroll_pane_ids`.
+    #[must_use]
+    pub fn build_followed_view(&self, scroll_pane_ids: &[PaneId]) -> FollowedView {
+        let active_tab_id = self.active_tab_id;
+        FollowedView {
+            active_tab_id,
+            focus_history: self.list_focus_history(active_tab_id).to_vec(),
+            zoomed_pane_id: self.get_zoomed_pane_id(active_tab_id),
+            shown_floating_pane_ids: self.shown_floating_pane_ids.clone(),
+            floating_pane_focus_by_floating_pane_id: self
+                .floating_pane_view_by_floating_pane_id
+                .iter()
+                .map(|(&floating_pane_id, view_with_own_solve)| {
+                    let floating_pane_view = &view_with_own_solve.floating_pane_view;
+                    (
+                        floating_pane_id,
+                        FloatingPaneFocus {
+                            focus_history: floating_pane_view.focus_history.clone(),
+                            zoomed_pane_id: floating_pane_view.zoomed_pane_id,
+                        },
+                    )
+                })
+                .collect(),
+            scroll_offset_by_pane_id: scroll_pane_ids
+                .iter()
+                .map(|&pane_id| (pane_id, self.get_scroll_offset(pane_id)))
+                .collect(),
+        }
+    }
+
+    /// The view this client takes when it follows `leader`: `leader`'s
+    /// [`build_followed_view`](Self::build_followed_view) over
+    /// `scroll_pane_ids`. It shows the floating panes `leader` shows while
+    /// this client has a floating viewport
+    /// ([`get_floating_viewport`](Self::get_floating_viewport)), else none.
+    ///
+    /// Example: `leader` shows the floating pane `htop`. A client with an
+    /// `80x22` pane area gets a view that shows `[htop]`, and a client with a
+    /// `4x22` pane area gets a view that shows none.
+    #[must_use]
+    pub fn build_view_to_follow(
+        &self,
+        leader: &Client,
+        scroll_pane_ids: &[PaneId],
+    ) -> FollowedView {
+        FollowedView {
+            shown_floating_pane_ids: self.list_followable_floating_pane_ids(leader).to_vec(),
+            ..leader.build_followed_view(scroll_pane_ids)
+        }
+    }
+
+    /// Whether this client's view equals the view it takes when it follows
+    /// `leader` ([`build_view_to_follow`](Self::build_view_to_follow) over
+    /// `scroll_pane_ids`): the same active tab, focus history and zoom there,
+    /// shown floating panes, focus history and zoom inside each floating pane,
+    /// and scroll offset of each pane of `scroll_pane_ids`. Reads both views
+    /// in place and copies nothing.
+    #[must_use]
+    pub fn is_view_followed(&self, leader: &Client, scroll_pane_ids: &[PaneId]) -> bool {
+        let tab_id = leader.active_tab_id;
+        self.active_tab_id == tab_id
+            && self.list_focus_history(tab_id) == leader.list_focus_history(tab_id)
+            && self.get_zoomed_pane_id(tab_id) == leader.get_zoomed_pane_id(tab_id)
+            && self.shown_floating_pane_ids == self.list_followable_floating_pane_ids(leader)
+            && leader.floating_pane_view_by_floating_pane_id.iter().all(
+                |(&floating_pane_id, leader_view_with_own_solve)| {
+                    let leader_floating_pane_view = &leader_view_with_own_solve.floating_pane_view;
+                    self.get_floating_pane_view(floating_pane_id).is_some_and(
+                        |own_floating_pane_view| {
+                            own_floating_pane_view.focus_history
+                                == leader_floating_pane_view.focus_history
+                                && own_floating_pane_view.zoomed_pane_id
+                                    == leader_floating_pane_view.zoomed_pane_id
+                        },
+                    )
+                },
+            )
+            && scroll_pane_ids.iter().all(|&pane_id| {
+                self.get_scroll_offset(pane_id) == leader.get_scroll_offset(pane_id)
+            })
+    }
+
+    /// The floating panes this client shows when it follows `leader`: the
+    /// floating panes `leader` shows, in its order, while this client has a
+    /// floating viewport ([`get_floating_viewport`](Self::get_floating_viewport)),
+    /// else none.
+    fn list_followable_floating_pane_ids<'leader>(
+        &self,
+        leader: &'leader Client,
+    ) -> &'leader [FloatingPaneId] {
+        match self.get_floating_viewport() {
+            Some(_) => &leader.shown_floating_pane_ids,
+            None => &[],
+        }
+    }
+
+    /// Make this client's view equal to `followed_view` in every part a
+    /// follow copies, except the active tab, which the caller switches:
+    ///
+    /// 1. The focus history and zoom in `followed_view.active_tab_id` become
+    ///    `followed_view`'s, when either differs.
+    /// 2. The shown floating panes, their order, and the focus history and
+    ///    zoom inside each floating pane become `followed_view`'s, when any of
+    ///    them differs ([`replace_floating_view`](Self::replace_floating_view)).
+    ///    Each floating pane keeps this client's own position.
+    /// 3. The scroll offset of each pane of
+    ///    `followed_view.scroll_offset_by_pane_id` becomes that offset.
+    ///
+    /// Example: this client's history `[c, a]` in tab `t` and a
+    /// `followed_view` of tab `t` with `[c, b, a]` and zoom on `c` give the
+    /// history `[c, b, a]` and the zoom on `c`.
+    pub fn apply_followed_view(
+        &mut self,
+        followed_view: &FollowedView,
+        floating_set: &FloatingSet,
+    ) {
+        let tab_id = followed_view.active_tab_id;
+        if self.list_focus_history(tab_id) != followed_view.focus_history.as_slice()
+            || self.get_zoomed_pane_id(tab_id) != followed_view.zoomed_pane_id
+        {
+            self.clear_focus_history(tab_id);
+            for &pane_id in followed_view.focus_history.iter().rev() {
+                self.update_focused_pane(tab_id, pane_id);
+            }
+            if let Some(zoomed_pane_id) = followed_view.zoomed_pane_id {
+                self.zoom_pane(tab_id, zoomed_pane_id);
+            }
+        }
+        let is_floating_view_followed = self.shown_floating_pane_ids
+            == followed_view.shown_floating_pane_ids
+            && self.floating_pane_view_by_floating_pane_id.iter().all(
+                |(floating_pane_id, view_with_own_solve)| {
+                    followed_view
+                        .floating_pane_focus_by_floating_pane_id
+                        .get(floating_pane_id)
+                        .is_none_or(|floating_pane_focus| {
+                            floating_pane_focus.focus_history
+                                == view_with_own_solve.floating_pane_view.focus_history
+                                && floating_pane_focus.zoomed_pane_id
+                                    == view_with_own_solve.floating_pane_view.zoomed_pane_id
+                        })
+                },
+            );
+        if !is_floating_view_followed {
+            let followed_floating_pane_views: HashMap<FloatingPaneId, FloatingPaneView> = self
+                .floating_pane_view_by_floating_pane_id
+                .iter()
+                .map(|(&floating_pane_id, view_with_own_solve)| {
+                    let own_floating_pane_view = &view_with_own_solve.floating_pane_view;
+                    let floating_pane_focus = followed_view
+                        .floating_pane_focus_by_floating_pane_id
+                        .get(&floating_pane_id);
+                    let floating_pane_view = FloatingPaneView {
+                        position: own_floating_pane_view.position,
+                        is_minimized: !followed_view
+                            .shown_floating_pane_ids
+                            .contains(&floating_pane_id),
+                        focus_history: floating_pane_focus.map_or_else(
+                            || own_floating_pane_view.focus_history.clone(),
+                            |floating_pane_focus| floating_pane_focus.focus_history.clone(),
+                        ),
+                        zoomed_pane_id: floating_pane_focus.map_or(
+                            own_floating_pane_view.zoomed_pane_id,
+                            |floating_pane_focus| floating_pane_focus.zoomed_pane_id,
+                        ),
+                    };
+                    (floating_pane_id, floating_pane_view)
+                })
+                .collect();
+            self.replace_floating_view(
+                &followed_floating_pane_views,
+                &followed_view.shown_floating_pane_ids,
+                floating_set,
+            );
+        }
+        for (&pane_id, &scroll_offset) in &followed_view.scroll_offset_by_pane_id {
+            self.set_scroll_offset(pane_id, scroll_offset);
+        }
     }
 
     /// Drop this client's highlight in `pane_id`, leaving visual mode for that
@@ -1604,6 +1843,12 @@ impl ClientRegistry {
     pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
         let detached_client = self.client_by_id.remove(&client_id)?;
         self.detached_client_ids.push(client_id);
+        for client in self.client_by_id.values_mut() {
+            if client.followed_client_id == Some(client_id) {
+                client.set_followed_client_id(None);
+                self.has_client_write = true;
+            }
+        }
         Some(detached_client)
     }
 

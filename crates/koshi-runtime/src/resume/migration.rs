@@ -1316,7 +1316,7 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 /// 7. Each entry of each session's `notification_queue.queued_entries` gains
 ///    `subject_client_id: null`.
 /// 8. Each client record and each saved view gains `unannounced_arrival:
-///    null`.
+///    null` and `followed_client_id: null`.
 /// 9. The saved-view store gains an empty `presented_token_hash_by_client_id`,
 ///    and each saved-view record's `connection_token_hash` `<h>` becomes
 ///    `connection_token_hashes: [<h>]`.
@@ -1360,8 +1360,9 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             |client_record, record_path| {
                 migrate_floating_pane_views_five_to_six(client_record, record_path)?;
                 migrate_client_origin_five_to_six(client_record, record_path)?;
-                get_json_object(client_record, record_path)?
-                    .insert("unannounced_arrival".to_string(), Value::Null);
+                let client_record_fields = get_json_object(client_record, record_path)?;
+                client_record_fields.insert("unannounced_arrival".to_string(), Value::Null);
+                client_record_fields.insert("followed_client_id".to_string(), Value::Null);
                 Ok(())
             },
         )?;
@@ -1422,6 +1423,7 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
                 serde_json::json!(generate_name(NameKind::Client, |_| false)),
             );
             saved_view_fields.insert("unannounced_arrival".to_string(), Value::Null);
+            saved_view_fields.insert("followed_client_id".to_string(), Value::Null);
             Ok(())
         },
     )

@@ -11,6 +11,7 @@ use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
 
+use super::follow::can_client_follow;
 use crate::runtime::event::AttachAccepted;
 use crate::runtime::presence_notice::{build_presence_notice, PresenceChange};
 use crate::runtime::saved_view::SavedView;
@@ -71,7 +72,7 @@ impl Server {
     /// while the client has not said that it read its answer. The arriving viewport, pane area
     /// and origin replace the record's, and its per-tab focus, zoom, scrollback
     /// offsets, selections, floating view, lock mode, mouse selection mode,
-    /// label and color all stay. That is the
+    /// label, color and the client it follows all stay. That is the
     /// whole of the `resume_client_id` path — no `resume_client_id`, an id the session does not
     /// hold, an id whose tab is gone, an id that an attach in this process
     /// minted or already claimed, and an id presented with no token or another client's token all
@@ -400,6 +401,12 @@ impl Server {
     /// follow it. A client that cannot draw floating panes minimizes, in that
     /// solve, every floating pane the restored view shows.
     ///
+    /// The client follows the client the saved view followed while
+    /// [`can_client_follow`] accepts it: the session holds that client, and its
+    /// follow chain does not reach the restored client. Otherwise the client
+    /// follows nobody. The next [`Self::record_view_changes`] copies the
+    /// followed client's view onto it.
+    ///
     /// Returns no event when the session or the client is gone.
     fn restore_saved_view(
         &mut self,
@@ -413,6 +420,10 @@ impl Server {
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return emitted_events;
         };
+        let restored_followed_client_id =
+            saved_view.followed_client_id.filter(|&followed_client_id| {
+                can_client_follow(session, client_id, followed_client_id)
+            });
         let floating_set = &session.floating_set;
         let tab_by_id = &session.tabs;
         let pane_registry = &session.panes;
@@ -456,6 +467,7 @@ impl Server {
             &saved_view.shown_floating_pane_ids,
             floating_set,
         );
+        client.set_followed_client_id(restored_followed_client_id);
         let pane_focused_event = build_pane_focused_event(client, previous_focused_pane_id);
         emitted_events.extend(pane_focused_event);
 

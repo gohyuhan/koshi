@@ -353,6 +353,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
             floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
             unannounced_arrival: None,
+            followed_client_id: None,
         })
     );
 }

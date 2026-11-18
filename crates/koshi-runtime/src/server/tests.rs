@@ -20,9 +20,9 @@ use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{
-    ClosePaneArgs, Command, CommandSource, DetachArgs, NewPaneArgs, NewPanePlacement,
-    PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget,
-    ToggleLockModeArgs,
+    ClosePaneArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FollowClientArgs,
+    FollowTarget, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
+    PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget, ToggleLockModeArgs,
 };
 use koshi_core::event::{
     InputModeChanged, PaneClosing, PaneFocused, PanePlacementCommitted, PaneProcessExited,
@@ -1480,6 +1480,7 @@ fn build_booted_saved_view(
         floating_pane_view_by_floating_pane_id: HashMap::new(),
         shown_floating_pane_ids: Vec::new(),
         unannounced_arrival: None,
+        followed_client_id: None,
     }
 }
 
@@ -2503,6 +2504,145 @@ fn a_restored_view_announces_the_focus_it_puts_back() {
             .expect("the client the token attached")
             .list_focus_history(booted_tab_id),
         [split_pane_id, root_pane_id]
+    );
+}
+
+/// Run `command` from `client_id`'s own key binding as one inbox event
+/// ([`Server::handle_runtime_event`]).
+fn run_key_binding_command(server: &mut Server, client_id: ClientId, command: Command) {
+    let (response_sender, _response_receiver) = mpsc::channel();
+    let _ = server.handle_runtime_event(RuntimeEvent::Ipc {
+        command_envelope: Box::new(CommandEnvelope::from_parts(
+            CommandId::new(),
+            CommandSource::from_key_binding(client_id),
+            command,
+        )),
+        fired_action: None,
+        response_sender,
+    });
+}
+
+/// A [`Command::FollowClient`] of `leader_client_id` for the issuing client.
+fn build_follow_command(leader_client_id: ClientId) -> Command {
+    Command::FollowClient(FollowClientArgs {
+        follow_target: FollowTarget::Client(leader_client_id),
+        client_id: None,
+    })
+}
+
+/// The client `client_id` follows, read from the session that holds it.
+fn get_followed_client_id(server: &Server, client_id: ClientId) -> Option<ClientId> {
+    server
+        .get_session_for_client(client_id)
+        .and_then(|session| session.clients.get_client_by_id(client_id))
+        .expect("the client is attached")
+        .get_followed_client_id()
+}
+
+/// The tab `client_id` views, read from the session that holds it.
+fn get_active_tab_id(server: &Server, client_id: ClientId) -> TabId {
+    server
+        .get_session_for_client(client_id)
+        .and_then(|session| session.clients.get_client_by_id(client_id))
+        .expect("the client is attached")
+        .get_active_tab_id()
+}
+
+/// Bob follows Alice when the session swaps its image, and the swap carries
+/// the follow. Alice claims her record and opens a second tab while Bob's
+/// record awaits him: Bob's view stays on the first tab. The first event after
+/// Bob's claim moves Bob's view to Alice's second tab.
+#[test]
+fn a_swap_carries_a_follow_and_the_followers_claim_copies_the_view_it_missed() {
+    let now = SystemTime::now();
+    let local_origin = ClientOrigin::Local { is_same_user: true };
+    let (mut server, _host_client_id) = boot_server();
+    let alice_attachment =
+        attach_from_origin_with_token(&mut server, None, local_origin, None, now);
+    let bob_attachment = attach_from_origin_with_token(&mut server, None, local_origin, None, now);
+    let (alice_client_id, bob_client_id) = (alice_attachment.client_id, bob_attachment.client_id);
+    run_key_binding_command(
+        &mut server,
+        bob_client_id,
+        build_follow_command(alice_client_id),
+    );
+    let first_tab_id = get_active_tab_id(&server, bob_client_id);
+    let mut resumed_server = swap_server_image(&mut server);
+    assert_eq!(
+        get_followed_client_id(&resumed_server, bob_client_id),
+        Some(alice_client_id)
+    );
+
+    let _alice_claim =
+        claim_client_from_origin(&mut resumed_server, &alice_attachment, local_origin);
+    receive_attach_answer(&mut resumed_server, alice_client_id);
+    run_key_binding_command(
+        &mut resumed_server,
+        alice_client_id,
+        Command::NewTab(NewTabArgs {
+            working_directory: None,
+            client_id: None,
+        }),
+    );
+    let second_tab_id = get_active_tab_id(&resumed_server, alice_client_id);
+    assert_eq!(
+        get_active_tab_id(&resumed_server, bob_client_id),
+        first_tab_id
+    );
+
+    let _bob_claim = claim_client_from_origin(&mut resumed_server, &bob_attachment, local_origin);
+    receive_attach_answer(&mut resumed_server, bob_client_id);
+
+    assert_ne!(second_tab_id, first_tab_id);
+    assert_eq!(
+        (
+            get_followed_client_id(&resumed_server, bob_client_id),
+            get_active_tab_id(&resumed_server, bob_client_id)
+        ),
+        (Some(alice_client_id), second_tab_id)
+    );
+}
+
+/// Bob follows Alice and leaves, and Carol follows Dave and leaves. Dave
+/// leaves too. Bob's token takes back the follow of Alice, who is still
+/// attached. Carol's token takes back no follow: Dave is gone.
+#[test]
+fn a_token_takes_back_the_follow_while_the_leader_is_attached() {
+    let (mut server, alice_client_id) = boot_server();
+    let bob_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    let carol_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    let dave_attachment = attach_with_token(&mut server, None, SystemTime::now());
+    run_key_binding_command(
+        &mut server,
+        bob_attachment.client_id,
+        build_follow_command(alice_client_id),
+    );
+    run_key_binding_command(
+        &mut server,
+        carol_attachment.client_id,
+        build_follow_command(dave_attachment.client_id),
+    );
+    let detached_at = SystemTime::now();
+    for leaving_client_id in [bob_attachment.client_id, carol_attachment.client_id] {
+        server.save_client_view(leaving_client_id, detached_at);
+        let _ = server.handle_client_detach(leaving_client_id);
+    }
+    let _ = server.handle_client_detach(dave_attachment.client_id);
+
+    let returning_bob_attachment =
+        attach_with_token(&mut server, Some(bob_attachment.resume_token), detached_at);
+    let returning_carol_attachment = attach_with_token(
+        &mut server,
+        Some(carol_attachment.resume_token),
+        detached_at,
+    );
+
+    assert_eq!(
+        [
+            get_followed_client_id(&server, returning_bob_attachment.client_id),
+            get_followed_client_id(&server, returning_carol_attachment.client_id),
+        ],
+        [Some(alice_client_id), None]
     );
 }
 

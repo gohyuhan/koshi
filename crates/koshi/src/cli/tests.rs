@@ -7,6 +7,7 @@ use clap::CommandFactory;
 use clap::Parser;
 use koshi_config::app_config::parse_app_config;
 use koshi_core::action::{build_core_action_seeds, ActionHandlerReference};
+use koshi_core::command::QuitArgs;
 use std::path::Path;
 
 use super::*;
