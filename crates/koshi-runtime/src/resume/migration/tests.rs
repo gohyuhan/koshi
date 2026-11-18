@@ -1116,8 +1116,7 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                             },
                             "shown_floating_pane_ids": ["P1"],
                             "focused_floating_pane_id": "P1",
-                            "unannounced_arrival": null,
-                            "followed_client_id": null
+                            "unannounced_arrival": null
                         },
                         "R": {
                             "color_index": 1,
@@ -1125,8 +1124,7 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                             "floating_pane_view_by_floating_pane_id": {},
                             "shown_floating_pane_ids": [],
                             "focused_floating_pane_id": null,
-                            "unannounced_arrival": null,
-                            "followed_client_id": null
+                            "unannounced_arrival": null
                         }
                     }},
                     "notification_queue": {"queued_entries": [
@@ -1153,7 +1151,6 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                     "saved_view": {
                         "color_index": 0,
                         "unannounced_arrival": null,
-                        "followed_client_id": null,
                         "active_tab_id": "T",
                         "floating_pane_view_by_floating_pane_id": {
                             "P2": {

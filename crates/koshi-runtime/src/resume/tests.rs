@@ -534,7 +534,6 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
             ]),
             shown_floating_pane_ids: vec![cells_floating_pane_id],
             unannounced_arrival: None,
-            followed_client_id: None,
         }
     );
 }
@@ -3537,7 +3536,6 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
             floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
             unannounced_arrival: None,
-            followed_client_id: None,
         })
     );
 }
