@@ -174,6 +174,11 @@ pub enum Command {
     DetachAll,
     /// Move a client out of this session and into another one.
     SwitchSession(SwitchSessionArgs),
+    /// Make one client's view follow the view of another client of its
+    /// session, or end its follow ([`FollowClientArgs`]). While a client
+    /// follows, the session copies its leader's view onto it after every
+    /// event, until the client acts on its own view.
+    FollowClient(FollowClientArgs),
 }
 
 /// The [`Command`] a built-in action builds, named without its payload.
@@ -721,6 +726,29 @@ pub struct SwitchSessionArgs {
     pub owner_user_id: Option<u32>,
 }
 
+/// Arguments for [`Command::FollowClient`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowClientArgs {
+    /// The client the follower follows from now on, or none.
+    pub follow_target: FollowTarget,
+    /// The client that follows; resolved by the same rules as
+    /// [`FocusTabArgs::client_id`].
+    pub client_id: Option<ClientId>,
+}
+
+/// The client a [`Command::FollowClient`] makes the follower follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FollowTarget {
+    /// Follow this client.
+    Client(ClientId),
+    /// Follow the next client after the current leader, in client number
+    /// order. With clients 2 and 3 to follow, repeated commands give no
+    /// follow → 2 → 3 → no follow.
+    NextPeer,
+    /// End the follow.
+    Nobody,
+}
+
 /// Selection and copy commands — the commands of visual mode.
 ///
 /// A client is in visual mode while text is highlighted. A mouse drag over a
@@ -831,6 +859,98 @@ pub enum CommandSource {
         /// issuer.
         target_client_id: Option<ClientId>,
     },
+}
+
+impl Command {
+    /// The client this command's own `client_id` argument names. Only
+    /// [`Command::NewPane`], [`Command::FocusPane`], [`Command::NewTab`],
+    /// [`Command::FocusTab`], [`Command::ToggleLockMode`],
+    /// [`Command::SetLockMode`], [`Command::Quit`], [`Command::Detach`],
+    /// [`Command::SwitchSession`] and [`Command::FollowClient`] carry the
+    /// argument. `None` for every other command, and for an argument that
+    /// names no client.
+    #[must_use]
+    pub fn get_client_id_argument(&self) -> Option<ClientId> {
+        match self {
+            Command::NewPane(NewPaneArgs { client_id, .. })
+            | Command::FocusPane(FocusPaneArgs { client_id, .. })
+            | Command::NewTab(NewTabArgs { client_id, .. })
+            | Command::FocusTab(FocusTabArgs { client_id, .. })
+            | Command::ToggleLockMode(ToggleLockModeArgs { client_id })
+            | Command::SetLockMode(LockModeArgs { client_id, .. })
+            | Command::Quit(QuitArgs { client_id })
+            | Command::Detach(DetachArgs { client_id })
+            | Command::SwitchSession(SwitchSessionArgs { client_id, .. })
+            | Command::FollowClient(FollowClientArgs { client_id, .. }) => *client_id,
+            Command::ClosePane(_)
+            | Command::ResizePane(_)
+            | Command::CloseTab(_)
+            | Command::WriteToPane(_)
+            | Command::ToggleMouseSelect
+            | Command::Visual(_)
+            | Command::TogglePaneFullscreen
+            | Command::MoveTab(_)
+            | Command::MovePane(_)
+            | Command::PlacePane(_)
+            | Command::TogglePaneFloating
+            | Command::DockFloatingPane(_)
+            | Command::ScrollPane(_)
+            | Command::MoveFloatingPane(_)
+            | Command::SetFloatingPanePinned(_)
+            | Command::ToggleFloatingPanePinned(_)
+            | Command::SetFloatingPaneMinimized(_)
+            | Command::ToggleFloatingPaneMinimized(_)
+            | Command::SetAllFloatingPanesMinimized(_)
+            | Command::ToggleAllFloatingPanesMinimized
+            | Command::CloseFloatingPane(_)
+            | Command::KillSession
+            | Command::DetachAll => None,
+        }
+    }
+
+    /// Set this command's own `client_id` argument, for the commands that
+    /// carry one ([`get_client_id_argument`](Self::get_client_id_argument)),
+    /// to `client_id`. Returns whether the command carries the argument; a
+    /// command that does not is left as it is.
+    pub fn set_client_id_argument(&mut self, client_id: ClientId) -> bool {
+        let command_client_id = match self {
+            Command::NewPane(NewPaneArgs { client_id, .. })
+            | Command::FocusPane(FocusPaneArgs { client_id, .. })
+            | Command::NewTab(NewTabArgs { client_id, .. })
+            | Command::FocusTab(FocusTabArgs { client_id, .. })
+            | Command::ToggleLockMode(ToggleLockModeArgs { client_id })
+            | Command::SetLockMode(LockModeArgs { client_id, .. })
+            | Command::Quit(QuitArgs { client_id })
+            | Command::Detach(DetachArgs { client_id })
+            | Command::SwitchSession(SwitchSessionArgs { client_id, .. })
+            | Command::FollowClient(FollowClientArgs { client_id, .. }) => client_id,
+            Command::ClosePane(_)
+            | Command::ResizePane(_)
+            | Command::CloseTab(_)
+            | Command::WriteToPane(_)
+            | Command::ToggleMouseSelect
+            | Command::Visual(_)
+            | Command::TogglePaneFullscreen
+            | Command::MoveTab(_)
+            | Command::MovePane(_)
+            | Command::PlacePane(_)
+            | Command::TogglePaneFloating
+            | Command::DockFloatingPane(_)
+            | Command::ScrollPane(_)
+            | Command::MoveFloatingPane(_)
+            | Command::SetFloatingPanePinned(_)
+            | Command::ToggleFloatingPanePinned(_)
+            | Command::SetFloatingPaneMinimized(_)
+            | Command::ToggleFloatingPaneMinimized(_)
+            | Command::SetAllFloatingPanesMinimized(_)
+            | Command::ToggleAllFloatingPanesMinimized
+            | Command::CloseFloatingPane(_)
+            | Command::KillSession
+            | Command::DetachAll => return false,
+        };
+        *command_client_id = Some(client_id);
+        true
+    }
 }
 
 impl CommandSource {

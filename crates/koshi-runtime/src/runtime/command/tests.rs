@@ -648,6 +648,7 @@ fn get_command_name(command: &Command) -> &'static str {
         Command::Detach(_) => "Detach",
         Command::DetachAll => "DetachAll",
         Command::SwitchSession(_) => "SwitchSession",
+        Command::FollowClient(_) => "FollowClient",
     }
 }
 

@@ -490,6 +490,13 @@ impl Server {
                     self.require_client_not_awaiting_reconnect(client.get_client_id())
                 }),
             Command::KillSession => Ok(()),
+            // A follow names its follower as a tab-view command names its
+            // client, and its leader by client id.
+            Command::FollowClient(command_args) => self.validate_follow_client(
+                command_args,
+                command_source,
+                Self::require_session(session)?,
+            ),
         }
     }
 
@@ -2423,7 +2430,7 @@ impl Server {
 /// [`format_member_not_in_session_help`] gives for `member_id` and the name of
 /// `session`: ``pane pane-<uuid> is not in session `work` `` for a pane that
 /// session `work` does not hold.
-fn build_member_not_in_session_rejection(
+pub(super) fn build_member_not_in_session_rejection(
     session: &Session,
     member_id: SessionMemberId,
 ) -> Rejection {

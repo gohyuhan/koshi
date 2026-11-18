@@ -629,6 +629,9 @@ impl Server {
             Command::SwitchSession(command_args) => {
                 self.handle_switch_session(command_id, &envelope.command_source, &command_args)
             }
+            Command::FollowClient(command_args) => {
+                self.handle_follow_client(command_id, &envelope.command_source, &command_args)
+            }
         };
         match outcome {
             Ok(command_result) => (command_result, moved_cell_count),
@@ -1346,6 +1349,7 @@ fn is_local_host(host: Option<&str>) -> bool {
 
 mod client;
 pub(crate) mod client_action;
+mod follow;
 mod pane;
 mod resolve;
 mod tab;

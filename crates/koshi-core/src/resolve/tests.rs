@@ -508,7 +508,8 @@ fn find_command_kind(command: &Command) -> Option<CommandKind> {
         | Command::Visual(_)
         | Command::Detach(_)
         | Command::DetachAll
-        | Command::SwitchSession(_) => None,
+        | Command::SwitchSession(_)
+        | Command::FollowClient(_) => None,
     }
 }
 
