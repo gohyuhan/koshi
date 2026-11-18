@@ -900,18 +900,13 @@ impl Server {
 
     /// Take each session's view changes ([`Session::take_view_changes`]) and
     /// add them to the changes the next
-    /// [`mark_changed_views`](Self::mark_changed_views) reads. Before that,
-    /// copy each leader's view onto its followers
-    /// ([`copy_followed_views`](Self::copy_followed_views)) and take the view
-    /// changes of the copies too. Then, for each subscriber whose client's
-    /// frame shows a changed state
+    /// [`mark_changed_views`](Self::mark_changed_views) reads. Before that, for
+    /// each subscriber whose client's frame shows a changed state
     /// ([`is_client_frame_changed`](Self::is_client_frame_changed)), record the
     /// pane that takes the client's input now ([`Server::find_typed_pane`],
     /// [`Client::update_checked_typed_pane`]). A changed pane counts as a move
     /// by others unless `sending_client_id` names that client: the event that
-    /// made the changes arrived on another connection, or on none. A changed
-    /// pane of a follower that a copy changed counts as a move by others
-    /// whichever connection the event arrived on. A client
+    /// made the changes arrived on another connection, or on none. A client
     /// whose pane as peers see it ([`Client::get_typed_pane_id_for_peers`])
     /// changed joins its session's
     /// [`presence_changed_client_ids`](SessionViewChanges::presence_changed_client_ids).
@@ -934,22 +929,13 @@ impl Server {
         if view_changes_by_session_id.is_empty() {
             return;
         }
-        let copied_client_ids = self.copy_followed_views(&view_changes_by_session_id);
-        if !copied_client_ids.is_empty() {
-            for (session_id, view_changes) in &mut view_changes_by_session_id {
-                if let Some(session) = self.session_by_id.get_mut(session_id) {
-                    view_changes.merge_view_changes(session.take_view_changes());
-                }
-            }
-        }
         for subscription_index in 0..self.subscriptions.len() {
             let client_id = self.subscriptions[subscription_index].client_id;
             if !self.is_client_frame_changed(client_id, &view_changes_by_session_id) {
                 continue;
             }
             let typed_pane_id = self.find_typed_pane(client_id);
-            let is_moved_by_others =
-                sending_client_id != Some(client_id) || copied_client_ids.contains(&client_id);
+            let is_moved_by_others = sending_client_id != Some(client_id);
             let Some(client) = self.get_client_mut(client_id) else {
                 continue;
             };
@@ -1003,7 +989,7 @@ impl Server {
     /// the client's session, the client's own view, the peer entry of another
     /// client of the session, or the layout of its active tab. `false` for a
     /// client attached to no session.
-    pub(crate) fn is_client_frame_changed(
+    fn is_client_frame_changed(
         &self,
         client_id: ClientId,
         view_changes_by_session_id: &HashMap<SessionId, SessionViewChanges>,

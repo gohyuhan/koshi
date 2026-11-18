@@ -154,15 +154,12 @@ impl Server {
     /// graceful path. An explicit quit travels through
     /// [`Command::KillSession`].
     ///
-    /// Every event that continues the loop ends the follow of each client it
-    /// acts for whose copied view it changed
-    /// (`Server::list_acting_follower_views`,
-    /// `Server::clear_follows_of_changed_views`), then records the view
-    /// changes it made (`Server::record_view_changes`), with the client whose
-    /// own connection carried it ([`RuntimeEvent::find_sending_client_id`]).
+    /// Every event that continues the loop ends by recording the view changes
+    /// it made (`Server::record_view_changes`), with the
+    /// client whose own connection carried it
+    /// ([`RuntimeEvent::find_sending_client_id`]).
     pub fn handle_runtime_event(&mut self, runtime_event: RuntimeEvent) -> ControlFlow<()> {
         let sending_client_id = runtime_event.find_sending_client_id();
-        let acting_follower_views = self.list_acting_follower_views(&runtime_event);
         match runtime_event {
             RuntimeEvent::Quit => return ControlFlow::Break(()),
             // The output itself waits in the queue; the pane gets its turns in
@@ -491,7 +488,6 @@ impl Server {
             // `push_due_frames`, at the subscriber's pace.
             RuntimeEvent::QueueRoomFreed => {}
         }
-        self.clear_follows_of_changed_views(acting_follower_views);
         self.record_view_changes(sending_client_id);
         ControlFlow::Continue(())
     }

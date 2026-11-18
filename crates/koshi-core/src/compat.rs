@@ -145,9 +145,6 @@ pub struct Surface {
 ///   field.
 /// - The `AttachAnswerReceived` request says that the client read the
 ///   `Attached` answer to its `Attach`. 5 has no such request.
-/// - The `FollowClient` command makes one client's view follow the view of
-///   another client of its session, or ends its follow. 5 has no such
-///   command.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -299,9 +296,7 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// `subject_client_id`, the client a join or leave notice reports on, and a
 /// format 5 entry takes `null`. Each client and each saved view holds
 /// `unannounced_arrival`, the arrival notice the session has not posted for
-/// that client, and a format 5 client or saved view takes `null`. Each client
-/// and each saved view holds `followed_client_id`, the client whose view that
-/// client follows, and a format 5 client or saved view takes `null`. The saved
+/// that client, and a format 5 client or saved view takes `null`. The saved
 /// view store holds `presented_token_hash_by_client_id`, the presented token
 /// hash that still stands for each client, and a format 5 store takes an
 /// empty map. Each saved view record holds `connection_token_hashes`, where

@@ -1247,7 +1247,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `TogglePaneFloating`, `DockFloatingPane`, `ScrollPane`, `MoveFloatingPane`, `SetFloatingPanePinned`, `ToggleFloatingPanePinned`, `SetFloatingPaneMinimized`, `ToggleFloatingPaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `CloseFloatingPane`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`, `FollowClient`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `Visual`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `TogglePaneFloating`, `DockFloatingPane`, `ScrollPane`, `MoveFloatingPane`, `SetFloatingPanePinned`, `ToggleFloatingPanePinned`, `SetFloatingPaneMinimized`, `ToggleFloatingPaneMinimized`, `SetAllFloatingPanesMinimized`, `ToggleAllFloatingPanesMinimized`, `CloseFloatingPane`, `Quit`, `KillSession`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 
@@ -1271,74 +1271,4 @@ fn command_envelope_error_implements_std_error() {
         envelope_error.to_string(),
         "envelope client_id does not match its source"
     );
-}
-
-/// Each command that names a client in a `client_id` argument reads that
-/// client back once it is set. A command with no such argument takes none and
-/// stays as it was.
-#[test]
-fn the_client_id_argument_is_set_and_read_on_each_command_that_names_one() {
-    let client_id = ClientId::new();
-    let commands_with_client_id_argument = vec![
-        Command::NewPane(build_new_pane_args()),
-        Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Direction(Direction::Left),
-            client_id: None,
-        }),
-        Command::NewTab(NewTabArgs {
-            working_directory: None,
-            client_id: None,
-        }),
-        Command::FocusTab(FocusTabArgs {
-            focus_target: TabTarget::Next,
-            client_id: None,
-        }),
-        Command::ToggleLockMode(ToggleLockModeArgs { client_id: None }),
-        Command::SetLockMode(LockModeArgs {
-            is_locked: true,
-            client_id: None,
-        }),
-        Command::Quit(QuitArgs { client_id: None }),
-        Command::Detach(DetachArgs { client_id: None }),
-        Command::SwitchSession(SwitchSessionArgs {
-            client_id: None,
-            session_id: SessionId::new(),
-            owner_user_id: None,
-        }),
-        Command::FollowClient(FollowClientArgs {
-            follow_target: FollowTarget::NextPeer,
-            client_id: None,
-        }),
-    ];
-
-    for mut command in commands_with_client_id_argument {
-        assert_eq!(command.get_client_id_argument(), None, "{command:?}");
-        assert!(command.set_client_id_argument(client_id), "{command:?}");
-        assert_eq!(
-            command.get_client_id_argument(),
-            Some(client_id),
-            "{command:?}"
-        );
-    }
-
-    let mut command = Command::KillSession;
-    assert!(!command.set_client_id_argument(client_id));
-    assert_eq!(
-        (command.get_client_id_argument(), command),
-        (None, Command::KillSession)
-    );
-}
-
-#[test]
-fn a_follow_client_command_round_trips_through_json() {
-    for follow_target in [
-        FollowTarget::Client(ClientId::new()),
-        FollowTarget::NextPeer,
-        FollowTarget::Nobody,
-    ] {
-        assert_json_roundtrip(&Command::FollowClient(FollowClientArgs {
-            follow_target,
-            client_id: Some(ClientId::new()),
-        }));
-    }
 }

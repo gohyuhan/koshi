@@ -25,12 +25,12 @@ use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, DockFloatingPaneArgs,
+    CloseFloatingPaneArgs, ClosePaneArgs, CloseTabArgs, Command, DetachArgs, DockFloatingPaneArgs,
     FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs, MoveFloatingPaneArgs, MovePaneArgs,
     MoveTabArgs, NewPaneArgs, NewPanePlacement, NewTabArgs, PanePlacementAnchor,
-    PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, ScrollPaneArgs,
+    PanePlacementTarget, PlacePaneArgs, QuitArgs, ResizePaneArgs, ScrollPaneArgs,
     SetAllFloatingPanesMinimizedArgs, SetFloatingPaneMinimizedArgs, SetFloatingPanePinnedArgs,
-    TabTarget, TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
+    SwitchSessionArgs, TabTarget, TiledPlacementTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, Point,
@@ -2318,7 +2318,41 @@ pub fn build_actions_run_request(
     let Some(target_client_id) = client_id else {
         return Ok(SessionRequest::Command(action_command));
     };
-    action_command.set_client_id_argument(target_client_id);
+    let command_client_id = match &mut action_command {
+        Command::NewPane(NewPaneArgs { client_id, .. })
+        | Command::FocusPane(FocusPaneArgs { client_id, .. })
+        | Command::NewTab(NewTabArgs { client_id, .. })
+        | Command::FocusTab(FocusTabArgs { client_id, .. })
+        | Command::ToggleLockMode(ToggleLockModeArgs { client_id })
+        | Command::SetLockMode(LockModeArgs { client_id, .. })
+        | Command::Quit(QuitArgs { client_id })
+        | Command::Detach(DetachArgs { client_id })
+        | Command::SwitchSession(SwitchSessionArgs { client_id, .. }) => client_id,
+        Command::ClosePane(_)
+        | Command::CloseFloatingPane(_)
+        | Command::ResizePane(_)
+        | Command::CloseTab(_)
+        | Command::WriteToPane(_)
+        | Command::ToggleMouseSelect
+        | Command::Visual(_)
+        | Command::TogglePaneFullscreen
+        | Command::TogglePaneFloating
+        | Command::DockFloatingPane(_)
+        | Command::MoveTab(_)
+        | Command::MovePane(_)
+        | Command::PlacePane(_)
+        | Command::ScrollPane(_)
+        | Command::MoveFloatingPane(_)
+        | Command::SetFloatingPanePinned(_)
+        | Command::ToggleFloatingPanePinned(_)
+        | Command::SetFloatingPaneMinimized(_)
+        | Command::ToggleFloatingPaneMinimized(_)
+        | Command::SetAllFloatingPanesMinimized(_)
+        | Command::ToggleAllFloatingPanesMinimized
+        | Command::KillSession
+        | Command::DetachAll => return Ok(SessionRequest::Command(action_command)),
+    };
+    *command_client_id = Some(target_client_id);
     Ok(SessionRequest::Command(action_command))
 }
 

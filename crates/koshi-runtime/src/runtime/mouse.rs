@@ -280,10 +280,9 @@ impl Server {
     /// left release from `client-1` at cell `(0, 0)` writes
     /// `ESC [ < 0 ; 1 ; 1 m` under SGR encoding.
     ///
-    /// A report the pane takes also ends this client's follow
-    /// (`Server::clear_followed_client_id`), and drops this client's
-    /// highlight in that pane. A wheel tick leaves the highlight standing. A
-    /// report the pane refuses leaves the follow and the highlight standing.
+    /// A report the pane takes also drops this client's highlight in that
+    /// pane. A wheel tick leaves the highlight standing. A report the pane
+    /// refuses leaves the highlight standing.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
@@ -325,7 +324,6 @@ impl Server {
             }
             _ => {}
         }
-        self.clear_followed_client_id(client_id);
         // A wheel tick leaves the highlight standing; every other forwarded
         // report — click, drag, motion, release — drops it.
         if !matches!(mouse_kind, MouseKind::Scroll(_)) {
@@ -466,14 +464,13 @@ impl Server {
     /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
     ///
     /// An `arrow_count` of `0` writes nothing, and so does one whose bytes
-    /// would pass [`MAX_QUEUED_PANE_INPUT_BYTE_COUNT`]. Returns whether the
-    /// pane took the arrows.
+    /// would pass [`MAX_QUEUED_PANE_INPUT_BYTE_COUNT`].
     pub fn write_alternate_scroll_arrows(
         &mut self,
         pane_id: PaneId,
         is_scrolling_up: bool,
         arrow_count: usize,
-    ) -> bool {
+    ) {
         let arrow_key = if is_scrolling_up {
             NamedKey::Up
         } else {
@@ -489,7 +486,7 @@ impl Server {
                     .then(|| terminal_state.is_application_cursor_keys_enabled())
             })
         else {
-            return false;
+            return;
         };
         let arrow_key_bytes = encode_key_chord(
             KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(arrow_key)),
@@ -504,14 +501,14 @@ impl Server {
                 arrow_count,
                 "alternate-scroll arrows past the pane input limit are not written"
             );
-            return false;
+            return;
         }
         let arrow_key_bytes_to_write = arrow_key_bytes.repeat(arrow_count);
-        !arrow_key_bytes_to_write.is_empty()
-            && self
+        if !arrow_key_bytes_to_write.is_empty() {
+            let _ = self
                 .get_pty_backend()
-                .write_pane_input(pane_id, &arrow_key_bytes_to_write)
-                .is_ok()
+                .write_pane_input(pane_id, &arrow_key_bytes_to_write);
+        }
     }
 
     /// Run one round of mouse actions `client_id`'s viewer decided, in the
@@ -580,9 +577,7 @@ impl Server {
                     is_scrolling_up,
                     arrow_count,
                 } => {
-                    if self.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count) {
-                        self.clear_followed_client_id(client_id);
-                    }
+                    self.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
                 }
                 WireMouseAction::Resize {
                     pane_id,
