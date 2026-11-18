@@ -193,6 +193,22 @@ pub fn place_floating_pane(
     Rect::from_origin_and_size(unclamped_top_left_cell, size).compute_moved_inside(client_viewport)
 }
 
+/// The notice the other clients of a session get when the session announces
+/// that a client arrived. The session announces it once the client says that
+/// it read its attach answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrivalNotice {
+    /// The other clients were never told that this client arrived, neither as
+    /// itself nor as an earlier client whose view it took back:
+    /// `bob (2) joined remotely`. Example: `bob` reads its attach answer, and
+    /// its word that it read it is lost. `bob` dials again with the token of
+    /// that answer and takes back that view, and the notice stays `Joined`.
+    Joined,
+    /// The client took back the view of a client that the other clients were
+    /// told arrived: `bob (2) reconnected`.
+    Reconnected,
+}
+
 /// One attached client: a single terminal connected to a session, holding the
 /// identity the server gave it at attach and the view state that is the
 /// client's alone. Two clients on the same session — and even viewing the same
@@ -221,6 +237,11 @@ pub struct Client {
     /// [`compute_client_number`](koshi_core::client::compute_client_number) of
     /// it: index `0` prints `1`.
     color_index: u32,
+    /// The arrival notice the other clients of the session have not been
+    /// given yet: `Some` from an attach until the client proves that it holds
+    /// its attach answer, and `None` once the session announced the client,
+    /// or when the client needs no announcement.
+    unannounced_arrival: Option<ArrivalNotice>,
     /// The panes this client focused in each tab, newest first, each pane
     /// once. The first pane is the one this client focuses in that tab, and
     /// the active tab's first pane takes this client's input while no
@@ -378,6 +399,7 @@ impl Client {
             origin,
             label,
             color_index,
+            unannounced_arrival: None,
             focus_history_by_tab_id: HashMap::new(),
             lock_mode: LockMode::Normal,
             last_settled_lock_command_id: None,
@@ -427,6 +449,27 @@ impl Client {
     #[must_use]
     pub fn get_label(&self) -> &str {
         &self.label
+    }
+
+    /// The arrival notice the other clients of the session have not been
+    /// given yet, or `None` when the session announced this client or it
+    /// needs no announcement.
+    #[must_use]
+    pub fn get_unannounced_arrival(&self) -> Option<ArrivalNotice> {
+        self.unannounced_arrival
+    }
+
+    /// Record `unannounced_arrival` as the arrival notice the other clients
+    /// of the session have not been given yet. `None` records that this
+    /// client needs no announcement.
+    pub fn set_unannounced_arrival(&mut self, unannounced_arrival: Option<ArrivalNotice>) {
+        self.unannounced_arrival = unannounced_arrival;
+    }
+
+    /// Take the arrival notice the other clients have not been given yet,
+    /// leaving `None`: the session announces this client once.
+    pub fn take_unannounced_arrival(&mut self) -> Option<ArrivalNotice> {
+        self.unannounced_arrival.take()
     }
 
     /// This client's index, as the caller chose it at attach.

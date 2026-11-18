@@ -5,8 +5,8 @@
 //! highlight upkeep, clipboard writes, PTY (pseudo-terminal, a child process's
 //! terminal connection) forwarding and output handling, config reload
 //! transactions, render scheduling, the saved views a detached client can take
-//! back, the join and leave notices, per-client scrollback scrolling, staged shutdown, the render-snapshot
-//! builder, the wire-frame builder, the painted-update sender and receiver, the
+//! back, the join and leave notices, per-client scrollback scrolling, staged
+//! shutdown, the render-snapshot builder, the wire-frame builder, the painted-update sender and receiver, the
 //! discovery-overview builder, the layout-dump builder, and event transactions.
 //! The [`Server`](crate::server::Server) type these modules extend lives in
 //! [`crate::server`].

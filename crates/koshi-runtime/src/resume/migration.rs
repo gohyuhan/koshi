@@ -1315,6 +1315,11 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 ///    `{"Local": {"is_same_user": false}}`, and `"Remote"` stays `"Remote"`.
 /// 7. Each entry of each session's `notification_queue.queued_entries` gains
 ///    `subject_client_id: null`.
+/// 8. Each client record and each saved view gains `unannounced_arrival:
+///    null`.
+/// 9. The saved-view store gains an empty `presented_token_hash_by_client_id`,
+///    and each saved-view record's `connection_token_hash` `<h>` becomes
+///    `connection_token_hashes: [<h>]`.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
@@ -1354,7 +1359,10 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             &client_by_id_path,
             |client_record, record_path| {
                 migrate_floating_pane_views_five_to_six(client_record, record_path)?;
-                migrate_client_origin_five_to_six(client_record, record_path)
+                migrate_client_origin_five_to_six(client_record, record_path)?;
+                get_json_object(client_record, record_path)?
+                    .insert("unannounced_arrival".to_string(), Value::Null);
+                Ok(())
             },
         )?;
         assign_unique_color_indexes_five_to_six(client_by_id, &client_by_id_path)?;
@@ -1379,8 +1387,13 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
     let Some(saved_view_store) = body_fields.get_mut("saved_view_store") else {
         return Ok(());
     };
+    let saved_view_store_fields = get_json_object(saved_view_store, "body.saved_view_store")?;
+    saved_view_store_fields.insert(
+        "presented_token_hash_by_client_id".to_string(),
+        serde_json::json!({}),
+    );
     let saved_view_records = get_required_json_field(
-        get_json_object(saved_view_store, "body.saved_view_store")?,
+        saved_view_store_fields,
         "saved_view_records",
         "body.saved_view_store",
     )?;
@@ -1388,12 +1401,19 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
         saved_view_records,
         "body.saved_view_store.saved_view_records",
         |saved_view_record, record_path| {
-            let saved_view_path = format!("{record_path}.saved_view");
-            let saved_view = get_required_json_field(
-                get_json_object(saved_view_record, record_path)?,
-                "saved_view",
+            let saved_view_record_fields = get_json_object(saved_view_record, record_path)?;
+            let connection_token_hash = remove_required_json_field(
+                saved_view_record_fields,
+                "connection_token_hash",
                 record_path,
             )?;
+            saved_view_record_fields.insert(
+                "connection_token_hashes".to_string(),
+                serde_json::json!([connection_token_hash]),
+            );
+            let saved_view_path = format!("{record_path}.saved_view");
+            let saved_view =
+                get_required_json_field(saved_view_record_fields, "saved_view", record_path)?;
             migrate_floating_pane_views_five_to_six(saved_view, &saved_view_path)?;
             let saved_view_fields = get_json_object(saved_view, &saved_view_path)?;
             saved_view_fields.insert("color_index".to_string(), serde_json::json!(0));
@@ -1401,6 +1421,7 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
                 "label".to_string(),
                 serde_json::json!(generate_name(NameKind::Client, |_| false)),
             );
+            saved_view_fields.insert("unannounced_arrival".to_string(), Value::Null);
             Ok(())
         },
     )

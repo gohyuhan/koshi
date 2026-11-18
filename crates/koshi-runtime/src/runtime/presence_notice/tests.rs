@@ -1,10 +1,12 @@
 //! Tests for `build_presence_notice`: the text of each change for each
-//! origin, and the host-account rule.
+//! origin, and the host-account rule, which counts no client whose arrival
+//! never posted.
 
 use std::time::SystemTime;
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, SessionId, TabId};
+use koshi_session::client::ArrivalNotice;
 
 use super::*;
 
@@ -128,5 +130,30 @@ fn a_remote_or_other_account_notice_ignores_who_is_present() {
     assert_eq!(
         build_presence_notice(&otter, [&host, &bob], PresenceChange::Disconnected),
         Some("C-swift-otter (3) disconnected".to_string())
+    );
+}
+
+#[test]
+fn a_host_terminal_counts_no_present_client_whose_arrival_never_posted() {
+    let host = build_client(HOST_ACCOUNT, "host", 0);
+    let bob = build_client(ClientOrigin::Remote, "bob", 1);
+    let mut unannounced_carol = build_client(ClientOrigin::Remote, "carol", 4);
+    unannounced_carol.set_unannounced_arrival(Some(ArrivalNotice::Joined));
+    let mut unannounced_second_host = build_client(HOST_ACCOUNT, "host-2", 3);
+    unannounced_second_host.set_unannounced_arrival(Some(ArrivalNotice::Reconnected));
+
+    assert_eq!(
+        build_presence_notice(&host, [&unannounced_carol], PresenceChange::Left),
+        None,
+        "the only other person never arrived"
+    );
+    assert_eq!(
+        build_presence_notice(
+            &host,
+            [&bob, &unannounced_second_host],
+            PresenceChange::Left
+        ),
+        Some("host (1) left".to_string()),
+        "the second host terminal never arrived"
     );
 }

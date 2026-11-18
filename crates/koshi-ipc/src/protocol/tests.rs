@@ -335,6 +335,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving { is_returning: true },
         IpcRequestKind::Ping,
+        IpcRequestKind::AttachAnswerReceived,
         IpcRequestKind::PaintedUpdate { update_sequence: 7 },
         IpcRequestKind::ClipboardCopyPart {
             copied_bytes: b"hel".to_vec(),
@@ -2240,6 +2241,20 @@ fn ping_request_round_trips_as_its_bare_name() {
     assert_eq!(
         serde_json::to_value(&ipc_request).expect("request encodes"),
         json!({ "request_id": 11, "request_kind": "Ping" })
+    );
+}
+
+#[test]
+fn attach_answer_received_request_round_trips_as_its_bare_name() {
+    let ipc_request = IpcRequest {
+        request_id: 4,
+        request_kind: IpcRequestKind::AttachAnswerReceived,
+    };
+
+    assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+    assert_eq!(
+        serde_json::to_value(&ipc_request).expect("request encodes"),
+        json!({ "request_id": 4, "request_kind": "AttachAnswerReceived" })
     );
 }
 

@@ -522,7 +522,8 @@ the label changes to `restore all`.
 Koshi states each message of its own as a notification: a pane that a signal
 killed, a config warning, a key whose command the session refused, or a
 terminal that joins or leaves the session. The notification center lists the
-notifications of this client, and a toast shows each new one for a short time. If this client reads its session slower than
+notifications of this client, and a toast shows each new one for a short
+time. If this client reads its session slower than
 the session writes, the session keeps each refusal of this client's commands
 until the client catches up. Then equal refusals in a row show as one
 notification with their count: `[Koshi] Warning ×3`.
@@ -535,15 +536,36 @@ number:
 - `bob (2) joined from another account on this machine` for a terminal of
   another user of this machine;
 - `bob (2) left` for a terminal that detaches, quits, or closes;
-- `bob (2) disconnected` for a terminal whose link dropped, or that does not
-  attach again within 60 seconds of a session restart;
+- `bob (2) disconnected` for a terminal whose connection ended without
+  leaving, as when its link dropped or its koshi process stopped, and for a
+  terminal that does not attach again within 60 seconds after the update that
+  restarted the session finishes;
 - `bob (2) reconnected` for a terminal that attaches again after it
   disconnected.
 
+The arrival notification posts once the new terminal tells the session that
+it got the session's answer to its attach. A new terminal that never tells it
+so gets no notification when it arrives or when it leaves, and counts for no
+other terminal's notification. A terminal that takes its place back after an
+update keeps what it had before the update: when it was announced then, it
+counts at once, and its `disconnected` posts as usual. When the answer to
+that dial is lost on the way, the next dial comes back as `bob (2)` again:
+every other terminal sees `bob (2) disconnected`, then
+`bob (2) reconnected`. Example: `bob`'s link drops, and every other
+terminal sees `bob (2) disconnected`. The answer to `bob`'s next dial is
+lost on the way, and no terminal sees a notification. `bob` dials again,
+gets the answer, and every other terminal sees `bob (2) reconnected` once.
+
 A terminal of the account that runs the session gets a notification only as
 that account's first or last terminal while another person is attached:
-`host (1) joined`, `host (1) left`. A terminal shows no toast for a
-notification about itself, and that notification still counts as unread.
+`host (1) joined`, `host (1) left`. A terminal that has not come back yet
+after an update, of that account or of another person, still counts until
+its `disconnected` notification posts. Example: after an update, `host` and
+`carol` are back and `host-2` is not. `host` leaves, and no notification
+posts. `host-2` comes back, and no notification posts.
+
+A terminal shows no toast for a notification about itself, and that
+notification still counts as unread.
 
 The tabline shows the notification button `●` left of the tray button, also
 while this client holds no notification. A tabline with no room for the tray

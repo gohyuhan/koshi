@@ -5992,6 +5992,7 @@ fn a_key_a_client_sends_while_requests_are_refused_never_reaches_the_dispatcher(
             detached_at: SystemTime::UNIX_EPOCH,
             is_streamed: true,
             is_returning: false,
+            has_sent_leaving: false,
         })
         .expect("the detach is queued");
     drop(inbox_sender);
@@ -6193,13 +6194,14 @@ fn the_wait_for_answers_with_no_request_unanswered_ends_at_once() {
 }
 
 /// A detach event for `client_id` at timestamp `0`, for a client that does not
-/// return.
+/// return and sent no `Leaving`.
 fn build_detach_event(client_id: ClientId) -> RuntimeEvent {
     RuntimeEvent::ClientDetached {
         client_id,
         detached_at: SystemTime::UNIX_EPOCH,
         is_streamed: true,
         is_returning: false,
+        has_sent_leaving: false,
     }
 }
 
@@ -7595,6 +7597,86 @@ fn a_ping_on_a_connection_with_no_attached_client_closes_it_with_no_answer() {
 }
 
 #[test]
+fn an_attach_answer_receipt_on_an_attached_stream_is_handed_over_and_gets_no_answer() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("answer-receipt");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher_thread, delivery_sender, forwarded_runtime_events) =
+        spawn_forwarding_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::AttachAnswerReceived,
+        })
+        .expect("send the answer receipt");
+    let RuntimeEvent::ClientAttachAnswerReceived {
+        client_id: answered_client_id,
+    } = receive_forwarded_event(&forwarded_runtime_events)
+    else {
+        panic!("the first event handed over is the answer receipt");
+    };
+    let rejected_command_id = CommandId::new();
+    delivery_sender
+        .try_send(build_invalid_state_rejection(rejected_command_id))
+        .expect("the writing thread holds the delivery queue");
+
+    assert_eq!(answered_client_id, client_id);
+    assert_eq!(
+        connection.recv::<SessionEvent>().expect("the client reads"),
+        build_invalid_state_rejection_event(rejected_command_id)
+    );
+
+    drop(delivery_sender);
+    drop(connection);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+}
+
+#[test]
+fn an_attach_answer_receipt_on_a_connection_with_no_attached_client_closes_it_with_no_answer() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+        start_attachable_test_server("answer-receipt-control", client_id);
+    let mut connection = connect_greeted_connection(&runtime_directory, session_id);
+
+    connection
+        .send(&IpcRequest {
+            request_id: 2,
+            request_kind: IpcRequestKind::AttachAnswerReceived,
+        })
+        .expect("send the answer receipt");
+    assert!(
+        matches!(
+            connection.recv::<IpcResponse>(),
+            Err(IpcError::Disconnected)
+        ),
+        "an answer receipt with no attached client closes the connection unanswered",
+    );
+    assert_eq!(
+        received_runtime_events
+            .recv_timeout(Duration::from_millis(300))
+            .unwrap_err(),
+        mpsc::RecvTimeoutError::Timeout,
+    );
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
 fn a_silent_client_with_a_link_timeout_stays_attached_and_reads_a_pong_every_third_of_it() {
     let client_id = ClientId::new();
     let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
@@ -7926,7 +8008,8 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
 }
 
 #[test]
-fn a_connection_that_ends_with_no_leaving_reports_its_client_returning_only_from_another_machine() {
+fn a_connection_that_ends_with_no_leaving_reports_no_leaving_and_its_client_returning_only_from_another_machine(
+) {
     for is_remote in [false, true] {
         let client_id = ClientId::new();
         let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
@@ -7944,6 +8027,7 @@ fn a_connection_that_ends_with_no_leaving_reports_its_client_returning_only_from
         let RuntimeEvent::ClientDetached {
             client_id: detached_client_id,
             is_returning,
+            has_sent_leaving,
             ..
         } = receive_forwarded_event(&received_runtime_events)
         else {
@@ -7951,13 +8035,14 @@ fn a_connection_that_ends_with_no_leaving_reports_its_client_returning_only_from
         };
         assert_eq!(detached_client_id, client_id);
         assert_eq!(is_returning, is_remote, "is_remote {is_remote}");
+        assert!(!has_sent_leaving, "is_remote {is_remote}");
 
         stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
     }
 }
 
 #[test]
-fn leaving_from_another_machine_reports_whether_the_client_returns() {
+fn leaving_from_another_machine_reports_the_leaving_and_whether_the_client_returns() {
     for is_client_returning in [false, true] {
         let client_id = ClientId::new();
         let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
@@ -7979,12 +8064,19 @@ fn leaving_from_another_machine_reports_whether_the_client_returns() {
                 },
             })
             .expect("send leaving");
-        let RuntimeEvent::ClientDetached { is_returning, .. } =
-            receive_forwarded_event(&received_runtime_events)
+        let RuntimeEvent::ClientDetached {
+            is_returning,
+            has_sent_leaving,
+            ..
+        } = receive_forwarded_event(&received_runtime_events)
         else {
             panic!("leaving detaches the client");
         };
         assert_eq!(is_returning, is_client_returning);
+        assert!(
+            has_sent_leaving,
+            "is_client_returning {is_client_returning}"
+        );
         // The session closes the queue on the detach: the client reads its
         // goodbye.
         assert_eq!(
@@ -8040,6 +8132,7 @@ fn a_local_attach_that_names_a_client_to_come_back_as_reports_it_returning_until
             client_id: detached_client_id,
             is_streamed,
             is_returning,
+            has_sent_leaving,
             ..
         } = receive_forwarded_event(&received_runtime_events)
         else {
@@ -8051,6 +8144,7 @@ fn a_local_attach_that_names_a_client_to_come_back_as_reports_it_returning_until
             is_returning, !has_sent_request,
             "has_sent_request {has_sent_request}"
         );
+        assert!(!has_sent_leaving, "has_sent_request {has_sent_request}");
 
         stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
     }
@@ -8106,6 +8200,7 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
             client_id: detached_client_id,
             is_streamed,
             is_returning,
+            has_sent_leaving,
             ..
         } = receive_forwarded_event(&inbox_receiver)
         else {
@@ -8113,6 +8208,7 @@ fn an_attach_whose_answer_cannot_be_written_reports_its_client_returning_only_wh
         };
         assert_eq!(detached_client_id, client_id);
         assert!(!is_streamed);
+        assert!(!has_sent_leaving);
         assert_eq!(
             is_returning,
             resume_client_id.is_some(),

@@ -1479,6 +1479,7 @@ fn build_booted_saved_view(
         scroll_offset_by_pane_id,
         floating_pane_view_by_floating_pane_id: HashMap::new(),
         shown_floating_pane_ids: Vec::new(),
+        unannounced_arrival: None,
     }
 }
 
@@ -1829,9 +1830,11 @@ fn an_attach_claiming_a_client_this_session_does_not_hold_mints_a_new_one() {
 fn an_attach_claiming_a_client_a_connection_is_streaming_for_mints_a_new_one() {
     let (mut server, client_id) = boot_server();
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
-    // The first attach takes the record with its token and holds its queue.
-    // The record is in use when the second attach names it.
+    // The record came across a swap. The first attach claims it with its
+    // token and holds its queue. The record is in use when the second attach
+    // names it.
     let resume_token = server.saved_view_store.mint_resume_token(client_id);
+    server.client_ids_awaiting_reconnect.insert(client_id);
     let held_attachment = server
         .handle_ipc_attach(
             Some(client_id),
@@ -2002,10 +2005,37 @@ fn attach_with_token(
     )
 }
 
+/// Attach as [`attach_from_origin_with_lost_answer`] does, then hand over the
+/// client's word that it read the answer ([`receive_attach_answer`]).
+fn attach_from_origin_with_token(
+    server: &mut Server,
+    resume_token: Option<ConnectionToken>,
+    client_origin: ClientOrigin,
+    granted_identity: Option<&str>,
+    attached_at: SystemTime,
+) -> AttachAccepted {
+    let attachment = attach_from_origin_with_lost_answer(
+        server,
+        resume_token,
+        client_origin,
+        granted_identity,
+        attached_at,
+    );
+    receive_attach_answer(server, attachment.client_id);
+    attachment
+}
+
+/// Hand `server` the `AttachAnswerReceived` of `client_id`, as the reading
+/// loop hands it over.
+fn receive_attach_answer(server: &mut Server, client_id: ClientId) {
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientAttachAnswerReceived { client_id });
+}
+
 /// Attach through [`Server::handle_ipc_attach`] as a connection from
 /// `client_origin` carrying `granted_identity`, presenting `resume_token` and
-/// no client id, at `attached_at`.
-fn attach_from_origin_with_token(
+/// no client id, at `attached_at`. The client never says that it read the
+/// answer.
+fn attach_from_origin_with_lost_answer(
     server: &mut Server,
     resume_token: Option<ConnectionToken>,
     client_origin: ClientOrigin,
@@ -4275,6 +4305,7 @@ fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_c
         detached_at,
         is_streamed: true,
         is_returning: true,
+        has_sent_leaving: false,
     });
 
     assert_eq!(control_flow, std::ops::ControlFlow::Continue(()));
@@ -4304,37 +4335,46 @@ fn a_returning_client_leaves_its_view_filed_and_its_session_running_under_auto_c
 }
 
 #[test]
-fn a_client_that_does_not_return_ends_its_session_under_auto_close_and_still_files_its_view() {
-    let (mut server, attachment) = boot_server_with_one_attached_client_under_auto_close();
-    let (_, booted_tab_id, root_pane_id) = get_booted_parts(&server, attachment.client_id);
-    let detached_at = SystemTime::now();
+fn a_client_that_does_not_return_ends_its_session_under_auto_close_and_still_files_its_view_with_or_without_leaving(
+) {
+    for has_sent_leaving in [true, false] {
+        let (mut server, attachment) = boot_server_with_one_attached_client_under_auto_close();
+        let (_, booted_tab_id, root_pane_id) = get_booted_parts(&server, attachment.client_id);
+        let detached_at = SystemTime::now();
 
-    let _ = server.handle_runtime_event(RuntimeEvent::ClientDetached {
-        client_id: attachment.client_id,
-        detached_at,
-        is_streamed: true,
-        is_returning: false,
-    });
+        let _ = server.handle_runtime_event(RuntimeEvent::ClientDetached {
+            client_id: attachment.client_id,
+            detached_at,
+            is_streamed: true,
+            is_returning: false,
+            has_sent_leaving,
+        });
 
-    assert_eq!(
-        server.session_by_id[&attachment.session_id]
-            .clients
-            .count_clients(),
-        0
-    );
-    assert!(server.is_quit_requested());
-    assert_eq!(
-        server
-            .saved_view_store
-            .take_saved_view(&attachment.resume_token, detached_at),
-        Some(build_booted_saved_view(
-            1,
-            "host-2",
-            booted_tab_id,
-            root_pane_id,
-            HashMap::new()
-        ))
-    );
+        assert_eq!(
+            server.session_by_id[&attachment.session_id]
+                .clients
+                .count_clients(),
+            0,
+            "has_sent_leaving {has_sent_leaving}"
+        );
+        assert!(
+            server.is_quit_requested(),
+            "has_sent_leaving {has_sent_leaving}"
+        );
+        assert_eq!(
+            server
+                .saved_view_store
+                .take_saved_view(&attachment.resume_token, detached_at),
+            Some(build_booted_saved_view(
+                1,
+                "host-2",
+                booted_tab_id,
+                root_pane_id,
+                HashMap::new()
+            )),
+            "has_sent_leaving {has_sent_leaving}"
+        );
+    }
 }
 
 #[test]
@@ -4347,6 +4387,7 @@ fn a_returning_client_the_attach_reply_never_reached_files_no_view_and_keeps_its
         detached_at,
         is_streamed: false,
         is_returning: true,
+        has_sent_leaving: false,
     });
 
     assert_eq!(
@@ -4624,42 +4665,95 @@ fn build_notice(text: &str, subject_client_id: ClientId) -> (String, Option<Clie
     (text.to_string(), Some(subject_client_id))
 }
 
-/// A connection end for `client_id` as the driver takes it from a reading
-/// loop that streamed: `is_returning` is what the connection said about
-/// attaching again.
-fn build_client_detached(client_id: ClientId, is_returning: bool) -> RuntimeEvent {
+/// A connection end with no `Leaving` for `client_id`, as the driver takes it
+/// from a reading loop that streamed: `is_returning` is what the connection
+/// reports about attaching again.
+fn build_lost_connection_detach(client_id: ClientId, is_returning: bool) -> RuntimeEvent {
     RuntimeEvent::ClientDetached {
         client_id,
         detached_at: SystemTime::now(),
         is_streamed: true,
         is_returning,
+        has_sent_leaving: false,
     }
 }
 
 #[test]
-fn a_remote_attach_posts_joined_remotely_to_every_other_client_and_hands_the_joiner_its_entry_in_its_queue(
-) {
+fn a_remote_attach_posts_joined_remotely_to_every_client_once_the_joiner_reads_its_answer() {
     let (mut server, host_client_id) = boot_server();
     let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
 
-    let bob_attachment = attach_from_origin_with_token(
+    let bob_attachment = attach_from_origin_with_lost_answer(
         &mut server,
         None,
         ClientOrigin::Remote,
         Some("bob"),
         SystemTime::now(),
     );
+    assert_eq!(take_posted_notices(&host_delivery_receiver), Vec::new());
+    assert_eq!(
+        list_queued_notices(&bob_attachment.notification_queue),
+        Vec::new()
+    );
 
+    receive_attach_answer(&mut server, bob_attachment.client_id);
     let joined_notice = build_notice("bob (2) joined remotely", bob_attachment.client_id);
     assert_eq!(
         take_posted_notices(&host_delivery_receiver),
         vec![joined_notice.clone()]
     );
     assert_eq!(
-        list_queued_notices(&bob_attachment.notification_queue),
+        take_posted_notices(&bob_attachment.deliveries),
         vec![joined_notice]
     );
-    assert_eq!(take_posted_notices(&bob_attachment.deliveries), Vec::new());
+
+    receive_attach_answer(&mut server, bob_attachment.client_id);
+    assert_eq!(take_posted_notices(&host_delivery_receiver), Vec::new());
+}
+
+#[test]
+fn an_answer_receipt_for_a_client_no_session_holds_posts_nothing() {
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+
+    receive_attach_answer(&mut server, ClientId::new());
+
+    assert_eq!(take_posted_notices(&host_delivery_receiver), Vec::new());
+}
+
+#[test]
+fn a_client_that_never_reads_its_answer_leaves_or_disconnects_with_no_notice() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let bob_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+    let carol_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("carol"),
+        now,
+    );
+
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: bob_attachment.client_id,
+        detached_at: now,
+        is_streamed: true,
+        is_returning: false,
+        has_sent_leaving: true,
+    });
+    let _ = server.handle_runtime_event(build_lost_connection_detach(
+        carol_attachment.client_id,
+        true,
+    ));
+
+    assert_eq!(take_posted_notices(&host_delivery_receiver), Vec::new());
 }
 
 #[test]
@@ -4703,6 +4797,7 @@ fn the_host_account_posts_for_its_last_and_first_terminal_while_another_person_i
     assert_eq!(
         take_posted_notices(&bob_attachment.deliveries),
         vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
             build_notice("host (1) left", first_host_client_id),
             build_notice("host (1) joined", returning_host_attachment.client_id),
         ]
@@ -4721,7 +4816,7 @@ fn a_host_terminal_with_nobody_else_present_posts_nothing() {
 }
 
 #[test]
-fn a_connection_that_does_not_attach_again_posts_left_and_one_that_may_posts_disconnected() {
+fn a_leaving_that_does_not_attach_again_posts_left_and_a_connection_that_may_posts_disconnected() {
     let now = SystemTime::now();
     let (mut server, host_client_id) = boot_server();
     let bob_attachment =
@@ -4732,8 +4827,17 @@ fn a_connection_that_does_not_attach_again_posts_left_and_one_that_may_posts_dis
     let _ = take_posted_notices(&bob_attachment.deliveries);
     let _ = take_posted_notices(&carol_attachment.deliveries);
 
-    let _ = server.handle_runtime_event(build_client_detached(bob_attachment.client_id, false));
-    let _ = server.handle_runtime_event(build_client_detached(carol_attachment.client_id, true));
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: bob_attachment.client_id,
+        detached_at: now,
+        is_streamed: true,
+        is_returning: false,
+        has_sent_leaving: true,
+    });
+    let _ = server.handle_runtime_event(build_lost_connection_detach(
+        carol_attachment.client_id,
+        true,
+    ));
 
     assert_eq!(
         take_posted_notices(&host_delivery_receiver),
@@ -4746,6 +4850,41 @@ fn a_connection_that_does_not_attach_again_posts_left_and_one_that_may_posts_dis
     assert_eq!(
         take_posted_notices(&carol_attachment.deliveries),
         vec![build_notice("bob (2) left", bob_attachment.client_id)]
+    );
+}
+
+#[test]
+fn a_connection_on_this_machine_that_ends_with_no_leaving_posts_disconnected() {
+    let (mut server, host_client_id) = boot_server();
+    let other_account_attachment = attach_from_origin_with_token(
+        &mut server,
+        None,
+        ClientOrigin::Local {
+            is_same_user: false,
+        },
+        None,
+        SystemTime::now(),
+    );
+    let other_account_label = get_client_label(&server, other_account_attachment.client_id);
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+
+    let _ = server.handle_runtime_event(build_lost_connection_detach(
+        other_account_attachment.client_id,
+        false,
+    ));
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![build_notice(
+            &format!("{other_account_label} (2) disconnected"),
+            other_account_attachment.client_id
+        )]
+    );
+    assert_eq!(
+        server
+            .get_session_for_client(other_account_attachment.client_id)
+            .map(|session| session.session_id),
+        None
     );
 }
 
@@ -4768,7 +4907,10 @@ fn a_detach_command_posts_left_once_and_the_connection_end_after_it_posts_nothin
         },
         Command::Detach(DetachArgs::default()),
     ));
-    let _ = server.handle_runtime_event(build_client_detached(bob_attachment.client_id, false));
+    let _ = server.handle_runtime_event(build_lost_connection_detach(
+        bob_attachment.client_id,
+        false,
+    ));
 
     assert_eq!(
         take_posted_notices(&host_delivery_receiver),
@@ -4820,7 +4962,8 @@ fn a_dropped_link_posts_disconnected_and_its_redial_posts_reconnected_under_the_
     let bob_attachment =
         attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
 
-    let _ = server.handle_runtime_event(build_client_detached(bob_attachment.client_id, true));
+    let _ =
+        server.handle_runtime_event(build_lost_connection_detach(bob_attachment.client_id, true));
     let returning_bob_attachment = attach_from_origin_with_token(
         &mut server,
         Some(bob_attachment.resume_token.clone()),
@@ -4839,7 +4982,10 @@ fn a_dropped_link_posts_disconnected_and_its_redial_posts_reconnected_under_the_
     );
     assert_eq!(
         take_posted_notices(&returning_bob_attachment.deliveries),
-        Vec::new()
+        vec![build_notice(
+            "bob (2) reconnected",
+            returning_bob_attachment.client_id
+        )]
     );
 }
 
@@ -4867,7 +5013,13 @@ fn a_redial_before_the_drop_is_read_posts_disconnected_then_reconnected() {
             build_notice("bob (2) reconnected", returning_bob_attachment.client_id),
         ]
     );
-    assert_eq!(take_posted_notices(&bob_attachment.deliveries), Vec::new());
+    assert_eq!(
+        take_posted_notices(&bob_attachment.deliveries),
+        vec![build_notice(
+            "bob (2) joined remotely",
+            bob_attachment.client_id
+        )]
+    );
 }
 
 /// `server` carried across an image swap and resumed: every client it held
@@ -4881,6 +5033,17 @@ fn swap_server_image(server: &mut Server) -> Server {
 /// Attach to `server` from another machine as `claimed_attachment`'s client,
 /// presenting its token, and hand back what the session answered.
 fn claim_remote_client(server: &mut Server, claimed_attachment: &AttachAccepted) -> AttachAccepted {
+    claim_client_from_origin(server, claimed_attachment, ClientOrigin::Remote)
+}
+
+/// Attach to `server` from `client_origin` as `claimed_attachment`'s client,
+/// presenting its token, and hand back what the session answered. The client
+/// never says that it read the answer.
+fn claim_client_from_origin(
+    server: &mut Server,
+    claimed_attachment: &AttachAccepted,
+    client_origin: ClientOrigin,
+) -> AttachAccepted {
     server
         .handle_ipc_attach(
             Some(claimed_attachment.client_id),
@@ -4889,7 +5052,7 @@ fn claim_remote_client(server: &mut Server, claimed_attachment: &AttachAccepted)
             None,
             None,
             SystemTime::now(),
-            ClientOrigin::Remote,
+            client_origin,
             None,
             60,
             None,
@@ -4929,6 +5092,7 @@ fn a_resume_claim_and_a_token_takeover_of_a_record_awaiting_its_reattach_post_no
     );
 
     let claimed_bob_attachment = claim_remote_client(&mut resumed_server, &bob_attachment);
+    receive_attach_answer(&mut resumed_server, claimed_bob_attachment.client_id);
     let carol_takeover_attachment = attach_from_origin_with_token(
         &mut resumed_server,
         Some(carol_attachment.resume_token.clone()),
@@ -4950,8 +5114,7 @@ fn a_resume_claim_and_a_token_takeover_of_a_record_awaiting_its_reattach_post_no
 }
 
 #[test]
-fn the_grace_window_closing_posts_disconnected_for_each_unclaimed_client_against_the_clients_present(
-) {
+fn the_grace_window_closing_posts_disconnected_for_each_unclaimed_client_host_account_first() {
     let now = SystemTime::now();
     let (mut server, host_client_id) = boot_server();
     let bob_attachment =
@@ -4963,24 +5126,30 @@ fn the_grace_window_closing_posts_disconnected_for_each_unclaimed_client_against
 
     let _ = resumed_server.handle_drop_unclaimed_clients(now);
 
-    let mut expected_notices = vec![
-        build_notice("host (1) disconnected", host_client_id),
-        build_notice("bob (2) disconnected", bob_attachment.client_id),
-    ];
-    expected_notices.sort_by_key(|(_, subject_client_id)| *subject_client_id);
     assert_eq!(
         take_posted_notices(&claimed_dave_attachment.deliveries),
-        expected_notices
+        vec![
+            build_notice("host (1) disconnected", host_client_id),
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+        ]
     );
 }
 
 #[test]
-fn the_grace_window_closing_posts_nothing_for_a_host_terminal_whose_only_other_person_also_awaits()
-{
+fn the_grace_window_closing_posts_disconnected_for_a_host_terminal_whose_only_other_person_also_awaits(
+) {
     let now = SystemTime::now();
-    let (mut server, _host_client_id) = boot_server();
+    let (mut server, genesis_host_client_id) = boot_server();
     let bob_attachment =
         attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let host_attachment = attach_with_token(&mut server, None, now);
+    let _ = server.handle_client_detach(genesis_host_client_id);
+    let host_label = get_client_label(&server, host_attachment.client_id);
+    let host_number = server
+        .get_client_mut(host_attachment.client_id)
+        .expect("the host terminal")
+        .get_color_index()
+        + 1;
     let mut resumed_server = swap_server_image(&mut server);
     let notices_before = list_queued_notices(
         &resumed_server
@@ -4991,7 +5160,15 @@ fn the_grace_window_closing_posts_nothing_for_a_host_terminal_whose_only_other_p
 
     let _ = resumed_server.handle_drop_unclaimed_clients(now);
 
+    assert!(
+        bob_attachment.client_id < host_attachment.client_id,
+        "bob's id sorts first"
+    );
     let mut expected_notices = notices_before;
+    expected_notices.push(build_notice(
+        &format!("{host_label} ({host_number}) disconnected"),
+        host_attachment.client_id,
+    ));
     expected_notices.push(build_notice(
         "bob (2) disconnected",
         bob_attachment.client_id,
@@ -5000,5 +5177,451 @@ fn the_grace_window_closing_posts_nothing_for_a_host_terminal_whose_only_other_p
     assert_eq!(
         list_queued_notices(&session.notification_queue),
         expected_notices
+    );
+}
+
+/// The text and the subject of each entry the sole session of `server` queued
+/// after its first `queued_notice_count` entries, oldest first.
+fn list_queued_notices_after(
+    server: &Server,
+    queued_notice_count: usize,
+) -> Vec<(String, Option<ClientId>)> {
+    let session = server.get_sole_session().expect("the session");
+    list_queued_notices(&session.notification_queue)[queued_notice_count..].to_vec()
+}
+
+#[test]
+fn a_redial_whose_answer_is_lost_posts_nothing_and_the_next_redial_with_the_same_token_posts_reconnected_once(
+) {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let _ =
+        server.handle_runtime_event(build_lost_connection_detach(bob_attachment.client_id, true));
+
+    let lost_redial_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+    let _ = server.handle_runtime_event(build_lost_connection_detach(
+        lost_redial_attachment.client_id,
+        true,
+    ));
+    let redial_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", redial_attachment.client_id),
+        ]
+    );
+    assert_eq!(
+        server
+            .saved_view_store
+            .take_saved_view(&lost_redial_attachment.resume_token, now),
+        None,
+        "the redial took back the one view filed under both tokens"
+    );
+}
+
+#[test]
+fn a_second_redial_with_the_same_token_replaces_a_redial_whose_answer_is_lost_with_no_notice() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let _ =
+        server.handle_runtime_event(build_lost_connection_detach(bob_attachment.client_id, true));
+
+    let lost_redial_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+    let redial_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", redial_attachment.client_id),
+        ]
+    );
+    assert_eq!(
+        server
+            .get_session_for_client(lost_redial_attachment.client_id)
+            .map(|session| session.session_id),
+        None
+    );
+}
+
+#[test]
+fn a_restart_claim_whose_answer_is_lost_comes_back_with_the_token_it_presented() {
+    let now = SystemTime::now();
+    let (mut server, _host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let mut resumed_server = swap_server_image(&mut server);
+    let queued_notice_count = list_queued_notices_after(&resumed_server, 0).len();
+
+    let claimed_bob_attachment = claim_remote_client(&mut resumed_server, &bob_attachment);
+    let _ = resumed_server.handle_runtime_event(build_lost_connection_detach(
+        claimed_bob_attachment.client_id,
+        true,
+    ));
+    let redial_attachment = attach_from_origin_with_token(
+        &mut resumed_server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        list_queued_notices_after(&resumed_server, queued_notice_count),
+        vec![
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", redial_attachment.client_id),
+        ]
+    );
+}
+
+#[test]
+fn a_late_detach_of_a_restart_claim_whose_answer_is_lost_leaves_the_next_dial_attached() {
+    let now = SystemTime::now();
+    let (mut server, _host_client_id) = boot_server();
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let mut resumed_server = swap_server_image(&mut server);
+    let session_id = resumed_server
+        .get_sole_session()
+        .expect("the session")
+        .session_id;
+    let queued_notice_count = list_queued_notices_after(&resumed_server, 0).len();
+    let claimed_bob_attachment = claim_remote_client(&mut resumed_server, &bob_attachment);
+    assert_eq!(claimed_bob_attachment.client_id, bob_attachment.client_id);
+    // The claim's writer stops: its receiver goes, and the next publish drops
+    // its subscription before the reading loop reports the detach.
+    drop(claimed_bob_attachment);
+    resumed_server.publish_events(&[Event::Quit(QuitCause::Requested)]);
+
+    let redial_attachment = claim_remote_client(&mut resumed_server, &bob_attachment);
+    receive_attach_answer(&mut resumed_server, redial_attachment.client_id);
+    let _ = resumed_server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: bob_attachment.client_id,
+        detached_at: now,
+        is_streamed: false,
+        is_returning: true,
+        has_sent_leaving: false,
+    });
+
+    assert_ne!(redial_attachment.client_id, bob_attachment.client_id);
+    assert_eq!(
+        resumed_server
+            .get_session_for_client(redial_attachment.client_id)
+            .map(|session| session.session_id),
+        Some(session_id)
+    );
+    let viewed_client_ids: Vec<ClientId> = resumed_server
+        .subscriptions
+        .iter()
+        .map(|frame_subscription| frame_subscription.client_id)
+        .collect();
+    assert_eq!(viewed_client_ids, vec![redial_attachment.client_id]);
+    assert_eq!(
+        list_queued_notices_after(&resumed_server, queued_notice_count),
+        vec![
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", redial_attachment.client_id),
+        ]
+    );
+}
+
+#[test]
+fn a_token_takeover_of_a_record_whose_arrival_never_posted_posts_that_arrival_on_the_answer() {
+    let now = SystemTime::now();
+    let (mut server, _host_client_id) = boot_server();
+    let bob_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+    let mut resumed_server = swap_server_image(&mut server);
+    let queued_notice_count = list_queued_notices_after(&resumed_server, 0).len();
+
+    let takeover_attachment = attach_from_origin_with_lost_answer(
+        &mut resumed_server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+    assert_eq!(
+        list_queued_notices_after(&resumed_server, queued_notice_count),
+        Vec::new()
+    );
+
+    receive_attach_answer(&mut resumed_server, takeover_attachment.client_id);
+    assert_eq!(
+        list_queued_notices_after(&resumed_server, queued_notice_count),
+        vec![build_notice(
+            "bob (2) joined remotely",
+            takeover_attachment.client_id
+        )]
+    );
+}
+
+#[test]
+fn the_grace_window_closing_posts_nothing_for_a_client_whose_arrival_never_posted() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let _bob_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+    let dave_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("dave"), now);
+    let mut resumed_server = swap_server_image(&mut server);
+    let claimed_dave_attachment = claim_remote_client(&mut resumed_server, &dave_attachment);
+
+    let _ = resumed_server.handle_drop_unclaimed_clients(now);
+
+    assert_eq!(
+        take_posted_notices(&claimed_dave_attachment.deliveries),
+        vec![build_notice("host (1) disconnected", host_client_id)]
+    );
+}
+
+#[test]
+fn a_redial_whose_reply_was_never_written_files_its_view_under_the_token_it_presented() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    let bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let _ =
+        server.handle_runtime_event(build_lost_connection_detach(bob_attachment.client_id, true));
+    let unwritten_redial_attachment = attach_from_origin_with_lost_answer(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: unwritten_redial_attachment.client_id,
+        detached_at: now,
+        is_streamed: false,
+        is_returning: true,
+        has_sent_leaving: false,
+    });
+    assert_eq!(
+        server
+            .saved_view_store
+            .take_saved_view(&unwritten_redial_attachment.resume_token, now),
+        None,
+        "the token the unwritten reply carried takes back nothing"
+    );
+    let redial_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(bob_attachment.resume_token.clone()),
+        ClientOrigin::Remote,
+        Some("bob"),
+        now,
+    );
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        vec![
+            build_notice("bob (2) joined remotely", bob_attachment.client_id),
+            build_notice("bob (2) disconnected", bob_attachment.client_id),
+            build_notice("bob (2) reconnected", redial_attachment.client_id),
+        ]
+    );
+}
+
+#[test]
+fn an_owner_terminal_whose_reclaim_answer_is_lost_keeps_the_owner_present_until_its_connection_ends(
+) {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let host_attachment = attach_with_token(&mut server, None, now);
+    let second_host_attachment = attach_with_token(&mut server, None, now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let _ = server.handle_client_detach(host_client_id);
+    let second_host_label = get_client_label(&server, second_host_attachment.client_id);
+    let second_host_number = server
+        .get_client_mut(second_host_attachment.client_id)
+        .expect("the second host terminal")
+        .get_color_index()
+        + 1;
+    let mut resumed_server = swap_server_image(&mut server);
+    let host_account = ClientOrigin::Local { is_same_user: true };
+    let claimed_host_attachment =
+        claim_client_from_origin(&mut resumed_server, &host_attachment, host_account);
+    receive_attach_answer(&mut resumed_server, claimed_host_attachment.client_id);
+    let claimed_carol_attachment = claim_remote_client(&mut resumed_server, &carol_attachment);
+    receive_attach_answer(&mut resumed_server, claimed_carol_attachment.client_id);
+    let _ = claim_client_from_origin(&mut resumed_server, &second_host_attachment, host_account);
+
+    let _ = resumed_server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: claimed_host_attachment.client_id,
+        detached_at: now,
+        is_streamed: true,
+        is_returning: false,
+        has_sent_leaving: true,
+    });
+    assert_eq!(
+        take_posted_notices(&claimed_carol_attachment.deliveries),
+        Vec::new(),
+        "the second host terminal still stands for the owner"
+    );
+
+    let _ = resumed_server.handle_runtime_event(build_lost_connection_detach(
+        second_host_attachment.client_id,
+        true,
+    ));
+    assert_eq!(
+        take_posted_notices(&claimed_carol_attachment.deliveries),
+        vec![build_notice(
+            &format!("{second_host_label} ({second_host_number}) disconnected"),
+            second_host_attachment.client_id
+        )]
+    );
+}
+
+#[test]
+fn an_owner_terminal_still_on_its_way_back_after_an_update_keeps_the_owner_present() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let host_attachment = attach_with_token(&mut server, None, now);
+    let second_host_attachment = attach_with_token(&mut server, None, now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let _ = server.handle_client_detach(host_client_id);
+    let second_host_label = get_client_label(&server, second_host_attachment.client_id);
+    let second_host_number = server
+        .get_client_mut(second_host_attachment.client_id)
+        .expect("the second host terminal")
+        .get_color_index()
+        + 1;
+    let mut resumed_server = swap_server_image(&mut server);
+    let host_account = ClientOrigin::Local { is_same_user: true };
+    let claimed_host_attachment =
+        claim_client_from_origin(&mut resumed_server, &host_attachment, host_account);
+    receive_attach_answer(&mut resumed_server, claimed_host_attachment.client_id);
+    let claimed_carol_attachment = claim_remote_client(&mut resumed_server, &carol_attachment);
+    receive_attach_answer(&mut resumed_server, claimed_carol_attachment.client_id);
+
+    let _ = resumed_server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: claimed_host_attachment.client_id,
+        detached_at: now,
+        is_streamed: true,
+        is_returning: false,
+        has_sent_leaving: true,
+    });
+    let claimed_second_host_attachment =
+        claim_client_from_origin(&mut resumed_server, &second_host_attachment, host_account);
+    receive_attach_answer(
+        &mut resumed_server,
+        claimed_second_host_attachment.client_id,
+    );
+    assert_eq!(
+        take_posted_notices(&claimed_carol_attachment.deliveries),
+        Vec::new()
+    );
+
+    let _ = resumed_server.handle_runtime_event(RuntimeEvent::ClientDetached {
+        client_id: claimed_second_host_attachment.client_id,
+        detached_at: now,
+        is_streamed: true,
+        is_returning: false,
+        has_sent_leaving: true,
+    });
+    assert_eq!(
+        take_posted_notices(&claimed_carol_attachment.deliveries),
+        vec![build_notice(
+            &format!("{second_host_label} ({second_host_number}) left"),
+            second_host_attachment.client_id
+        )]
+    );
+}
+
+#[test]
+fn the_grace_window_closing_posts_one_owner_departure_for_two_unclaimed_owner_terminals() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let second_host_attachment = attach_with_token(&mut server, None, now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let last_owner_client_id = host_client_id.max(second_host_attachment.client_id);
+    let last_owner_label = get_client_label(&server, last_owner_client_id);
+    let last_owner_number = server
+        .get_client_mut(last_owner_client_id)
+        .expect("the last owner terminal")
+        .get_color_index()
+        + 1;
+    let mut resumed_server = swap_server_image(&mut server);
+    let claimed_carol_attachment = claim_remote_client(&mut resumed_server, &carol_attachment);
+    receive_attach_answer(&mut resumed_server, claimed_carol_attachment.client_id);
+
+    let _ = resumed_server.handle_drop_unclaimed_clients(now);
+
+    assert_eq!(
+        take_posted_notices(&claimed_carol_attachment.deliveries),
+        vec![build_notice(
+            &format!("{last_owner_label} ({last_owner_number}) disconnected"),
+            last_owner_client_id
+        )]
+    );
+}
+
+#[test]
+fn a_fresh_owner_terminal_posts_nothing_while_another_owner_terminal_is_on_its_way_back() {
+    let now = SystemTime::now();
+    let (mut server, genesis_host_client_id) = boot_server();
+    let _waiting_host_attachment = attach_with_token(&mut server, None, now);
+    let carol_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("carol"), now);
+    let _ = server.handle_client_detach(genesis_host_client_id);
+    let mut resumed_server = swap_server_image(&mut server);
+    let claimed_carol_attachment = claim_remote_client(&mut resumed_server, &carol_attachment);
+    receive_attach_answer(&mut resumed_server, claimed_carol_attachment.client_id);
+
+    let _ = attach_with_token(&mut resumed_server, None, now);
+
+    assert_eq!(
+        take_posted_notices(&claimed_carol_attachment.deliveries),
+        Vec::new()
     );
 }

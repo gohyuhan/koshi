@@ -987,8 +987,7 @@ fn step_four_names_the_missing_or_misshapen_field() {
 }
 
 #[test]
-fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its_history_and_a_generated_label_each_local_origin_an_unknown_account_and_each_queued_entry_no_subject(
-) {
+fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to_format_six() {
     let mut resume_body = serde_json::json!({
         "session_by_id": {
             "S": {
@@ -1116,14 +1115,16 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its
                                 }
                             },
                             "shown_floating_pane_ids": ["P1"],
-                            "focused_floating_pane_id": "P1"
+                            "focused_floating_pane_id": "P1",
+                            "unannounced_arrival": null
                         },
                         "R": {
                             "color_index": 1,
                             "origin": "Remote",
                             "floating_pane_view_by_floating_pane_id": {},
                             "shown_floating_pane_ids": [],
-                            "focused_floating_pane_id": null
+                            "focused_floating_pane_id": null,
+                            "unannounced_arrival": null
                         }
                     }},
                     "notification_queue": {"queued_entries": [
@@ -1143,11 +1144,13 @@ fn step_five_turns_each_floating_member_into_a_floating_pane_gives_each_view_its
             "carried_pane_state_by_pane_id": {},
             "saved_view_store": {
                 "connection_token_hash_by_client_id": {"C": "first-hash"},
+                "presented_token_hash_by_client_id": {},
                 "saved_view_records": [{
-                    "connection_token_hash": "second-hash",
+                    "connection_token_hashes": ["second-hash"],
                     "expires_at": {"secs_since_epoch": 86500, "nanos_since_epoch": 0},
                     "saved_view": {
                         "color_index": 0,
+                        "unannounced_arrival": null,
                         "active_tab_id": "T",
                         "floating_pane_view_by_floating_pane_id": {
                             "P2": {
@@ -1414,10 +1417,19 @@ fn step_five_names_the_missing_or_misshapen_field() {
         ),
         (
             build_saved_view_body(serde_json::json!({"saved_view_records": [{}]})),
+            "body.saved_view_store.saved_view_records[0].connection_token_hash is missing",
+        ),
+        (
+            build_saved_view_body(serde_json::json!({"saved_view_records": [{
+                "connection_token_hash": "hash"
+            }]})),
             "body.saved_view_store.saved_view_records[0].saved_view is missing",
         ),
         (
-            build_saved_view_body(serde_json::json!({"saved_view_records": [{"saved_view": {}}]})),
+            build_saved_view_body(serde_json::json!({"saved_view_records": [{
+                "connection_token_hash": "hash",
+                "saved_view": {}
+            }]})),
             "body.saved_view_store.saved_view_records[0].saved_view.floating_pane_view_by_pane_id \
              is missing",
         ),

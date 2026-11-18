@@ -435,9 +435,11 @@ pub enum IpcRequestKind {
         viewport_size: Size,
         /// The client record to come back as, named by a caller re-attaching
         /// after the session replaced its own process image. The server hands
-        /// that record back when it still holds it, the tab that record was
-        /// viewing still exists, no connection is streaming for it, and
-        /// `resume_token` is the token that record's last attach minted, and
+        /// that record back when the swap carried it and no attach has claimed
+        /// it since, the tab that record was viewing still exists, and
+        /// `resume_token` is the token that record's last attach minted, or the
+        /// token that attach presented before its client sent
+        /// [`AttachAnswerReceived`](Self::AttachAnswerReceived). The server
         /// mints a fresh client in every other case. `None` on a first attach.
         resume_client_id: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
@@ -448,7 +450,12 @@ pub enum IpcRequestKind {
         /// than 24 hours, attach with a fresh view instead of failing. A token
         /// minted for a client that is still attached, or for a record that
         /// came across a swap and still waits for its client, takes that
-        /// client's view over, and the session removes that client.
+        /// client's view over, and the session removes that client. A token
+        /// that took back a view or claimed a record stays good for the client
+        /// this attach makes until that client sends
+        /// [`AttachAnswerReceived`](Self::AttachAnswerReceived): an `Attach`
+        /// that presents it again after the answer was lost takes back that
+        /// client's view.
         resume_token: Option<ConnectionToken>,
         /// The pane region the caller draws the tab's panes in, which the
         /// server records on the client. Absent, the server sizes the
@@ -675,6 +682,13 @@ pub enum IpcRequestKind {
     /// [`Commit`](Self::Commit): then the session reads the `Ping` and drops
     /// it.
     Ping,
+    /// The attached client read the [`IpcResult::Attached`] answer to its
+    /// `Attach`. The client sends it as its first request after that answer,
+    /// on every attach. The session then stops taking the `resume_token` the
+    /// `Attach` presented as this client's, and posts the arrival notice the
+    /// client still owes the other clients, if any. Nothing answers it. On a connection with no
+    /// attached client, it closes the connection.
+    AttachAnswerReceived,
     /// The attached client painted after it applied the painted update
     /// numbered `update_sequence`, and that update is the last one it applied.
     /// The client sends it after each paint, and nothing answers it. The
@@ -931,6 +945,7 @@ impl IpcRequestKind {
             IpcRequestKind::Restart => "Restart",
             IpcRequestKind::Leaving { .. } => "Leaving",
             IpcRequestKind::Ping => "Ping",
+            IpcRequestKind::AttachAnswerReceived => "AttachAnswerReceived",
             IpcRequestKind::PaintedUpdate { .. } => "PaintedUpdate",
             IpcRequestKind::ClipboardCopyPart { .. } => "ClipboardCopyPart",
             IpcRequestKind::ClipboardCopy { .. } => "ClipboardCopy",
@@ -1049,7 +1064,9 @@ pub enum IpcResult {
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
     /// event subscription is live. Every field is the server's own answer, and
-    /// this frame is the last one written before the event stream starts.
+    /// this frame is the last one written before the event stream starts. The
+    /// client answers it with
+    /// [`IpcRequestKind::AttachAnswerReceived`].
     Attached {
         /// The id the server minted for this client. A second attach mints a
         /// new one, unless its `resume_client_id` named a record the server handed back.
@@ -1200,6 +1217,7 @@ impl WireVariants for IpcRequestKind {
         "Restart",
         "Leaving",
         "Ping",
+        "AttachAnswerReceived",
         "PaintedUpdate",
         "ClipboardCopyPart",
         "ClipboardCopy",

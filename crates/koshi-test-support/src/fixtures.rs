@@ -481,7 +481,8 @@ fn spawn_previous_release_server(
 ///    file under the token made from `connection_secret`.
 /// 4. Accept the second caller's Hello and answer it with build `9.9.9`.
 ///    Answer each request after it with what `answer_request` gives for its
-///    kind, and for the held kind on a `Commit`.
+///    kind, and for the held kind on a `Commit`. An `AttachAnswerReceived`
+///    gets no answer.
 ///
 /// A request behind a refused Hello gets the `HelloRequired` refusal. Each
 /// connection ends when its caller hangs up, and the thread ends after the
@@ -540,8 +541,8 @@ pub fn spawn_session_listening_before_it_advertises(
 /// 2. Serve the first caller with `answer_before_replacement`: an accepted
 ///    Hello gets build `9.9.9` and this process's image, a `Prepare` is
 ///    answered `Prepared`, a `Commit` gets what the answer function gives for
-///    the held request's kind, and every other request gets what it gives for
-///    its own kind.
+///    the held request's kind, an `AttachAnswerReceived` gets no answer, and
+///    every other request gets what it gives for its own kind.
 /// 3. Once that caller hangs up, write the endpoint file under the token made
 ///    from `connection_secret`, as the new image does when it binds.
 /// 4. Serve each caller after it with `answer_after_replacement`, the same
@@ -629,8 +630,9 @@ pub fn build_accepted_hello_result() -> IpcResult {
 /// [`ProcessImageId::get_own`] gives it, and a refused request gets the gate's
 /// refusal. A `Prepare` is answered `Prepared` and its request is held. A
 /// `Commit` gets what `answer_request` gives for the held request's kind, and
-/// a `RequestFailed` refusal when nothing is held. Every other request gets
-/// what `answer_request` gives for its kind.
+/// a `RequestFailed` refusal when nothing is held. An `AttachAnswerReceived`
+/// gets no answer. Every other request gets what `answer_request` gives for
+/// its kind.
 ///
 /// Gives whether the caller's Hello was accepted.
 fn answer_session_requests(
@@ -648,6 +650,12 @@ fn answer_session_requests(
     );
     let mut prepared_request_kind: Option<IpcRequestKind> = None;
     while let Ok(ipc_request) = session_connection.recv::<IpcRequest>() {
+        if matches!(
+            ipc_request.request_kind,
+            IpcRequestKind::AttachAnswerReceived
+        ) {
+            continue;
+        }
         let answer_result = match session_handshake.validate_request_kind(&ipc_request.request_kind)
         {
             Err(refusal) => IpcResult::Error(refusal),
