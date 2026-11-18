@@ -13,6 +13,16 @@
 //! them. Presenting the token of a client that is still attached finds that
 //! client ([`SavedViewStore::find_client_id_by_resume_token`]).
 //!
+//! The token an attach presented, when that attach claimed a client record or
+//! took back a view, also stands for the attached client until the client
+//! says that it read its attach answer
+//! ([`SavedViewStore::hold_presented_token`]). A view filed in that time is
+//! filed under both hashes, and either token takes it back once. Example:
+//! `bob` presents token `A`, the session mints token `B` for the new
+//! client, and the link drops before the answer that carries `B` reaches
+//! `bob`. The view is filed under `A` and `B`, and `bob`'s next attach
+//! with `A` takes it back.
+//!
 //! The store lives in memory. An image swap writes it, hashes and filed views
 //! included, into the resume file
 //! ([`ResumeBody::saved_view_store`](crate::resume::ResumeBody::saved_view_store)),
@@ -30,7 +40,7 @@ use subtle::ConstantTimeEq;
 use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::hash_connection_token;
-use koshi_session::client::{Client, FloatingPaneView};
+use koshi_session::client::{ArrivalNotice, Client, FloatingPaneView};
 
 /// How long a filed view stands before it is dropped: 24 hours.
 const SAVED_VIEW_LIFETIME_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -66,26 +76,34 @@ pub struct SavedView {
     /// The floating panes the client showed, oldest first. The last one held
     /// the client's input.
     pub shown_floating_pane_ids: Vec<FloatingPaneId>,
+    /// The arrival notice the other clients had not been given when the
+    /// client detached ([`Client::get_unannounced_arrival`]), or `None` when
+    /// they saw it arrive.
+    pub unannounced_arrival: Option<ArrivalNotice>,
 }
 
-/// One filed view: the sha256 of the token that takes it back, when it stops
-/// standing, and the view itself.
+/// One filed view: the sha256 of each token that takes it back, when it stops
+/// standing, and the view itself. Either token takes the view back, once.
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedViewRecord {
-    connection_token_hash: String,
+    connection_token_hashes: Vec<String>,
     expires_at: SystemTime,
     saved_view: SavedView,
 }
 
-/// The views detached clients left behind, keyed by the sha256 of the token
-/// that takes each one back.
+/// The views detached clients left behind, each filed under the sha256 of
+/// every token that takes it back.
 ///
 /// `connection_token_hash_by_client_id` holds the hash minted for each attached client,
-/// waiting for that client to detach. `saved_view_records` holds the filed
-/// views, oldest first.
+/// waiting for that client to detach. `presented_token_hash_by_client_id`
+/// holds the hash of the token a client's attach presented when that attach
+/// claimed a record or took back a view, standing until that client proves it
+/// holds its attach answer. `saved_view_records` holds the
+/// filed views, oldest first.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SavedViewStore {
     connection_token_hash_by_client_id: HashMap<ClientId, String>,
+    presented_token_hash_by_client_id: HashMap<ClientId, String>,
     saved_view_records: Vec<SavedViewRecord>,
 }
 
@@ -102,34 +120,61 @@ impl SavedViewStore {
         resume_token
     }
 
-    /// File `client`'s view under the hash minted for it, standing until 24
-    /// hours after `observed_time`.
+    /// Keep the sha256 of `presented_token`, the token `client_id`'s attach
+    /// presented, standing for `client_id` until
+    /// [`release_presented_token`](Self::release_presented_token). Until then
+    /// the token finds `client_id`
+    /// ([`find_client_id_by_resume_token`](Self::find_client_id_by_resume_token)),
+    /// and the view `client_id` leaves is filed under it too
+    /// ([`save_client_view`](Self::save_client_view)). A hash already kept for
+    /// `client_id` is replaced.
+    pub fn hold_presented_token(&mut self, client_id: ClientId, presented_token: &ConnectionToken) {
+        self.presented_token_hash_by_client_id
+            .insert(client_id, hash_connection_token(presented_token));
+    }
+
+    /// Drop the hash [`hold_presented_token`](Self::hold_presented_token) kept
+    /// for `client_id`: from then on that token finds nothing and takes back
+    /// nothing `client_id` leaves. A client with no hash kept changes nothing.
+    pub fn release_presented_token(&mut self, client_id: ClientId) {
+        self.presented_token_hash_by_client_id.remove(&client_id);
+    }
+
+    /// File `client`'s view under the hash minted for it and the hash of the
+    /// token its attach presented, standing until 24 hours after
+    /// `observed_time`. Either token takes the view back, once. Both hashes are
+    /// dropped from `client`'s id.
     ///
     /// Files nothing when no hash stands against `client`'s id — the client was
-    /// never minted, its hash was already spent by an earlier
-    /// [`save_client_view`](Self::save_client_view), or
+    /// never minted and holds no presented token, its hashes were already spent
+    /// by an earlier [`save_client_view`](Self::save_client_view), or
     /// [`forget_client_resume_token`](Self::forget_client_resume_token) dropped
-    /// it.
+    /// them.
     ///
     /// Drops every record that stopped standing at or before `observed_time`, then drops
     /// oldest-first until at most 32 remain.
     ///
-    /// Files nothing, and drops the hash, when `observed_time` plus 24 hours is past
-    /// the largest `SystemTime` this platform holds.
+    /// Files nothing, and drops both hashes, when `observed_time` plus 24 hours
+    /// is past the largest `SystemTime` this platform holds.
     pub fn save_client_view(&mut self, client: &Client, observed_time: SystemTime) {
-        let Some(connection_token_hash) = self
-            .connection_token_hash_by_client_id
-            .remove(&client.get_client_id())
-        else {
+        let client_id = client.get_client_id();
+        let connection_token_hashes: Vec<String> = [
+            self.connection_token_hash_by_client_id.remove(&client_id),
+            self.presented_token_hash_by_client_id.remove(&client_id),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if connection_token_hashes.is_empty() {
             return;
-        };
+        }
         let Some(expires_at) = observed_time.checked_add(SAVED_VIEW_LIFETIME_DURATION) else {
             return;
         };
         self.saved_view_records
             .retain(|saved_view_record| saved_view_record.expires_at > observed_time);
         self.saved_view_records.push(SavedViewRecord {
-            connection_token_hash,
+            connection_token_hashes,
             expires_at,
             saved_view: SavedView {
                 color_index: client.get_color_index(),
@@ -140,6 +185,7 @@ impl SavedViewStore {
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
                 floating_pane_view_by_floating_pane_id: client.list_floating_pane_views(),
                 shown_floating_pane_ids: client.list_shown_floating_pane_ids().to_vec(),
+                unannounced_arrival: client.get_unannounced_arrival(),
             },
         });
         while self.saved_view_records.len() > MAX_SAVED_VIEW_RECORD_COUNT {
@@ -147,17 +193,29 @@ impl SavedViewStore {
         }
     }
 
-    /// Drop the hash filed against `client_id` and file no record, so the token
-    /// [`mint_resume_token`](Self::mint_resume_token) handed out takes back
-    /// nothing.
+    /// Drop the hash filed against `client_id` and the hash of the token its
+    /// attach presented, and file no record, so neither token takes back
+    /// anything.
     ///
     /// Dropping a client that has no hash filed changes nothing.
     pub fn forget_client_resume_token(&mut self, client_id: ClientId) {
         self.connection_token_hash_by_client_id.remove(&client_id);
+        self.presented_token_hash_by_client_id.remove(&client_id);
     }
 
-    /// The client whose attach minted `resume_token` and whose hash still
-    /// waits for its detach, or `None` when no such hash is that token's sha256.
+    /// Drop the hash filed against `client_id` when its attach minted a token,
+    /// and keep the hash of the token its attach presented: a
+    /// [`save_client_view`](Self::save_client_view) after it files the view
+    /// under the presented token alone. Dropping a client that has no minted
+    /// hash changes nothing.
+    pub fn forget_minted_resume_token(&mut self, client_id: ClientId) {
+        self.connection_token_hash_by_client_id.remove(&client_id);
+    }
+
+    /// The client whose attach minted `resume_token`, or whose attach presented
+    /// it and still holds it ([`hold_presented_token`](Self::hold_presented_token)),
+    /// and whose hash still waits for its detach. `None` when no such hash is
+    /// that token's sha256.
     ///
     /// Compares every waiting hash through its last byte, never stopping at
     /// the first match. Changes nothing in the store.
@@ -168,7 +226,11 @@ impl SavedViewStore {
     ) -> Option<ClientId> {
         let presented_token_hash = hash_connection_token(resume_token);
         let mut matched_client_id = None;
-        for (&client_id, connection_token_hash) in &self.connection_token_hash_by_client_id {
+        let waiting_token_hashes = self
+            .connection_token_hash_by_client_id
+            .iter()
+            .chain(&self.presented_token_hash_by_client_id);
+        for (&client_id, connection_token_hash) in waiting_token_hashes {
             if is_same_token_hash(connection_token_hash, &presented_token_hash) {
                 matched_client_id = Some(client_id);
             }
@@ -195,11 +257,10 @@ impl SavedViewStore {
             .retain(|saved_view_record| saved_view_record.expires_at > observed_time);
         let mut matched_record_index = None;
         for (record_index, saved_view_record) in self.saved_view_records.iter().enumerate() {
-            if is_same_token_hash(
-                &saved_view_record.connection_token_hash,
-                &presented_token_hash,
-            ) {
-                matched_record_index = Some(record_index);
+            for connection_token_hash in &saved_view_record.connection_token_hashes {
+                if is_same_token_hash(connection_token_hash, &presented_token_hash) {
+                    matched_record_index = Some(record_index);
+                }
             }
         }
         Some(

@@ -882,6 +882,7 @@ impl Server {
                         session_id,
                         NotificationSeverity::Error,
                         &pane_exit_notice,
+                        None,
                     );
                 }
                 return emitted_events;
@@ -927,6 +928,7 @@ impl Server {
                     session_id,
                     NotificationSeverity::Error,
                     &pane_exit_notice,
+                    None,
                 );
             }
         }

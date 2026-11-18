@@ -158,6 +158,7 @@ impl Server {
             session_id,
             NotificationSeverity::Warning,
             LAYOUT_NOT_RESTORED_NOTIFICATION_TEXT,
+            None,
         );
     }
 

@@ -184,11 +184,11 @@ impl Server {
         })
     }
 
-    /// Every client attached to `session` but `viewing_client_id`, in
-    /// `color_index` order, each with the pane its keys reach as peers see it
-    /// ([`Client::get_typed_pane_id_for_peers`]). A client restored after a
-    /// restart and not yet attached again (`client_ids_awaiting_reconnect`) is
-    /// left out. Reads each client's checked pane and solves nothing.
+    /// Every client present in `session`
+    /// ([`list_present_clients`](Self::list_present_clients)) but
+    /// `viewing_client_id`, in `color_index` order, each with the pane its
+    /// keys reach as peers see it ([`Client::get_typed_pane_id_for_peers`]).
+    /// Reads each client's checked pane and solves nothing.
     ///
     /// Example: clients with indexes `0`, `2` and `1` attached, viewed by the
     /// client with index `0` → the clients with indexes `1` and `2`, in that
@@ -198,14 +198,9 @@ impl Server {
         session: &Session,
         viewing_client_id: ClientId,
     ) -> Vec<PeerSnapshot> {
-        let mut peer_snapshots: Vec<PeerSnapshot> = session
-            .clients
-            .list_attached_clients()
-            .filter(|peer_client| {
-                let peer_client_id = peer_client.get_client_id();
-                peer_client_id != viewing_client_id
-                    && !self.client_ids_awaiting_reconnect.contains(&peer_client_id)
-            })
+        let mut peer_snapshots: Vec<PeerSnapshot> = self
+            .list_present_clients(session)
+            .filter(|peer_client| peer_client.get_client_id() != viewing_client_id)
             .map(|peer_client| PeerSnapshot {
                 client_id: peer_client.get_client_id(),
                 color_index: peer_client.get_color_index(),

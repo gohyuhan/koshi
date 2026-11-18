@@ -23,13 +23,25 @@ fn create_session_queue() -> (SessionId, NotificationQueue) {
     )
 }
 
-/// Post `text` as an `Error` to `session_queue` and return what the session
-/// sends for it: the revision and the entry.
+/// Post `text` as an `Error` that reports on no client to `session_queue`
+/// and return what the session sends for it: the revision and the entry.
 fn post_to_session(session_queue: &mut NotificationQueue, text: &str) -> (u64, NotificationEntry) {
+    post_to_session_about_client(session_queue, text, None)
+}
+
+/// Post `text` as an `Error` that reports on `subject_client_id` to
+/// `session_queue` and return what the session sends for it: the revision and
+/// the entry.
+fn post_to_session_about_client(
+    session_queue: &mut NotificationQueue,
+    text: &str,
+    subject_client_id: Option<ClientId>,
+) -> (u64, NotificationEntry) {
     let posted_entry = session_queue
         .post_core_entry(
             NotificationSeverity::Error,
             text,
+            subject_client_id,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(1),
         )
@@ -837,6 +849,7 @@ fn a_local_session_queue_holding_the_viewers_warning_replaces_the_viewers_entry(
     session_queue.post_core_entry(
         NotificationSeverity::Warning,
         SHARED_CONFIG_WARNING,
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(2),
     );
@@ -873,6 +886,7 @@ fn a_local_viewer_posts_nothing_the_session_already_posted() {
     session_queue.post_core_entry(
         NotificationSeverity::Warning,
         SHARED_CONFIG_WARNING,
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(1),
     );
@@ -932,6 +946,7 @@ fn a_local_session_post_of_the_viewers_warning_replaces_the_viewers_entry() {
         .post_core_entry(
             NotificationSeverity::Warning,
             SHARED_CONFIG_WARNING,
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(2),
         )
@@ -966,6 +981,7 @@ fn a_remote_session_and_its_viewer_each_keep_their_own_warning() {
     session_queue.post_core_entry(
         NotificationSeverity::Warning,
         SHARED_CONFIG_WARNING,
+        None,
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(2),
     );
@@ -1385,6 +1401,50 @@ fn the_first_queue_of_a_session_previews_nothing_and_a_later_queue_previews_its_
 }
 
 #[test]
+fn a_session_entry_about_this_viewer_or_its_previous_client_shows_no_toast_and_counts_as_unread() {
+    let previous_client_id = ClientId::new();
+    let client_id = ClientId::new();
+    for (subject_client_id, should_preview) in [
+        (Some(previous_client_id), false),
+        (Some(client_id), false),
+        (Some(ClientId::new()), true),
+        (None, true),
+    ] {
+        for is_taken_as_post in [false, true] {
+            let mut notification_history = NotificationHistory::from_client_id(previous_client_id);
+            let (session_id, mut session_queue) = create_session_queue();
+            notification_history
+                .take_session_queue(session_id, &session_queue, true)
+                .expect("take the attach queue");
+            notification_history.set_client_id(client_id);
+
+            let (revision, posted_entry) = post_to_session_about_client(
+                &mut session_queue,
+                "bob (2) reconnected",
+                subject_client_id,
+            );
+            if is_taken_as_post {
+                notification_history
+                    .take_session_post(revision, posted_entry, true)
+                    .expect("take the post");
+            } else {
+                notification_history
+                    .take_session_queue(session_id, &session_queue, true)
+                    .expect("take the redial queue");
+            }
+
+            let newest_entry = get_newest_entry(&notification_history);
+            assert_eq!(
+                find_shown_toast_content(&notification_history),
+                should_preview.then_some((NotificationToastContent::Entry(&newest_entry), 1000)),
+                "subject {subject_client_id:?}, taken as a post: {is_taken_as_post}"
+            );
+            assert_eq!(notification_history.get_unread_entry_count(), 1);
+        }
+    }
+}
+
+#[test]
 fn an_arrival_previews_nothing_while_toasts_are_off() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
 
@@ -1531,6 +1591,7 @@ fn a_local_session_entry_takes_over_the_preview_of_the_viewers_own_entry() {
         .post_core_entry(
             NotificationSeverity::Warning,
             SHARED_CONFIG_WARNING,
+            None,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(2),
         )

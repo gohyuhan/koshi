@@ -2,8 +2,9 @@
 //! takes it back once, what an unminted token finds, when a filed view stops
 //! standing, what happens past the record count, what a second save for one
 //! client files, what `forget` leaves behind, how an untouched view
-//! round-trips, which saved view records a save drops, and which attached
-//! client a token finds.
+//! round-trips, which saved view records a save drops, which attached
+//! client a token finds, and what a presented token finds and takes back
+//! while it stands.
 
 use koshi_core::geometry::{FloatingPanePosition, Point, Size, DEFAULT_FLOATING_PANE_SIZE};
 use koshi_core::ids::SessionId;
@@ -351,6 +352,7 @@ fn a_client_that_touched_nothing_takes_back_its_tab_and_an_empty_view() {
             scroll_offset_by_pane_id: HashMap::new(),
             floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
+            unannounced_arrival: None,
         })
     );
 }
@@ -447,5 +449,128 @@ fn a_token_finds_no_client_once_unminted_replaced_filed_or_forgotten() {
     assert_eq!(
         saved_view_store.find_client_id_by_resume_token(&forgotten_resume_token),
         None
+    );
+}
+
+#[test]
+fn a_presented_token_finds_its_client_until_it_is_released() {
+    let client_id = ClientId::new();
+    let presented_token = ConnectionToken::generate();
+    let mut saved_view_store = SavedViewStore::default();
+
+    saved_view_store.hold_presented_token(client_id, &presented_token);
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&presented_token),
+        Some(client_id)
+    );
+
+    saved_view_store.release_presented_token(client_id);
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&presented_token),
+        None
+    );
+}
+
+#[test]
+fn a_view_saved_while_a_presented_token_stands_is_taken_back_once_by_either_token() {
+    for is_presented_token_first in [true, false] {
+        let mut client = build_client(ClientId::new(), TabId::new());
+        client.set_unannounced_arrival(Some(ArrivalNotice::Reconnected));
+        let mut saved_view_store = SavedViewStore::default();
+        let minted_token = saved_view_store.mint_resume_token(client.get_client_id());
+        let presented_token = ConnectionToken::generate();
+        saved_view_store.hold_presented_token(client.get_client_id(), &presented_token);
+        saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
+        let (first_token, second_token) = if is_presented_token_first {
+            (&presented_token, &minted_token)
+        } else {
+            (&minted_token, &presented_token)
+        };
+
+        let first_view = saved_view_store
+            .take_saved_view(first_token, build_system_time_at_seconds(101))
+            .map(|saved_view| (saved_view.active_tab_id, saved_view.unannounced_arrival));
+        let second_view =
+            saved_view_store.take_saved_view(second_token, build_system_time_at_seconds(101));
+
+        assert_eq!(
+            first_view,
+            Some((client.get_active_tab_id(), Some(ArrivalNotice::Reconnected))),
+            "presented token first: {is_presented_token_first}"
+        );
+        assert_eq!(
+            second_view, None,
+            "presented token first: {is_presented_token_first}"
+        );
+        assert_eq!(
+            saved_view_store.find_client_id_by_resume_token(&presented_token),
+            None,
+            "presented token first: {is_presented_token_first}"
+        );
+    }
+}
+
+#[test]
+fn a_client_holding_only_a_presented_token_files_its_view_under_it() {
+    let client = build_client(ClientId::new(), TabId::new());
+    let presented_token = ConnectionToken::generate();
+    let mut saved_view_store = SavedViewStore::default();
+    saved_view_store.hold_presented_token(client.get_client_id(), &presented_token);
+
+    saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
+
+    assert_eq!(
+        saved_view_store
+            .take_saved_view(&presented_token, build_system_time_at_seconds(101))
+            .map(|saved_view| saved_view.active_tab_id),
+        Some(client.get_active_tab_id())
+    );
+}
+
+#[test]
+fn forget_drops_the_presented_token_with_the_minted_one() {
+    let client = build_client(ClientId::new(), TabId::new());
+    let mut saved_view_store = SavedViewStore::default();
+    let minted_token = saved_view_store.mint_resume_token(client.get_client_id());
+    let presented_token = ConnectionToken::generate();
+    saved_view_store.hold_presented_token(client.get_client_id(), &presented_token);
+
+    saved_view_store.forget_client_resume_token(client.get_client_id());
+    saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
+
+    assert_eq!(
+        saved_view_store.find_client_id_by_resume_token(&presented_token),
+        None
+    );
+    assert_eq!(
+        saved_view_store.take_saved_view(&presented_token, build_system_time_at_seconds(101)),
+        None
+    );
+    assert_eq!(
+        saved_view_store.take_saved_view(&minted_token, build_system_time_at_seconds(101)),
+        None
+    );
+}
+
+#[test]
+fn a_view_saved_after_its_minted_token_is_forgotten_files_under_the_presented_token_alone() {
+    let client = build_client(ClientId::new(), TabId::new());
+    let mut saved_view_store = SavedViewStore::default();
+    let minted_token = saved_view_store.mint_resume_token(client.get_client_id());
+    let presented_token = ConnectionToken::generate();
+    saved_view_store.hold_presented_token(client.get_client_id(), &presented_token);
+
+    saved_view_store.forget_minted_resume_token(client.get_client_id());
+    saved_view_store.save_client_view(&client, build_system_time_at_seconds(100));
+
+    assert_eq!(
+        saved_view_store.take_saved_view(&minted_token, build_system_time_at_seconds(101)),
+        None
+    );
+    assert_eq!(
+        saved_view_store
+            .take_saved_view(&presented_token, build_system_time_at_seconds(101))
+            .map(|saved_view| saved_view.active_tab_id),
+        Some(client.get_active_tab_id())
     );
 }

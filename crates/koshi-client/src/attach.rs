@@ -39,8 +39,9 @@
 //! back, and its first frame paints the same panes back, so the screen does not
 //! flicker. A session that cannot hand the record back mints a fresh client,
 //! and the viewer takes that id as its own: a restart that could not bring the
-//! carried layout back holds no record, and a record whose tab closed is not
-//! handed back. A session that moves this client to another session comes back
+//! carried layout back holds no record, a record whose tab closed is not
+//! handed back, and a record an earlier attach already claimed is not handed
+//! back again. A session that moves this client to another session comes back
 //! the same way. Keys and pastes typed while the client comes back are held in
 //! the order typed and sent after the size report on the new link. The hold
 //! keeps at most 1024 inputs and one frame of paste text: past either, every
@@ -49,8 +50,9 @@
 //!
 //! A viewer of a session on a server sends a `Ping` every third of
 //! `remote-link-timeout-ms` while it waits for the session's answer to its
-//! `Attach`. Once joined, its first request goes up at once: a `Ping` on the
-//! first link, the size report on each link it gets back. A `Ping` then
+//! `Attach`. Once joined, it sends `AttachAnswerReceived` at once, and its
+//! next request goes up at once too: a `Ping` on the first link, the size
+//! report on each link it gets back. A `Ping` then
 //! follows every third of `remote-link-timeout-ms` after the last one. The
 //! session writes a `Pong` whenever it has written the viewer nothing for a
 //! third of `remote-link-timeout-ms`. A viewer that reads nothing on the link
@@ -4079,8 +4081,9 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 ///
 /// With `rejoin_claim`, the Attach names its client id and presents its resume
 /// token, on this machine and on a server alike. The session hands that
-/// client back when it still holds the record and the token proves the claim,
-/// and mints a new client otherwise: the claim never makes the dial fail.
+/// client back when it still holds the record, no attach has claimed the
+/// record since the swap, and the token proves the claim, and mints a new
+/// client otherwise: the claim never makes the dial fail.
 fn dial_session(
     home: &Home,
     session_selector: &SessionSelector,
@@ -4248,7 +4251,8 @@ fn dial_remote(
 /// every heartbeat interval of `remote_link_timeout_ms`
 /// ([`compute_heartbeat_interval`]). Example: `3000` and a session that
 /// answers the `Prepare` after 2.5 seconds send two `Ping` requests, at 1 and
-/// 2 seconds. Once joined, the returned reader and
+/// 2 seconds. Once it reads the `Attached` answer, it writes
+/// `AttachAnswerReceived`, numbered `4`. Once joined, the returned reader and
 /// writer hold no deadline. Each socket read of the reader waits at most
 /// `remote_link_timeout_ms` for the session's next byte, and each socket
 /// write of the writer waits at most `remote_link_timeout_ms` for the link to
@@ -4260,8 +4264,9 @@ fn dial_remote(
 /// [`DialError::Unreachable`] when a frame of the join could not be written or
 /// read. After the `Commit` starts to be written, it carries
 /// [`CliError::CommittedRequestUnanswered`]: the session may still attach the
-/// client. [`DialError::Restarting`] when the serving router refused the join
-/// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`], and carrying
+/// client. So does a failed write of `AttachAnswerReceived`, after which the
+/// session holds the client. [`DialError::Restarting`] when the serving
+/// router refused the join with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`], and carrying
 /// [`CliError::SessionRestarting`] when the session refused the `Prepare` or
 /// the `Commit` while it replaces its process image. [`DialError::Refused`]
 /// when the server answered and every identical join after it gets the same
@@ -4329,6 +4334,9 @@ fn join_remote_session(
     };
     let attach_answer =
         parse_attached_session(attach_result).map_err(DialError::from_session_refusal)?;
+    writer
+        .send(&build_attach_answer_received_request())
+        .map_err(build_committed_attach_failure)?;
 
     // Joined: the join's deadline is taken away, and each socket read and
     // write waits at most the link timeout for a byte.
@@ -4455,7 +4463,8 @@ fn validate_attach_prepare_answer(prepare_response: IncomingResponse) -> Result<
 /// record hands it back with its view. The returned client is `client_id` when the session handed
 /// its record back, and a fresh client the session minted when it cannot: a
 /// restart that could not bring the carried layout back holds no record, a
-/// record whose tab closed is not handed back, and a claim with no token or
+/// record whose tab closed is not handed back, a record an earlier attach
+/// already claimed is not handed back again, and a claim with no token or
 /// another token is not proven. Example: a record whose tab closed is taken over by its token,
 /// and the fresh client comes back with that record's view on the first tab.
 ///
@@ -5563,8 +5572,8 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// the session replaced its own process image carries it, and a first join
 /// leaves it `None`. `resume_token` is the secret that record's last attach
 /// minted, presented as the proof of that claim, and a first join leaves it
-/// `None`. The server hands that record back when it still holds it, the tab
-/// that record was viewing still exists, no connection is streaming for it,
+/// `None`. The server hands that record back when the swap carried it and no
+/// attach has claimed it since, the tab that record was viewing still exists,
 /// and the token is the one that record's last attach minted, and mints a
 /// fresh client otherwise. Either way, the caller holds the returned id from
 /// here. `placement_preview_target` is the placement target the client
@@ -5572,14 +5581,17 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// input fields of the newest frame the client painted, and a first join
 /// leaves it `None`. `is_viewer_local_input_mode_on` says whether the client
 /// keeps its keys in a local input mode, and a first join leaves it `false`.
+/// Once it reads the `Attached` answer, it writes `AttachAnswerReceived`,
+/// numbered `4`.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the Hello or the `Prepare` could not be
 /// written, or a reply to them could not be read. [`DialError::Unreachable`]
 /// carrying [`CliError::CommittedRequestUnanswered`] when the `Commit` could
 /// not be written or its answer could not be read: the session may still
-/// attach the client. [`DialError::Restarting`] carrying
-/// [`CliError::SessionRestarting`] when the session refused the `Prepare` or
+/// attach the client. The same error when `AttachAnswerReceived` could not be
+/// written, after which the session holds the client.
+/// [`DialError::Restarting`] carrying [`CliError::SessionRestarting`] when the session refused the `Prepare` or
 /// the `Commit` while it replaces its process image: the session holds no
 /// client for this join. [`DialError::Refused`] for every other reply that
 /// arrived and does not join: a refused Hello, a protocol version this build
@@ -5623,7 +5635,21 @@ fn join_session(
     validate_attach_prepare_answer(reader.recv_answer().map_err(build_link_failure)?)?;
     let attach_result = ipc_client::commit_prepared_request(reader, writer, 3, commit_timeout)
         .map_err(DialError::Unreachable)?;
-    parse_attached_session(attach_result).map_err(DialError::from_session_refusal)
+    let attach_answer =
+        parse_attached_session(attach_result).map_err(DialError::from_session_refusal)?;
+    writer
+        .send(&build_attach_answer_received_request())
+        .map_err(build_committed_attach_failure)?;
+    Ok(attach_answer)
+}
+
+/// The `AttachAnswerReceived` this client writes, numbered 4, right after it
+/// reads the `Attached` answer of a join.
+fn build_attach_answer_received_request() -> IpcRequest {
+    IpcRequest {
+        request_id: 4,
+        request_kind: IpcRequestKind::AttachAnswerReceived,
+    }
 }
 
 /// What this terminal asks of the session at every attach, besides the cell

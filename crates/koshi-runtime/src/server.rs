@@ -327,10 +327,10 @@ pub struct Server {
     pub(crate) is_restart_requested: bool,
     /// The clients whose records came across an image swap and have not
     /// attached again yet. Filled by [`resume`](Self::resume) from the carried
-    /// sessions, emptied one id at a time as those clients attach again or an
-    /// attach presenting a record's token takes that record over, and read by
+    /// sessions, and emptied one id at a time: as those clients attach again,
+    /// as an attach presenting a record's token takes that record over, and as
     /// [`handle_drop_unclaimed_clients`](Self::handle_drop_unclaimed_clients)
-    /// when the grace window closes.
+    /// removes each record nobody claimed when the grace window closes.
     pub(crate) client_ids_awaiting_reconnect: HashSet<ClientId>,
     /// The viewer action requests that wait for their client's answer
     /// ([`request_client_action`](Self::request_client_action)). Nothing in it
@@ -530,6 +530,7 @@ impl Server {
                         "{}: its screen could not be restored after the restart; its program is still running",
                         pane_id.format_short_label()
                     ),
+                    None,
                 );
                 continue;
             };
@@ -1185,9 +1186,10 @@ impl Server {
     }
 
     /// Post `text` from koshi itself at `severity` to session `session_id`'s
-    /// notification queue, at the current wall-clock time
+    /// notification queue, at the current wall-clock time, with
+    /// `subject_client_id` as the client it reports on
     /// ([`NotificationQueue::post_core_entry`](koshi_core::notification::NotificationQueue::post_core_entry)),
-    /// and deliver the post to every attached client as one
+    /// and deliver the post to every client subscribed at that moment as one
     /// `NotificationPosted`.
     /// A client that attaches after the post receives the queue in its attach
     /// answer.
@@ -1200,13 +1202,20 @@ impl Server {
         session_id: SessionId,
         severity: NotificationSeverity,
         text: &str,
+        subject_client_id: Option<ClientId>,
     ) {
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
         };
         let notification_queue = &mut session.notification_queue;
         let posted_entry = notification_queue
-            .post_core_entry(severity, text, NonZeroU32::MIN, SystemTime::now())
+            .post_core_entry(
+                severity,
+                text,
+                subject_client_id,
+                NonZeroU32::MIN,
+                SystemTime::now(),
+            )
             .clone();
         let revision = notification_queue.get_revision();
         let removed_subscriber_ids = self
@@ -1297,6 +1306,21 @@ impl Server {
     #[must_use]
     pub fn is_awaiting_client(&self) -> bool {
         !self.client_ids_awaiting_reconnect.is_empty()
+    }
+
+    /// Every client attached to `session` that the frames of the session's
+    /// other clients list as a peer, in id order: each attached client but one
+    /// whose record came across an image swap and has not attached again
+    /// (`client_ids_awaiting_reconnect`).
+    pub(crate) fn list_present_clients<'a>(
+        &'a self,
+        session: &'a Session,
+    ) -> impl Iterator<Item = &'a Client> {
+        session.clients.list_attached_clients().filter(|client| {
+            !self
+                .client_ids_awaiting_reconnect
+                .contains(&client.get_client_id())
+        })
     }
 
     /// The id a [`RuntimeEvent::DropUnclaimedClients`] carries to close this

@@ -12,7 +12,9 @@ use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
 
 use crate::runtime::event::AttachAccepted;
+use crate::runtime::presence_notice::{build_presence_notice, PresenceChange};
 use crate::runtime::saved_view::SavedView;
+use koshi_session::client::ArrivalNotice;
 
 impl Server {
     /// Record `cell_size` as the measured cell size of `client_id`, then reflow
@@ -61,19 +63,25 @@ impl Server {
     ///
     /// `resume_client_id` names the client record a caller asks to come back as, after
     /// the session replaced its own process image. The record is handed back
-    /// when the session still holds it, the tab it was viewing still exists,
-    /// no connection is streaming for it, and `resume_token` is the token that
-    /// record's last attach minted. The arriving viewport, pane area
+    /// when the swap carried it and no attach has claimed it since
+    /// (`client_ids_awaiting_reconnect`), the tab it was viewing still exists,
+    /// and `resume_token` stands for the record
+    /// ([`SavedViewStore::find_client_id_by_resume_token`](crate::runtime::saved_view::SavedViewStore::find_client_id_by_resume_token)):
+    /// the token its last attach minted, or the token that attach presented
+    /// while the client has not said that it read its answer. The arriving viewport, pane area
     /// and origin replace the record's, and its per-tab focus, zoom, scrollback
     /// offsets, selections, floating view, lock mode, mouse selection mode,
     /// label and color all stay. That is the
     /// whole of the `resume_client_id` path — no `resume_client_id`, an id the session does not
-    /// hold, an id whose tab is gone, an id a connection is already streaming
-    /// for, and an id presented with no token or another client's token all
+    /// hold, an id whose tab is gone, an id that an attach in this process
+    /// minted or already claimed, and an id presented with no token or another client's token all
     /// mint a fresh client instead, so an attach never fails over
     /// `resume_client_id`. Example: after a swap, a viewer that names the
     /// owner's client id with no token attaches as a fresh client, and the
-    /// owner's own attach with its token takes its record back.
+    /// owner's own attach with its token takes its record back. Example:
+    /// `bob` claims a record after a swap, and the answer is lost on the wire.
+    /// The next dial names the same id with the same token, takes the claimed
+    /// record over, and gets a fresh id.
     ///
     /// `resume_token` names the view a caller asks to have back, filed when
     /// that caller's last client detached. A token that proves a
@@ -126,7 +134,8 @@ impl Server {
     /// its first frame is due at once. `None` when no session is
     /// running, or when the one running holds no tab to view — neither is
     /// something a client can attach to. `attached_at` is supplied by the
-    /// caller; the handler never reads the clock itself. The subscription
+    /// caller, and the client's record reads no clock; a notice the attach
+    /// posts carries the wall-clock time of its post. The subscription
     /// gets a frame at most `max_frames_per_second` times a second
     /// ([`subscribe`](Self::subscribe)).
     ///
@@ -150,6 +159,26 @@ impl Server {
     /// [`Self::handle_client_attach`] reads them: a freshly minted client with
     /// no saved view, or whose saved label another client holds, takes its
     /// label from them, and a client record taken back keeps its label.
+    ///
+    /// The attach posts no arrival notice. A client the attach mints owes the
+    /// other clients one ([`Client::get_unannounced_arrival`]):
+    /// [`ArrivalNotice::Joined`] when it took back no view,
+    /// [`ArrivalNotice::Reconnected`] when it took back the view of a client
+    /// they saw arrive, and the notice that client still owed when they never
+    /// saw it arrive. A token that takes over a record awaiting its re-attach
+    /// passes that record's notice on as it stood, and a claimed record keeps
+    /// its own. The notice posts once the client proves it holds this answer
+    /// ([`handle_attach_answer_received`](Self::handle_attach_answer_received)).
+    /// A record the token names that frames list goes first, with
+    /// [`PresenceChange::Disconnected`] when the other clients saw it arrive.
+    ///
+    /// A presented token that claimed a record or took back a view keeps
+    /// standing for the client until that proof
+    /// ([`SavedViewStore::hold_presented_token`](crate::runtime::saved_view::SavedViewStore::hold_presented_token)):
+    /// a client whose answer was lost comes back with the token it still
+    /// holds. Example: `bob` dials again, and the answer is lost on the wire.
+    /// The next dial presents the same token, takes back the same view, and
+    /// every other client gets `bob (2) reconnected` once.
     // Carries the whole of one attach request: what it claims back (`resume_client_id`,
     // `resume_token`), the view it arrives with (`viewport_size`, `pane_area`,
     // `cell_size`, `placement_preview_target`, `painted_input_view`,
@@ -183,21 +212,26 @@ impl Server {
         let claimed_client_view = resume_client_id.and_then(|claimed_client_id| {
             let client = session.clients.get_client_by_id(claimed_client_id)?;
             let client_active_tab_id = client.get_active_tab_id();
-            let is_streaming = self
-                .find_subscriber_id_by_client_id(claimed_client_id)
-                .is_some();
+            let is_awaiting_reconnect = self
+                .client_ids_awaiting_reconnect
+                .contains(&claimed_client_id);
             let is_claim_proven = resume_token.as_ref().is_some_and(|resume_token| {
                 self.saved_view_store
                     .find_client_id_by_resume_token(resume_token)
                     == Some(claimed_client_id)
             });
-            (session.tabs.contains_key(&client_active_tab_id) && !is_streaming && is_claim_proven)
+            (session.tabs.contains_key(&client_active_tab_id)
+                && is_awaiting_reconnect
+                && is_claim_proven)
                 .then_some((claimed_client_id, client_active_tab_id))
         });
         let mut emitted_events = Vec::new();
         // A token minted for a client the session still holds, attached or
-        // awaiting its re-attach: that client's view is filed under the token
-        // and taken below, and its record goes.
+        // awaiting its re-attach, or still held for it: that client's view is
+        // filed under the token and taken below, and its record goes. A record
+        // that frames list goes as disconnected when the other clients saw it
+        // arrive; a record awaiting its re-attach goes with no notice.
+        let mut is_taking_over_waiting_record = false;
         if let (None, Some(resume_token)) = (claimed_client_view, resume_token.as_ref()) {
             if let Some(previous_client_id) = self
                 .saved_view_store
@@ -206,18 +240,31 @@ impl Server {
                 let is_listed_as_peer = !self
                     .client_ids_awaiting_reconnect
                     .remove(&previous_client_id);
+                is_taking_over_waiting_record = !is_listed_as_peer;
                 self.save_client_view(previous_client_id, attached_at);
                 self.remove_client_record(
                     previous_client_id,
                     is_listed_as_peer,
+                    is_listed_as_peer.then_some(PresenceChange::Disconnected),
                     &mut emitted_events,
                 );
             }
         }
-        let saved_view = resume_token.and_then(|resume_token| {
+        let saved_view = resume_token.as_ref().and_then(|resume_token| {
             self.saved_view_store
-                .take_saved_view(&resume_token, attached_at)
+                .take_saved_view(resume_token, attached_at)
         });
+        let minted_client_unannounced_arrival = match &saved_view {
+            Some(saved_view) if is_taking_over_waiting_record => saved_view.unannounced_arrival,
+            Some(saved_view) => Some(
+                saved_view
+                    .unannounced_arrival
+                    .unwrap_or(ArrivalNotice::Reconnected),
+            ),
+            None => Some(ArrivalNotice::Joined),
+        };
+        let held_presented_token =
+            resume_token.filter(|_| claimed_client_view.is_some() || saved_view.is_some());
         let (client_id, active_tab_id) = match claimed_client_view {
             Some(claimed_client_view) => claimed_client_view,
             None => {
@@ -256,6 +303,19 @@ impl Server {
                 active_tab_id,
                 &saved_view,
             ));
+        }
+        if claimed_client_view.is_none() {
+            if let Some(client) = self
+                .session_by_id
+                .get_mut(&session_id)
+                .and_then(|session| session.clients.get_client_mut_by_id(client_id))
+            {
+                client.set_unannounced_arrival(minted_client_unannounced_arrival);
+            }
+        }
+        if let Some(held_presented_token) = held_presented_token {
+            self.saved_view_store
+                .hold_presented_token(client_id, &held_presented_token);
         }
         self.publish_events(&emitted_events);
         self.set_pane_placement_preview(client_id, placement_preview_target);
@@ -707,6 +767,55 @@ impl Server {
         self.saved_view_store.save_client_view(client, detached_at);
     }
 
+    /// Take the proof that `client_id`'s viewer holds its attach answer: the
+    /// token its attach presented stops standing for it
+    /// ([`SavedViewStore::release_presented_token`](crate::runtime::saved_view::SavedViewStore::release_presented_token)),
+    /// and the arrival notice it owes the other clients
+    /// ([`Client::get_unannounced_arrival`]) posts once, against the client
+    /// records the session holds then, when [`build_presence_notice`] gives
+    /// one. A client no session holds, and a client that owes no notice, post
+    /// nothing.
+    ///
+    /// Example: remote `bob` attaches as client `2` and its viewer reads the
+    /// answer; every other client gets `bob (2) joined remotely`.
+    pub(crate) fn handle_attach_answer_received(&mut self, client_id: ClientId) {
+        self.saved_view_store.release_presented_token(client_id);
+        let Some(session) = self.get_session_for_client_mut(client_id) else {
+            return;
+        };
+        let session_id = session.session_id;
+        let Some(arrival_notice) = session
+            .clients
+            .get_client_mut_by_id(client_id)
+            .and_then(Client::take_unannounced_arrival)
+        else {
+            return;
+        };
+        let presence_change = match arrival_notice {
+            ArrivalNotice::Joined => PresenceChange::Joined,
+            ArrivalNotice::Reconnected => PresenceChange::Reconnected,
+        };
+        let Some(session) = self.session_by_id.get(&session_id) else {
+            return;
+        };
+        let Some(client) = session.clients.get_client_by_id(client_id) else {
+            return;
+        };
+        let Some(arrival_text) = build_presence_notice(
+            client,
+            session.clients.list_attached_clients(),
+            presence_change,
+        ) else {
+            return;
+        };
+        self.post_session_notification(
+            session_id,
+            NotificationSeverity::Info,
+            &arrival_text,
+            Some(client_id),
+        );
+    }
+
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
     /// was viewing and of the session's floating panes. The client's entry in
     /// every other client's peer list is marked gone
@@ -728,12 +837,17 @@ impl Server {
     /// does not hold releases those buttons and changes nothing else.
     ///
     /// Every subscription registered as viewing this client is dropped with the
-    /// record, closing the sending end of each one's queue.
+    /// record, closing the sending end of each one's queue. The session then
+    /// posts the client's leave notice `PresenceChange::Left`, `bob (2) left`,
+    /// to the clients still subscribed, when the session announced the
+    /// client's arrival and `build_presence_notice` gives one.
     ///
-    /// Runs for every detach trigger but a returning client's: an attached
-    /// client's connection that ends with a client that does not attach again,
-    /// the [`Command::Detach`] / [`Command::DetachAll`] / [`Command::Quit`]
-    /// execution arms. Target
+    /// Runs for a connection whose `Leaving` request says that the client does
+    /// not attach again, and for the [`Command::Detach`] /
+    /// [`Command::DetachAll`] / [`Command::Quit`] execution arms. A connection
+    /// that ends with no `Leaving`, for a client that does not attach again,
+    /// detaches the same way through `detach_client`, with the leave notice
+    /// `PresenceChange::Disconnected`: `bob (2) disconnected`. Target
     /// resolution happens at command resolution before this is reached. With
     /// `auto-close-session` on, a detach that leaves the session with no
     /// client requests a graceful quit. A client that may attach again goes
@@ -743,13 +857,25 @@ impl Server {
     /// `handle_drop_unclaimed_clients` removes that client from the set and
     /// detaches it when the grace window closes.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
+        self.detach_client(client_id, PresenceChange::Left)
+    }
+
+    /// Detach the client `client_id` as
+    /// [`handle_client_detach`](Self::handle_client_detach) states, with
+    /// `departure` as the client's leave notice: [`PresenceChange::Left`] or
+    /// [`PresenceChange::Disconnected`].
+    pub(crate) fn detach_client(
+        &mut self,
+        client_id: ClientId,
+        departure: PresenceChange,
+    ) -> Vec<Event> {
         if self.client_ids_awaiting_reconnect.contains(&client_id) {
             return Vec::new();
         }
 
         let mut emitted_events = Vec::new();
         let session_id_of_removed_client =
-            self.remove_client_record(client_id, true, &mut emitted_events);
+            self.remove_client_record(client_id, true, Some(departure), &mut emitted_events);
         let is_session_left_without_client = session_id_of_removed_client
             .and_then(|session_id| self.session_by_id.get(&session_id))
             .is_some_and(|session| !session.clients.has_clients());
@@ -769,9 +895,11 @@ impl Server {
     /// token its attach minted: release every mouse button it holds, remove
     /// its record, reflow the tab it was viewing and the session's floating
     /// panes, and mark its entry in every other client's peer list gone, as
-    /// [`handle_client_detach`](Self::handle_client_detach) does. Requests no
-    /// quit: with `auto-close-session` on, a session this leaves with no
-    /// client keeps running.
+    /// [`handle_client_detach`](Self::handle_client_detach) does. The leave
+    /// notice reads [`PresenceChange::Disconnected`]: `bob (2) disconnected`,
+    /// and posts only when the session announced the client's arrival.
+    /// Requests no quit: with `auto-close-session` on, a session this leaves
+    /// with no client keeps running.
     ///
     /// Returns one [`Event::PtyResized`] per reflowed pane. A detach for a
     /// client that is still awaiting reconnect, or that no session holds, is
@@ -784,7 +912,12 @@ impl Server {
             return Vec::new();
         }
         let mut emitted_events = Vec::new();
-        self.remove_client_record(client_id, true, &mut emitted_events);
+        self.remove_client_record(
+            client_id,
+            true,
+            Some(PresenceChange::Disconnected),
+            &mut emitted_events,
+        );
         emitted_events
     }
 
@@ -804,6 +937,14 @@ impl Server {
     /// restored after a restart that no viewer claimed, which no frame lists,
     /// and that marks nothing.
     ///
+    /// `departure` is the change the client's leave notice reports,
+    /// [`PresenceChange::Left`] or [`PresenceChange::Disconnected`], or
+    /// `None` for a removal that posts no notice. The notice posts after the
+    /// client's subscriptions are dropped, only for a client whose arrival the
+    /// session announced ([`Client::get_unannounced_arrival`] is `None`), and
+    /// only when [`build_presence_notice`] gives one for the client records
+    /// the session still holds. The removed client gets none of it.
+    ///
     /// The id of the session that held the client, once its record is removed.
     /// `None` for a client no session holds, which changes nothing but the
     /// release and the answers.
@@ -811,6 +952,7 @@ impl Server {
         &mut self,
         client_id: ClientId,
         is_listed_as_peer: bool,
+        departure: Option<PresenceChange>,
         emitted_events: &mut Vec<Event>,
     ) -> Option<SessionId> {
         self.release_client_mouse_buttons(client_id);
@@ -840,24 +982,53 @@ impl Server {
         );
         self.reflow_floating_panes(pty_backend.as_ref(), session_id, emitted_events);
 
+        let is_arrival_announced = removed_client.get_unannounced_arrival().is_none();
+        let departure_notice =
+            departure
+                .filter(|_| is_arrival_announced)
+                .and_then(|presence_change| {
+                    let session = self.session_by_id.get(&session_id)?;
+                    build_presence_notice(
+                        &removed_client,
+                        session.clients.list_attached_clients(),
+                        presence_change,
+                    )
+                });
+
+        if let Some(departure_notice) = departure_notice {
+            self.post_session_notification(
+                session_id,
+                NotificationSeverity::Info,
+                &departure_notice,
+                Some(client_id),
+            );
+        }
+
         Some(session_id)
     }
 
     /// Detach every client whose record came across an image swap and has not
     /// attached again by `unclaimed_client_deadline`.
     ///
-    /// Each one's view is filed under the token its last attach minted, as
-    /// [`save_client_view`](Self::save_client_view) files one with
-    /// `unclaimed_client_deadline` as the detach time: that token takes the view
-    /// back within 24 hours. A client carried with no resume-token hash files
+    /// Each one's view is filed under the token its last attach minted, and
+    /// under the token that attach presented while it still stands for the
+    /// client, as [`save_client_view`](Self::save_client_view) files one with
+    /// `unclaimed_client_deadline` as the detach time: either token takes the
+    /// view back within 24 hours. A client carried with neither hash files
     /// nothing. Each one's record is then removed as
     /// [`handle_client_detach`](Self::handle_client_detach) removes one, and its
-    /// tab and the session's floating panes reflow. No quit is requested: a
-    /// session these removals leave with no client keeps running, with
-    /// `auto-close-session` on or off. A client that attached again is no
-    /// longer in the set: in the usual case no client is removed and no event
-    /// is emitted. The removals run in client-id order, and the events they
-    /// emit arrive in that order.
+    /// tab and the session's floating panes reflow. Each removal of a client
+    /// whose arrival the session announced posts the leave notice
+    /// [`PresenceChange::Disconnected`], `bob (2) disconnected`, against the
+    /// client records the session holds then: a client of the set not yet
+    /// removed still counts. No quit is requested: a session these removals
+    /// leave with no client keeps running, with `auto-close-session` on or off.
+    /// A client that attached again is no longer in the set: in the usual case no client is removed and no event
+    /// is emitted. The removals of the host account's clients run first, then
+    /// the others, each group in client-id order, and the events they emit
+    /// arrive in that order. Example: `host` and remote `bob` both did not come
+    /// back, and nobody else is attached: `host (1) disconnected`, then
+    /// `bob (2) disconnected`.
     ///
     /// `unclaimed_client_deadline` is when the grace window closed, supplied by the producer;
     /// the handler never reads the clock to decide anything.
@@ -869,10 +1040,16 @@ impl Server {
             return Vec::new();
         }
         let mut unclaimed_client_ids: Vec<ClientId> =
-            std::mem::take(&mut self.client_ids_awaiting_reconnect)
-                .into_iter()
-                .collect();
-        unclaimed_client_ids.sort();
+            self.client_ids_awaiting_reconnect.iter().copied().collect();
+        unclaimed_client_ids.sort_by_key(|client_id| {
+            let is_host_account_client = self
+                .get_session_for_client(*client_id)
+                .and_then(|session| session.clients.get_client_by_id(*client_id))
+                .is_some_and(|client| {
+                    client.get_origin() == (ClientOrigin::Local { is_same_user: true })
+                });
+            (!is_host_account_client, *client_id)
+        });
         tracing::info!(
             unclaimed_client_count = unclaimed_client_ids.len(),
             waited_ms = SystemTime::now()
@@ -883,8 +1060,14 @@ impl Server {
         );
         let mut emitted_events = Vec::new();
         for client_id in unclaimed_client_ids {
+            self.client_ids_awaiting_reconnect.remove(&client_id);
             self.save_client_view(client_id, unclaimed_client_deadline);
-            self.remove_client_record(client_id, false, &mut emitted_events);
+            self.remove_client_record(
+                client_id,
+                false,
+                Some(PresenceChange::Disconnected),
+                &mut emitted_events,
+            );
         }
         emitted_events
     }

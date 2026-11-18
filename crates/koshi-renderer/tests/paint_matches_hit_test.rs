@@ -819,6 +819,7 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         text: "pane exited".to_string(),
         created_at: SystemTime::UNIX_EPOCH,
         repeat_count: 1,
+        subject_client_id: None,
     }]);
     let viewer_chrome = ViewerChrome {
         active_input_mode: Some(LockMode::NotificationCenter),

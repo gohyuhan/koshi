@@ -27,6 +27,7 @@ fn post_own_entries(own_entry_count: usize) -> Vec<NotificationEntry> {
                 .post_core_entry(
                     NotificationSeverity::Warning,
                     &format!("entry {own_entry_index}"),
+                    None,
                     NonZeroU32::MIN,
                     SystemTime::UNIX_EPOCH,
                 )
@@ -1160,6 +1161,7 @@ fn post_session_entry(text: &str) -> NotificationEntry {
         .post_core_entry(
             NotificationSeverity::Warning,
             text,
+            None,
             NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )

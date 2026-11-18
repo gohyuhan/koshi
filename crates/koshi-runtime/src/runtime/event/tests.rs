@@ -107,7 +107,8 @@ fn build_toggle_lock_mode_event(command_source: CommandSource) -> RuntimeEvent {
     }
 }
 
-/// Bob's key and a command from Bob's key binding or mouse name Bob. A
+/// Bob's key, Bob's word that it read its attach answer, and a command from
+/// Bob's key binding or mouse name Bob. A
 /// command typed on a command line names no client, even one typed in Bob's
 /// own pane or one that targets Bob, and so do the session's own events.
 #[test]
@@ -128,6 +129,9 @@ fn an_event_names_the_client_whose_own_connection_carried_it() {
             client_id: bob_client_id,
             pasted_text: String::from("ls"),
             painted_input_pane_moved_by_others_count: 0,
+        },
+        RuntimeEvent::ClientAttachAnswerReceived {
+            client_id: bob_client_id,
         },
         build_toggle_lock_mode_event(CommandSource::from_key_binding(bob_client_id)),
         build_toggle_lock_mode_event(CommandSource::from_mouse(bob_client_id)),
@@ -151,6 +155,7 @@ fn an_event_names_the_client_whose_own_connection_carried_it() {
     assert_eq!(
         sending_client_ids,
         vec![
+            Some(bob_client_id),
             Some(bob_client_id),
             Some(bob_client_id),
             Some(bob_client_id),

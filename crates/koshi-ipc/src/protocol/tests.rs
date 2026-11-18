@@ -335,6 +335,7 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving { is_returning: true },
         IpcRequestKind::Ping,
+        IpcRequestKind::AttachAnswerReceived,
         IpcRequestKind::PaintedUpdate { update_sequence: 7 },
         IpcRequestKind::ClipboardCopyPart {
             copied_bytes: b"hel".to_vec(),
@@ -491,7 +492,7 @@ pub(crate) fn build_fixed_test_uuid() -> uuid::Uuid {
 
 /// The wire form of one session notification entry at fixed ids: sequence 0
 /// of the session queue, an `Error` that reads `pane …a1b2 killed by signal
-/// 9`, at the Unix epoch, posted once.
+/// 9`, at the Unix epoch, posted once, reporting on no client.
 pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
     json!({
@@ -504,7 +505,8 @@ pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
         "severity": "Error",
         "text": "pane …a1b2 killed by signal 9",
         "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
-        "repeat_count": 1
+        "repeat_count": 1,
+        "subject_client_id": null
     })
 }
 
@@ -2239,6 +2241,20 @@ fn ping_request_round_trips_as_its_bare_name() {
     assert_eq!(
         serde_json::to_value(&ipc_request).expect("request encodes"),
         json!({ "request_id": 11, "request_kind": "Ping" })
+    );
+}
+
+#[test]
+fn attach_answer_received_request_round_trips_as_its_bare_name() {
+    let ipc_request = IpcRequest {
+        request_id: 4,
+        request_kind: IpcRequestKind::AttachAnswerReceived,
+    };
+
+    assert_eq!(round_trip_wire_message(&ipc_request), ipc_request);
+    assert_eq!(
+        serde_json::to_value(&ipc_request).expect("request encodes"),
+        json!({ "request_id": 4, "request_kind": "AttachAnswerReceived" })
     );
 }
 

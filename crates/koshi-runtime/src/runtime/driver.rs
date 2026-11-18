@@ -20,6 +20,7 @@ use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::process::KillPolicy;
 
 use crate::runtime::event::RuntimeEvent;
+use crate::runtime::presence_notice::PresenceChange;
 use crate::server::Server;
 
 /// What one [`run_dispatch_pass`](Server::run_dispatch_pass) ended on.
@@ -253,20 +254,26 @@ impl Server {
                 detached_at,
                 is_streamed,
                 is_returning,
+                has_sent_leaving,
             } => {
                 // The view is filed before the detach, which removes the record
-                // it is read from.
-                if is_streamed {
-                    self.save_client_view(client_id, detached_at);
-                } else {
-                    self.saved_view_store.forget_client_resume_token(client_id);
+                // it is read from. A client whose attach reply was never
+                // written files it under the token its attach presented alone.
+                if !is_streamed {
+                    self.saved_view_store.forget_minted_resume_token(client_id);
                 }
+                self.save_client_view(client_id, detached_at);
                 let client_detach_events = if is_returning {
                     self.handle_returning_client_detach(client_id)
-                } else {
+                } else if has_sent_leaving {
                     self.handle_client_detach(client_id)
+                } else {
+                    self.detach_client(client_id, PresenceChange::Disconnected)
                 };
                 self.publish_events(&client_detach_events);
+            }
+            RuntimeEvent::ClientAttachAnswerReceived { client_id } => {
+                self.handle_attach_answer_received(client_id);
             }
             RuntimeEvent::Resize {
                 client_id,

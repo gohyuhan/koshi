@@ -1301,6 +1301,7 @@ fn serve_connection(
                             detached_at: SystemTime::now(),
                             is_streamed: false,
                             is_returning: is_returning_before_first_request,
+                            has_sent_leaving: false,
                         },
                     );
                     return;
@@ -1342,6 +1343,7 @@ fn serve_connection(
             | IpcRequestKind::SetViewerLocalInputMode { .. }
             | IpcRequestKind::ConfirmPanePlacement { .. }
             | IpcRequestKind::Ping
+            | IpcRequestKind::AttachAnswerReceived
             | IpcRequestKind::PaintedUpdate { .. }
             | IpcRequestKind::ClientActionAnswer { .. } => return,
             IpcRequestKind::Discovery => {
@@ -1582,8 +1584,9 @@ fn serve_connection(
 /// [`RuntimeEvent::ClientDetached`], whose `is_returning` is the value of the
 /// `Leaving` request that ended the loop. With no such request, it is
 /// `is_returning_before_first_request` when the loop read no request, and
-/// `is_remote` after the loop read one. Example: a client on this machine
-/// whose Attach names its own id, after the session replaced its own process
+/// `is_remote` after the loop read one. Its `has_sent_leaving` is `true`
+/// only when a `Leaving` request ended the loop. Example: a client on this
+/// machine whose Attach names its own id, after the session replaced its own process
 /// image, and that ends before its first request, detaches as returning. The
 /// same client ending after its first request detaches as not returning. The
 /// detach removes the client's record and drops its
@@ -1881,6 +1884,7 @@ fn stream_events(
     // returning: `is_returning_before_first_request` until the first request
     // is read, then `is_remote`.
     let mut is_returning = is_returning_before_first_request;
+    let mut has_sent_leaving = false;
     loop {
         let incoming_request_result = frame_reader.recv::<IncomingRequest>();
         // The setting is read again after each read on this connection,
@@ -2020,6 +2024,9 @@ fn stream_events(
                 refusal,
             },
             IpcRequestKind::Ping => continue,
+            IpcRequestKind::AttachAnswerReceived => {
+                RuntimeEvent::ClientAttachAnswerReceived { client_id }
+            }
             IpcRequestKind::PaintedUpdate { update_sequence } => {
                 paint_reporter.report_painted_update(PaintedUpdateReport {
                     update_sequence,
@@ -2033,6 +2040,7 @@ fn stream_events(
                 is_returning: is_client_returning,
             } => {
                 is_returning = is_client_returning;
+                has_sent_leaving = true;
                 break;
             }
             IpcRequestKind::Hello { .. }
@@ -2063,6 +2071,7 @@ fn stream_events(
             detached_at: SystemTime::now(),
             is_streamed: true,
             is_returning,
+            has_sent_leaving,
         },
     );
 }

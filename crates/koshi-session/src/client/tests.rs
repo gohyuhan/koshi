@@ -2,8 +2,9 @@
 //!
 //! Tests verify the server-set identity (origin, label, color), client
 //! state tracking (focus, viewport, lock mode, zoom, scrollback view,
-//! highlights, floating pane views, the pane that takes the client's input
-//! and the input requests the session dropped) and registry operations
+//! highlights, floating pane views, the pane that takes the client's input,
+//! the input requests the session dropped and the arrival notice it owes) and
+//! registry operations
 //! (attach, detach, lookup, mutation).
 
 use super::*;
@@ -3576,4 +3577,22 @@ fn start_connection_input_counts_records_no_view_change() {
             client.start_connection_input_counts(Some(pane_id), 1, 0);
         }
     ));
+}
+
+#[test]
+fn a_new_client_owes_no_arrival_and_takes_the_one_it_is_given_once() {
+    let mut client = build_test_client(TabId::new());
+    assert_eq!(client.get_unannounced_arrival(), None);
+
+    client.set_unannounced_arrival(Some(ArrivalNotice::Reconnected));
+    assert_eq!(
+        client.get_unannounced_arrival(),
+        Some(ArrivalNotice::Reconnected)
+    );
+    assert_eq!(
+        client.take_unannounced_arrival(),
+        Some(ArrivalNotice::Reconnected)
+    );
+    assert_eq!(client.take_unannounced_arrival(), None);
+    assert_eq!(client.get_unannounced_arrival(), None);
 }

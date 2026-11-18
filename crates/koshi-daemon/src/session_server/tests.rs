@@ -583,6 +583,7 @@ fn a_client_that_hung_up_before_the_swap_told_anyone_is_detached() {
             detached_at: SystemTime::now(),
             is_streamed: true,
             is_returning: false,
+            has_sent_leaving: true,
         })
         .expect("the detach is queued");
 
@@ -607,6 +608,7 @@ fn the_record_of_a_client_the_swap_told_survives_the_pass_after_the_announce() {
             detached_at: SystemTime::now(),
             is_streamed: true,
             is_returning: true,
+            has_sent_leaving: true,
         })
         .expect("the detach is queued");
 

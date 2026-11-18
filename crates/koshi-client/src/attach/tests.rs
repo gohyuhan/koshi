@@ -647,6 +647,7 @@ fn every_other_frame_keeps_the_stream_reading() {
         .post_core_entry(
             NotificationSeverity::Info,
             "saved",
+            None,
             NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )
@@ -1286,6 +1287,9 @@ struct RecordedLinkHalf {
     link_limits: LinkLimits,
     /// The limits the half held when each read or write started, in order.
     link_limits_at_steps: Arc<Mutex<Vec<LinkLimits>>>,
+    /// A write whose bytes hold these bytes fails with `BrokenPipe` and
+    /// writes nothing. `None` fails no write.
+    refused_write_marker: Option<&'static [u8]>,
 }
 
 /// The deadline and the idle timeout a [`RecordedLinkHalf`] holds.
@@ -1298,7 +1302,7 @@ struct LinkLimits {
 }
 
 /// A [`RecordedLinkHalf`] whose reads return `read_bytes`, with no deadline,
-/// no idle timeout, nothing written and no step recorded.
+/// no idle timeout, nothing written, no step recorded and no write refused.
 fn build_recorded_link_half(read_bytes: Vec<u8>) -> RecordedLinkHalf {
     RecordedLinkHalf {
         read_bytes: io::Cursor::new(read_bytes),
@@ -1308,6 +1312,7 @@ fn build_recorded_link_half(read_bytes: Vec<u8>) -> RecordedLinkHalf {
             idle_timeout: None,
         },
         link_limits_at_steps: Arc::new(Mutex::new(Vec::new())),
+        refused_write_marker: None,
     }
 }
 
@@ -1327,6 +1332,14 @@ impl io::Write for RecordedLinkHalf {
             .lock()
             .expect("the record outlives every panic")
             .push(self.link_limits);
+        if let Some(refused_write_marker) = self.refused_write_marker {
+            if frame_bytes
+                .windows(refused_write_marker.len())
+                .any(|frame_window| frame_window == refused_write_marker)
+            {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+        }
         self.written_bytes
             .lock()
             .expect("the record outlives every panic")
@@ -1444,6 +1457,135 @@ fn assert_prepare_then_commit_steps_and_clear(
 }
 
 #[test]
+fn a_remote_join_whose_answer_receipt_cannot_be_written_leaves_its_attach_unanswered() {
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let link_reader_half =
+        build_recorded_link_half(encode_remote_join_answers(client_id, session_id));
+    let mut link_writer_half = build_recorded_link_half(Vec::new());
+    link_writer_half.refused_write_marker = Some(b"AttachAnswerReceived");
+    let written_bytes = Arc::clone(&link_writer_half.written_bytes);
+    let (frame_reader, frame_writer) =
+        build_frame_halves(Box::new(link_reader_half), Box::new(link_writer_half));
+
+    let join_result = join_remote_session(
+        remote_client::RemoteLink {
+            frame_reader,
+            frame_writer,
+        },
+        "host:7654",
+        ConnectionToken::generate(),
+        &SessionSelector::SessionId(session_id),
+        None,
+        None,
+        TEXT_ONLY_ATTACH_SETTINGS,
+        None,
+        None,
+        None,
+        false,
+        MIN_LINK_TIMEOUT_MS,
+    );
+
+    let Err(DialError::Unreachable(CliError::CommittedRequestUnanswered { detail })) = join_result
+    else {
+        panic!("expected a committed attach left unanswered");
+    };
+    assert_eq!(detail, IpcError::Disconnected.render_sanitized_message());
+    let written_text = String::from_utf8_lossy(
+        &written_bytes
+            .lock()
+            .expect("the record outlives every panic"),
+    )
+    .into_owned();
+    assert!(
+        written_text.contains("\"Commit\"") && !written_text.contains("AttachAnswerReceived"),
+        "the Commit went out and the answer receipt did not: {written_text}"
+    );
+}
+
+#[test]
+fn a_local_join_says_it_read_the_attached_answer_right_after_it() {
+    let (client_connection, serving_connection) = connect_test_socket_pair();
+    let (mut client_frame_reader, mut client_frame_writer) = client_connection.split();
+    let (mut serving_frame_reader, mut serving_frame_writer) = serving_connection.split();
+    serving_frame_reader.set_deadline(Some(Instant::now() + Duration::from_secs(10)));
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let join_thread = thread::spawn(move || {
+        join_session(
+            &mut client_frame_reader,
+            &mut client_frame_writer,
+            &ConnectionToken::generate(),
+            None,
+            None,
+            TEXT_ONLY_ATTACH_SETTINGS,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .map(|attach_answer| attach_answer.client_id)
+    });
+
+    let opening_request_ids: Vec<u64> = (0..2)
+        .map(|_| {
+            serving_frame_reader
+                .recv::<IpcRequest>()
+                .expect("the Hello and the Prepare arrive")
+                .request_id
+        })
+        .collect();
+    for opening_answer in [
+        IpcResponse {
+            request_id: Some(1),
+            answer_result: build_accepted_hello_result(),
+        },
+        IpcResponse {
+            request_id: Some(2),
+            answer_result: IpcResult::Prepared,
+        },
+    ] {
+        serving_frame_writer
+            .send(&opening_answer)
+            .expect("the opening answer is written");
+    }
+    let commit_request: IpcRequest = serving_frame_reader.recv().expect("the Commit arrives");
+    serving_frame_writer
+        .send(&IpcResponse {
+            request_id: Some(3),
+            answer_result: build_attached_result(client_id, session_id, None, None),
+        })
+        .expect("the Commit answer is written");
+    let answer_receipt: IpcRequest = serving_frame_reader
+        .recv()
+        .expect("the answer receipt arrives");
+
+    assert_eq!(opening_request_ids, vec![1, 2]);
+    assert_eq!(
+        commit_request,
+        IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Commit,
+        }
+    );
+    assert_eq!(
+        answer_receipt,
+        IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::AttachAnswerReceived,
+        }
+    );
+    assert_eq!(
+        join_thread
+            .join()
+            .expect("the join thread ends")
+            .expect("the session joins"),
+        client_id
+    );
+}
+
+#[test]
 fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_timeout_then_keeps_only_the_idle_timeout(
 ) {
     let client_id = ClientId::new();
@@ -1522,7 +1664,7 @@ fn a_remote_join_prepares_under_the_link_deadline_commits_under_a_fresh_join_tim
 }
 
 #[test]
-fn a_remote_join_names_its_placement_target_painted_input_view_and_local_input_mode_and_pings_every_third_of_the_link_timeout_until_answered(
+fn a_remote_join_names_its_placement_target_painted_input_view_and_local_input_mode_pings_every_third_of_the_link_timeout_until_answered_then_says_it_read_the_answer(
 ) {
     let (client_connection, serving_connection) = connect_test_socket_pair();
     let (client_frame_reader, client_frame_writer) = client_connection.split();
@@ -1619,10 +1761,25 @@ fn a_remote_join_names_its_placement_target_painted_input_view_and_local_input_m
             answer_result: build_attached_result(client_id, session_id, None, None),
         })
         .expect("the Commit answer is written");
+    let answer_receipt = loop {
+        let session_request: IpcRequest = serving_frame_reader
+            .recv()
+            .expect("the answer receipt arrives");
+        if session_request.request_kind != IpcRequestKind::Ping {
+            break session_request;
+        }
+    };
     let joined_ids = join_result_receiver
         .recv_timeout(Duration::from_secs(10))
         .expect("the join ends")
         .expect("the session joins");
+    assert_eq!(
+        answer_receipt,
+        IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::AttachAnswerReceived,
+        }
+    );
 
     assert_eq!(
         remote_attach,
@@ -16082,6 +16239,7 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
         .post_core_entry(
             NotificationSeverity::Error,
             "pane …a1b2 killed by signal 9",
+            None,
             NonZeroU32::MIN,
             SystemTime::UNIX_EPOCH,
         )
@@ -16089,6 +16247,7 @@ fn the_viewer_holds_each_session_post_once_and_a_resync_adds_only_what_it_missed
     session_notification_queue.post_core_entry(
         NotificationSeverity::Warning,
         "koshi.kdl: unknown key `tab-bar`",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
@@ -16208,6 +16367,7 @@ fn a_resync_carrying_another_sessions_queue_leaves_the_history_as_it_was() {
     foreign_notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );

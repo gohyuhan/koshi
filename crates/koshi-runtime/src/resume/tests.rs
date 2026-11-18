@@ -533,6 +533,7 @@ fn migrate_format_five_keeps_the_floating_panes_every_client_view_and_the_saved_
                 ),
             ]),
             shown_floating_pane_ids: vec![cells_floating_pane_id],
+            unannounced_arrival: None,
         }
     );
 }
@@ -1535,7 +1536,7 @@ fn format_pane_state_parse_error(pane_state_json: &serde_json::Value) -> String 
 /// of one JSON object, as the map of pane states.
 fn build_raw_resume_body(pane_states_text: &str) -> Box<serde_json::value::RawValue> {
     serde_json::value::RawValue::from_string(format!(
-        r#"{{"session_by_id":{{}},"carried_pane_state_by_pane_id":{pane_states_text},"carried_quit":null,"saved_view_store":{{"connection_token_hash_by_client_id":{{}},"saved_view_records":[]}},"left_running_child_process_ids":[]}}"#
+        r#"{{"session_by_id":{{}},"carried_pane_state_by_pane_id":{pane_states_text},"carried_quit":null,"saved_view_store":{{"connection_token_hash_by_client_id":{{}},"presented_token_hash_by_client_id":{{}},"saved_view_records":[]}},"left_running_child_process_ids":[]}}"#
     ))
     .expect("the body is json")
 }
@@ -1888,12 +1889,14 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
     notification_queue.post_core_entry(
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
+        None,
         NonZeroU32::MIN,
         SystemTime::UNIX_EPOCH,
     );
@@ -3532,6 +3535,7 @@ fn a_saved_view_store_crosses_the_file_with_its_waiting_hash_and_its_filed_view(
             scroll_offset_by_pane_id: HashMap::new(),
             floating_pane_view_by_floating_pane_id: HashMap::new(),
             shown_floating_pane_ids: Vec::new(),
+            unannounced_arrival: None,
         })
     );
 }

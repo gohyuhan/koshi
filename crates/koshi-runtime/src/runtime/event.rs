@@ -84,7 +84,9 @@ pub enum RuntimeEvent {
         detached_at: SystemTime,
         /// Whether the connection carrying this client reached its event
         /// stream. `false` from the attach reply failing to write, which hands
-        /// the client no token; the view it was looking at is dropped.
+        /// the client no token: the view it was looking at is filed under the
+        /// token its attach presented when that token still stands for it, and
+        /// dropped otherwise.
         is_streamed: bool,
         /// Whether the client may attach again: the `is_returning` of the
         /// `Leaving` request that ended the connection. With no such request,
@@ -95,6 +97,19 @@ pub enum RuntimeEvent {
         /// with no `auto-close-session` quit. `false` lets `auto-close-session`
         /// end a session the client leaves with no client.
         is_returning: bool,
+        /// Whether the client's `Leaving` request ended the connection.
+        /// `false` for a connection that ended with no `Leaving`: a read that
+        /// failed, as when the client's process stopped, an access setting
+        /// withdrawn, a request the connection does not take, or an attach
+        /// reply that could not be written. With `is_returning` `false`, `true`
+        /// posts the leave notice `left` and `false` posts `disconnected`.
+        has_sent_leaving: bool,
+    },
+    /// The viewer of `client_id` said that it read its attach answer: its
+    /// connection sent `AttachAnswerReceived`.
+    ClientAttachAnswerReceived {
+        /// The client whose viewer holds its attach answer.
+        client_id: ClientId,
     },
     /// A request to stop the event loop and shut the process down. Produced
     /// when reading a client's outer terminal fails, which is that terminal
@@ -235,10 +250,11 @@ pub enum RuntimeEvent {
     IpcAttach {
         /// The client record the caller asks to come back as, after the
         /// session replaced its own process image. The dispatcher hands that
-        /// record back when it still holds it, the tab that record was viewing
-        /// still exists, no connection is streaming for it, and `resume_token`
-        /// is the token that record's last attach minted, and mints a fresh
-        /// client otherwise.
+        /// record back when the swap carried it and no attach has claimed it
+        /// since, the tab that record was viewing still exists, and
+        /// `resume_token` stands for that record
+        /// ([`SavedViewStore::find_client_id_by_resume_token`](crate::runtime::saved_view::SavedViewStore::find_client_id_by_resume_token)),
+        /// and mints a fresh client otherwise.
         resume_client_id: Option<ClientId>,
         /// The token the caller's last attach minted, presented to get that
         /// attach's view back
@@ -423,8 +439,8 @@ pub enum RuntimeEvent {
 impl RuntimeEvent {
     /// The attached client whose own connection carried this event: the client
     /// a key, paste, mouse round, resize, cell size, outer terminal focus
-    /// loss, placement request, local input mode report, action answer or
-    /// detach names, and the client
+    /// loss, placement request, local input mode report, action answer, proof
+    /// of a held attach answer or detach names, and the client
     /// a command from a key binding or a mouse event names as its source.
     /// `None` for every other event, such as a pane's output, a command or
     /// request from the CLI, an attach, a clipboard copy, and the session's
@@ -438,6 +454,7 @@ impl RuntimeEvent {
             RuntimeEvent::Resize { client_id, .. }
             | RuntimeEvent::CellSize { client_id, .. }
             | RuntimeEvent::ClientDetached { client_id, .. }
+            | RuntimeEvent::ClientAttachAnswerReceived { client_id }
             | RuntimeEvent::KeyInput { client_id, .. }
             | RuntimeEvent::ClientKeyboard { client_id, .. }
             | RuntimeEvent::ClientMouse { client_id, .. }
