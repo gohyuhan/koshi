@@ -11,19 +11,20 @@
 mod common;
 
 use common::{
-    count_attached_clients, get_last_painted_frame, get_seeded_tab_and_pane_ids,
-    get_session_overview, open_session_connection, read_session_frames_to_detached,
-    read_session_frames_to_mouse_answer, read_session_frames_until,
-    read_session_frames_until_painted_frame, serve_test_session, submit_test_command,
-    submit_test_command_for_client, wait_for_client_count, wait_for_mouse_tracking,
-    ViewerConnection, TEST_SESSION_NAME, TEST_VIEWPORT_SIZE,
+    attach_test_client, count_attached_clients, create_right_split_pane, get_last_painted_frame,
+    get_seeded_tab_and_pane_ids, get_session_overview, open_session_connection,
+    read_session_frames_to_detached, read_session_frames_to_mouse_answer,
+    read_session_frames_until, read_session_frames_until_painted_frame, send_test_attach,
+    serve_test_session, submit_test_command, submit_test_command_for_client, wait_for_client_count,
+    wait_for_mouse_tracking, AttachedTestClient, ViewerConnection, TEST_SESSION_NAME,
+    TEST_VIEWPORT_SIZE,
 };
 
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     CloseTabArgs, Command, CommandEnvelope, CommandSource, DetachArgs, FocusPaneArgs, FocusTabArgs,
-    FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewPaneArgs, NewPanePlacement, NewTabArgs,
-    PanePlacementAnchor, PanePlacementTarget, TabTarget, TiledPlacementTarget,
+    FocusTarget, LockModeArgs, MoveFloatingPaneArgs, NewTabArgs, PanePlacementAnchor,
+    PanePlacementTarget, TabTarget, TiledPlacementTarget,
 };
 use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
@@ -31,7 +32,7 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseKind};
-use koshi_core::notification::{NotificationQueue, NotificationQueueOwner};
+use koshi_core::notification::NotificationQueueOwner;
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::PaintedFrame;
@@ -39,8 +40,7 @@ use koshi_ipc::placement::{
     PanePlacementPreview, PanePlacementPreviewTarget, PanePlacementSnapshot, PanePlacementSource,
 };
 use koshi_ipc::protocol::{
-    ConnectionToken, FiredAction, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
-    WireMouseAction,
+    FiredAction, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
 };
 use koshi_ipc::transport::Connection;
 use koshi_layout::mode::LayoutMode;
@@ -51,89 +51,7 @@ use koshi_layout::solver::PaneSizing;
 use koshi_runtime::runtime::painted_update::{ReceivedPaintedFrame, SessionFrame};
 use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::{
-    build_key_input_for_chord, read_prepared_and_send_commit, send_committed_request,
-};
-
-/// Attach on `ipc_connection` reporting [`TEST_VIEWPORT_SIZE`], and return what
-/// the reply carried. The connection carries only the client's event stream
-/// afterwards.
-fn attach_test_client(
-    ipc_connection: &mut Connection,
-    request_id: u64,
-) -> (
-    ClientId,
-    SessionId,
-    NotificationQueue,
-    Option<ConnectionToken>,
-) {
-    attach_test_client_with_viewport_size(ipc_connection, request_id, TEST_VIEWPORT_SIZE)
-}
-
-/// [`attach_test_client`] reporting `viewport_size` instead, for a test that
-/// puts two differently sized clients on one tab.
-fn attach_test_client_with_viewport_size(
-    ipc_connection: &mut Connection,
-    request_id: u64,
-    viewport_size: Size,
-) -> (
-    ClientId,
-    SessionId,
-    NotificationQueue,
-    Option<ConnectionToken>,
-) {
-    attach_test_client_with_resume_token(ipc_connection, request_id, viewport_size, None)
-}
-
-/// [`attach_test_client_with_viewport_size`] presenting `resume_token`, which
-/// asks the session for the view the token's client left behind.
-fn attach_test_client_with_resume_token(
-    ipc_connection: &mut Connection,
-    request_id: u64,
-    viewport_size: Size,
-    resume_token: Option<ConnectionToken>,
-) -> (
-    ClientId,
-    SessionId,
-    NotificationQueue,
-    Option<ConnectionToken>,
-) {
-    send_committed_request(
-        ipc_connection,
-        IpcRequest {
-            request_id,
-            request_kind: IpcRequestKind::Attach {
-                viewport_size,
-                resume_client_id: None,
-                resume_token,
-                pane_area: None,
-                graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-                cell_size: None,
-                link_timeout_ms: None,
-                max_frames_per_second: 60,
-                placement_preview_target: None,
-                painted_input_view: None,
-                is_viewer_local_input_mode_on: false,
-            },
-        },
-    );
-    let attach_response: IpcResponse = ipc_connection.recv().expect("attach reply");
-    assert_eq!(attach_response.request_id, Some(request_id));
-    let IpcResult::Attached {
-        client_id,
-        session_id,
-        notification_queue,
-        resume_token,
-        ..
-    } = attach_response.answer_result
-    else {
-        panic!(
-            "expected an attach reply, got {:?}",
-            attach_response.answer_result
-        );
-    };
-    (client_id, session_id, notification_queue, resume_token)
-}
+use koshi_test_support::fixtures::{build_key_input_for_chord, read_prepared_and_send_commit};
 
 /// Add one tab to the running session over `ipc_connection`, and return its id.
 fn create_test_tab(
@@ -152,34 +70,6 @@ fn create_test_tab(
             _ => None,
         })
         .expect("the new tab reports its id")
-}
-
-/// Split `source_pane_id` over `ipc_connection` on behalf of `client_id`, with
-/// the new pane to the right, and return the new pane's id.
-fn create_right_split_pane(
-    ipc_connection: &mut Connection,
-    session_id: SessionId,
-    source_pane_id: PaneId,
-    client_id: ClientId,
-    request_id: u64,
-) -> PaneId {
-    let command = Command::NewPane(NewPaneArgs {
-        placement: NewPanePlacement::Split {
-            source_pane_id: Some(source_pane_id),
-            tab_id: None,
-            direction: Direction::Right,
-        },
-        working_directory: None,
-        spawn_spec: None,
-        client_id: Some(client_id),
-    });
-    submit_test_command(ipc_connection, session_id, command, request_id)
-        .iter()
-        .find_map(|emitted_event| match emitted_event {
-            Event::PaneCreated(pane_created) => Some(pane_created.pane_id),
-            _ => None,
-        })
-        .expect("the split reports the new pane")
 }
 
 /// The ids of the tabs `received_painted_frame` lists in its tab bar, in
@@ -235,8 +125,12 @@ fn one_attach_registers_the_client_the_server_minted() {
             "registers",
             |runtime_directory, session_id, _fake_pty_backend| {
                 let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-                let (client_id, replied_session_id, notification_queue, _) =
-                    attach_test_client(&mut viewer_connection, 2);
+                let AttachedTestClient {
+                    client_id,
+                    session_id: replied_session_id,
+                    notification_queue,
+                    ..
+                } = attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
                 assert_eq!(replied_session_id, session_id);
                 (
                     vec![viewer_connection],
@@ -282,7 +176,8 @@ fn the_frame_that_shows_a_viewers_lock_names_the_lock_command_it_sent() {
             "lock-answer",
             |runtime_directory, session_id, _fake_pty_backend| {
                 let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-                let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+                let client_id =
+                    attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
                 let lock_command_id = CommandId::new();
                 viewer_connection
                     .send(&IpcRequest {
@@ -426,7 +321,7 @@ fn the_attach_reply_is_written_before_the_first_session_frame() {
 
             // Frame one on this connection decodes as a response: no session
             // frame was written ahead of the reply.
-            attach_test_client(&mut viewer_connection, 2);
+            attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
 
             // Every frame after it decodes as a session frame. The tab added
             // now shows in the tab bar of a painted frame on this stream.
@@ -462,7 +357,8 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
             |runtime_directory, session_id, _fake_pty_backend| {
                 let mut initial_connection =
                     open_session_connection(&runtime_directory, session_id);
-                let (initial_client_id, _, _, _) = attach_test_client(&mut initial_connection, 2);
+                let initial_client_id =
+                    attach_test_client(&mut initial_connection, 2, TEST_VIEWPORT_SIZE).client_id;
                 let (booted_tab_id, _) =
                     get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
@@ -471,8 +367,8 @@ fn a_second_attach_mints_a_fresh_client_and_sees_the_tab_added_since_the_first()
 
                 let mut additional_connection =
                     open_session_connection(&runtime_directory, session_id);
-                let (additional_client_id, _, _, _) =
-                    attach_test_client(&mut additional_connection, 4);
+                let additional_client_id =
+                    attach_test_client(&mut additional_connection, 4, TEST_VIEWPORT_SIZE).client_id;
                 assert_ne!(additional_client_id, initial_client_id);
                 let (additional_connection, additional_session_frames) =
                     read_session_frames_until_painted_frame(additional_connection, |_| true);
@@ -541,7 +437,7 @@ fn the_event_stream_ends_with_the_quit_frame() {
         "quit-ends-stream",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            attach_test_client(&mut viewer_connection, 2);
+            attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             let (only_tab_id, _) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
@@ -582,7 +478,8 @@ fn the_stream_drops_an_exited_pane_from_the_view_while_the_session_keeps_serving
         "pane-exit-on-stream",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (_, existing_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
@@ -640,7 +537,7 @@ fn the_event_stream_ends_with_the_quit_frame_when_the_only_program_exits() {
         "quit-on-program-exit",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            attach_test_client(&mut viewer_connection, 2);
+            attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             let (_, only_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             fake_pty_backend
@@ -677,7 +574,8 @@ fn dropping_an_attached_connection_removes_its_client_record() {
         "disconnect",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (tab_id, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             assert_eq!(count_attached_clients(&mut caller_connection, 3), 1);
@@ -737,7 +635,8 @@ fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
         "unreadable-frame",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (booted_tab_id, _) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             wait_for_client_count(&mut caller_connection, 1, 3);
@@ -818,9 +717,11 @@ fn detaching_one_client_leaves_every_other_stream_running() {
         "detach-one",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut detaching_connection = open_session_connection(&runtime_directory, session_id);
-            let (detached_client_id, _, _, _) = attach_test_client(&mut detaching_connection, 2);
+            let detached_client_id =
+                attach_test_client(&mut detaching_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let mut remaining_connection = open_session_connection(&runtime_directory, session_id);
-            let (remaining_client_id, _, _, _) = attach_test_client(&mut remaining_connection, 2);
+            let remaining_client_id =
+                attach_test_client(&mut remaining_connection, 2, TEST_VIEWPORT_SIZE).client_id;
 
             // The caller never attaches and has no event stream of its own.
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
@@ -903,14 +804,15 @@ fn detach_all_takes_every_client_and_leaves_the_session_whole() {
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut first_attached_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (detached_first_client_id, _, _, _) =
-                attach_test_client(&mut first_attached_connection, 2);
+            let detached_first_client_id =
+                attach_test_client(&mut first_attached_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (seeded_tab_id, seeded_pane_id) =
                 get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let mut second_attached_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (detached_second_client_id, _, _, _) =
-                attach_test_client(&mut second_attached_connection, 2);
+            let detached_second_client_id =
+                attach_test_client(&mut second_attached_connection, 2, TEST_VIEWPORT_SIZE)
+                    .client_id;
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             assert_eq!(count_attached_clients(&mut caller_connection, 3), 2);
@@ -1004,20 +906,14 @@ fn detaching_the_smaller_client_grows_the_tabs_pty_back() {
             // it. The pane's PTY shrinks.
             let mut narrow_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (narrow_client_id, _, _, _) = attach_test_client_with_viewport_size(
-                &mut narrow_client_connection,
-                2,
-                NARROW_VIEWPORT_SIZE,
-            );
+            let narrow_client_id =
+                attach_test_client(&mut narrow_client_connection, 2, NARROW_VIEWPORT_SIZE)
+                    .client_id;
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut wide_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            attach_test_client_with_viewport_size(
-                &mut wide_client_connection,
-                2,
-                TEST_VIEWPORT_SIZE,
-            );
+            attach_test_client(&mut wide_client_connection, 2, TEST_VIEWPORT_SIZE);
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             assert_eq!(count_attached_clients(&mut caller_connection, 3), 2);
@@ -1082,20 +978,12 @@ fn dropping_a_smaller_client_connection_grows_the_tabs_pty_back() {
             // it. The pane's PTY shrinks.
             let mut narrow_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            attach_test_client_with_viewport_size(
-                &mut narrow_client_connection,
-                2,
-                NARROW_VIEWPORT_SIZE,
-            );
+            attach_test_client(&mut narrow_client_connection, 2, NARROW_VIEWPORT_SIZE);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut wide_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            attach_test_client_with_viewport_size(
-                &mut wide_client_connection,
-                3,
-                TEST_VIEWPORT_SIZE,
-            );
+            attach_test_client(&mut wide_client_connection, 3, TEST_VIEWPORT_SIZE);
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             assert_eq!(count_attached_clients(&mut caller_connection, 4), 2);
@@ -1151,8 +1039,11 @@ fn an_attached_client_types_into_its_pane_and_resizes_the_tab_it_views() {
         "types-and-resizes",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, replied_session_id, _, _) =
-                attach_test_client(&mut viewer_connection, 2);
+            let AttachedTestClient {
+                client_id,
+                session_id: replied_session_id,
+                ..
+            } = attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             assert_eq!(replied_session_id, session_id);
             let (tab_id, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
@@ -1304,10 +1195,12 @@ fn an_accepted_pane_swap_delivers_its_frame_without_a_resize() {
         "pane-swap-frame",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (_, target_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let mut observer_connection = open_session_connection(&runtime_directory, session_id);
-            let (observer_client_id, _, _, _) = attach_test_client(&mut observer_connection, 2);
+            let observer_client_id =
+                attach_test_client(&mut observer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             let source_pane_id = create_right_split_pane(
                 &mut caller_connection,
@@ -1457,11 +1350,13 @@ fn a_pane_swap_confirmed_before_another_viewers_new_pane_is_rejected_to_its_view
         "pane-swap-stale",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (_, target_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let mut other_viewer_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (other_client_id, _, _, _) = attach_test_client(&mut other_viewer_connection, 2);
+            let other_client_id =
+                attach_test_client(&mut other_viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             let source_pane_id = create_right_split_pane(
                 &mut caller_connection,
@@ -1565,7 +1460,8 @@ fn a_refused_floating_pane_move_from_a_key_binding_is_rejected_to_its_viewer() {
         "floating-move-refused",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (_, tiled_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let move_command_id = CommandId::new();
             viewer_connection
@@ -1609,7 +1505,8 @@ fn an_accepted_pane_insertion_delivers_its_frame_without_a_resize() {
         "place-frame",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (_, target_pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             let source_pane_id = create_right_split_pane(
@@ -1908,7 +1805,8 @@ fn an_attached_client_forwards_a_mouse_press_into_its_pane() {
         "mouse-forward",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (_, replied_session_id, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let replied_session_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).session_id;
             assert_eq!(replied_session_id, session_id);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
@@ -1950,7 +1848,7 @@ fn the_answer_to_a_round_that_reports_nothing_still_reaches_the_viewer() {
         "mouse-answer",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            attach_test_client(&mut viewer_connection, 2);
+            attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut viewer_connection =
@@ -1985,7 +1883,7 @@ fn a_scroll_round_answers_with_the_pane_and_the_line_its_view_landed_on() {
         "mouse-scroll",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            attach_test_client(&mut viewer_connection, 2);
+            attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let (mut viewer_connection, top_row_index) = fill_pane_scrollback(
@@ -2038,7 +1936,8 @@ fn a_border_move_round_answers_with_the_cells_it_applied() {
         "mouse-border",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // The neighbor whose room the border move takes, split off the
@@ -2091,7 +1990,8 @@ fn one_round_runs_every_action_it_holds_and_is_answered_once() {
         "mouse-round",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _, _) = attach_test_client(&mut viewer_connection, 2);
+            let client_id =
+                attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE).client_id;
             let (tab_id, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             // Splitting the pane this client attached on moves its focus to the
@@ -2200,7 +2100,7 @@ fn two_rounds_sent_back_to_back_are_answered_in_the_order_they_were_sent() {
         "mouse-order",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            attach_test_client(&mut viewer_connection, 2);
+            attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let (mut viewer_connection, top_row_index) = fill_pane_scrollback(
@@ -2278,8 +2178,11 @@ fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
         "resume-view",
         |runtime_directory, session_id, fake_pty_backend| {
             let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-            let (detached_client_id, _, _, resume_token) =
-                attach_test_client(&mut viewer_connection, 2);
+            let AttachedTestClient {
+                client_id: detached_client_id,
+                resume_token,
+                ..
+            } = attach_test_client(&mut viewer_connection, 2, TEST_VIEWPORT_SIZE);
             let (booted_tab_id, root_pane_id) =
                 get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let resume_token = resume_token.expect("the attach minted a token");
@@ -2333,13 +2236,18 @@ fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
             wait_for_client_count(&mut caller_connection, 0, 8);
 
             let mut resumed_connection = open_session_connection(&runtime_directory, session_id);
-            let (resumed_client_id, resumed_session_id, _, _) =
-                attach_test_client_with_resume_token(
-                    &mut resumed_connection,
-                    2,
-                    TEST_VIEWPORT_SIZE,
-                    Some(resume_token),
-                );
+            let AttachedTestClient {
+                client_id: resumed_client_id,
+                session_id: resumed_session_id,
+                ..
+            } = send_test_attach(
+                &mut resumed_connection,
+                2,
+                TEST_VIEWPORT_SIZE,
+                None,
+                None,
+                Some(resume_token),
+            );
             assert_eq!(resumed_session_id, session_id);
 
             (

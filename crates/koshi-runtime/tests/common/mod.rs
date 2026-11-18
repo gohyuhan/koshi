@@ -21,16 +21,20 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::client::ClientOrigin;
-use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandResult, CommandSource, NewPaneArgs, NewPanePlacement,
+};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::Event;
-use koshi_core::geometry::Size;
+use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::mouse::MouseTracking;
+use koshi_core::notification::NotificationQueue;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    ConnectionToken, GraphicsCapabilities, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_pty::backend::state::PtyBackend;
@@ -97,14 +101,30 @@ impl<ExchangeResult> ServedTestSession<ExchangeResult> {
     }
 }
 
-/// A server over a fresh fake PTY backend that delivers each pane's output and
-/// exit into the server's inbox, that backend, and a sender into the same
-/// inbox.
-pub fn build_server_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>, Sender<RuntimeEvent>) {
+/// A fresh fake PTY backend that delivers each pane's output and exit into a
+/// new runtime inbox, a sender into that inbox, and the inbox's receiver.
+pub fn build_fake_pty_backend_with_inbox() -> (
+    Arc<FakePtyBackend>,
+    Sender<RuntimeEvent>,
+    mpsc::Receiver<RuntimeEvent>,
+) {
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(runtime_event_sender.clone()),
     )));
+    (
+        fake_pty_backend,
+        runtime_event_sender,
+        runtime_event_receiver,
+    )
+}
+
+/// A server over a fresh fake PTY backend that delivers each pane's output and
+/// exit into the server's inbox, that backend, and a sender into the same
+/// inbox.
+pub fn build_server_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>, Sender<RuntimeEvent>) {
+    let (fake_pty_backend, runtime_event_sender, runtime_event_receiver) =
+        build_fake_pty_backend_with_inbox();
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
     let server = Server::from_runtime_parts(pty_backend, runtime_event_receiver, Arc::default());
     (server, fake_pty_backend, runtime_event_sender)
@@ -146,9 +166,40 @@ pub fn create_session_with_attached_client(server: &mut Server) -> ClientId {
 }
 
 /// Apply `startup_config` (`None` keeps the built-in defaults), seed a headless
-/// session under a fake PTY backend, serve its control socket from a directory
-/// named for `session_label`, and start `run_exchange` against that socket on
-/// its own thread.
+/// session under a fake PTY backend, and serve it with
+/// [`start_serving_test_session`].
+pub fn start_test_session<ExchangeResult: Send + 'static>(
+    session_label: &str,
+    startup_config: Option<PartialKoshiConfig>,
+    run_exchange: impl FnOnce(PathBuf, SessionId, Arc<FakePtyBackend>) -> (Vec<Connection>, ExchangeResult)
+        + Send
+        + 'static,
+) -> ServedTestSession<ExchangeResult> {
+    let session_id = SessionId::new();
+    let (mut server, fake_pty_backend, runtime_event_sender) = build_server_with_fake_pty_backend();
+    server.load_startup_config(startup_config);
+    server
+        .bootstrap_session(
+            session_id,
+            TEST_SESSION_NAME.to_string(),
+            TEST_VIEWPORT_SIZE,
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("seed the session");
+    start_serving_test_session(
+        session_label,
+        server,
+        fake_pty_backend,
+        runtime_event_sender,
+        session_id,
+        run_exchange,
+    )
+}
+
+/// Serve `session_id`'s control socket for `server` from a directory named
+/// for `session_label`, and start `run_exchange` against that socket on its
+/// own thread. `runtime_event_sender` sends into `server`'s inbox, and
+/// `fake_pty_backend` is the backend `server` drives.
 ///
 /// `run_exchange` receives the runtime directory and the session id, the two
 /// facts it needs to find and open the socket, and the fake backend, which
@@ -158,9 +209,12 @@ pub fn create_session_with_attached_client(server: &mut Server) -> ClientId {
 /// client. The connections handed back close only in
 /// [`ServedTestSession::finish`]. The exchange thread sends
 /// [`RuntimeEvent::Quit`] when it ends.
-pub fn start_test_session<ExchangeResult: Send + 'static>(
+pub fn start_serving_test_session<ExchangeResult: Send + 'static>(
     session_label: &str,
-    startup_config: Option<PartialKoshiConfig>,
+    server: Server,
+    fake_pty_backend: Arc<FakePtyBackend>,
+    runtime_event_sender: Sender<RuntimeEvent>,
+    session_id: SessionId,
     run_exchange: impl FnOnce(PathBuf, SessionId, Arc<FakePtyBackend>) -> (Vec<Connection>, ExchangeResult)
         + Send
         + 'static,
@@ -176,17 +230,6 @@ pub fn start_test_session<ExchangeResult: Send + 'static>(
         std::process::id()
     ));
 
-    let session_id = SessionId::new();
-    let (mut server, fake_pty_backend, runtime_event_sender) = build_server_with_fake_pty_backend();
-    server.load_startup_config(startup_config);
-    server
-        .bootstrap_session(
-            session_id,
-            TEST_SESSION_NAME.to_string(),
-            TEST_VIEWPORT_SIZE,
-            SystemTime::UNIX_EPOCH,
-        )
-        .expect("seed the session");
     let ipc_server = IpcServer::start(
         &runtime_directory,
         session_id,
@@ -218,30 +261,57 @@ pub fn start_test_session<ExchangeResult: Send + 'static>(
 }
 
 /// Run `run_exchange` against a session from [`start_test_session`] while this
-/// thread drains the runtime inbox and pushes each attached client its frames.
-///
-/// Returns the server and the fake backend once the exchange is done, so a
-/// test can read the session state and the PTY sizes the exchange left behind,
-/// plus whatever the exchange itself produced.
+/// thread runs it with [`run_served_test_session`].
 pub fn serve_test_session<ExchangeResult: Send + 'static>(
     session_label: &str,
     run_exchange: impl FnOnce(PathBuf, SessionId, Arc<FakePtyBackend>) -> (Vec<Connection>, ExchangeResult)
         + Send
         + 'static,
 ) -> (Server, Arc<FakePtyBackend>, ExchangeResult) {
-    let mut served_test_session = start_test_session(session_label, None, run_exchange);
-    let server = &mut served_test_session.server;
+    run_served_test_session(start_test_session(session_label, None, run_exchange))
+}
 
-    // The per-session server's own loop, one dispatch pass at a time, until
-    // the inbox closes or a quit event arrives.
-    while server.run_dispatch_pass() == DispatchPassOutcome::Served {}
-
+/// Drain `served_test_session`'s runtime inbox on this thread and push each
+/// attached client its frames, one dispatch pass at a time, until the inbox
+/// closes or a quit event arrives, then finish it.
+///
+/// Returns, once the exchange is done, the server and the fake backend as the
+/// exchange left them, and the value the exchange produced.
+pub fn run_served_test_session<ExchangeResult>(
+    mut served_test_session: ServedTestSession<ExchangeResult>,
+) -> (Server, Arc<FakePtyBackend>, ExchangeResult) {
+    while served_test_session.server.run_dispatch_pass() == DispatchPassOutcome::Served {}
     served_test_session.finish()
 }
 
-/// Connect to the socket the endpoint file advertises and complete the Hello.
-/// The returned connection accepts every other request kind.
+/// Connect to the socket the endpoint file advertises and complete the Hello
+/// of a caller on this machine. The returned connection accepts every other
+/// request kind.
 pub fn open_session_connection(runtime_directory: &Path, session_id: SessionId) -> Connection {
+    open_session_connection_saying(runtime_directory, session_id, None)
+}
+
+/// [`open_session_connection`] completing the Hello the router sends for a
+/// caller on another machine: the endpoint file's token, `is_remote: true`,
+/// and `granted_identity` as the identity of the grant the caller attached
+/// with. A client attached on the connection is remote, and takes its label
+/// from `granted_identity`.
+pub fn open_remote_session_connection(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    granted_identity: &str,
+) -> Connection {
+    open_session_connection_saying(runtime_directory, session_id, Some(granted_identity))
+}
+
+/// Connect to the socket the endpoint file advertises and complete the Hello.
+/// `Some(granted_identity)` sends `is_remote: true` with it; `None` sends a
+/// caller on this machine.
+fn open_session_connection_saying(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    granted_identity: Option<&str>,
+) -> Connection {
     let endpoint_file = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
         runtime_directory,
         session_id,
@@ -255,14 +325,124 @@ pub fn open_session_connection(runtime_directory: &Path, session_id: SessionId) 
                 minimum_protocol_version: MIN_PROTOCOL_VERSION,
                 maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: endpoint_file.connection_token,
-                is_remote: false,
-                granted_identity: None,
+                is_remote: granted_identity.is_some(),
+                granted_identity: granted_identity.map(str::to_string),
             },
         })
         .expect("send hello");
     let hello_response: IpcResponse = ipc_connection.recv().expect("hello reply");
     assert_eq!(hello_response.answer_result, build_accepted_hello_result());
     ipc_connection
+}
+
+/// What an `Attached` reply carried.
+pub struct AttachedTestClient {
+    /// The client the session minted or handed back.
+    pub client_id: ClientId,
+    /// The session the client joined.
+    pub session_id: SessionId,
+    /// The session's notification queue as the reply carried it.
+    pub notification_queue: NotificationQueue,
+    /// The secret the attach minted. An attach that presents it takes this
+    /// attach's view or record back.
+    pub resume_token: Option<ConnectionToken>,
+    /// The pane region the session holds for the client, as the attach
+    /// reported it.
+    pub pane_area: Option<PaneArea>,
+}
+
+/// Attach on `ipc_connection` reporting `viewport_size`, no pane area and no
+/// claim, and return what the reply carried. The connection carries only the
+/// client's event stream afterwards.
+pub fn attach_test_client(
+    ipc_connection: &mut Connection,
+    request_id: u64,
+    viewport_size: Size,
+) -> AttachedTestClient {
+    send_test_attach(ipc_connection, request_id, viewport_size, None, None, None)
+}
+
+/// Attach on `ipc_connection` reporting `viewport_size` and `pane_area`,
+/// naming `resume_client_id` and presenting `resume_token`, with
+/// `Prepare` and `Commit`, and return what the reply carried. Panics unless
+/// the reply is `Attached` and answers `request_id`.
+pub fn send_test_attach(
+    ipc_connection: &mut Connection,
+    request_id: u64,
+    viewport_size: Size,
+    pane_area: Option<PaneArea>,
+    resume_client_id: Option<ClientId>,
+    resume_token: Option<ConnectionToken>,
+) -> AttachedTestClient {
+    send_committed_request(
+        ipc_connection,
+        IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::Attach {
+                viewport_size,
+                resume_client_id,
+                resume_token,
+                pane_area,
+                graphics_capabilities: GraphicsCapabilities::default(),
+                cell_size: None,
+                link_timeout_ms: None,
+                max_frames_per_second: 60,
+                placement_preview_target: None,
+                painted_input_view: None,
+                is_viewer_local_input_mode_on: false,
+            },
+        },
+    );
+    let attach_response: IpcResponse = ipc_connection.recv().expect("attach reply");
+    assert_eq!(attach_response.request_id, Some(request_id));
+    let IpcResult::Attached {
+        client_id,
+        session_id,
+        notification_queue,
+        resume_token,
+        pane_area,
+    } = attach_response.answer_result
+    else {
+        panic!(
+            "expected an attach reply, got {:?}",
+            attach_response.answer_result
+        );
+    };
+    AttachedTestClient {
+        client_id,
+        session_id,
+        notification_queue,
+        resume_token,
+        pane_area,
+    }
+}
+
+/// Split `source_pane_id` over `ipc_connection` on behalf of `client_id`, with
+/// the new pane to the right, and return the new pane's id.
+pub fn create_right_split_pane(
+    ipc_connection: &mut Connection,
+    session_id: SessionId,
+    source_pane_id: PaneId,
+    client_id: ClientId,
+    request_id: u64,
+) -> PaneId {
+    let command = Command::NewPane(NewPaneArgs {
+        placement: NewPanePlacement::Split {
+            source_pane_id: Some(source_pane_id),
+            tab_id: None,
+            direction: Direction::Right,
+        },
+        working_directory: None,
+        spawn_spec: None,
+        client_id: Some(client_id),
+    });
+    submit_test_command(ipc_connection, session_id, command, request_id)
+        .iter()
+        .find_map(|emitted_event| match emitted_event {
+            Event::PaneCreated(pane_created) => Some(pane_created.pane_id),
+            _ => None,
+        })
+        .expect("the split reports the new pane")
 }
 
 /// What the session reports about itself over `ipc_connection`.
@@ -346,15 +526,14 @@ pub fn submit_test_command(
 
 /// Submit a command over `ipc_connection` with `Prepare` and `Commit`, as an
 /// external `koshi` invocation naming `session_id` and targeting
-/// `target_client_id`, and return the events it emitted. Panics unless the
-/// session applied it.
-pub fn submit_test_command_for_client(
+/// `target_client_id`, and return the session's answer.
+pub fn submit_test_command_for_answer(
     ipc_connection: &mut Connection,
     session_id: SessionId,
     target_client_id: Option<ClientId>,
     command: Command,
     request_id: u64,
-) -> Vec<Event> {
+) -> IpcResult {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(Some(session_id), target_client_id),
@@ -371,15 +550,31 @@ pub fn submit_test_command_for_client(
         },
     );
     let command_response: IpcResponse = ipc_connection.recv().expect("command reply");
+    command_response.answer_result
+}
+
+/// [`submit_test_command_for_answer`], returning the events the command
+/// emitted. Panics unless the session applied it.
+pub fn submit_test_command_for_client(
+    ipc_connection: &mut Connection,
+    session_id: SessionId,
+    target_client_id: Option<ClientId>,
+    command: Command,
+    request_id: u64,
+) -> Vec<Event> {
+    let answer_result = submit_test_command_for_answer(
+        ipc_connection,
+        session_id,
+        target_client_id,
+        command,
+        request_id,
+    );
     let IpcResult::CommandResult(CommandResult::Ok {
         command_id: _,
         emitted_events,
-    }) = command_response.answer_result
+    }) = answer_result
     else {
-        panic!(
-            "expected the command to apply, got {:?}",
-            command_response.answer_result
-        );
+        panic!("expected the command to apply, got {answer_result:?}");
     };
     emitted_events
 }
