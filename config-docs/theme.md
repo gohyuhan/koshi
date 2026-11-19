@@ -56,7 +56,7 @@ both rows. `on-ramp` and `on-accent` color text drawn over filled blocks.
 | `bar-bg` | `#RRGGBB` — background of the tab bar and the key-hint bar | `#000000` | ≥ 0.1.0 |
 | `border-focused` | `#RRGGBB` — border of the focused pane | `#00afd7` | ≥ 0.1.0 |
 | `border-unfocused` | `#RRGGBB` — border of the other panes | `#585858` | ≥ 0.1.0 |
-| `border-hover` | `#RRGGBB` — border of the pane the pointer is over (the wheel target) | `#af5fff` | ≥ 0.1.0 |
+| `border-hover` | `#RRGGBB` — border of an unfocused pane whose content, top border or handle is under the pointer | `#af5fff` | ≥ 0.1.0 |
 | `stack-header-fg` | `#RRGGBB` — text of a collapsed stack member's header | `#f4f1fa` | ≥ 0.1.0 |
 | `stack-header-bg` | `#RRGGBB` — background of that header | `#300f4a` | ≥ 0.1.0 |
 | `letterbox` | `#RRGGBB` — the margin around a centered layout | `#585858` | ≥ 0.1.0 |

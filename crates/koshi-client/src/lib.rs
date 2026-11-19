@@ -239,8 +239,9 @@ pub(crate) struct FloatingPaneMoveSelection {
     pub(crate) pending_move_command_id: Option<CommandId>,
 }
 
-/// The viewer fields [`Client::apply_render_snapshot`] changes, copied before
-/// one frame is applied. [`Client::restore_viewer`] puts them back.
+/// The viewer fields [`Client::apply_render_snapshot`] and
+/// [`Client::update_pointer_hover_for_frame`] change, copied before one frame
+/// is applied. [`Client::restore_viewer`] puts them back.
 pub(crate) struct ViewerRestorePoint {
     /// The base input mode.
     lock_mode: LockMode,
@@ -273,6 +274,20 @@ pub(crate) struct ViewerRestorePoint {
     /// The notification center as it stood: open or sliding out, its scroll,
     /// its selected card and its slide. `None` while it was closed.
     notification_center_state: Option<NotificationCenterState>,
+    /// What the pointer was over.
+    pointer_hover: PointerHover,
+}
+
+/// What a viewer's pointer is over at its pointer cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PointerHover {
+    /// The pane the pointer is over, or `None` when it is over chrome or off
+    /// every pane. The renderer draws an unfocused hovered pane in the hover
+    /// color.
+    hovered_pane_id: Option<PaneId>,
+    /// Where the pointer rests on a pane's placement handle or on the tiled
+    /// top border that shows it, or `None` off both.
+    placement_handle_hover: Option<PlacementHandleHover>,
 }
 
 /// What a viewer-local action, or a mouse event that pane placement owns, asks
@@ -417,13 +432,13 @@ pub struct Client {
     /// step was asked for, awaiting the session's report of where the view
     /// landed. Set only for a scroll the selection drag's timer asked for.
     selection_scroll_origin_row_index: Option<u64>,
-    /// The pane this viewer's pointer is over, or `None` when it is over chrome
-    /// or off every pane. The renderer draws an unfocused hovered pane in the
-    /// hover color.
-    hovered_pane_id: Option<PaneId>,
-    /// Where this viewer's pointer rests on a pane's placement handle or on
-    /// the tiled top border that shows it, or `None` off both.
-    placement_handle_hover: Option<PlacementHandleHover>,
+    /// The cell of the last mouse event this viewer read, or `None` before
+    /// the first one. The hovered pane and the placement handle hover are
+    /// found at this cell ([`Client::update_pointer_hover`],
+    /// [`Client::update_pointer_hover_for_frame`]).
+    pointer_position: Option<Point>,
+    /// What this viewer's pointer is over at `pointer_position`.
+    pointer_hover: PointerHover,
     /// Whether this viewer holds a link to its session, and how it is getting
     /// one back when it does not. The tabline draws
     /// `RECONNECTING (attempt 4, retry in 8s)` while it holds
@@ -496,8 +511,8 @@ impl Client {
             sent_floating_pane_move: None,
             tabline_peek: None,
             selection_scroll_origin_row_index: None,
-            hovered_pane_id: None,
-            placement_handle_hover: None,
+            pointer_position: None,
+            pointer_hover: PointerHover::default(),
             link_status: LinkStatus::Linked,
             placement_state: PlacementState::default(),
             active_tab_id: None,
@@ -769,7 +784,8 @@ impl Client {
     }
 
     /// Copy every field [`apply_render_snapshot`](Self::apply_render_snapshot)
-    /// changes. The accepted placement preview is shared, not copied.
+    /// and [`update_pointer_hover_for_frame`](Self::update_pointer_hover_for_frame)
+    /// change. The accepted placement preview is shared, not copied.
     pub(crate) fn build_viewer_restore_point(&self) -> ViewerRestorePoint {
         ViewerRestorePoint {
             lock_mode: self.lock_mode,
@@ -786,6 +802,7 @@ impl Client {
             sent_floating_pane_move: self.sent_floating_pane_move,
             floating_pane_tray: self.floating_pane_tray,
             notification_center_state: self.notification_history.get_notification_center_state(),
+            pointer_hover: self.pointer_hover,
         }
     }
 
@@ -806,6 +823,7 @@ impl Client {
             sent_floating_pane_move,
             floating_pane_tray,
             notification_center_state,
+            pointer_hover,
         } = viewer_restore_point;
         self.lock_mode = lock_mode;
         self.pending_lock_command_id = pending_lock_command_id;
@@ -822,6 +840,7 @@ impl Client {
         self.floating_pane_tray = floating_pane_tray;
         self.notification_history
             .set_notification_center_state(notification_center_state);
+        self.pointer_hover = pointer_hover;
     }
 
     /// Record the view carried by the newest painted frame: its active tab,

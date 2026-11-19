@@ -735,19 +735,18 @@ fn a_right_press_on_a_dismiss_button_and_a_left_press_under_the_cards_do_nothing
 }
 
 #[test]
-fn a_pointer_motion_over_the_center_clears_the_pane_hover_and_a_drag_takes_the_next_path() {
+fn a_pointer_motion_over_the_center_hovers_no_pane_and_a_drag_takes_the_next_path() {
     let (mut client, mouse_frame) = build_center_client();
     open_center(&mut client, &mouse_frame);
-    client.hovered_pane_id = Some(PaneId::new());
-
-    let motion_answer = client.handle_notification_center_mouse(
-        build_mouse_event(
-            MouseKind::Motion,
-            CENTER_BODY_CELL,
-            BindingModifierFlags::NONE,
-        ),
-        &mouse_frame,
+    client.pointer_hover.hovered_pane_id = Some(PaneId::new());
+    let center_motion = build_mouse_event(
+        MouseKind::Motion,
+        CENTER_BODY_CELL,
+        BindingModifierFlags::NONE,
     );
+
+    let motion_answer = client.handle_notification_center_mouse(center_motion, &mouse_frame);
+    client.update_pointer_hover(center_motion, &mouse_frame);
     let drag_answer = client.handle_notification_center_mouse(
         build_mouse_event(
             MouseKind::Drag(MouseButton::Left),
@@ -766,7 +765,7 @@ fn a_pointer_motion_over_the_center_clears_the_pane_hover_and_a_drag_takes_the_n
     );
 
     assert_eq!(motion_answer, Some(Vec::new()));
-    assert_eq!(client.hovered_pane_id, None);
+    assert_eq!(client.pointer_hover.hovered_pane_id, None);
     assert_eq!(drag_answer, None);
     assert_eq!(pane_motion_answer, None);
 }
@@ -1231,6 +1230,30 @@ fn a_left_press_on_the_toast_close_control_withdraws_the_toast_and_keeps_its_ent
         None
     );
     assert_eq!(list_merged_entry_texts(&client), vec!["entry 0"]);
+}
+
+#[test]
+fn the_pointer_on_the_toast_close_control_hovers_no_pane() {
+    let (mut client, mouse_frame) = build_sliding_center_client();
+    let pane_id = mouse_frame.mouse_panes[0].pane_id;
+    post_own_entries(&mut client, 1);
+    let start = Instant::now();
+    client.advance_notification_clocks(start, false);
+    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 1000), false);
+    let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
+
+    let hovered_pane_ids: Vec<Option<PaneId>> = [PANE_CONTENT_CELL, TOAST_CLOSE_CONTROL_CELL]
+        .into_iter()
+        .map(|screen_point| {
+            client.update_pointer_hover(
+                build_mouse_event(MouseKind::Motion, screen_point, BindingModifierFlags::NONE),
+                &painted_mouse_frame,
+            );
+            client.pointer_hover.hovered_pane_id
+        })
+        .collect();
+
+    assert_eq!(hovered_pane_ids, [Some(pane_id), None]);
 }
 
 #[test]

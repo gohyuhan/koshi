@@ -400,9 +400,8 @@ impl Client {
     /// sends nothing.
     ///
     /// Every other press and wheel tick over the center, and every event over
-    /// a center that slides out, does nothing more. A pointer motion over the
-    /// center clears the hovered pane and the placement handle hover. Every
-    /// event the center takes sends nothing. A drag and a release return
+    /// a center that slides out, does nothing more. Every event the center
+    /// takes sends nothing. A drag and a release return
     /// `None`, and a gesture under way goes on.
     pub(crate) fn handle_notification_center_mouse(
         &mut self,
@@ -453,12 +452,7 @@ impl Client {
                 }
                 Some(Vec::new())
             }
-            MouseKind::Motion if is_on_center => {
-                self.hovered_pane_id = None;
-                self.placement_handle_hover = None;
-                Some(Vec::new())
-            }
-            MouseKind::Press(_) if is_on_center => Some(Vec::new()),
+            MouseKind::Motion | MouseKind::Press(_) if is_on_center => Some(Vec::new()),
             _ => None,
         }
     }

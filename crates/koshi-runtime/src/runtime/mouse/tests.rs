@@ -2125,11 +2125,9 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
         server.build_snapshot(client_id).expect("render snapshot"),
         &viewer,
     );
-    let mouse_decision = viewer
-        .handle_mouse_wheel(wheel_input, &mouse_frame)
-        .expect("a wheel event decides");
+    let mouse_action = viewer.handle_mouse_wheel(wheel_input, &mouse_frame);
     assert_eq!(
-        mouse_decision.mouse_action,
+        mouse_action,
         Some(MouseAction::Forward {
             pane_id,
             mouse_kind: MouseKind::Scroll(ScrollDirection::Up),
@@ -2171,14 +2169,12 @@ fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_wri
         server.build_snapshot(client_id).expect("render snapshot"),
         &viewer,
     );
-    let mouse_decision = viewer
-        .handle_mouse_wheel(
-            build_wheel_input(ScrollDirection::Up, screen_point),
-            &mouse_frame,
-        )
-        .expect("a wheel event decides");
+    let mouse_action = viewer.handle_mouse_wheel(
+        build_wheel_input(ScrollDirection::Up, screen_point),
+        &mouse_frame,
+    );
     assert_eq!(
-        mouse_decision.mouse_action,
+        mouse_action,
         Some(MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: true,
@@ -2212,14 +2208,12 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
         server.build_snapshot(client_id).expect("render snapshot"),
         &viewer,
     );
-    let mouse_decision = viewer
-        .handle_mouse_wheel(
-            build_wheel_input(ScrollDirection::Up, screen_point),
-            &mouse_frame,
-        )
-        .expect("a wheel event decides");
+    let mouse_action = viewer.handle_mouse_wheel(
+        build_wheel_input(ScrollDirection::Up, screen_point),
+        &mouse_frame,
+    );
     assert_eq!(
-        mouse_decision.mouse_action,
+        mouse_action,
         Some(MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: true,

@@ -554,6 +554,25 @@ impl ViewerPaint {
     }
 }
 
+/// Find the hovered pane and the placement handle hover at the pointer cell
+/// against `mouse_frame_snapshot`, the frame the next mouse event is placed
+/// against, drawn with `viewer_paint`'s chrome and `committed_regions`
+/// ([`Client::update_pointer_hover_for_frame`]). Then build
+/// `viewer_paint`'s chrome again with the hover found, for the paint that
+/// shows `displayed_active_tab_id`.
+fn update_painted_pointer_hover(
+    client: &mut Client,
+    mouse_frame_snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    displayed_active_tab_id: TabId,
+    viewer_paint: &mut ViewerPaint,
+) {
+    client.update_pointer_hover_for_frame(
+        mouse_frame_snapshot.build_painted_frame_layout(viewer_paint.chrome, committed_regions),
+    );
+    viewer_paint.chrome = client.build_viewer_chrome(displayed_active_tab_id, committed_regions);
+}
+
 /// The second line of a placement message while the session refuses the
 /// selected target.
 const PLACEMENT_REFUSAL_DETAIL_TEXT: &str = "Choose another place · Esc to cancel";
@@ -968,6 +987,10 @@ impl<B: Backend> Screen<B> {
     /// all from one tray anchor ([`Client::find_floating_pane_tray_anchor`]).
     /// The tray layout that keeps the open tray in step with the pending frame
     /// ([`Client::update_floating_pane_tray`]) is the one that anchor uses.
+    /// Before the paint, the client finds the hovered pane and the placement
+    /// handle hover at the pointer cell against the frame a mouse event is
+    /// placed against: the displayed preview while a placement preview shows,
+    /// else the session's frame ([`Client::update_pointer_hover_for_frame`]).
     /// After a paint, the client records the frame's input fields
     /// ([`Client::record_painted_input_view`]): the input read clock takes its
     /// move count, and its dropped count posts its warnings, which show from
@@ -1036,11 +1059,22 @@ impl<B: Backend> Screen<B> {
             &self.floating_pane_minimize_animations,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
-        let frame_paint = ViewerPaint::from_client(
+        let mut frame_paint = ViewerPaint::from_client(
             client,
             displayed_snapshot.client_snapshot.active_tab_id,
             snapshot,
             &committed_regions,
+        );
+        update_painted_pointer_hover(
+            client,
+            if placement_display.is_some() {
+                displayed_snapshot
+            } else {
+                snapshot
+            },
+            &committed_regions,
+            displayed_snapshot.client_snapshot.active_tab_id,
+            &mut frame_paint,
         );
         match terminal::paint_frame_with_writer(
             &mut self.frame_output,
@@ -1137,7 +1171,10 @@ impl<B: Backend> Screen<B> {
     ///
     /// `active_tab_id` is `Some` after the first frame has been drawn. A viewer
     /// with no changed local state, and no finished image request since its
-    /// last paint, draws nothing. A viewer whose viewport no longer matches the
+    /// last paint, draws nothing. A pass that draws finds the hovered pane and
+    /// the placement handle hover at the pointer cell first, as
+    /// [`Self::commit_pending_snapshot`] does, and puts back the hover it
+    /// replaced when the paint fails. A viewer whose viewport no longer matches the
     /// committed region solve draws nothing until the next session frame.
     ///
     /// Each refresh first advances the toast's clock and the notification
@@ -1193,7 +1230,7 @@ impl<B: Backend> Screen<B> {
             snapshot.client_snapshot.active_tab_id,
             |placement_display| placement_display.displayed_tab_snapshot.tab_snapshot.tab_id,
         );
-        let viewer_paint = ViewerPaint::from_client(
+        let mut viewer_paint = ViewerPaint::from_client(
             client,
             displayed_active_tab_id,
             snapshot,
@@ -1222,6 +1259,19 @@ impl<B: Backend> Screen<B> {
             &self.floating_pane_minimize_animations,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
+        let mouse_frame_snapshot = if placement_display.is_some() {
+            displayed_snapshot
+        } else {
+            snapshot
+        };
+        let shown_pointer_hover = client.pointer_hover;
+        update_painted_pointer_hover(
+            client,
+            mouse_frame_snapshot,
+            &self.committed_regions,
+            displayed_active_tab_id,
+            &mut viewer_paint,
+        );
         if !is_frame_committed(terminal::paint_frame_with_writer(
             &mut self.frame_output,
             &mut self.paint_driver,
@@ -1244,6 +1294,7 @@ impl<B: Backend> Screen<B> {
                 .as_ref()
                 .map(|placement_display| &placement_display.displayed_tab_snapshot),
         )) {
+            client.pointer_hover = shown_pointer_hover;
             return None;
         }
         let painted_viewer_chrome = viewer_paint.chrome;
@@ -1256,11 +1307,6 @@ impl<B: Backend> Screen<B> {
                 .active_tab_snapshot
                 .clone(),
         );
-        let mouse_frame_snapshot = if self.shown_placement_display.is_some() {
-            displayed_snapshot
-        } else {
-            snapshot
-        };
         let drawn_notifications = client.build_drawn_notifications(
             mouse_frame_snapshot
                 .build_painted_frame_layout(painted_viewer_chrome, &self.committed_regions),
@@ -6585,6 +6631,9 @@ fn expire_input_timers(
 ///   `pending_mouse_actions` ([`handle_mouse_event`]), which the pass writes at
 ///   its end. Before the first paint, `mouse_frame` is `None`, and a mouse
 ///   event changes nothing.
+/// - After each mouse event that one of the three paths above took, the viewer
+///   finds the hovered pane and the placement handle hover at the event's cell
+///   ([`Client::update_pointer_hover`]).
 /// - A loss of the outer terminal's focus ends what
 ///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing of
 ///   its own.
@@ -6642,21 +6691,21 @@ fn handle_terminal_input_event(
                     .or_else(|| client.handle_notification_center_mouse(mouse_input, mouse_frame))
                 {
                     queue_mouse_actions(pending_mouse_actions, mouse_actions);
-                    continue;
-                }
-                match client.handle_placement_mouse(mouse_input, mouse_frame, read_at) {
-                    Some(placement_input_action) => {
-                        flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
-                        uplink.submit_placement_input_action(client, placement_input_action, None);
-                    }
-                    None => handle_mouse_event(
+                } else if let Some(placement_input_action) =
+                    client.handle_placement_mouse(mouse_input, mouse_frame, read_at)
+                {
+                    flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
+                    uplink.submit_placement_input_action(client, placement_input_action, None);
+                } else {
+                    handle_mouse_event(
                         client,
                         mouse_frame,
                         mouse_input,
                         read_at,
                         pending_mouse_actions,
-                    ),
+                    );
                 }
+                client.update_pointer_hover(mouse_input, mouse_frame);
             }
             RuntimeEvent::OuterTerminalFocusLost { .. } => {
                 client.handle_outer_terminal_focus_lost();

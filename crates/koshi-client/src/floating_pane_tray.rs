@@ -289,8 +289,7 @@ impl Client {
     /// with no tray ([`build_frame_layout_without_overlays`]):
     ///
     /// - A pointer motion sets the hovered tile to the tile under the pointer,
-    ///   or to none. Over the tray it also clears the hovered pane and the
-    ///   placement handle hover, and sends nothing.
+    ///   or to none. Over the tray it sends nothing.
     /// - A left press on a tile selects it and sends its command
     ///   ([`activate_tray_tile`](Self::activate_tray_tile)): a pane's tile
     ///   sends `ToggleFloatingPaneMinimized`, and the `+ new` tile closes the tray and
@@ -332,12 +331,7 @@ impl Client {
                     hovered_tile_index,
                     ..floating_pane_tray
                 });
-                if !is_on_tray {
-                    return None;
-                }
-                self.hovered_pane_id = None;
-                self.placement_handle_hover = None;
-                Some(Vec::new())
+                is_on_tray.then(Vec::new)
             }
             (
                 MouseKind::Press(MouseButton::Left),
