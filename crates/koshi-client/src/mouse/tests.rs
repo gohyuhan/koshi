@@ -7,9 +7,11 @@
 //! drags swap, Shift-pane drags insert, edge scroll a held text drag drives on
 //! the clock; the top border hover that shows a tiled pane's handle, the
 //! handle cells that mark it, the panes that show none, and the press, drag,
-//! release or wheel tick that hides it; and the gestures a new frame ends. For floating panes: the
-//! grab-handle move, the pin toggle, minimize and close buttons, a corner
-//! resize, and floating pane move mode.
+//! release or wheel tick that hides it; the hovered pane and the handle that
+//! each mouse event and each painted frame find at the pointer cell; and the
+//! gestures a new frame ends. For floating panes: the grab-handle move, the
+//! pin toggle, minimize and close buttons, a corner resize, and floating pane
+//! move mode.
 //!
 //! Each test builds a frame by hand: one tab, its tiled panes and its floating
 //! panes, and no chrome beyond the tabline and hint bar.
@@ -196,6 +198,20 @@ fn repaint_mouse_frame(client: &Client, mouse_frame: &MouseFrame) -> MouseFrame 
     painted_mouse_frame
 }
 
+/// Answer `mouse_input` against `mouse_frame`, then find the pointer hover at
+/// its cell, as the attach loop does for an event that no overlay and no pane
+/// placement takes.
+pub(crate) fn handle_mouse_and_update_pointer_hover(
+    client: &mut Client,
+    mouse_input: MouseInput,
+    mouse_frame: &MouseFrame,
+    current_time: Instant,
+) -> Vec<MouseAction> {
+    let mouse_actions = client.handle_mouse(mouse_input, mouse_frame, current_time);
+    client.update_pointer_hover(mouse_input, mouse_frame);
+    mouse_actions
+}
+
 /// A frame holding one plain terminal pane, focused.
 fn build_one_pane_mouse_frame(mouse_pane: MousePane) -> MouseFrame {
     let pane_id = mouse_pane.pane_id;
@@ -218,7 +234,7 @@ fn build_forwarded_mouse_action(
 }
 
 /// A cell inside the content of the `pane_index`-th pane in a fixture frame.
-fn get_content_cell(mouse_frame: &MouseFrame, pane_index: usize) -> Point {
+pub(crate) fn get_content_cell(mouse_frame: &MouseFrame, pane_index: usize) -> Point {
     let content_rect = mouse_frame
         .session_snapshot
         .active_tab_snapshot
@@ -337,16 +353,13 @@ fn a_wheel_over_a_plain_pane_scrolls_by_the_viewers_own_line_count() {
         ..PartialMouseConfig::default()
     });
 
-    let wheel_decision = client
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = client.handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
-    assert_eq!(wheel_decision.hovered_pane_id, Some(pane_id));
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id,
             is_scrolling_up: true,
@@ -360,15 +373,13 @@ fn a_wheel_down_over_a_plain_pane_moves_the_view_toward_live() {
     let pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Down, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Down, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id,
             is_scrolling_up: false,
@@ -383,20 +394,13 @@ fn a_horizontal_wheel_over_a_plain_pane_decides_nothing() {
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
 
     for scroll_direction in [ScrollDirection::Left, ScrollDirection::Right] {
-        let wheel_decision = build_test_client()
-            .handle_mouse_wheel(
-                build_mouse_wheel(scroll_direction, get_content_cell(&mouse_frame, 0)),
-                &mouse_frame,
-            )
-            .expect("a wheel tick decides");
+        let wheel_action = build_test_client().handle_mouse_wheel(
+            build_mouse_wheel(scroll_direction, get_content_cell(&mouse_frame, 0)),
+            &mouse_frame,
+        );
 
         assert_eq!(
-            wheel_decision.hovered_pane_id,
-            Some(pane_id),
-            "{scroll_direction:?} still hovers"
-        );
-        assert_eq!(
-            wheel_decision.mouse_action, None,
+            wheel_action, None,
             "{scroll_direction:?} moves no vertical view"
         );
     }
@@ -411,14 +415,12 @@ fn the_ignore_setting_leaves_a_plain_pane_alone() {
         ..PartialMouseConfig::default()
     });
 
-    let wheel_decision = client
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = client.handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
-    assert_eq!(wheel_decision.mouse_action, None);
+    assert_eq!(wheel_action, None);
 }
 
 #[test]
@@ -429,12 +431,10 @@ fn a_program_asking_for_the_mouse_gets_the_tick_forwarded() {
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
     let wheel_tick = build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0));
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(wheel_tick, &mouse_frame)
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(wheel_tick, &mouse_frame);
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(build_forwarded_mouse_action(
             pane_id,
             wheel_tick,
@@ -452,15 +452,13 @@ fn x10_tracking_predates_the_wheel_so_the_tick_is_koshis() {
     mouse_pane.mouse_tracking = MouseTracking::X10;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id,
             is_scrolling_up: true,
@@ -477,15 +475,13 @@ fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
     mouse_pane.has_selection = true;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id,
             is_scrolling_up: true,
@@ -503,14 +499,12 @@ fn the_alternate_screen_with_alternate_scroll_becomes_arrow_keys() {
     mouse_pane.is_alternate_scroll_enabled = true;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
 
-    let wheel_up_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_up_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
     assert_eq!(
-        wheel_up_decision.mouse_action,
+        wheel_up_action,
         Some(MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: true,
@@ -518,14 +512,12 @@ fn the_alternate_screen_with_alternate_scroll_becomes_arrow_keys() {
         })
     );
 
-    let wheel_down_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Down, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_down_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Down, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
     assert_eq!(
-        wheel_down_decision.mouse_action,
+        wheel_down_action,
         Some(MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: false,
@@ -542,15 +534,13 @@ fn alternate_scroll_off_the_alternate_screen_is_not_arrow_keys() {
     mouse_pane.is_alternate_scroll_enabled = true;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id,
             is_scrolling_up: true,
@@ -567,14 +557,12 @@ fn a_horizontal_wheel_under_alternate_scroll_sends_no_arrows() {
     mouse_pane.is_alternate_scroll_enabled = true;
     let mouse_frame = build_one_pane_mouse_frame(mouse_pane);
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Left, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Left, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
-    assert_eq!(wheel_decision.mouse_action, None);
+    assert_eq!(wheel_action, None);
 }
 
 #[test]
@@ -589,16 +577,13 @@ fn the_tick_targets_the_pane_under_the_pointer_not_the_focused_one() {
         Some(focused_pane_id),
     );
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 1)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 1)),
+        &mouse_frame,
+    );
 
-    assert_eq!(wheel_decision.hovered_pane_id, Some(other_pane_id));
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id: other_pane_id,
             is_scrolling_up: true,
@@ -608,30 +593,24 @@ fn the_tick_targets_the_pane_under_the_pointer_not_the_focused_one() {
 }
 
 #[test]
-fn a_tick_over_chrome_falls_through_to_the_focused_pane_and_hovers_nothing() {
+fn a_tick_over_chrome_falls_through_to_the_focused_pane() {
     let focused_pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(focused_pane_id));
 
     // The hint bar on the bottom row is chrome: no pane sits under the pointer.
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(
-                ScrollDirection::Up,
-                Point {
-                    column: 40,
-                    row: TEST_VIEWPORT_SIZE.row_count - 1,
-                },
-            ),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(
+            ScrollDirection::Up,
+            Point {
+                column: 40,
+                row: TEST_VIEWPORT_SIZE.row_count - 1,
+            },
+        ),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.hovered_pane_id, None,
-        "chrome hovers no pane"
-    );
-    assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id: focused_pane_id,
             is_scrolling_up: true,
@@ -646,15 +625,12 @@ fn a_tick_over_the_tabline_steps_the_viewers_own_strip() {
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
 
     let mut client = build_test_client();
-    let wheel_down_decision = client
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
-    assert_eq!(wheel_down_decision.hovered_pane_id, None);
+    let wheel_down_action = client.handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
+        &mouse_frame,
+    );
     assert_eq!(
-        wheel_down_decision.mouse_action, None,
+        wheel_down_action, None,
         "the strip is the viewer's own to move"
     );
     assert_eq!(
@@ -667,13 +643,11 @@ fn a_tick_over_the_tabline_steps_the_viewers_own_strip() {
         Some(1)
     );
 
-    let wheel_up_decision = client
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, Point { column: 40, row: 0 }),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
-    assert_eq!(wheel_up_decision.mouse_action, None);
+    let wheel_up_action = client.handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, Point { column: 40, row: 0 }),
+        &mouse_frame,
+    );
+    assert_eq!(wheel_up_action, None);
     assert_eq!(
         client
             .build_viewer_chrome(
@@ -709,12 +683,13 @@ fn build_overflowing_tab_strip_mouse_frame() -> MouseFrame {
 /// no repaint between them.
 fn scroll_tab_strip_down_twice(client: &mut Client, mouse_frame: &MouseFrame) {
     for _ in 0..2 {
-        client
-            .handle_mouse_wheel(
+        assert_eq!(
+            client.handle_mouse_wheel(
                 build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
                 mouse_frame,
-            )
-            .expect("a wheel tick decides");
+            ),
+            None
+        );
     }
 }
 
@@ -905,12 +880,13 @@ fn a_tab_switch_cancels_the_strip_peek() {
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
     let mut client = build_test_client();
 
-    client
-        .handle_mouse_wheel(
+    assert_eq!(
+        client.handle_mouse_wheel(
             build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
             &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+        ),
+        None
+    );
     assert_eq!(
         client
             .build_viewer_chrome(
@@ -942,12 +918,13 @@ fn switching_away_and_back_does_not_bring_the_peek_out_again() {
     let other_tab_id = TabId::new();
     let mut client = build_test_client();
 
-    client
-        .handle_mouse_wheel(
+    assert_eq!(
+        client.handle_mouse_wheel(
             build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
             &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+        ),
+        None
+    );
     assert_eq!(
         client
             .build_viewer_chrome(
@@ -992,12 +969,13 @@ fn a_mouse_event_on_another_tabs_frame_throws_the_peek_away() {
     other_tab_frame.client_snapshot.active_tab_id = TabId::new();
     let mut client = build_test_client();
 
-    client
-        .handle_mouse_wheel(
+    assert_eq!(
+        client.handle_mouse_wheel(
             build_mouse_wheel(ScrollDirection::Down, Point { column: 40, row: 0 }),
             &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+        ),
+        None
+    );
     assert_eq!(
         client
             .build_viewer_chrome(
@@ -1062,21 +1040,18 @@ fn a_tick_over_chrome_with_nothing_focused_decides_nothing() {
     // A tab with no focusable pane leaves a tick over chrome with no target.
     let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(PaneId::new())], None);
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(
-                ScrollDirection::Up,
-                Point {
-                    column: 40,
-                    row: TEST_VIEWPORT_SIZE.row_count - 1,
-                },
-            ),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(
+            ScrollDirection::Up,
+            Point {
+                column: 40,
+                row: TEST_VIEWPORT_SIZE.row_count - 1,
+            },
+        ),
+        &mouse_frame,
+    );
 
-    assert_eq!(wheel_decision.hovered_pane_id, None);
-    assert_eq!(wheel_decision.mouse_action, None);
+    assert_eq!(wheel_action, None);
 }
 
 #[test]
@@ -1086,20 +1061,18 @@ fn a_tick_over_chrome_ignores_a_focused_pane_the_layout_does_not_place() {
     let mut mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
     mouse_frame.client_snapshot.focused_pane_id = Some(PaneId::new());
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(
-                ScrollDirection::Up,
-                Point {
-                    column: 40,
-                    row: TEST_VIEWPORT_SIZE.row_count - 1,
-                },
-            ),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(
+            ScrollDirection::Up,
+            Point {
+                column: 40,
+                row: TEST_VIEWPORT_SIZE.row_count - 1,
+            },
+        ),
+        &mouse_frame,
+    );
 
-    assert_eq!(wheel_decision.mouse_action, None);
+    assert_eq!(wheel_action, None);
 }
 
 #[test]
@@ -1112,15 +1085,13 @@ fn a_zero_line_scroll_setting_is_carried_through_as_zero() {
         ..PartialMouseConfig::default()
     });
 
-    let wheel_decision = client
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = client.handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id,
             is_scrolling_up: true,
@@ -1153,19 +1124,13 @@ fn a_frame_with_no_room_falls_through_to_the_focused_pane() {
             row: TEST_VIEWPORT_SIZE.row_count - 1,
         },
     ] {
-        let wheel_decision = build_test_client()
-            .handle_mouse_wheel(
-                build_mouse_wheel(ScrollDirection::Down, screen_point),
-                &mouse_frame,
-            )
-            .expect("a wheel tick decides");
+        let wheel_action = build_test_client().handle_mouse_wheel(
+            build_mouse_wheel(ScrollDirection::Down, screen_point),
+            &mouse_frame,
+        );
 
         assert_eq!(
-            wheel_decision.hovered_pane_id, None,
-            "{screen_point:?} hovers no pane"
-        );
-        assert_eq!(
-            wheel_decision.mouse_action,
+            wheel_action,
             Some(MouseAction::Scroll {
                 pane_id,
                 is_scrolling_up: false,
@@ -1184,19 +1149,12 @@ fn a_tick_aimed_at_a_pane_the_frame_carries_no_content_for_decides_nothing() {
     let mut mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
     mouse_frame.mouse_panes.clear();
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
-
-    assert_eq!(
-        wheel_decision.hovered_pane_id,
-        Some(pane_id),
-        "the layout still places it"
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
     );
-    assert_eq!(wheel_decision.mouse_action, None);
+
+    assert_eq!(wheel_action, None);
 }
 
 // ============================================================================
@@ -1244,7 +1202,7 @@ pub(crate) fn build_left_mouse_release(position: Point) -> MouseInput {
 }
 
 /// A buttonless move to `position`.
-fn build_mouse_motion(position: Point) -> MouseInput {
+pub(crate) fn build_mouse_motion(position: Point) -> MouseInput {
     build_mouse_event(MouseKind::Motion, position, BindingModifierFlags::NONE)
 }
 
@@ -2120,14 +2078,16 @@ fn mouse_routing_uses_the_region_solve_committed_with_the_frame() {
 }
 
 #[test]
-fn a_painted_frame_leaves_the_hover_until_a_mouse_event_meets_a_frame_without_its_pane() {
+fn a_painted_frame_leaves_the_hover_and_the_next_mouse_event_finds_it_against_its_own_frame() {
     let pane_id = PaneId::new();
+    let other_tab_pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
-    let other_tab_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
+    let other_tab_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(other_tab_pane_id));
     let mut client = build_test_client();
     let current_time = Instant::now();
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_mouse_motion(get_content_cell(&mouse_frame, 0)),
         &mouse_frame,
         current_time,
@@ -2148,7 +2108,8 @@ fn a_painted_frame_leaves_the_hover_until_a_mouse_event_meets_a_frame_without_it
     );
 
     assert_eq!(
-        client.handle_mouse(
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
             build_left_mouse_release(get_content_cell(&other_tab_frame, 0)),
             &other_tab_frame,
             advance_time_by_seconds(current_time, 1),
@@ -2162,8 +2123,8 @@ fn a_painted_frame_leaves_the_hover_until_a_mouse_event_meets_a_frame_without_it
                 &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
             )
             .hovered_pane_id,
-        None,
-        "a mouse event placed against a frame without the pane clears the hover"
+        Some(other_tab_pane_id),
+        "a mouse event finds the pane under its cell in the frame it is placed against"
     );
 }
 
@@ -3030,7 +2991,8 @@ fn shifted_handle_press_in_normal_mode_does_not_start_pane_placement() {
         Some(pane_id),
         vec![active_tab_id],
     );
-    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
+    client.pointer_hover.placement_handle_hover =
+        Some(PlacementHandleHover::TiledHandle { pane_id });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
@@ -3051,7 +3013,8 @@ fn shifted_handle_press_in_normal_mode_does_not_start_pane_placement() {
         None
     );
     assert_eq!(
-        client.handle_mouse(
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
             build_mouse_event(
                 MouseKind::Press(MouseButton::Left),
                 handle_position,
@@ -3077,7 +3040,8 @@ fn plain_handle_press_in_normal_mode_starts_pane_placement() {
         Some(pane_id),
         vec![active_tab_id],
     );
-    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
+    client.pointer_hover.placement_handle_hover =
+        Some(PlacementHandleHover::TiledHandle { pane_id });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
@@ -3120,7 +3084,8 @@ fn a_tiled_handle_drag_while_locked_opens_pane_placement_and_keeps_the_client_lo
         vec![active_tab_id],
     );
     client.set_lock_mode(LockMode::Locked);
-    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
+    client.pointer_hover.placement_handle_hover =
+        Some(PlacementHandleHover::TiledHandle { pane_id });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
     let handle_position = Point { column: 1, row: 1 };
     assert_eq!(
@@ -3247,7 +3212,7 @@ fn a_handle_drag_drop_the_session_accepts_leaves_the_client_in_its_base_mode() {
             vec![active_tab_id],
         );
         client.set_lock_mode(base_lock_mode);
-        client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+        client.pointer_hover.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
             pane_id: source_pane_id,
         });
         let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
@@ -3506,13 +3471,19 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
     let mut client = build_test_client();
 
     // A peeked strip and a hovered pane. Neither is a gesture.
-    client
-        .handle_mouse_wheel(
+    assert_eq!(
+        client.handle_mouse_wheel(
             build_mouse_wheel(ScrollDirection::Down, tabline_point),
             &mouse_frame,
-        )
-        .expect("a wheel tick decides");
-    client.handle_mouse(build_mouse_motion(screen_point), &mouse_frame, current_time);
+        ),
+        None
+    );
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(screen_point),
+        &mouse_frame,
+        current_time,
+    );
     assert_eq!(
         client
             .build_viewer_chrome(
@@ -3534,7 +3505,8 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
 
     // A border drag held by the left button, and the right button captured to
     // the hovered pane's program.
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_left_mouse_press(divider_point),
         &mouse_frame,
         current_time,
@@ -3545,7 +3517,8 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
         BindingModifierFlags::NONE,
     );
     assert_eq!(
-        client.handle_mouse(
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
             right_press,
             &mouse_frame,
             advance_time_by_seconds(current_time, 1)
@@ -3604,7 +3577,8 @@ fn ending_the_gestures_drops_the_left_gesture_and_the_capture_and_leaves_the_poi
         "the hovered pane stands"
     );
     assert_eq!(
-        client.handle_mouse(
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
             build_left_mouse_drag(Point {
                 column: screen_point.column + 4,
                 ..screen_point
@@ -4145,19 +4119,13 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
     let tabline_point = Point { column: 40, row: 0 };
     let mut client = build_test_client();
 
-    let wheel_decision = client
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Right, tabline_point),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = client.handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Right, tabline_point),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision,
-        WheelDecision {
-            hovered_pane_id: None,
-            mouse_action: None,
-        },
+        wheel_action, None,
         "the strip is this viewer's own; nothing goes to the session"
     );
     assert_eq!(
@@ -4170,12 +4138,13 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
         Some(1)
     );
 
-    client
-        .handle_mouse_wheel(
+    assert_eq!(
+        client.handle_mouse_wheel(
             build_mouse_wheel(ScrollDirection::Left, tabline_point),
             &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+        ),
+        None
+    );
 
     assert_eq!(
         client
@@ -4187,12 +4156,13 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
         Some(0)
     );
 
-    client
-        .handle_mouse_wheel(
+    assert_eq!(
+        client.handle_mouse_wheel(
             build_mouse_wheel(ScrollDirection::Left, tabline_point),
             &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+        ),
+        None
+    );
 
     assert_eq!(
         client
@@ -4207,7 +4177,7 @@ fn a_horizontal_wheel_over_the_tab_strip_steps_it_the_same_way() {
 }
 
 #[test]
-fn the_wheel_decision_answers_nothing_for_an_event_that_is_not_a_wheel_tick() {
+fn a_wheel_answer_is_none_for_an_event_that_is_not_a_wheel_tick() {
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
     let screen_point = get_content_cell(&mouse_frame, 0);
     let mut client = build_test_client();
@@ -4677,7 +4647,7 @@ fn a_handle_drag_dropped_on_a_pane_of_a_hovered_tab_returns_to_the_base_mode_onc
         Some(source_pane_id),
         vec![source_tab_id, destination_tab_id],
     );
-    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+    client.pointer_hover.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
         pane_id: source_pane_id,
     });
     let source_frame = repaint_mouse_frame(&client, &source_frame);
@@ -5659,21 +5629,19 @@ fn a_wheel_over_chrome_scrolls_the_focused_floating_pane() {
         floating_slot_pane_id,
     );
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(
-                ScrollDirection::Up,
-                Point {
-                    column: 40,
-                    row: TEST_VIEWPORT_SIZE.row_count - 1,
-                },
-            ),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(
+            ScrollDirection::Up,
+            Point {
+                column: 40,
+                row: TEST_VIEWPORT_SIZE.row_count - 1,
+            },
+        ),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision.mouse_action,
+        wheel_action,
         Some(MouseAction::Scroll {
             pane_id: floating_slot_pane_id,
             is_scrolling_up: true,
@@ -5709,20 +5677,15 @@ fn a_wheel_over_a_floating_panes_titlebar_border_handle_or_buttons_scrolls_that_
 
     for screen_point in floating_pane_chrome_points {
         assert_eq!(
-            build_test_client()
-                .handle_mouse_wheel(
-                    build_mouse_wheel(ScrollDirection::Up, screen_point),
-                    &mouse_frame
-                )
-                .expect("a wheel tick decides"),
-            WheelDecision {
-                hovered_pane_id: None,
-                mouse_action: Some(MouseAction::Scroll {
-                    pane_id: floating_slot_pane_id,
-                    is_scrolling_up: true,
-                    scroll_line_count: 3,
-                }),
-            },
+            build_test_client().handle_mouse_wheel(
+                build_mouse_wheel(ScrollDirection::Up, screen_point),
+                &mouse_frame
+            ),
+            Some(MouseAction::Scroll {
+                pane_id: floating_slot_pane_id,
+                is_scrolling_up: true,
+                scroll_line_count: 3,
+            }),
             "{screen_point:?}"
         );
     }
@@ -5738,23 +5701,18 @@ fn a_wheel_over_a_tiled_panes_border_scrolls_the_focused_pane() {
         floating_slot_pane_id,
     );
 
-    let wheel_decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(ScrollDirection::Up, Point { column: 0, row: 9 }),
-            &mouse_frame,
-        )
-        .expect("a wheel tick decides");
+    let wheel_action = build_test_client().handle_mouse_wheel(
+        build_mouse_wheel(ScrollDirection::Up, Point { column: 0, row: 9 }),
+        &mouse_frame,
+    );
 
     assert_eq!(
-        wheel_decision,
-        WheelDecision {
-            hovered_pane_id: None,
-            mouse_action: Some(MouseAction::Scroll {
-                pane_id: floating_slot_pane_id,
-                is_scrolling_up: true,
-                scroll_line_count: 3,
-            }),
-        }
+        wheel_action,
+        Some(MouseAction::Scroll {
+            pane_id: floating_slot_pane_id,
+            is_scrolling_up: true,
+            scroll_line_count: 3,
+        })
     );
 }
 
@@ -7343,7 +7301,8 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle_and_its_top_border_sho
     let current_time = Instant::now();
     let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
 
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_mouse_motion(Point { column: 12, row: 5 }),
         &mouse_frame,
         current_time,
@@ -7365,7 +7324,8 @@ fn hovering_a_floating_panes_grab_handle_marks_its_handle_and_its_top_border_sho
         (Point { column: 20, row: 6 }, 1),
         (Point { column: 20, row: 5 }, 2),
     ] {
-        client.handle_mouse(
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
             build_mouse_motion(screen_point),
             &mouse_frame,
             advance_time_by_seconds(current_time, time_offset_seconds),
@@ -7395,7 +7355,12 @@ fn list_placement_handle_hovers(
     let mut painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);
     let mut placement_handle_hovers = Vec::new();
     for mouse_input in mouse_inputs {
-        client.handle_mouse(*mouse_input, &painted_mouse_frame, Instant::now());
+        handle_mouse_and_update_pointer_hover(
+            client,
+            *mouse_input,
+            &painted_mouse_frame,
+            Instant::now(),
+        );
         placement_handle_hovers.push(
             client
                 .build_viewer_chrome(
@@ -7928,7 +7893,8 @@ fn a_sent_floating_pane_move_hides_the_grab_handle_hover_until_the_session_answe
     });
     assert_eq!(find_grab_handle_hover(&mut client, &mouse_frame), None);
     let painted_mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_left_mouse_press(GRAB_HANDLE_POSITION),
         &painted_mouse_frame,
         Instant::now(),
@@ -8740,7 +8706,7 @@ fn a_tiled_placement_handle_press_in_the_move_chooser_opens_pane_placement() {
     client.apply_render_snapshot(&build_render_snapshot_from_mouse_frame(&mouse_frame));
     client.apply_client_action(ClientActionKind::BeginPanePlacement, Some(&mouse_frame));
     assert_eq!(client.pane_move_mode, Some(PaneMoveMode::Choice));
-    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
+    client.pointer_hover.placement_handle_hover = Some(PlacementHandleHover::TiledHandle {
         pane_id: tiled_pane_id,
     });
     let mouse_frame = repaint_mouse_frame(&client, &mouse_frame);
@@ -8879,4 +8845,512 @@ fn build_two_band_layout_tree(upper_pane_id: PaneId, lower_pane_id: PaneId) -> L
             LayoutNode::Pane(lower_pane_id),
         ],
     ))
+}
+
+// ============================================================================
+// The pointer hover: found at the pointer cell for each mouse event and each
+// painted frame
+// ============================================================================
+
+/// `relaid_mouse_frame` moved to the session, the tab and the client of
+/// `mouse_frame`: the same tab, laid out again.
+pub(crate) fn build_mouse_frame_on_tab_of(
+    mut relaid_mouse_frame: MouseFrame,
+    mouse_frame: &MouseFrame,
+) -> MouseFrame {
+    relaid_mouse_frame.session_snapshot.session_id = mouse_frame.session_snapshot.session_id;
+    relaid_mouse_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_id = mouse_frame.session_snapshot.active_tab_snapshot.tab_id;
+    relaid_mouse_frame.session_snapshot.tabs_metadata =
+        mouse_frame.session_snapshot.tabs_metadata.clone();
+    relaid_mouse_frame.client_snapshot.client_id = mouse_frame.client_snapshot.client_id;
+    relaid_mouse_frame.client_snapshot.active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    relaid_mouse_frame
+}
+
+/// A frame of one focused plain pane `pane_id` on a `viewport_size`
+/// viewport: the tabline on row 0, the hint bar on the last row, and the pane
+/// box between them.
+fn build_one_pane_mouse_frame_with_viewport_size(
+    pane_id: PaneId,
+    viewport_size: Size,
+) -> MouseFrame {
+    let mut mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let layout_size = Size {
+        column_count: viewport_size.column_count,
+        row_count: viewport_size.row_count - 2,
+    };
+    mouse_frame.client_snapshot.viewport_size = viewport_size;
+    mouse_frame.committed_regions = CommittedRegions::build_core(viewport_size, 0);
+    let layout_area = &mut mouse_frame.session_snapshot.active_tab_snapshot.layout_area;
+    layout_area.solved_size = layout_size;
+    layout_area.pane_slots = vec![build_visible_pane_slot(
+        pane_id,
+        Rect::from_origin_and_size(Point { column: 0, row: 0 }, layout_size),
+    )];
+    mouse_frame
+}
+
+/// The hovered pane and the placement handle hover `client` paints
+/// `mouse_frame` with.
+fn find_painted_pointer_hover(
+    client: &Client,
+    mouse_frame: &MouseFrame,
+) -> (Option<PaneId>, Option<PlacementHandleHover>) {
+    let viewer_chrome = client.build_viewer_chrome(
+        mouse_frame.client_snapshot.active_tab_id,
+        &mouse_frame.committed_regions,
+    );
+    (
+        viewer_chrome.hovered_pane_id,
+        viewer_chrome.placement_handle_hover,
+    )
+}
+
+/// `client` finds the pointer hover against `mouse_frame` painted with its
+/// chrome, as each paint does before it draws.
+fn update_pointer_hover_for_mouse_frame(client: &mut Client, mouse_frame: &MouseFrame) {
+    let painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);
+    client.update_pointer_hover_for_frame(painted_mouse_frame.build_frame_layout());
+}
+
+#[test]
+fn a_split_under_the_resting_pointer_hovers_the_new_pane_that_a_press_focuses() {
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let one_pane_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(first_pane_id));
+    let split_frame = build_mouse_frame_on_tab_of(
+        build_mouse_frame(
+            &[
+                build_plain_mouse_pane(first_pane_id),
+                build_plain_mouse_pane(second_pane_id),
+            ],
+            Some(first_pane_id),
+        ),
+        &one_pane_frame,
+    );
+    // Row 15 is content of the one pane, and content of the second band after
+    // the split.
+    let resting_cell = Point {
+        column: 10,
+        row: 15,
+    };
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(resting_cell),
+        &one_pane_frame,
+        Instant::now(),
+    );
+    let hover_before_split = find_painted_pointer_hover(&client, &one_pane_frame);
+
+    update_pointer_hover_for_mouse_frame(&mut client, &split_frame);
+
+    assert_eq!(hover_before_split, (Some(first_pane_id), None));
+    assert_eq!(
+        find_painted_pointer_hover(&client, &split_frame),
+        (Some(second_pane_id), None)
+    );
+    assert_eq!(
+        client.handle_mouse(
+            build_left_mouse_press(resting_cell),
+            &split_frame,
+            Instant::now()
+        ),
+        vec![build_focus_pane_action(
+            client.get_client_id(),
+            second_pane_id
+        )]
+    );
+}
+
+#[test]
+fn closing_the_pane_under_the_resting_pointer_hovers_the_neighbor_that_grows_under_it() {
+    let upper_pane_id = PaneId::new();
+    let lower_pane_id = PaneId::new();
+    let two_pane_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(upper_pane_id),
+    );
+    let one_pane_frame = build_mouse_frame_on_tab_of(
+        build_one_pane_mouse_frame(build_plain_mouse_pane(upper_pane_id)),
+        &two_pane_frame,
+    );
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(get_content_cell(&two_pane_frame, 1)),
+        &two_pane_frame,
+        Instant::now(),
+    );
+    let hover_before_close = find_painted_pointer_hover(&client, &two_pane_frame);
+
+    update_pointer_hover_for_mouse_frame(&mut client, &one_pane_frame);
+
+    assert_eq!(hover_before_close, (Some(lower_pane_id), None));
+    assert_eq!(
+        find_painted_pointer_hover(&client, &one_pane_frame),
+        (Some(upper_pane_id), None)
+    );
+}
+
+#[test]
+fn a_terminal_shrink_that_puts_chrome_or_no_cell_under_the_resting_pointer_hovers_no_pane() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let resting_cell = Point {
+        column: 70,
+        row: 15,
+    };
+    // An 80x16 viewport puts its hint bar on row 15. A 60x24 viewport has no
+    // column 70.
+    for viewport_size in [
+        Size {
+            column_count: 80,
+            row_count: 16,
+        },
+        Size {
+            column_count: 60,
+            row_count: 24,
+        },
+    ] {
+        let shrunk_mouse_frame = build_mouse_frame_on_tab_of(
+            build_one_pane_mouse_frame_with_viewport_size(pane_id, viewport_size),
+            &mouse_frame,
+        );
+        let mut client = build_test_client();
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
+            build_mouse_motion(resting_cell),
+            &mouse_frame,
+            Instant::now(),
+        );
+        let hover_before_shrink = find_painted_pointer_hover(&client, &mouse_frame);
+
+        update_pointer_hover_for_mouse_frame(&mut client, &shrunk_mouse_frame);
+
+        assert_eq!(
+            hover_before_shrink,
+            (Some(pane_id), None),
+            "{viewport_size:?}"
+        );
+        assert_eq!(
+            find_painted_pointer_hover(&client, &shrunk_mouse_frame),
+            (None, None),
+            "{viewport_size:?}"
+        );
+    }
+}
+
+#[test]
+fn a_frame_before_the_first_mouse_event_hovers_no_pane() {
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(PaneId::new()));
+    let mut client = build_test_client();
+
+    update_pointer_hover_for_mouse_frame(&mut client, &mouse_frame);
+
+    assert_eq!(
+        find_painted_pointer_hover(&client, &mouse_frame),
+        (None, None)
+    );
+}
+
+#[test]
+fn a_floating_pane_that_opens_under_the_resting_pointer_takes_the_hover() {
+    let tiled_pane_id = PaneId::new();
+    let floating_slot_pane_id = PaneId::new();
+    let tiled_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(tiled_pane_id));
+    let floating_frame = build_mouse_frame_on_tab_of(
+        build_floating_mouse_frame(
+            build_plain_mouse_pane(tiled_pane_id),
+            build_plain_mouse_pane(floating_slot_pane_id),
+            false,
+            tiled_pane_id,
+        ),
+        &tiled_frame,
+    );
+    // The floating pane's box takes screen columns 10 to 49 and rows 5 to 16,
+    // with content from row 7.
+    let resting_cell = Point {
+        column: 20,
+        row: 10,
+    };
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(resting_cell),
+        &tiled_frame,
+        Instant::now(),
+    );
+    let hover_before_open = find_painted_pointer_hover(&client, &tiled_frame);
+
+    update_pointer_hover_for_mouse_frame(&mut client, &floating_frame);
+
+    assert_eq!(hover_before_open, (Some(tiled_pane_id), None));
+    assert_eq!(
+        find_painted_pointer_hover(&client, &floating_frame),
+        (Some(floating_slot_pane_id), None)
+    );
+}
+
+#[test]
+fn a_tab_switch_under_the_resting_pointer_hovers_the_pane_of_the_new_tab() {
+    let first_tab_pane_id = PaneId::new();
+    let second_tab_pane_id = PaneId::new();
+    let first_tab_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(first_tab_pane_id));
+    let second_tab_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(second_tab_pane_id));
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(get_content_cell(&first_tab_frame, 0)),
+        &first_tab_frame,
+        Instant::now(),
+    );
+
+    update_pointer_hover_for_mouse_frame(&mut client, &second_tab_frame);
+
+    assert_eq!(
+        find_painted_pointer_hover(&client, &second_tab_frame),
+        (Some(second_tab_pane_id), None)
+    );
+}
+
+#[test]
+fn a_frame_keeps_a_shown_tiled_handle_only_while_the_pointer_cell_is_on_that_panes_top_border() {
+    let upper_pane_id = PaneId::new();
+    let lower_pane_id = PaneId::new();
+    let one_pane_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(upper_pane_id));
+    let upper_first_frame = build_mouse_frame_on_tab_of(
+        build_mouse_frame(
+            &[
+                build_plain_mouse_pane(upper_pane_id),
+                build_plain_mouse_pane(lower_pane_id),
+            ],
+            Some(upper_pane_id),
+        ),
+        &one_pane_frame,
+    );
+    let lower_first_frame = build_mouse_frame_on_tab_of(
+        build_mouse_frame(
+            &[
+                build_plain_mouse_pane(lower_pane_id),
+                build_plain_mouse_pane(upper_pane_id),
+            ],
+            Some(upper_pane_id),
+        ),
+        &one_pane_frame,
+    );
+    // `(2, 1)` is a handle cell of the pane whose box starts at screen `(0, 1)`.
+    let handle_cell = Point { column: 2, row: 1 };
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(handle_cell),
+        &one_pane_frame,
+        Instant::now(),
+    );
+    let mut pointer_hovers = vec![find_painted_pointer_hover(&client, &one_pane_frame)];
+
+    // The upper pane keeps its top border under the pointer, then a move puts
+    // the lower pane's top border there, then the upper pane's again.
+    for mouse_frame in [&upper_first_frame, &lower_first_frame, &upper_first_frame] {
+        update_pointer_hover_for_mouse_frame(&mut client, mouse_frame);
+        pointer_hovers.push(find_painted_pointer_hover(&client, mouse_frame));
+    }
+
+    let upper_handle_hover = (
+        Some(upper_pane_id),
+        Some(PlacementHandleHover::TiledHandle {
+            pane_id: upper_pane_id,
+        }),
+    );
+    assert_eq!(
+        pointer_hovers,
+        [
+            upper_handle_hover,
+            upper_handle_hover,
+            (Some(lower_pane_id), None),
+            (Some(upper_pane_id), None),
+        ]
+    );
+}
+
+#[test]
+fn a_frame_with_the_same_layout_keeps_the_hover_and_the_handles() {
+    let floating_slot_pane_id = PaneId::new();
+    let tiled_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_slot_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    // `(60, 1)` is the tiled pane's top border right of the floating pane, and
+    // `(12, 5)` is the floating pane's grab handle.
+    for (resting_cell, expected_pointer_hover) in [
+        (
+            Point { column: 60, row: 1 },
+            (
+                Some(tiled_pane_id),
+                Some(PlacementHandleHover::TiledTopBorder {
+                    pane_id: tiled_pane_id,
+                }),
+            ),
+        ),
+        (
+            Point { column: 12, row: 5 },
+            (
+                Some(floating_slot_pane_id),
+                Some(PlacementHandleHover::FloatingHandle {
+                    floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+                    is_pinned: false,
+                }),
+            ),
+        ),
+    ] {
+        let mut client = build_test_client();
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
+            build_mouse_motion(resting_cell),
+            &mouse_frame,
+            Instant::now(),
+        );
+        let hover_after_motion = find_painted_pointer_hover(&client, &mouse_frame);
+
+        update_pointer_hover_for_mouse_frame(&mut client, &mouse_frame);
+
+        assert_eq!(
+            hover_after_motion, expected_pointer_hover,
+            "{resting_cell:?}"
+        );
+        assert_eq!(
+            find_painted_pointer_hover(&client, &mouse_frame),
+            expected_pointer_hover,
+            "{resting_cell:?}"
+        );
+    }
+}
+
+#[test]
+fn a_wheel_tick_on_a_top_border_hovers_that_pane_and_shows_no_handle() {
+    let upper_pane_id = PaneId::new();
+    let lower_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(upper_pane_id),
+    );
+    // The lower pane's top border is screen row 12.
+    let top_border_cell = Point {
+        column: 10,
+        row: 12,
+    };
+    let mut client = build_test_client();
+    let mut pointer_hovers = Vec::new();
+
+    for mouse_input in [
+        build_mouse_motion(top_border_cell),
+        build_mouse_wheel(ScrollDirection::Up, top_border_cell),
+    ] {
+        handle_mouse_and_update_pointer_hover(
+            &mut client,
+            mouse_input,
+            &mouse_frame,
+            Instant::now(),
+        );
+        pointer_hovers.push(find_painted_pointer_hover(&client, &mouse_frame));
+    }
+
+    assert_eq!(
+        pointer_hovers,
+        [
+            (
+                Some(lower_pane_id),
+                Some(PlacementHandleHover::TiledTopBorder {
+                    pane_id: lower_pane_id,
+                }),
+            ),
+            (Some(lower_pane_id), None),
+        ]
+    );
+}
+
+#[test]
+fn the_hover_follows_a_held_left_drag_into_another_pane() {
+    let upper_pane_id = PaneId::new();
+    let lower_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(upper_pane_id),
+            build_plain_mouse_pane(lower_pane_id),
+        ],
+        Some(upper_pane_id),
+    );
+    let current_time = Instant::now();
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_left_mouse_press(get_content_cell(&mouse_frame, 0)),
+        &mouse_frame,
+        current_time,
+    );
+    let hover_after_press = find_painted_pointer_hover(&client, &mouse_frame);
+
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_left_mouse_drag(get_content_cell(&mouse_frame, 1)),
+        &mouse_frame,
+        current_time,
+    );
+
+    assert_eq!(hover_after_press, (Some(upper_pane_id), None));
+    assert_eq!(
+        find_painted_pointer_hover(&client, &mouse_frame),
+        (Some(lower_pane_id), None)
+    );
+}
+
+#[test]
+fn a_grab_handle_drag_keeps_the_handle_hover_on_the_moving_handle() {
+    let floating_slot_pane_id = PaneId::new();
+    let tiled_pane_id = PaneId::new();
+    let mouse_frame = build_floating_mouse_frame(
+        build_plain_mouse_pane(tiled_pane_id),
+        build_plain_mouse_pane(floating_slot_pane_id),
+        false,
+        tiled_pane_id,
+    );
+    let grab_handle_hover = (
+        Some(floating_slot_pane_id),
+        Some(PlacementHandleHover::FloatingHandle {
+            floating_pane_id: build_floating_pane_id(floating_slot_pane_id),
+            is_pinned: false,
+        }),
+    );
+    let current_time = Instant::now();
+    let mut client = build_test_client();
+    let mut pointer_hovers = Vec::new();
+
+    // The grab handle takes `(12, 5)`. The drag moves the pane 5 columns
+    // right and 2 rows down, and its handle with it.
+    for mouse_input in [
+        build_mouse_motion(Point { column: 12, row: 5 }),
+        build_left_mouse_press(Point { column: 12, row: 5 }),
+        build_left_mouse_drag(Point { column: 17, row: 7 }),
+    ] {
+        handle_mouse_and_update_pointer_hover(&mut client, mouse_input, &mouse_frame, current_time);
+        pointer_hovers.push(find_painted_pointer_hover(&client, &mouse_frame));
+    }
+
+    assert_eq!(
+        pointer_hovers,
+        [grab_handle_hover, grab_handle_hover, grab_handle_hover]
+    );
 }

@@ -61,7 +61,8 @@ pub(crate) fn build_viewer(client_id: ClientId) -> ViewerClient {
 /// One mouse event at `event_time`, the way the running binary delivers it:
 /// the viewer applies the frame the session composes for it and drops the
 /// gestures that frame ended, decides what the event means against that
-/// frame, and only what it decided reaches the session.
+/// frame, finds the pointer hover at the event's cell, and only what it
+/// decided reaches the session.
 pub(crate) fn dispatch_mouse_input_at_time(
     server: &mut Server,
     viewer: &mut ViewerClient,
@@ -75,6 +76,7 @@ pub(crate) fn dispatch_mouse_input_at_time(
     let mouse_frame = build_mouse_frame(render_snapshot, viewer);
     viewer.drop_gestures_the_frame_ended(&mouse_frame);
     let mouse_actions = viewer.handle_mouse(mouse_input, &mouse_frame, event_time);
+    viewer.update_pointer_hover(mouse_input, &mouse_frame);
     apply_mouse_actions(server, viewer, &mouse_frame, mouse_actions);
 }
 

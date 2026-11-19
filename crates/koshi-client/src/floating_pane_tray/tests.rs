@@ -35,8 +35,8 @@ use crate::input::KeyOutcome;
 use crate::mouse::tests::{
     add_floating_mouse_pane, build_left_mouse_press, build_mouse_event, build_mouse_frame,
     build_plain_mouse_pane, build_render_snapshot_from_mouse_frame,
+    handle_mouse_and_update_pointer_hover,
 };
-use crate::mouse::WheelDecision;
 use crate::tests::{build_core_bound_action, build_core_fired_action, build_input_read_stamp};
 use crate::PaneMoveMode;
 
@@ -662,24 +662,23 @@ fn the_pointer_over_a_tile_hovers_it_and_no_pane() {
     let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true, false]);
     let tiled_pane_id = mouse_frame.mouse_panes[0].pane_id;
     let mut client = build_client_with_open_tray(&mouse_frame);
-    client.hovered_pane_id = Some(tiled_pane_id);
+    client.pointer_hover.hovered_pane_id = Some(tiled_pane_id);
+    let tile_motion = build_mouse_event(
+        MouseKind::Motion,
+        Point { column: 20, row: 5 },
+        BindingModifierFlags::NONE,
+    );
 
     assert_eq!(
-        client.handle_floating_pane_tray_mouse(
-            build_mouse_event(
-                MouseKind::Motion,
-                Point { column: 20, row: 5 },
-                BindingModifierFlags::NONE
-            ),
-            &mouse_frame
-        ),
+        client.handle_floating_pane_tray_mouse(tile_motion, &mouse_frame),
         Some(Vec::new())
     );
     assert_eq!(
         client.floating_pane_tray,
         build_open_floating_pane_tray(0, Some(1))
     );
-    assert_eq!(client.hovered_pane_id, None);
+    client.update_pointer_hover(tile_motion, &mouse_frame);
+    assert_eq!(client.pointer_hover.hovered_pane_id, None);
 
     assert_eq!(
         client.handle_floating_pane_tray_mouse(
@@ -935,12 +934,13 @@ fn a_tray_closed_before_its_frame_repaints_leaves_its_cells_to_the_panes_under_t
     );
     let event_time = Instant::now();
 
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_mouse_event(MouseKind::Motion, tile_cell, BindingModifierFlags::NONE),
         &mouse_frame,
         event_time,
     );
-    assert_eq!(client.hovered_pane_id, Some(tiled_pane_id));
+    assert_eq!(client.pointer_hover.hovered_pane_id, Some(tiled_pane_id));
     assert_eq!(
         client.handle_mouse_wheel(
             build_mouse_event(
@@ -950,13 +950,10 @@ fn a_tray_closed_before_its_frame_repaints_leaves_its_cells_to_the_panes_under_t
             ),
             &mouse_frame
         ),
-        Some(WheelDecision {
-            hovered_pane_id: Some(tiled_pane_id),
-            mouse_action: Some(MouseAction::Scroll {
-                pane_id: tiled_pane_id,
-                is_scrolling_up: true,
-                scroll_line_count: usize::from(client.client_config.mouse.scroll_line_count),
-            }),
+        Some(MouseAction::Scroll {
+            pane_id: tiled_pane_id,
+            is_scrolling_up: true,
+            scroll_line_count: usize::from(client.client_config.mouse.scroll_line_count),
         })
     );
     assert_eq!(
@@ -1085,16 +1082,14 @@ fn a_tray_opened_before_its_frame_repaints_leaves_the_cells_beside_it_to_the_pan
 
     assert_eq!(
         client.handle_mouse_wheel(wheel_up, &mouse_frame),
-        Some(WheelDecision {
-            hovered_pane_id: Some(top_pane_id),
-            mouse_action: Some(MouseAction::Scroll {
-                pane_id: top_pane_id,
-                is_scrolling_up: true,
-                scroll_line_count: usize::from(client.client_config.mouse.scroll_line_count),
-            }),
+        Some(MouseAction::Scroll {
+            pane_id: top_pane_id,
+            is_scrolling_up: true,
+            scroll_line_count: usize::from(client.client_config.mouse.scroll_line_count),
         })
     );
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_mouse_event(
             MouseKind::Motion,
             beside_tray_cell,
@@ -1103,7 +1098,7 @@ fn a_tray_opened_before_its_frame_repaints_leaves_the_cells_beside_it_to_the_pan
         &mouse_frame,
         Instant::now(),
     );
-    assert_eq!(client.hovered_pane_id, Some(top_pane_id));
+    assert_eq!(client.pointer_hover.hovered_pane_id, Some(top_pane_id));
 }
 
 #[test]

@@ -81,11 +81,11 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, CursorSnapshot, DrawnNotifications, FloatingPane,
-    FloatingPaneMoveDraft, FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot,
-    LayoutAreaSnapshot, MousePane, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot,
-    PlacementHandleHover, PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata,
-    SessionSnapshot, TabMetadata, TabSnapshot,
+    ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
+    FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot, LayoutAreaSnapshot,
+    MousePane, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PlacementHandleHover,
+    PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
+    TabMetadata, TabSnapshot,
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 use koshi_terminal::graphics::{
@@ -100,7 +100,11 @@ use super::*;
 use crate::attach::paint::build_render_snapshot;
 use crate::floating_pane_tray::tests::{build_client_with_open_tray, build_tray_mouse_frame};
 use crate::input::tests::{build_client_viewing, build_keymap_for_modes};
-use crate::mouse::tests::build_plain_mouse_pane;
+use crate::mouse::tests::{
+    build_mouse_frame_on_tab_of, build_mouse_motion, build_plain_mouse_pane,
+    build_render_snapshot_from_mouse_frame, get_content_cell,
+    handle_mouse_and_update_pointer_hover,
+};
 use crate::tests::{
     build_core_bound_action, build_core_fired_action, build_input_read_stamp,
     build_one_pane_floating_pane_slot, build_test_client, create_session_with_attached_client,
@@ -3124,106 +3128,10 @@ fn the_way_back_to_another_users_session_names_its_owner() {
 /// a one-cell border ring, so the second band's top row is the divider the two
 /// panes share.
 fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
-    let tab_id = TabId::new();
-    let band_row_count =
-        (TEST_VIEWPORT_SIZE.row_count - 2) / u16::try_from(mouse_panes.len()).expect("few panes");
-    let pane_slots: Vec<PaneSlot> = mouse_panes
-        .iter()
-        .enumerate()
-        .map(|(pane_index, mouse_pane)| {
-            let top_row = band_row_count * u16::try_from(pane_index).expect("few panes");
-            PaneSlot {
-                pane_id: mouse_pane.pane_id,
-                outer_rect: Rect::from_origin_and_size(
-                    Point {
-                        column: 0,
-                        row: top_row,
-                    },
-                    Size {
-                        column_count: TEST_VIEWPORT_SIZE.column_count,
-                        row_count: band_row_count,
-                    },
-                ),
-                content_rect: Some(Rect::from_origin_and_size(
-                    Point {
-                        column: 1,
-                        row: top_row + 1,
-                    },
-                    Size {
-                        column_count: TEST_VIEWPORT_SIZE.column_count - 2,
-                        row_count: band_row_count - 2,
-                    },
-                )),
-                is_visible: true,
-                is_suppressed: false,
-            }
-        })
-        .collect();
-    MouseFrame {
-        session_snapshot: SessionSnapshot {
-            session_id: SessionId::new(),
-            session_name: String::from("fixture"),
-            active_tab_snapshot: TabSnapshot {
-                tab_id,
-                tab_name: String::from("one"),
-                layout_area: LayoutAreaSnapshot {
-                    solved_size: Size {
-                        column_count: TEST_VIEWPORT_SIZE.column_count,
-                        row_count: TEST_VIEWPORT_SIZE.row_count - 2,
-                    },
-                    pane_slots,
-                    stack_headers: Vec::new(),
-                    layout_mode: LayoutMode::Tiled,
-                    is_every_pane_suppressed: false,
-                    gap_cell_count: 0,
-                },
-            },
-            tabs_metadata: vec![TabMetadata {
-                tab_id,
-                tab_name: String::from("one"),
-                tab_index: 0,
-                is_active: true,
-            }],
-            floating_pane_slots: Vec::new(),
-            floating_panes: Vec::new(),
-            peers: Vec::new(),
-        },
-        mouse_panes: mouse_panes.to_vec(),
-        client_snapshot: ClientSnapshot {
-            client_id: ClientId::new(),
-            color_index: 0,
-            viewport_size: TEST_VIEWPORT_SIZE,
-            active_tab_id: tab_id,
-            focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
-            active_tab_focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
-            lock_mode: LockMode::Normal,
-            last_settled_lock_command_id: None,
-            last_applied_floating_pane_move_command_id: None,
-            last_applied_placement_command_id: None,
-            is_mouse_selection_enabled: false,
-            typed_pane_id: None,
-            input_pane_moved_by_others_count: 0,
-            dropped_input_request_count: 0,
-        },
-        committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
-        viewer_chrome: koshi_renderer::snapshot::ViewerChrome::default(),
-        drawn_notifications: DrawnNotifications::default(),
-    }
-}
-
-/// A cell inside the content of the `pane_index`-th pane in a fixture frame.
-fn get_content_cell(mouse_layout_frame: &MouseFrame, pane_index: usize) -> Point {
-    let content_rect = mouse_layout_frame
-        .session_snapshot
-        .active_tab_snapshot
-        .layout_area
-        .pane_slots[pane_index]
-        .content_rect
-        .expect("a visible pane");
-    Point {
-        column: content_rect.origin.column + 1,
-        row: content_rect.origin.row + 2,
-    }
+    crate::mouse::tests::build_mouse_frame(
+        mouse_panes,
+        mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
+    )
 }
 
 /// The row the two bands of a two-pane fixture frame share: the second pane's
@@ -4226,7 +4134,8 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
     let pane_id = PaneId::new();
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    client.placement_handle_hover = Some(PlacementHandleHover::TiledHandle { pane_id });
+    client.pointer_hover.placement_handle_hover =
+        Some(PlacementHandleHover::TiledHandle { pane_id });
     let painted_mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let active_tab_id = painted_mouse_frame.client_snapshot.active_tab_id;
     let mouse_frame = MouseFrame {
@@ -7519,7 +7428,8 @@ fn mouse_pickup_previews_and_focuses_the_dragged_pane() {
         Some(initial_focused_pane_id),
         vec![active_tab_id],
     );
-    client.handle_mouse(
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
         build_mouse_motion(placement_handle_position),
         &mouse_frame,
         Instant::now(),
@@ -8509,15 +8419,6 @@ fn get_sequence_opener(client: &Client) -> KeyChord {
         .list_chords()[0]
 }
 
-/// The pointer moved to `screen_point` with no button held.
-fn build_mouse_motion(screen_point: Point) -> MouseInput {
-    MouseInput {
-        mouse_kind: MouseKind::Motion,
-        position: screen_point,
-        modifier_flags: BindingModifierFlags::NONE,
-    }
-}
-
 #[test]
 fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
     // The first draw leaves the viewer in normal mode. The second is the frame
@@ -8717,48 +8618,29 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
     // viewer's own, and the frame drawn before the move does not carry it.
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
-    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
-    let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let mouse_frame = build_mouse_frame(&[
-        build_plain_mouse_pane(first_pane_id),
+        build_plain_mouse_pane(PaneId::new()),
         build_plain_mouse_pane(second_pane_id),
     ]);
-    let mut pending_mouse_actions = Vec::new();
-
-    screen
-        .draw_painted_frame(&mut client, Box::new(painted_frame))
+    let painted_mouse_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&mouse_frame),
+        )
         .expect("paint");
-    let painted_render_snapshot = screen.last_snapshot.clone().expect("the frame painted");
-    let hovered_pane_id_before = ViewerPaint::from_client(
-        &client,
-        active_tab_id,
-        &painted_render_snapshot,
-        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
-    )
-    .chrome
-    .hovered_pane_id;
+    let active_tab_id = painted_mouse_frame.client_snapshot.active_tab_id;
+    let hovered_pane_id_before = painted_mouse_frame.viewer_chrome.hovered_pane_id;
 
-    handle_mouse_event(
+    handle_mouse_and_update_pointer_hover(
         &mut client,
-        &mouse_frame,
-        build_mouse_motion(get_content_cell(&mouse_frame, 1)),
+        build_mouse_motion(get_content_cell(&painted_mouse_frame, 1)),
+        &painted_mouse_frame,
         Instant::now(),
-        &mut pending_mouse_actions,
     );
-    let hovered_pane_id_after = ViewerPaint::from_client(
-        &client,
-        active_tab_id,
-        &painted_render_snapshot,
-        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
-    )
-    .chrome
-    .hovered_pane_id;
     screen.refresh(&mut client, Some(active_tab_id));
 
     assert_eq!(hovered_pane_id_before, None);
-    assert_eq!(hovered_pane_id_after, Some(second_pane_id));
     assert_eq!(
         screen
             .shown_viewer_paint
@@ -8773,13 +8655,14 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
 fn a_pointer_moving_along_a_top_border_repaints_only_when_the_handle_changes() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
-    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
     let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(PaneId::new())]);
-    let mut pending_mouse_actions = Vec::new();
-    screen
-        .draw_painted_frame(&mut client, Box::new(painted_frame))
+    let painted_mouse_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&mouse_frame),
+        )
         .expect("paint");
+    let active_tab_id = painted_mouse_frame.client_snapshot.active_tab_id;
 
     // The pane's top border is screen row 1, and its handle cells are columns
     // 1 to 3: the title, the title again, the handle, the handle again, and
@@ -8787,15 +8670,14 @@ fn a_pointer_moving_along_a_top_border_repaints_only_when_the_handle_changes() {
     let is_repainted_by_motion: Vec<bool> = [10, 20, 2, 3, 30]
         .into_iter()
         .map(|screen_column| {
-            handle_mouse_event(
+            handle_mouse_and_update_pointer_hover(
                 &mut client,
-                &mouse_frame,
                 build_mouse_motion(Point {
                     column: screen_column,
                     row: 1,
                 }),
+                &painted_mouse_frame,
                 Instant::now(),
-                &mut pending_mouse_actions,
             );
             screen.refresh(&mut client, Some(active_tab_id)).is_some()
         })
@@ -8808,18 +8690,19 @@ fn a_pointer_moving_along_a_top_border_repaints_only_when_the_handle_changes() {
 fn each_painted_mouse_frame_carries_the_viewer_chrome_it_was_painted_with() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
-    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
     let second_pane_id = PaneId::new();
     let mouse_frame = build_mouse_frame(&[
         build_plain_mouse_pane(PaneId::new()),
         build_plain_mouse_pane(second_pane_id),
     ]);
-    let mut pending_mouse_actions = Vec::new();
 
     let drawn_mouse_frame = screen
-        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&mouse_frame),
+        )
         .expect("paint");
+    let active_tab_id = drawn_mouse_frame.client_snapshot.active_tab_id;
     assert_eq!(
         Some(drawn_mouse_frame.viewer_chrome),
         screen
@@ -8832,12 +8715,11 @@ fn each_painted_mouse_frame_carries_the_viewer_chrome_it_was_painted_with() {
         Some(LockMode::Normal)
     );
 
-    handle_mouse_event(
+    handle_mouse_and_update_pointer_hover(
         &mut client,
-        &mouse_frame,
-        build_mouse_motion(get_content_cell(&mouse_frame, 1)),
+        build_mouse_motion(get_content_cell(&drawn_mouse_frame, 1)),
+        &drawn_mouse_frame,
         Instant::now(),
-        &mut pending_mouse_actions,
     );
     let refreshed_mouse_frame = screen
         .refresh(&mut client, Some(active_tab_id))
@@ -8853,6 +8735,299 @@ fn each_painted_mouse_frame_carries_the_viewer_chrome_it_was_painted_with() {
     assert_eq!(
         refreshed_mouse_frame.viewer_chrome.hovered_pane_id,
         Some(second_pane_id)
+    );
+}
+
+#[test]
+fn a_frame_that_splits_the_pane_under_the_resting_pointer_draws_the_new_pane_hovered() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let one_pane_frame = build_mouse_frame(&[build_plain_mouse_pane(first_pane_id)]);
+    let split_frame = build_mouse_frame_on_tab_of(
+        build_mouse_frame(&[
+            build_plain_mouse_pane(first_pane_id),
+            build_plain_mouse_pane(second_pane_id),
+        ]),
+        &one_pane_frame,
+    );
+    let active_tab_id = one_pane_frame.client_snapshot.active_tab_id;
+    // Row 15 is content of the one pane, and content of the second band after
+    // the split.
+    let resting_cell = Point {
+        column: 10,
+        row: 15,
+    };
+    let painted_one_pane_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&one_pane_frame),
+        )
+        .expect("paint");
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(resting_cell),
+        &painted_one_pane_frame,
+        Instant::now(),
+    );
+    let hovered_pane_id_before_split = screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the hover repaints")
+        .viewer_chrome
+        .hovered_pane_id;
+
+    let painted_split_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&split_frame),
+        )
+        .expect("paint");
+
+    assert_eq!(hovered_pane_id_before_split, Some(first_pane_id));
+    assert_eq!(
+        painted_split_frame.viewer_chrome.hovered_pane_id,
+        Some(second_pane_id)
+    );
+    assert_eq!(
+        resolve_hit_region(painted_split_frame.build_frame_layout(), resting_cell),
+        HitRegion::PaneContent {
+            pane_id: second_pane_id
+        },
+        "a press at the pointer cell lands on the tinted pane"
+    );
+}
+
+#[test]
+fn a_frame_that_closes_the_pane_under_the_resting_pointer_draws_its_grown_neighbor_hovered() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let upper_pane_id = PaneId::new();
+    let two_pane_frame = build_mouse_frame(&[
+        build_plain_mouse_pane(upper_pane_id),
+        build_plain_mouse_pane(PaneId::new()),
+    ]);
+    let one_pane_frame = build_mouse_frame_on_tab_of(
+        build_mouse_frame(&[build_plain_mouse_pane(upper_pane_id)]),
+        &two_pane_frame,
+    );
+    let painted_two_pane_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&two_pane_frame),
+        )
+        .expect("paint");
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(get_content_cell(&painted_two_pane_frame, 1)),
+        &painted_two_pane_frame,
+        Instant::now(),
+    );
+
+    let painted_one_pane_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&one_pane_frame),
+        )
+        .expect("paint");
+
+    assert_eq!(
+        painted_one_pane_frame.viewer_chrome.hovered_pane_id,
+        Some(upper_pane_id)
+    );
+}
+
+#[test]
+fn a_tray_that_a_key_opens_over_the_resting_pointer_repaints_with_no_pane_hovered() {
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true, false]);
+    let tiled_pane_id = mouse_frame.mouse_panes[0].pane_id;
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    // `(20, 5)` is content of the tiled pane, and a tile of the open tray.
+    let tray_tile_cell = Point { column: 20, row: 5 };
+    let painted_mouse_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&mouse_frame),
+        )
+        .expect("paint");
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(tray_tile_cell),
+        &painted_mouse_frame,
+        Instant::now(),
+    );
+    let hovered_pane_id_before_tray = screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the hover repaints")
+        .viewer_chrome
+        .hovered_pane_id;
+
+    client.apply_client_action(
+        ClientActionKind::ToggleFloatingPaneTray,
+        Some(&painted_mouse_frame),
+    );
+    let tray_mouse_frame = screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the open tray repaints");
+
+    assert_eq!(hovered_pane_id_before_tray, Some(tiled_pane_id));
+    assert_eq!(tray_mouse_frame.viewer_chrome.hovered_pane_id, None);
+}
+
+#[test]
+fn a_rejected_paint_puts_back_the_hover_its_frame_found() {
+    let mut client = build_test_client();
+    let mut screen = Screen::from_backend_and_viewport_size(
+        FailingBackend::from_terminal_size(TEST_VIEWPORT_SIZE),
+        TEST_VIEWPORT_SIZE,
+    );
+    let first_pane_id = PaneId::new();
+    let one_pane_frame = build_mouse_frame(&[build_plain_mouse_pane(first_pane_id)]);
+    let split_frame = build_mouse_frame_on_tab_of(
+        build_mouse_frame(&[
+            build_plain_mouse_pane(first_pane_id),
+            build_plain_mouse_pane(PaneId::new()),
+        ]),
+        &one_pane_frame,
+    );
+    let active_tab_id = one_pane_frame.client_snapshot.active_tab_id;
+    let resting_cell = Point {
+        column: 10,
+        row: 15,
+    };
+    let painted_one_pane_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&one_pane_frame),
+        )
+        .expect("paint");
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(resting_cell),
+        &painted_one_pane_frame,
+        Instant::now(),
+    );
+    screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the hover repaints");
+    screen.paint_driver.backend.should_fail_draw = true;
+
+    assert_eq!(
+        screen.draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&split_frame)
+        ),
+        None
+    );
+    assert_eq!(
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
+        Some(first_pane_id)
+    );
+}
+
+#[test]
+fn a_rejected_refresh_paint_puts_back_the_hover_it_replaced() {
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true, false]);
+    let tiled_pane_id = mouse_frame.mouse_panes[0].pane_id;
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    let mut screen = Screen::from_backend_and_viewport_size(
+        FailingBackend::from_terminal_size(TEST_VIEWPORT_SIZE),
+        TEST_VIEWPORT_SIZE,
+    );
+    // `(20, 5)` is content of the tiled pane, and a tile of the open tray.
+    let tray_tile_cell = Point { column: 20, row: 5 };
+    let painted_mouse_frame = screen
+        .draw_snapshot(
+            &mut client,
+            build_render_snapshot_from_mouse_frame(&mouse_frame),
+        )
+        .expect("paint");
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(tray_tile_cell),
+        &painted_mouse_frame,
+        Instant::now(),
+    );
+    screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the hover repaints");
+    client.apply_client_action(
+        ClientActionKind::ToggleFloatingPaneTray,
+        Some(&painted_mouse_frame),
+    );
+    screen.paint_driver.backend.should_fail_draw = true;
+
+    assert_eq!(screen.refresh(&mut client, Some(active_tab_id)), None);
+    assert_eq!(
+        client
+            .build_viewer_chrome(
+                active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
+        Some(tiled_pane_id)
+    );
+
+    screen.paint_driver.backend.should_fail_draw = false;
+    assert_eq!(
+        screen
+            .refresh(&mut client, Some(active_tab_id))
+            .expect("the open tray repaints")
+            .viewer_chrome
+            .hovered_pane_id,
+        None
+    );
+}
+
+#[test]
+fn the_attach_loop_finds_the_hover_after_each_mouse_event_it_answers() {
+    let upper_pane_id = PaneId::new();
+    let lower_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(&[
+        build_plain_mouse_pane(upper_pane_id),
+        build_plain_mouse_pane(lower_pane_id),
+    ]);
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+
+    assert_eq!(
+        handle_terminal_input_event(
+            &mut client,
+            &mut uplink,
+            &mut cell_size_query,
+            Some(&mouse_frame),
+            TerminalInput {
+                runtime_events: vec![RuntimeEvent::MouseInput {
+                    client_id,
+                    mouse_input: build_mouse_motion(get_content_cell(&mouse_frame, 1)),
+                }],
+                read_stamp: build_input_read_stamp(Instant::now()),
+            },
+            &mut Vec::new(),
+            &mut Vec::new(),
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(
+        client
+            .build_viewer_chrome(
+                mouse_frame.client_snapshot.active_tab_id,
+                &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0)
+            )
+            .hovered_pane_id,
+        Some(lower_pane_id)
     );
 }
 
