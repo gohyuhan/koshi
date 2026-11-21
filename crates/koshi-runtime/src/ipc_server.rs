@@ -1628,6 +1628,13 @@ fn serve_connection(
 /// after a failed read: it left before the session did. The thread counts
 /// itself on the notice for as long as it runs.
 ///
+/// Until the client sends `AttachAnswerReceived`, the reading loop takes only
+/// that request, `Ping` and `Leaving`: any other request ends the loop, and
+/// the client is detached. Its subscriber takes nothing until then
+/// ([`Server::handle_attach_answer_received`](crate::server::Server::handle_attach_answer_received)).
+/// Example: a client that sends `Keyboard` right after the `Attached`
+/// answer reads no frame, and no key of it reaches a pane.
+///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
 /// started the session. It is read after each read on this connection,
@@ -1885,6 +1892,7 @@ fn stream_events(
     // is read, then `is_remote`.
     let mut is_returning = is_returning_before_first_request;
     let mut has_sent_leaving = false;
+    let mut has_attach_answer_arrived = false;
     loop {
         let incoming_request_result = frame_reader.recv::<IncomingRequest>();
         // The setting is read again after each read on this connection,
@@ -1925,6 +1933,19 @@ fn stream_events(
                 continue;
             }
         };
+        // Before `AttachAnswerReceived`, the connection carries only that
+        // request, `Ping` and `Leaving`. Any other request ends the loop.
+        if !has_attach_answer_arrived
+            && !matches!(
+                request_kind,
+                IpcRequestKind::AttachAnswerReceived
+                    | IpcRequestKind::Ping
+                    | IpcRequestKind::Leaving { .. }
+            )
+        {
+            tracing::debug!(%client_id, "a request before the attach answer arrived");
+            break;
+        }
         let runtime_event = match request_kind {
             IpcRequestKind::CellSize { cell_size } => RuntimeEvent::CellSize {
                 client_id,
@@ -2025,6 +2046,7 @@ fn stream_events(
             },
             IpcRequestKind::Ping => continue,
             IpcRequestKind::AttachAnswerReceived => {
+                has_attach_answer_arrived = true;
                 RuntimeEvent::ClientAttachAnswerReceived { client_id }
             }
             IpcRequestKind::PaintedUpdate { update_sequence } => {

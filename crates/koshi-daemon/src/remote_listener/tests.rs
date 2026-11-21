@@ -1757,7 +1757,8 @@ mod bridge_round_trip {
     use koshi_runtime::server::Server;
     use koshi_test_support::fake_pty::FakePtyBackend;
     use koshi_test_support::fixtures::{
-        build_paint_report_request, build_test_runtime_directory, send_committed_request,
+        build_paint_report_request, build_test_runtime_directory,
+        send_attach_answer_received_through_halves, send_committed_request,
         send_committed_request_through_halves,
     };
     use koshi_test_support::throttle::pump_throttled;
@@ -2201,12 +2202,13 @@ mod bridge_round_trip {
 
     /// Send the session Attach numbered 2, at [`TEST_VIEWPORT_SIZE`] and
     /// naming `link_timeout_ms`, through `writer` with
-    /// [`send_committed_request_through_halves`]. The Attach answer is the
-    /// next frame `reader` reads.
+    /// [`send_committed_request_through_halves`], then the attach answer
+    /// receipt numbered 3 ([`send_attach_answer_received_through_halves`]).
+    /// The Attach answer is the next frame `reader` reads.
     ///
     /// # Panics
     ///
-    /// Panics as [`send_committed_request_through_halves`] states.
+    /// Panics as those two functions state.
     fn send_committed_attach(
         reader: &mut FrameReader,
         writer: &mut FrameWriter,
@@ -2233,6 +2235,7 @@ mod bridge_round_trip {
                 },
             },
         );
+        send_attach_answer_received_through_halves(writer, 3);
     }
 
     /// Submit `command` to the session over its own control connection, the

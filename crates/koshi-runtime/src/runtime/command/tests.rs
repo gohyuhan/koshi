@@ -3706,6 +3706,7 @@ fn copying_a_pane_with_no_highlight_writes_nothing_and_is_not_an_error() {
         ..
     } = build_resize_fixture();
     let (outer_terminal_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_mouse(client_id),
@@ -10705,6 +10706,7 @@ fn a_confirmation_that_no_longer_matches_the_session_is_rejected_and_answered() 
         })),
     );
     let (delivery_receiver, _writer_handoff) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let _ = take_session_view_changes(&mut runtime, session_id);
     let session_records_before = serialize_session_records(&runtime);
     let command_id = CommandId::new();
@@ -10768,6 +10770,7 @@ fn a_key_confirmation_typed_against_a_frame_before_the_input_moved_is_refused_an
     let placement_snapshot =
         build_server_placement_snapshot(&mut runtime, client_id, root_pane_id, tab_id);
     let (delivery_receiver, _writer_handoff) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     set_client_input_pane_moved_by_others_count(&mut runtime, client_id, 1);
     let _ = take_session_view_changes(&mut runtime, session_id);
     let session_records_before = serialize_session_records(&runtime);
@@ -20367,6 +20370,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -20433,8 +20437,10 @@ fn detach_all_takes_every_attached_client() {
         None,
     );
     let (initial_client_delivery_receiver, _) = runtime.subscribe(initial_client_id, 60, None);
+    runtime.handle_attach_answer_received(initial_client_id);
     let (additional_client_delivery_receiver, _) =
         runtime.subscribe(additional_client_id, 60, None);
+    runtime.handle_attach_answer_received(additional_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -20597,6 +20603,7 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(only_client_id, 60, None);
+    runtime.handle_attach_answer_received(only_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -20740,6 +20747,7 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let target_session_id = SessionId::new();
 
     let command_envelope = build_command_envelope(
@@ -20791,6 +20799,7 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -20832,6 +20841,7 @@ fn a_switch_to_another_users_session_with_this_sessions_id_is_queued() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -20920,6 +20930,7 @@ fn a_client_that_switched_away_ends_the_session_under_auto_close() {
     // An attach registers the client and its subscriber together, so a client
     // that can be moved always has one.
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -20974,6 +20985,7 @@ fn a_switch_moves_the_client_it_names_with_several_attached() {
         None,
     );
     let (delivery_receiver, _) = runtime.subscribe(initial_client_id, 60, None);
+    runtime.handle_attach_answer_received(initial_client_id);
     let target_session_id = SessionId::new();
 
     // An external source names no client of its own: `client_id` names the
@@ -21026,6 +21038,7 @@ fn a_switch_is_refused_when_the_clients_queue_is_full() {
     .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     // Nothing reads the queue: publishing its whole capacity fills it.
     let queued_events: Vec<Event> = (0..crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY)

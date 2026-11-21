@@ -136,7 +136,9 @@ pub struct Surface {
 /// - The `Attach` request carries `is_viewer_local_input_mode_on`: whether the
 ///   caller keeps its keys in a local input mode. 5 has no such field.
 /// - The `SetViewerLocalInputMode` request says whether an attached client
-///   keeps its keys in a local input mode. 5 has no such request.
+///   keeps its keys in a local input mode. While it is on, the session drops
+///   each `Keyboard` and `Paste` request of that client and counts it in
+///   `dropped_input_request_count`. 5 has no such request.
 /// - The session of a painted frame carries `peers`: every other attached
 ///   client, with its `client_id`, `color_index` and `typed_pane_id`. A frame
 ///   without it fails to decode. 5 has no such field.
@@ -144,7 +146,9 @@ pub struct Surface {
 ///   leave notice reports on, or `null` for every other entry. 5 has no such
 ///   field.
 /// - The `AttachAnswerReceived` request says that the client read the
-///   `Attached` answer to its `Attach`. 5 has no such request.
+///   `Attached` answer to its `Attach`. Until it arrives, the session sends
+///   the client no frame, event or host write, and any request other than it,
+///   `Ping` and `Leaving` ends the connection. 5 has no such request.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

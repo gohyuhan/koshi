@@ -76,7 +76,9 @@ use koshi_runtime::runtime::painted_update::{
 };
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::{build_floating_pane_id, build_key_input_for_chord};
+use koshi_test_support::fixtures::{
+    build_floating_pane_id, build_key_input_for_chord, send_attach_answer_received,
+};
 
 /// The PTY size [`common::TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
 /// tabline row and one hint row off the terminal, then a 1-cell pane border.
@@ -205,6 +207,7 @@ fn a_client_reporting_a_pane_area_sizes_the_pty_to_that_area() {
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut client_connection, 3);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             assert_eq!(echoed_pane_area, Some(reported_pane_area));
 
@@ -245,6 +248,7 @@ fn a_starving_client_does_not_shrink_the_tab() {
                 None,
                 None,
             );
+            send_attach_answer_received(&mut large_client_connection, 3);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut starving_client_connection =
@@ -258,6 +262,7 @@ fn a_starving_client_does_not_shrink_the_tab() {
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut starving_client_connection, 3);
             assert_eq!(echoed_pane_area, Some(PaneArea::Starving));
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
@@ -310,6 +315,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut starving_client_connection, 3);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             assert_eq!(echoed_pane_area, Some(PaneArea::Starving));
 
@@ -374,6 +380,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 None,
                 None,
             );
+            send_attach_answer_received(&mut large_client_connection, 3);
             wait_for_client_count(&mut caller_connection, 2, 1000);
 
             (
@@ -419,6 +426,7 @@ fn an_attach_without_a_pane_area_echoes_none() {
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut client_connection, 3);
             (vec![client_connection], echoed_pane_area)
         },
     );
@@ -1485,17 +1493,6 @@ fn two_clients_typing_into_one_pane_never_split_each_others_keys() {
     );
 }
 
-/// Send `AttachAnswerReceived` on the attached `ipc_connection` under
-/// `request_id`: the client read its `Attached` reply.
-fn send_attach_answer_received(ipc_connection: &mut Connection, request_id: u64) {
-    ipc_connection
-        .send(&IpcRequest {
-            request_id,
-            request_kind: IpcRequestKind::AttachAnswerReceived,
-        })
-        .expect("send the attach answer receipt");
-}
-
 /// Send `Leaving` with `is_returning: false` on the attached
 /// `ipc_connection` under `request_id`: the client leaves for good.
 fn send_leaving_for_good(ipc_connection: &mut Connection, request_id: u64) {
@@ -1563,12 +1560,10 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut alice_connection = open_session_connection(&runtime_directory, session_id);
             attach_test_client(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut alice_connection, 3);
 
             let mut bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             let bob_attachment = attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut bob_connection, 3);
             let (alice_connection, joined_notice) = read_next_posted_notice(alice_connection);
             assert_eq!(
                 describe_presence_notice(&joined_notice),
@@ -1654,12 +1649,10 @@ fn a_second_terminal_of_the_host_account_beside_a_remote_person_posts_no_notice(
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut alice_connection = open_session_connection(&runtime_directory, session_id);
             attach_test_client(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut alice_connection, 3);
             let mut bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             let bob_client_id =
                 attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE).client_id;
-            send_attach_answer_received(&mut bob_connection, 3);
             let (alice_connection, joined_notice) = read_next_posted_notice(alice_connection);
             assert_eq!(joined_notice.text, "bob (2) joined remotely");
 
@@ -1667,7 +1660,6 @@ fn a_second_terminal_of_the_host_account_beside_a_remote_person_posts_no_notice(
             let mut second_alice_connection =
                 open_session_connection(&runtime_directory, session_id);
             attach_test_client(&mut second_alice_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut second_alice_connection, 3);
             send_leaving_for_good(&mut second_alice_connection, 4);
             // The session reads the receipt, then the leaving, on one
             // connection: both are read once the second terminal's record is
@@ -1715,13 +1707,11 @@ fn the_host_accounts_terminals_are_host_and_host_2_and_two_grants_named_bob_are_
             for _ in 0..2 {
                 let mut host_connection = open_session_connection(&runtime_directory, session_id);
                 attach_test_client(&mut host_connection, 2, SMALL_VIEWPORT_SIZE);
-                send_attach_answer_received(&mut host_connection, 3);
                 host_connections.push(host_connection);
             }
             let mut first_bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             attach_test_client(&mut first_bob_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut first_bob_connection, 3);
             let first_host_connection = host_connections.remove(0);
             let (first_host_connection, first_bob_notice) =
                 read_next_posted_notice(first_host_connection);
@@ -1730,7 +1720,6 @@ fn the_host_accounts_terminals_are_host_and_host_2_and_two_grants_named_bob_are_
             let mut second_bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             attach_test_client(&mut second_bob_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut second_bob_connection, 3);
             let (first_host_connection, second_bob_notice) =
                 read_next_posted_notice(first_host_connection);
             assert_eq!(second_bob_notice.text, "bob-2 (4) joined remotely");

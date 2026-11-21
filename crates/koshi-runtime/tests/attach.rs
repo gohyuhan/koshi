@@ -51,7 +51,9 @@ use koshi_layout::solver::PaneSizing;
 use koshi_runtime::runtime::painted_update::{ReceivedPaintedFrame, SessionFrame};
 use koshi_session::client::{compute_default_pane_area_size, Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::{build_key_input_for_chord, read_prepared_and_send_commit};
+use koshi_test_support::fixtures::{
+    build_key_input_for_chord, read_prepared_and_send_commit, send_attach_answer_received,
+};
 
 /// Add one tab to the running session over `ipc_connection`, and return its id.
 fn create_test_tab(
@@ -2248,6 +2250,7 @@ fn attaching_again_with_the_token_brings_back_the_tab_focus_zoom_and_scroll() {
                 None,
                 Some(resume_token),
             );
+            send_attach_answer_received(&mut resumed_connection, 3);
             assert_eq!(resumed_session_id, session_id);
 
             (

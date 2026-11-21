@@ -771,8 +771,10 @@ impl Server {
         self.saved_view_store.save_client_view(client, detached_at);
     }
 
-    /// Take the proof that `client_id`'s viewer holds its attach answer: the
-    /// token its attach presented stops standing for it
+    /// Take the proof that `client_id`'s viewer holds its attach answer: every
+    /// subscriber that views `client_id` starts taking deliveries
+    /// ([`EventBus::release_attach_answer_hold`](crate::runtime::bus::EventBus::release_attach_answer_hold)),
+    /// the token its attach presented stops standing for it
     /// ([`SavedViewStore::release_presented_token`](crate::runtime::saved_view::SavedViewStore::release_presented_token)),
     /// and the arrival notice it owes the other clients
     /// ([`Client::get_unannounced_arrival`]) posts once, against the client
@@ -783,6 +785,12 @@ impl Server {
     /// Example: remote `bob` attaches as client `2` and its viewer reads the
     /// answer; every other client gets `bob (2) joined remotely`.
     pub(crate) fn handle_attach_answer_received(&mut self, client_id: ClientId) {
+        for frame_subscription in &self.subscriptions {
+            if frame_subscription.client_id == client_id {
+                self.event_bus
+                    .release_attach_answer_hold(frame_subscription.subscriber_id);
+            }
+        }
         self.saved_view_store.release_presented_token(client_id);
         let Some(session) = self.get_session_for_client_mut(client_id) else {
             return;

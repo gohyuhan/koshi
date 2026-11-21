@@ -48,7 +48,8 @@ use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::{
-    build_accepted_hello_result, build_paint_report_request, send_committed_request,
+    build_accepted_hello_result, build_paint_report_request, send_attach_answer_received,
+    send_committed_request,
 };
 
 /// The terminal size the seeded session is bootstrapped at, before any client
@@ -352,20 +353,25 @@ pub struct AttachedTestClient {
 }
 
 /// Attach on `ipc_connection` reporting `viewport_size`, no pane area and no
-/// claim, and return what the reply carried. The connection carries only the
-/// client's event stream afterwards.
+/// claim, send the attach answer receipt under `request_id + 1`
+/// ([`send_attach_answer_received`]), and return what the reply carried. The
+/// connection carries only the client's event stream afterwards.
 pub fn attach_test_client(
     ipc_connection: &mut Connection,
     request_id: u64,
     viewport_size: Size,
 ) -> AttachedTestClient {
-    send_test_attach(ipc_connection, request_id, viewport_size, None, None, None)
+    let attached_test_client =
+        send_test_attach(ipc_connection, request_id, viewport_size, None, None, None);
+    send_attach_answer_received(ipc_connection, request_id + 1);
+    attached_test_client
 }
 
 /// Attach on `ipc_connection` reporting `viewport_size` and `pane_area`,
 /// naming `resume_client_id` and presenting `resume_token`, with
 /// `Prepare` and `Commit`, and return what the reply carried. Panics unless
-/// the reply is `Attached` and answers `request_id`.
+/// the reply is `Attached` and answers `request_id`. Sends no attach answer
+/// receipt.
 pub fn send_test_attach(
     ipc_connection: &mut Connection,
     request_id: u64,

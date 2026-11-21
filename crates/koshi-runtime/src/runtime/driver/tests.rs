@@ -480,6 +480,7 @@ fn a_new_subscriber_gets_its_first_frame_at_once_and_one_push_sends_it() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let current_time = Instant::now();
 
     assert_eq!(
@@ -491,6 +492,29 @@ fn a_new_subscriber_gets_its_first_frame_at_once_and_one_push_sends_it() {
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 0);
+}
+
+/// A client that has not said it read its attach answer takes no frame, and
+/// the loop sets no wakeup for it. Its receipt makes its first frame due at
+/// once, and one push sends it.
+#[test]
+fn a_subscriber_takes_its_first_frame_only_after_its_client_read_the_attach_answer() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    let current_time = Instant::now();
+
+    assert_eq!(server.compute_next_render_wakeup(current_time), None);
+    server.push_due_frames(current_time);
+    assert_eq!(delivery_receiver.try_iter().count(), 0);
+
+    server.handle_attach_answer_received(client_id);
+    assert_eq!(
+        server.compute_next_render_wakeup(current_time),
+        Some(Duration::ZERO)
+    );
+    server.push_due_frames(current_time);
+    assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
 }
 
 #[test]
@@ -520,6 +544,7 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
         .try_recv()
         .expect("the attach is answered")
         .expect("a session is running");
+    server.handle_attach_answer_received(attach_accepted.client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&attach_accepted.deliveries).len(), 1);
@@ -548,7 +573,11 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
     let client_ids = [first_client_id, second_client_id, third_client_id];
     let delivery_receivers: Vec<DeliveryReceiver> = client_ids
         .iter()
-        .map(|&client_id| server.subscribe(client_id, 60, None).0)
+        .map(|&client_id| {
+            let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+            server.handle_attach_answer_received(client_id);
+            delivery_receiver
+        })
         .collect();
     let mut last_frames: Vec<Option<RenderSnapshot>> = vec![None; client_ids.len()];
     let mut random_state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -635,7 +664,9 @@ fn a_command_that_fails_validation_marks_no_view_and_a_lock_toggle_marks_the_vie
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
+    server.handle_attach_answer_received(other_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     let rejected_command_id = CommandId::new();
@@ -737,6 +768,7 @@ fn a_change_right_after_a_frame_waits_out_the_frame_interval() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
@@ -771,7 +803,9 @@ fn list_frame_waits_after_input_event(
     let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
+    server.handle_attach_answer_received(other_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 
@@ -880,6 +914,7 @@ fn the_exit_of_a_tiled_pane_and_of_a_floating_pane_each_mark_every_view() {
         build_floating_new_pane_args(None, None, false),
     );
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let first_exit_time = Instant::now();
     server.push_due_frames(first_exit_time);
 
@@ -979,6 +1014,7 @@ fn an_animated_pane_marks_the_view_that_shows_it_only_when_its_frame_changes() {
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let start_time = Instant::now();
     server.push_due_frames(start_time);
 
@@ -1001,6 +1037,7 @@ fn an_animation_that_starts_after_an_idle_stretch_shows_its_first_frame_for_its_
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let idle_time = Instant::now();
     server.push_due_frames(idle_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
@@ -1046,6 +1083,7 @@ fn an_overdue_animation_frame_wakes_the_loop_at_the_first_grid_time_after_now() 
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let start_time = Instant::now();
     // The pass sends the first frame and starts the animation clock: the red
     // frame ends at `start_time + 100 ms`.
@@ -1083,6 +1121,7 @@ fn a_detached_session_sets_no_wakeup_for_its_animation_and_an_attach_sees_the_fr
     // 10150 ms is 25 loops of 400 ms and 150 ms into the next one: blue.
     let attach_time = start_time + Duration::from_millis(10_150);
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     server.push_due_frames(attach_time);
 
     assert_eq!(get_shown_rgba_bytes(&server, pane_id), BLUE_RGBA_BYTES);
@@ -1137,6 +1176,7 @@ fn a_three_loop_animation_that_ends_while_hidden_shows_its_last_frame_when_its_t
     );
     server.insert_terminal_engine(pane_id, terminal_engine);
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     open_new_tab_for_client(&mut server, client_id);
     assert!(!server.is_pane_shown_to_client(client_id, pane_id));
     let start_time = Instant::now();
@@ -1165,6 +1205,7 @@ fn a_client_that_switches_to_the_tab_of_a_running_animation_gets_its_frames_from
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     open_new_tab_for_client(&mut server, client_id);
     let start_time = Instant::now();
     server.push_due_frames(start_time);
@@ -1202,6 +1243,7 @@ fn a_two_frame_animation_of_one_ms_frames_wakes_a_session_at_60_frames_a_second_
         build_two_frame_animated_terminal_engine_with_gaps(1, 1),
     );
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let start_time = Instant::now();
     let end_time = start_time + Duration::from_secs(1);
 
@@ -1590,7 +1632,9 @@ fn a_refused_key_binding_command_goes_back_to_the_pressing_client_alone_with_its
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let (other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
+    server.handle_attach_answer_received(other_client_id);
     let command_id = CommandId::new();
 
     let control_flow = server.handle_runtime_event(build_fired_command_event(
@@ -1631,6 +1675,7 @@ fn a_key_that_finds_no_pane_in_its_direction_or_no_floating_pane_goes_back_as_no
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     for (focus_target, fired_action) in [
         (FocusTarget::Direction(Direction::Left), "focus-pane-left"),
@@ -1663,6 +1708,7 @@ fn a_refused_command_from_the_command_line_goes_back_to_no_client() {
     let session_id = SessionId::new();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -1737,7 +1783,9 @@ fn a_key_typed_before_another_client_closed_its_pane_is_dropped_and_a_key_typed_
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -1805,6 +1853,7 @@ fn a_key_typed_before_the_clients_own_focus_move_reaches_the_pane_it_moved_to() 
     let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let _ = server.handle_runtime_event(build_command_event(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(build_new_pane_args()),
@@ -1847,6 +1896,7 @@ fn a_key_typed_before_a_command_line_moved_the_clients_focus_is_dropped() {
     let (client_id, left_pane_id) = bootstrap_test_session(&mut server, session_id);
     let right_pane_id = split_focused_pane(&mut server, client_id);
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     let _ = server.handle_runtime_event(build_command_event(
         CommandSource::from_external_cli(Some(session_id), Some(client_id)),
@@ -1889,6 +1939,7 @@ fn a_key_and_a_paste_typed_before_their_pane_exited_are_dropped() {
     let (client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let right_pane_id = split_focused_pane(&mut server, client_id);
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     fake_pty_backend
         .trigger_child_exit(right_pane_id, koshi_core::process::ExitStatus::ExitCode(0))
@@ -1932,6 +1983,7 @@ fn a_key_typed_before_its_floating_pane_exited_is_dropped() {
         build_floating_new_pane_args(None, None, false),
     );
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     fake_pty_backend
         .trigger_child_exit(
@@ -1968,7 +2020,9 @@ fn a_key_typed_before_another_client_changed_the_view_reaches_a_pane_that_did_no
     let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(left_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
 
     let _ = server.handle_runtime_event(build_command_event(
         CommandSource::from_key_binding(alice_client_id),
@@ -2003,7 +2057,9 @@ fn a_key_binding_fired_before_another_client_moved_its_pane_is_refused_to_that_c
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2070,7 +2126,9 @@ fn a_directional_focus_key_fired_before_another_client_moved_its_pane_is_refused
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2122,7 +2180,9 @@ fn build_session_where_another_client_closed_bobs_pane(
     let right_pane_id = split_focused_pane(server, alice_client_id);
     let bob_client_id = attach_second_client(server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2247,8 +2307,11 @@ fn a_client_viewed_by_two_subscribers_counts_one_move_when_another_client_closes
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_first_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let (_second_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -2440,7 +2503,9 @@ fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_at_the_name
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2471,6 +2536,7 @@ fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_at_the_name
             dropped_input_request_count: 0,
         }),
     );
+    server.handle_attach_answer_received(bob_client_id);
 
     let next_connection_snapshot = get_client_snapshot(&server, bob_client_id);
     assert_eq!(
@@ -2530,7 +2596,9 @@ fn build_two_client_session() -> TwoClientSession {
     let right_pane_id = split_focused_pane(&mut server, bob_client_id);
     server.handle_pty_output(left_pane_id, "line\r\n".repeat(30).as_bytes());
     let (alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     TwoClientSession {
         server,
         fake_pty_backend,
@@ -2581,8 +2649,11 @@ fn a_frame_lists_every_other_attached_client_in_color_index_order_with_the_pane_
     let dave_client_id =
         attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_carol_delivery_receiver, _) = server.subscribe(carol_client_id, 60, None);
+    server.handle_attach_answer_received(carol_client_id);
     let (_dave_delivery_receiver, _) = server.subscribe(dave_client_id, 60, None);
+    server.handle_attach_answer_received(dave_client_id);
 
     assert_eq!(
         list_frame_peer_snapshots(&server, alice_client_id),
@@ -2621,6 +2692,7 @@ fn the_frame_of_the_only_client_of_a_session_lists_no_peers() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     assert_eq!(
         list_frame_peer_snapshots(&server, client_id),
@@ -2637,6 +2709,7 @@ fn a_client_restored_after_a_restart_and_not_claimed_again_is_not_listed_as_a_pe
     let bob_client_id =
         attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
 
     server.client_ids_awaiting_reconnect.insert(bob_client_id);
 
@@ -2695,6 +2768,56 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
             color_index: 1,
             typed_pane_id: Some(right_pane_id),
         }]
+    );
+}
+
+/// Bob opens his floating pane tray, then types `a` and pastes `ls`: no pane
+/// takes either, and Bob's dropped request count goes from `0` to `2`. Bob
+/// closes the tray and types `b`: the right pane takes `b`.
+#[test]
+fn keys_and_pastes_a_viewer_sends_in_a_local_input_mode_are_dropped_and_counted() {
+    let TwoClientSession {
+        mut server,
+        fake_pty_backend,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        ..
+    } = build_two_client_session();
+    let _ = server.handle_runtime_event(build_viewer_local_input_mode_event(bob_client_id, true));
+
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'a', 0));
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientPaste {
+        client_id: bob_client_id,
+        pasted_text: String::from("ls"),
+        painted_input_pane_moved_by_others_count: 0,
+    });
+
+    for pane_id in [left_pane_id, right_pane_id] {
+        assert_eq!(
+            fake_pty_backend
+                .list_pane_write_bytes(pane_id)
+                .expect("writes"),
+            Vec::<Vec<u8>>::new()
+        );
+    }
+    assert_eq!(
+        get_client_snapshot(&server, bob_client_id).dropped_input_request_count,
+        2
+    );
+
+    let _ = server.handle_runtime_event(build_viewer_local_input_mode_event(bob_client_id, false));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'b', 0));
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(right_pane_id)
+            .expect("writes"),
+        vec![b"b".to_vec()]
+    );
+    assert_eq!(
+        get_client_snapshot(&server, bob_client_id).dropped_input_request_count,
+        2
     );
 }
 
@@ -2862,6 +2985,7 @@ fn an_attach_from_a_viewer_in_a_local_input_mode_is_listed_as_typing_in_no_pane(
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (alice_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
 
     let attach_accepted = server
         .handle_ipc_attach(
@@ -2901,6 +3025,7 @@ fn a_client_attaching_marks_the_frame_of_every_other_client() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (alice_client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 
@@ -2953,6 +3078,7 @@ fn dropping_a_restored_record_no_viewer_claimed_marks_no_frame() {
         attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
     server.client_ids_awaiting_reconnect.insert(bob_client_id);
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 

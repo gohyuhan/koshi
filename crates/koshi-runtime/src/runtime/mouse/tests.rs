@@ -2618,6 +2618,7 @@ fn build_server_with_mouse_event_queue() -> (Server, Arc<FakePtyBackend>, Client
 {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let (mouse_event_queue, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     (server, fake_pty_backend, client_id, mouse_event_queue)
 }
 
@@ -2922,7 +2923,9 @@ fn a_client_with_no_subscription_is_answered_nothing() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Another client's queue, which would catch an answer sent to the wrong one.
-    let (unrelated_event_queue, _) = server.subscribe(ClientId::new(), 60, None);
+    let unrelated_client_id = ClientId::new();
+    let (unrelated_event_queue, _) = server.subscribe(unrelated_client_id, 60, None);
+    server.handle_attach_answer_received(unrelated_client_id);
 
     server.run_client_mouse(
         client_id,

@@ -177,16 +177,17 @@ impl Server {
             // An attached client's viewer already read these events: its
             // keymap bound nothing to them, or no chord could name them. The
             // pane write reads each whole event: the receiving pane's keyboard
-            // flags decide which of its fields reach that pane. Events typed
+            // flags decide which of its fields reach that pane. Events of a
+            // client that keeps its keys in a local input mode, and events typed
             // against a frame older than the last move of the client's input
-            // pane by others reach no pane (`drop_stale_input`).
+            // pane by others, reach no pane (`drop_refused_input`).
             RuntimeEvent::ClientKeyboard {
                 client_id,
                 key_inputs,
                 painted_input_pane_moved_by_others_count,
             } => {
                 self.allow_client_frame_now(client_id);
-                if !self.drop_stale_input(client_id, painted_input_pane_moved_by_others_count) {
+                if !self.drop_refused_input(client_id, painted_input_pane_moved_by_others_count) {
                     self.handle_key_inputs(client_id, &key_inputs);
                 }
             }
@@ -237,15 +238,16 @@ impl Server {
             RuntimeEvent::HostPaste { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a paste no attached viewer read");
             }
-            // A paste typed against a frame older than the last move of the
-            // client's input pane by others reaches no pane, as keys do.
+            // A paste of a client that keeps its keys in a local input mode,
+            // and a paste typed against a frame older than the last move of the
+            // client's input pane by others, reach no pane, as keys do.
             RuntimeEvent::ClientPaste {
                 client_id,
                 pasted_text,
                 painted_input_pane_moved_by_others_count,
             } => {
                 self.allow_client_frame_now(client_id);
-                if !self.drop_stale_input(client_id, painted_input_pane_moved_by_others_count) {
+                if !self.drop_refused_input(client_id, painted_input_pane_moved_by_others_count) {
                     self.handle_host_paste(client_id, &pasted_text);
                 }
             }

@@ -544,9 +544,11 @@ number:
   disconnected.
 
 The arrival notification posts once the new terminal tells the session that
-it got the session's answer to its attach. A new terminal that never tells it
-so gets no notification when it arrives or when it leaves, and counts for no
-other terminal's notification. A terminal that takes its place back after an
+it got the session's answer to its attach. Until then, the session sends the
+terminal no screen and no notification, and a key or any other request from
+it ends its connection. A new terminal that never tells it so gets no
+notification when it arrives or when it leaves, and counts for no other
+terminal's notification. A terminal that takes its place back after an
 update keeps what it had before the update: when it was announced then, it
 counts at once, and its `disconnected` posts as usual. When the answer to
 that dial is lost on the way, the next dial comes back as `bob (2)` again:

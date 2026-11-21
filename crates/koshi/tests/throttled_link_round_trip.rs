@@ -47,7 +47,10 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::transport::{build_frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
-use koshi_test_support::fixtures::{send_committed_request, send_committed_request_through_halves};
+use koshi_test_support::fixtures::{
+    send_attach_answer_received_through_halves, send_committed_request,
+    send_committed_request_through_halves,
+};
 use koshi_test_support::throttle::pump_throttled;
 
 use common::in_process_session::{
@@ -179,8 +182,9 @@ struct ThrottledClient {
 }
 
 /// Connect to the relay at `relay_socket_address`, do the Hello and the Attach
-/// for `session` over it, the Attach as a `Prepare` and its `Commit`, and hand
-/// back the attached client with its stream unread.
+/// for `session` over it, the Attach as a `Prepare` and its `Commit`, send
+/// the attach answer receipt numbered 3, and hand back the attached client with
+/// its stream unread.
 fn attach_client_through_relay(
     session: &RunningSession,
     relay_socket_address: &str,
@@ -229,6 +233,7 @@ fn attach_client_through_relay(
         );
     };
     assert_eq!(session_id, session.session_id);
+    send_attach_answer_received_through_halves(&mut client_frame_writer, 3);
 
     ThrottledClient {
         client_id,

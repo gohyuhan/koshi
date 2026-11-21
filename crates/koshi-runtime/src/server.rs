@@ -709,9 +709,14 @@ impl Server {
     /// `client_id` is the client the subscriber views as: the one whose frame
     /// [`push_frames`](Self::push_frames) queues each frame that is due, and
     /// the one [`resync_lagged`](Self::resync_lagged) builds when an event
-    /// does not fit the queue. The subscriber gets a frame at most once per
-    /// [`compute_frame_interval`] of `max_frames_per_second`, and its first
-    /// frame is due at once.
+    /// does not fit the queue. The subscriber takes nothing until the client
+    /// says that it read the session's answer to its attach: its
+    /// `AttachAnswerReceived` request.
+    /// Its first delivery is then its first frame, or, when it missed a
+    /// delivery meanwhile, the resync snapshot that
+    /// [`resync_lagged`](Self::resync_lagged) builds. The subscriber gets a
+    /// frame at most once per [`compute_frame_interval`] of
+    /// `max_frames_per_second`.
     ///
     /// Starts the input counts of the client's new connection
     /// ([`Client::start_connection_input_counts`]): the pane that takes

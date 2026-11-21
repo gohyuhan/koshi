@@ -187,18 +187,30 @@ impl Server {
             })
     }
 
-    /// Drop a key or paste request of `client_id` typed against a frame
-    /// carrying `painted_input_pane_moved_by_others_count` when it is stale
-    /// ([`is_input_stale`](Self::is_input_stale)): add one to the client's
-    /// dropped request count
+    /// Drop a key or paste request of `client_id`, typed against a frame
+    /// carrying `painted_input_pane_moved_by_others_count`, that no pane takes:
+    /// the client keeps its keys in a local input mode
+    /// ([`Client::is_viewer_local_input_mode_on`](koshi_session::client::Client::is_viewer_local_input_mode_on)),
+    /// or the request is stale ([`is_input_stale`](Self::is_input_stale)). A
+    /// drop adds one to the client's dropped request count
     /// ([`Client::record_dropped_input_request`](koshi_session::client::Client::record_dropped_input_request)),
     /// which its next frame carries. Returns whether the request was dropped.
-    pub(crate) fn drop_stale_input(
+    ///
+    /// Example: a client whose floating pane tray is open sends the keys
+    /// `ls` → no pane takes them, and its dropped request count goes from
+    /// `0` to `1`.
+    pub(crate) fn drop_refused_input(
         &mut self,
         client_id: ClientId,
         painted_input_pane_moved_by_others_count: u64,
     ) -> bool {
-        if !self.is_input_stale(client_id, painted_input_pane_moved_by_others_count) {
+        let is_viewer_local_input_mode_on = self
+            .get_session_for_client(client_id)
+            .and_then(|session| session.clients.get_client_by_id(client_id))
+            .is_some_and(|attached_client| attached_client.is_viewer_local_input_mode_on());
+        if !is_viewer_local_input_mode_on
+            && !self.is_input_stale(client_id, painted_input_pane_moved_by_others_count)
+        {
             return false;
         }
         if let Some(attached_client) = self.get_client_mut(client_id) {
