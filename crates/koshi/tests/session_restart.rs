@@ -72,7 +72,8 @@ use common::{
     RunningClient,
 };
 use koshi_test_support::fixtures::{
-    build_paint_report_request, send_committed_request, start_program_process,
+    build_paint_report_request, send_attach_answer_received, send_committed_request,
+    start_program_process,
 };
 
 /// How long a poll in this suite pauses between attempts: 50 milliseconds.
@@ -344,8 +345,9 @@ struct AttachedClientStream {
 
 impl AttachedClientStream {
     /// Join `session_id` as a viewing client at `viewport_size`, the way the
-    /// attached client joins it: Hello, then the Attach as a `Prepare` and its
-    /// `Commit`, on the same connection.
+    /// attached client joins it: Hello, the Attach as a `Prepare` and its
+    /// `Commit`, then the attach answer receipt numbered 3, on the same
+    /// connection.
     ///
     /// `resume_client_id` names the client record to come back as after the
     /// session replaced its own image, and is `None` on a first attach.
@@ -393,6 +395,7 @@ impl AttachedClientStream {
             );
         };
         assert_eq!(joined_session_id, session_id);
+        send_attach_answer_received(&mut connection, 3);
 
         let (mut session_event_reader, request_writer) = connection.split();
         let request_writer = Arc::new(Mutex::new(request_writer));

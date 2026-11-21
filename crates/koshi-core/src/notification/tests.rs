@@ -451,3 +451,136 @@ fn severities_order_from_the_quietest_to_the_loudest() {
         ]
     );
 }
+
+#[test]
+fn a_replacing_post_takes_the_place_of_the_newest_entry_that_holds_the_replaced_text() {
+    let mut notification_queue = create_session_queue();
+    let dropped_client_id = ClientId::new();
+    let returning_client_id = ClientId::new();
+    let disconnected_entry = notification_queue
+        .post_core_entry(
+            NotificationSeverity::Info,
+            "bob (2) disconnected",
+            Some(dropped_client_id),
+            NonZeroU32::MIN,
+            compute_time_after_unix_epoch(10),
+        )
+        .clone();
+
+    let reconnected_entry = notification_queue
+        .post_core_entry_replacing(
+            NotificationSeverity::Info,
+            "bob (2) reconnected",
+            Some(returning_client_id),
+            "bob (2) disconnected",
+            compute_time_after_unix_epoch(12),
+        )
+        .clone();
+
+    assert_eq!(
+        reconnected_entry,
+        NotificationEntry {
+            notification_id: disconnected_entry.notification_id,
+            source: NotificationSource::Core,
+            severity: NotificationSeverity::Info,
+            text: "bob (2) reconnected".to_string(),
+            created_at: compute_time_after_unix_epoch(12),
+            repeat_count: 2,
+            subject_client_id: Some(returning_client_id),
+        }
+    );
+    assert_eq!(
+        notification_queue
+            .list_queued_entries()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![reconnected_entry]
+    );
+    assert_eq!(notification_queue.get_revision(), 2);
+}
+
+#[test]
+fn a_replacing_post_adds_an_entry_when_the_newest_entry_is_another_text_severity_or_source() {
+    let client_id = ClientId::new();
+    let post_reconnected = |notification_queue: &mut NotificationQueue| {
+        notification_queue
+            .post_core_entry_replacing(
+                NotificationSeverity::Info,
+                "bob (2) reconnected",
+                Some(client_id),
+                "bob (2) disconnected",
+                compute_time_after_unix_epoch(12),
+            )
+            .clone()
+    };
+
+    let mut empty_queue = create_session_queue();
+    let first_entry = post_reconnected(&mut empty_queue);
+    assert_eq!(
+        (
+            first_entry.notification_id.sequence,
+            first_entry.repeat_count
+        ),
+        (0, 1)
+    );
+
+    for (severity, newest_text) in [
+        (NotificationSeverity::Info, "carol (3) joined remotely"),
+        (NotificationSeverity::Warning, "bob (2) disconnected"),
+    ] {
+        let mut notification_queue = create_session_queue();
+        notification_queue.post_core_entry(
+            severity,
+            newest_text,
+            None,
+            NonZeroU32::MIN,
+            compute_time_after_unix_epoch(10),
+        );
+
+        let posted_entry = post_reconnected(&mut notification_queue);
+
+        assert_eq!(
+            (
+                posted_entry.notification_id.sequence,
+                posted_entry.text.as_str(),
+                posted_entry.repeat_count
+            ),
+            (1, "bob (2) reconnected", 1),
+            "newest entry {severity:?} {newest_text:?}"
+        );
+        assert_eq!(notification_queue.list_queued_entries().count(), 2);
+        assert_eq!(notification_queue.get_revision(), 2);
+    }
+}
+
+#[test]
+fn a_replacing_post_of_the_newest_entrys_own_text_and_subject_merges_as_a_repeat() {
+    let mut notification_queue = create_session_queue();
+    let client_id = ClientId::new();
+    notification_queue.post_core_entry(
+        NotificationSeverity::Info,
+        "bob (2) reconnected",
+        Some(client_id),
+        NonZeroU32::MIN,
+        compute_time_after_unix_epoch(10),
+    );
+
+    let posted_entry = notification_queue
+        .post_core_entry_replacing(
+            NotificationSeverity::Info,
+            "bob (2) reconnected",
+            Some(client_id),
+            "bob (2) disconnected",
+            compute_time_after_unix_epoch(12),
+        )
+        .clone();
+
+    assert_eq!(
+        (
+            posted_entry.notification_id.sequence,
+            posted_entry.repeat_count
+        ),
+        (0, 2)
+    );
+    assert_eq!(notification_queue.list_queued_entries().count(), 1);
+}

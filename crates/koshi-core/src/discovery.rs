@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client::ClientOrigin;
 use crate::geometry::{PaneArea, Size};
-use crate::ids::{ClientId, PaneId, SessionId, TabId};
+use crate::ids::{ClientId, LayoutAreaId, PaneId, SessionId, TabId};
 use crate::lock::LockMode;
 
 /// One session, as `inspect session` reports it and `list-sessions` rows
@@ -72,8 +72,8 @@ pub enum PaneLifecycle {
 pub struct PaneDiscovery {
     /// Stable pane id.
     pub pane_id: PaneId,
-    /// The tab whose layout holds the pane; `None` for a floating pane.
-    pub tab_id: Option<TabId>,
+    /// The layout tree that holds the pane: its tab's, or its floating pane's.
+    pub layout_area_id: LayoutAreaId,
     /// The session holding the pane.
     pub session_id: SessionId,
     /// The pane's display title, once the child has set one.

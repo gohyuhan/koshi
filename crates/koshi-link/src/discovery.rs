@@ -12,8 +12,8 @@
 //! or the single record an `inspect` prints.
 //!
 //! A listing row is an id chain plus the names on it: a pane row names its
-//! pane, its tab (none for a floating pane), and its session, in the form a
-//! `--pane`/`--tab`/`--session` flag takes. The full detail of one
+//! pane, its tab or its floating pane, and its session. The pane, tab and
+//! session ids are in the form a `--pane`/`--tab`/`--session` flag takes. The full detail of one
 //! entity — creation time, working directory, argv, lock state — belongs to
 //! `inspect`, which renders the `koshi-core` structs themselves.
 
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use koshi_core::discovery::{ClientDiscovery, PaneDiscovery, SessionOverview, TabDiscovery};
 use koshi_core::event::RejectReason;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, LayoutAreaId, PaneId, SessionId, TabId};
 use koshi_core::redact::redact_command_argv;
 use koshi_core::text::{format_counted_noun, sanitize_reported_text};
 use koshi_ipc::endpoint::{
@@ -95,14 +95,29 @@ pub struct PaneRow {
     pub pane_id: PaneId,
     /// The pane's title, once the child has set one.
     pub pane_name: Option<String>,
-    /// The tab whose layout holds the pane; `None` for a floating pane.
-    pub tab_id: Option<TabId>,
-    /// That tab's display name; `None` for a floating pane.
-    pub tab_name: Option<String>,
+    /// The layout tree that holds the pane.
+    pub layout_area: PaneRowLayoutArea,
     /// The session holding the pane.
     pub session_id: SessionId,
     /// That session's display name.
     pub session_name: String,
+}
+
+/// The layout tree that holds the pane of a `list-panes` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneRowLayoutArea {
+    /// The layout tree of the tab `tab_id`, whose display name is `tab_name`.
+    Tab {
+        /// The tab whose layout holds the pane.
+        tab_id: TabId,
+        /// That tab's display name.
+        tab_name: String,
+    },
+    /// The layout tree of the floating pane `floating_pane_id`.
+    FloatingPane {
+        /// The floating pane that holds the pane.
+        floating_pane_id: FloatingPaneId,
+    },
 }
 
 /// One `list-clients` row.
@@ -801,22 +816,27 @@ pub fn build_tab_rows(session_overviews: &[SessionOverview]) -> Vec<TabRow> {
 /// layout order.
 ///
 /// A tiled pane whose tab is not in the overview's tab list is left out. A
-/// floating pane's row carries no tab.
+/// floating pane's row names its floating pane in place of a tab.
 #[must_use]
 pub fn build_pane_rows(session_overviews: &[SessionOverview]) -> Vec<PaneRow> {
     session_overviews
         .iter()
         .flat_map(|session_overview| {
             session_overview.panes.iter().filter_map(|pane_discovery| {
-                let tab_name = match pane_discovery.tab_id {
-                    Some(tab_id) => {
+                let layout_area = match pane_discovery.layout_area_id {
+                    LayoutAreaId::Tab(tab_id) => {
                         let tab_discovery = session_overview
                             .tabs
                             .iter()
                             .find(|tab_discovery| tab_discovery.tab_id == tab_id)?;
-                        Some(sanitize_reported_text(&tab_discovery.tab_name))
+                        PaneRowLayoutArea::Tab {
+                            tab_id,
+                            tab_name: sanitize_reported_text(&tab_discovery.tab_name),
+                        }
                     }
-                    None => None,
+                    LayoutAreaId::FloatingPane(floating_pane_id) => {
+                        PaneRowLayoutArea::FloatingPane { floating_pane_id }
+                    }
                 };
                 Some(PaneRow {
                     pane_id: pane_discovery.pane_id,
@@ -824,8 +844,7 @@ pub fn build_pane_rows(session_overviews: &[SessionOverview]) -> Vec<PaneRow> {
                         .pane_title
                         .as_deref()
                         .map(sanitize_reported_text),
-                    tab_id: pane_discovery.tab_id,
-                    tab_name,
+                    layout_area,
                     session_id: session_overview.session.session_id,
                     session_name: sanitize_reported_text(&session_overview.session.session_name),
                 })

@@ -533,11 +533,13 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
             client_id: ClientId::new(),
             color_index: 1,
             typed_pane_id: Some(empty_pane_id),
+            recent_input_pane_ids: Vec::new(),
         },
         PeerSnapshot {
             client_id: ClientId::new(),
             color_index: 4,
             typed_pane_id: None,
+            recent_input_pane_ids: vec![empty_pane_id],
         },
     ];
     assert_eq!(

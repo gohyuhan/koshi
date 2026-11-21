@@ -92,8 +92,13 @@ const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 ///
 /// Focus reports (`CSI ? 1004 h`) make the terminal send `CSI I` when its
 /// window gains focus and `CSI O` when it loses focus.
+///
+/// Autowrap off (`CSI ? 7 l`) keeps a glyph written in the last column in
+/// that column: the cursor does not move to the next row, and the screen does
+/// not scroll. Example: a glyph that the terminal draws 2 columns wide in the
+/// bottom-right cell is cut at the right edge.
 const APPLICATION_MODE_SETUP_BYTES: &[u8] =
-    b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h";
+    b"\x1b[?1049h\x1b[?7l\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h";
 
 const SHIFT_MOUSE_CAPTURE_REQUEST_BYTES: &[u8] = b"\x1b[>1s";
 const SHIFT_MOUSE_CAPTURE_RELEASE_BYTES: &[u8] = b"\x1b[>0s";
@@ -102,10 +107,10 @@ const SHIFT_MOUSE_CAPTURE_RELEASE_BYTES: &[u8] = b"\x1b[>0s";
 /// `ESC [ ? flags u`.
 const KEYBOARD_ENHANCEMENT_QUERY_BYTES: &[u8] = b"\x1b[?u";
 
-/// Reset Shift mouse capture, disable focus, paste, mouse, keyboard, and
-/// alternate-screen modes, and restore cursor state.
+/// Reset Shift mouse capture, disable focus, paste, mouse and keyboard modes,
+/// turn autowrap on, leave the alternate screen, and restore cursor state.
 const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
-    b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
+    b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// Paints a render snapshot into ratatui's frame buffer with
 /// [`koshi_renderer::render_frame`]. With a placement preview, a displayed

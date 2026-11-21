@@ -1093,6 +1093,7 @@ fn every_client_chip_cell_hits_the_tabline_and_a_click_on_tab_3_hits_tab_3() {
             client_id: ClientId::new(),
             color_index,
             typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
         })
         .to_vec();
     let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);

@@ -15,7 +15,7 @@ use koshi_core::{
         compute_percent_cell_count, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize,
         PixelCellSize, Rect, RequiredSize, Size,
     },
-    ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId},
+    ids::{ClientId, FloatingPaneId, LayoutAreaId, PaneId, SessionId, TabId},
     notification::{NotificationQueue, NotificationQueueOwner},
     process::PtySize,
 };
@@ -39,17 +39,6 @@ use crate::{
     session::focus::{build_floating_pane_minimized_changed_events, build_pane_focused_event},
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent},
 };
-
-/// The layout tree that holds a pane: the tree of a tab, or the tree of a
-/// floating pane. [`Session::find_layout_area_id_by_pane_id`] gives it for a
-/// pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LayoutAreaId {
-    /// The layout tree of the tab `TabId`.
-    Tab(TabId),
-    /// The layout tree of the floating pane `FloatingPaneId`.
-    FloatingPane(FloatingPaneId),
-}
 
 /// One layout tree, the size it is solved at, and the tiled solve of the tree
 /// at that size. A tab holds one ([`Tab`]), and so does each floating pane

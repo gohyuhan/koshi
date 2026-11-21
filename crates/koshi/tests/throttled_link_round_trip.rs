@@ -21,9 +21,13 @@
 //! fills. A frame that does not fit is dropped and leaves the client live. The
 //! first event that does not fit marks the client desynced, and the serve loop
 //! resyncs it with a [`SessionEvent::Resync`] naming how many events went
-//! missing. Nothing in this file reaches into the bus to make that happen. A
-//! swap submitted after that resync must arrive on the throttled connection
-//! itself.
+//! missing. The burst can desync and resync the client several times, so a
+//! resync the client reads can have another one behind it. Nothing in this
+//! file reaches into the bus to make that happen. A swap submitted after a
+//! resync must arrive on the throttled connection itself: a swap that the
+//! session publishes while the client is desynced again reaches the client
+//! only inside the next resync, so the test submits a new swap after each
+//! resync it reads, until one swap arrives as its own event.
 //!
 //! Every wait here is bounded. A queue read waits for the time left until its
 //! [`Instant`] deadline, and a session that never resyncs fails the test at that
@@ -47,7 +51,10 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::transport::{build_frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
-use koshi_test_support::fixtures::{send_committed_request, send_committed_request_through_halves};
+use koshi_test_support::fixtures::{
+    send_attach_answer_received_through_halves, send_committed_request,
+    send_committed_request_through_halves,
+};
 use koshi_test_support::throttle::pump_throttled;
 
 use common::in_process_session::{
@@ -179,8 +186,9 @@ struct ThrottledClient {
 }
 
 /// Connect to the relay at `relay_socket_address`, do the Hello and the Attach
-/// for `session` over it, the Attach as a `Prepare` and its `Commit`, and hand
-/// back the attached client with its stream unread.
+/// for `session` over it, the Attach as a `Prepare` and its `Commit`, send
+/// the attach answer receipt numbered 3, and hand back the attached client with
+/// its stream unread.
 fn attach_client_through_relay(
     session: &RunningSession,
     relay_socket_address: &str,
@@ -229,6 +237,7 @@ fn attach_client_through_relay(
         );
     };
     assert_eq!(session_id, session.session_id);
+    send_attach_answer_received_through_halves(&mut client_frame_writer, 3);
 
     ThrottledClient {
         client_id,
@@ -421,7 +430,8 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     }
 
     // Only now does the throttled client start reading. Its queue holds the
-    // backlog, and the resync the serve loop owes it lands after that backlog.
+    // backlog, and the first resync the serve loop owes it lands after that
+    // backlog.
     let throttled_events = forward_session_events(
         throttled_client.session_frame_reader,
         throttled_client.client_frame_writer,
@@ -462,34 +472,51 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
         Some(throttled_client.client_id)
     );
 
-    // A swap submitted after the resync must reach the throttled client
-    // through the relay, as the exact event the dispatcher emitted. Frames
-    // still in flight from the burst — and any further resync among them —
-    // are read past. The burst made an even count of swaps, so the root pane
-    // is on the left again.
-    let probe_swap_event = submit_pane_swap(
+    // A swap submitted after a resync must reach the throttled client through
+    // the relay, as the exact event the dispatcher emitted. Events still in
+    // flight from the burst are read past. A further resync means the client
+    // was desynced again, and the swaps submitted before it can be inside its
+    // snapshot instead of on the stream: one more swap goes after each one.
+    // The burst made an even count of swaps, so the root pane is on the left
+    // again, and each swap moves it to the other side.
+    let mut probe_swap_events = vec![submit_pane_swap(
         &mut control_connection,
         &session,
         control_client.client_id,
         root_pane_id,
         &session_socket_address,
         Direction::Right,
-    );
+    )];
     let probe_deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
     loop {
         assert!(
             Instant::now() < probe_deadline,
-            "the swap submitted after the resync never reached the throttled client"
+            "no swap submitted after a resync reached the throttled client"
         );
         let session_event = throttled_events
             .recv_timeout(probe_deadline.saturating_duration_since(Instant::now()))
             .expect("the session keeps writing to the throttled client");
         assert!(
             Instant::now() < probe_deadline,
-            "the swap submitted after the resync never reached the throttled client"
+            "no swap submitted after a resync reached the throttled client"
         );
-        if session_event == probe_swap_event {
+        if probe_swap_events.contains(&session_event) {
             break;
+        }
+        if let SessionEvent::Resync { .. } = session_event {
+            let direction = if probe_swap_events.len() % 2 == 0 {
+                Direction::Right
+            } else {
+                Direction::Left
+            };
+            probe_swap_events.push(submit_pane_swap(
+                &mut control_connection,
+                &session,
+                control_client.client_id,
+                root_pane_id,
+                &session_socket_address,
+                direction,
+            ));
         }
     }
 

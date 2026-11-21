@@ -1,6 +1,6 @@
 //! Tests for `build_presence_notice`: the text of each change for each
 //! origin, and the host-account rule, which counts no client whose arrival
-//! never posted.
+//! never posted. Also the change whose notice each change takes the place of.
 
 use std::time::SystemTime;
 
@@ -56,6 +56,39 @@ fn a_remote_client_gets_each_notice_with_its_label_and_number() {
             Some("bob (2) left".to_string()),
             Some("bob (2) disconnected".to_string()),
         ]
+    );
+}
+
+#[test]
+fn a_disconnect_and_a_reconnect_each_take_the_place_of_the_other_and_no_other_change_replaces() {
+    assert_eq!(
+        [
+            PresenceChange::Joined,
+            PresenceChange::Reconnected,
+            PresenceChange::Left,
+            PresenceChange::Disconnected,
+        ]
+        .map(PresenceChange::find_replaced_presence_change),
+        [
+            None,
+            Some(PresenceChange::Disconnected),
+            None,
+            Some(PresenceChange::Reconnected),
+        ]
+    );
+}
+
+#[test]
+fn the_host_accounts_replaced_text_is_formatted_whatever_clients_are_present() {
+    let host = build_client(HOST_ACCOUNT, "host", 0);
+
+    assert_eq!(
+        format_presence_notice(&host, PresenceChange::Disconnected),
+        "host (1) disconnected"
+    );
+    assert_eq!(
+        build_presence_notice(&host, [], PresenceChange::Disconnected),
+        None
     );
 }
 

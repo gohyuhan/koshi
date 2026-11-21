@@ -55,6 +55,7 @@ use crate::{
         delivery_queue::DeliveryReceiver,
         event::{RuntimeEvent, SessionEnding},
         mouse::HeldMouseButton,
+        peer_input::PeerInputView,
         placement_preview::ClientPlacementPreview,
         pty_inbox::PaneOutputQueue,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
@@ -63,8 +64,9 @@ use crate::{
     },
 };
 
-/// One bus subscriber, the client it views as, and the pace of that client's
-/// frames on its queue.
+/// One bus subscriber, the client it views as, the pace of that client's
+/// frames on its queue, and the panes other clients' input reached that its
+/// frames must show.
 #[derive(Debug)]
 pub(crate) struct FrameSubscription {
     /// The subscriber whose queue the frames go on.
@@ -74,6 +76,10 @@ pub(crate) struct FrameSubscription {
     /// Whether the client's view changed since its last frame, and when its
     /// next frame may go.
     pub(crate) frame_pace: FramePace,
+    /// The typed pane each other client had in the newest frame queued for
+    /// the subscriber, and the marks of the panes their input reached that
+    /// the subscriber's frames name.
+    pub(crate) peer_input_view: PeerInputView,
 }
 
 /// How long an announcement waits for every attached client's writing thread to
@@ -531,6 +537,7 @@ impl Server {
                         pane_id.format_short_label()
                     ),
                     None,
+                    None,
                 );
                 continue;
             };
@@ -709,9 +716,16 @@ impl Server {
     /// `client_id` is the client the subscriber views as: the one whose frame
     /// [`push_frames`](Self::push_frames) queues each frame that is due, and
     /// the one [`resync_lagged`](Self::resync_lagged) builds when an event
-    /// does not fit the queue. The subscriber gets a frame at most once per
-    /// [`compute_frame_interval`] of `max_frames_per_second`, and its first
-    /// frame is due at once.
+    /// does not fit the queue. The subscriber takes nothing until the client
+    /// says that it read the session's answer to its attach: its
+    /// `AttachAnswerReceived` request.
+    /// From then on it takes every delivery published, in publish order: the
+    /// arrival notice that the session posts as that request arrives reaches
+    /// it ahead of its first frame. When it missed a delivery
+    /// meanwhile, its first delivery is the resync snapshot that
+    /// [`resync_lagged`](Self::resync_lagged) builds. The subscriber gets a
+    /// frame at most once per [`compute_frame_interval`] of
+    /// `max_frames_per_second`.
     ///
     /// Starts the input counts of the client's new connection
     /// ([`Client::start_connection_input_counts`]): the pane that takes
@@ -760,6 +774,7 @@ impl Server {
             frame_pace: FramePace::with_frame_interval(compute_frame_interval(
                 max_frames_per_second,
             )),
+            peer_input_view: PeerInputView::default(),
         });
         (delivery_receiver, writer_handoff)
     }
@@ -789,10 +804,12 @@ impl Server {
     /// ([`push_due_frames`](Self::push_due_frames)).
     ///
     /// The frame is this subscriber's viewing client's, built by
-    /// [`build_snapshot`](Self::build_snapshot), and goes with that client's
-    /// session's notification queue, regardless of the subscriber's frame
-    /// pace. A queued frame counts as the subscriber's
-    /// frame at `current_time` (`FramePace::record_frame_sent`). A subscriber
+    /// [`build_snapshot`](Self::build_snapshot) as
+    /// [`push_frames`](Self::push_frames) builds it, and goes with that
+    /// client's session's notification queue, regardless of the subscriber's
+    /// frame pace. A queued frame counts as the subscriber's frame at
+    /// `current_time`, and names the subscriber's marks of other clients'
+    /// input, as a frame that [`push_frames`](Self::push_frames) queues does. A subscriber
     /// that views no client, or whose client is no longer attached, has its
     /// subscription dropped.
     ///
@@ -836,14 +853,25 @@ impl Server {
                 self.event_bus.unsubscribe(desynced_subscriber_id);
                 continue;
             };
-            if self.event_bus.try_resync(
+            let peer_typed_pane_ids: Vec<(ClientId, Option<PaneId>)> = snapshot
+                .session_snapshot
+                .peers
+                .iter()
+                .map(|peer_snapshot| (peer_snapshot.client_id, peer_snapshot.typed_pane_id))
+                .collect();
+            if let Some(queued_frame_number) = self.event_bus.try_resync(
                 desynced_subscriber_id,
                 Box::new(snapshot),
                 notification_queue,
             ) {
-                self.subscriptions[subscription_index]
+                let frame_subscription = &mut self.subscriptions[subscription_index];
+                frame_subscription
                     .frame_pace
                     .record_frame_sent(current_time);
+                frame_subscription
+                    .peer_input_view
+                    .record_frame_queued(queued_frame_number, peer_typed_pane_ids);
+                self.record_peer_input_frames_taken(subscription_index, current_time);
             }
         }
         self.remove_ended_subscriptions();
@@ -862,7 +890,11 @@ impl Server {
     /// is built for it.
     ///
     /// A queued frame counts as the subscriber's frame at `current_time`
-    /// (`FramePace::record_frame_sent`). A frame that does not fit the queue
+    /// (`FramePace::record_frame_sent`), every mark the subscriber holds
+    /// counts as named by a queued frame (`PeerInputView::record_frame_queued`),
+    /// and the queue is asked to report when the writing thread takes the
+    /// first frame that named a mark (`Server::record_peer_input_frames_taken`).
+    /// A frame that does not fit the queue
     /// is dropped, marks the subscriber owed a frame, and leaves its view
     /// change in place: the pass that [`RuntimeEvent::QueueRoomFreed`] starts
     /// sends a newer one. A client the session no longer shows a frame for
@@ -886,13 +918,24 @@ impl Server {
                     .clear_view_change();
                 continue;
             };
-            if self
+            let peer_typed_pane_ids: Vec<(ClientId, Option<PaneId>)> = snapshot
+                .session_snapshot
+                .peers
+                .iter()
+                .map(|peer_snapshot| (peer_snapshot.client_id, peer_snapshot.typed_pane_id))
+                .collect();
+            if let Some(queued_frame_number) = self
                 .event_bus
                 .try_send_frame(subscriber_id, Box::new(snapshot))
             {
-                self.subscriptions[subscription_index]
+                let frame_subscription = &mut self.subscriptions[subscription_index];
+                frame_subscription
                     .frame_pace
                     .record_frame_sent(current_time);
+                frame_subscription
+                    .peer_input_view
+                    .record_frame_queued(queued_frame_number, peer_typed_pane_ids);
+                self.record_peer_input_frames_taken(subscription_index, current_time);
             }
         }
         self.remove_ended_subscriptions();
@@ -1190,7 +1233,10 @@ impl Server {
     /// `subject_client_id` as the client it reports on
     /// ([`NotificationQueue::post_core_entry`](koshi_core::notification::NotificationQueue::post_core_entry)),
     /// and deliver the post to every client subscribed at that moment as one
-    /// `NotificationPosted`.
+    /// `NotificationPosted`. With `replaced_text`, the post takes the place
+    /// of the newest entry when that entry is from koshi at `severity` and
+    /// holds `replaced_text`
+    /// ([`NotificationQueue::post_core_entry_replacing`](koshi_core::notification::NotificationQueue::post_core_entry_replacing)).
     /// A client that attaches after the post receives the queue in its attach
     /// answer.
     /// Does nothing when this process holds no session `session_id`.
@@ -1203,20 +1249,29 @@ impl Server {
         severity: NotificationSeverity,
         text: &str,
         subject_client_id: Option<ClientId>,
+        replaced_text: Option<&str>,
     ) {
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
         };
         let notification_queue = &mut session.notification_queue;
-        let posted_entry = notification_queue
-            .post_core_entry(
+        let posted_entry = match replaced_text {
+            Some(replaced_text) => notification_queue.post_core_entry_replacing(
+                severity,
+                text,
+                subject_client_id,
+                replaced_text,
+                SystemTime::now(),
+            ),
+            None => notification_queue.post_core_entry(
                 severity,
                 text,
                 subject_client_id,
                 NonZeroU32::MIN,
                 SystemTime::now(),
-            )
-            .clone();
+            ),
+        }
+        .clone();
         let revision = notification_queue.get_revision();
         let removed_subscriber_ids = self
             .event_bus

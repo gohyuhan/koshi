@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
 };
-use koshi_core::ids::{PaneId, TabId};
+use koshi_core::ids::{LayoutAreaId, PaneId};
 use koshi_core::process::SpawnSpec;
 use koshi_session::session::state::{Session, Tab};
 
@@ -89,7 +89,7 @@ impl Server {
 /// holds and the session registry knows: the tabs' panes in the tab-bar order
 /// of the tabs holding them and layout order within each tab, then the
 /// floating panes in the order they were created and each one's panes in
-/// layout order, with `tab_id: None`.
+/// layout order. Each row names the tab or the floating pane that holds it.
 /// A pane the registry does not hold gets no row.
 fn list_pane_discoveries(
     session: &Session,
@@ -101,25 +101,27 @@ fn list_pane_discoveries(
         for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
             pane_discoveries.extend(build_pane_discovery(
                 session,
-                Some(tab.get_tab_id()),
+                LayoutAreaId::Tab(tab.get_tab_id()),
                 pane_id,
                 terminal_engine_by_pane_id,
             ));
         }
     }
-    for pane_id in session.floating_set.list_pane_ids() {
-        pane_discoveries.extend(build_pane_discovery(
-            session,
-            None,
-            pane_id,
-            terminal_engine_by_pane_id,
-        ));
+    for floating_pane in session.floating_set.list_floating_panes() {
+        for pane_id in floating_pane.list_pane_ids() {
+            pane_discoveries.extend(build_pane_discovery(
+                session,
+                LayoutAreaId::FloatingPane(floating_pane.get_floating_pane_id()),
+                pane_id,
+                terminal_engine_by_pane_id,
+            ));
+        }
     }
     pane_discoveries
 }
 
-/// The [`PaneDiscovery`] row of `pane_id`, held by tab `tab_id` or, for
-/// `None`, by the floating set. `None` when the session registry does not hold
+/// The [`PaneDiscovery`] row of `pane_id`, held by the layout tree
+/// `layout_area_id`. `None` when the session registry does not hold
 /// the pane: a pane whose child exited is gone from the registry. The lifecycle
 /// is [`PaneLifecycle::Running`]. The title is the pane terminal's OSC 0/1/2
 /// title, once the child has set one. `focused_by_client_ids` lists every
@@ -127,7 +129,7 @@ fn list_pane_discoveries(
 /// ([`Client::get_active_focused_pane_id`](koshi_session::client::Client::get_active_focused_pane_id)).
 fn build_pane_discovery(
     session: &Session,
-    tab_id: Option<TabId>,
+    layout_area_id: LayoutAreaId,
     pane_id: PaneId,
     terminal_engine_by_pane_id: &HashMap<PaneId, TerminalEngine>,
 ) -> Option<PaneDiscovery> {
@@ -140,7 +142,7 @@ fn build_pane_discovery(
         .collect();
     Some(PaneDiscovery {
         pane_id,
-        tab_id,
+        layout_area_id,
         session_id: session.session_id,
         pane_title: terminal_engine_by_pane_id
             .get(&pane_id)

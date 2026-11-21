@@ -187,8 +187,13 @@ impl Server {
     /// Every client present in `session`
     /// ([`list_present_clients`](Self::list_present_clients)) but
     /// `viewing_client_id`, in `color_index` order, each with the pane its
-    /// keys reach as peers see it ([`Client::get_typed_pane_id_for_peers`]).
-    /// Reads each client's checked pane and solves nothing.
+    /// keys reach as peers see it ([`Client::get_typed_pane_id_for_peers`]),
+    /// and with the other panes of its marks in the record of the subscription
+    /// that views `viewing_client_id`
+    /// ([`PeerInputView::list_mark_pane_ids`](crate::runtime::peer_input::PeerInputView::list_mark_pane_ids)).
+    /// A viewing client with no
+    /// subscription gets no such panes. Reads each client's checked pane and
+    /// solves nothing.
     ///
     /// Example: clients with indexes `0`, `2` and `1` attached, viewed by the
     /// client with index `0` → the clients with indexes `1` and `2`, in that
@@ -198,13 +203,28 @@ impl Server {
         session: &Session,
         viewing_client_id: ClientId,
     ) -> Vec<PeerSnapshot> {
+        let peer_input_view = self
+            .subscriptions
+            .iter()
+            .find(|frame_subscription| frame_subscription.client_id == viewing_client_id)
+            .map(|frame_subscription| &frame_subscription.peer_input_view);
         let mut peer_snapshots: Vec<PeerSnapshot> = self
             .list_present_clients(session)
             .filter(|peer_client| peer_client.get_client_id() != viewing_client_id)
-            .map(|peer_client| PeerSnapshot {
-                client_id: peer_client.get_client_id(),
-                color_index: peer_client.get_color_index(),
-                typed_pane_id: peer_client.get_typed_pane_id_for_peers(),
+            .map(|peer_client| {
+                let client_id = peer_client.get_client_id();
+                let typed_pane_id = peer_client.get_typed_pane_id_for_peers();
+                PeerSnapshot {
+                    client_id,
+                    color_index: peer_client.get_color_index(),
+                    typed_pane_id,
+                    recent_input_pane_ids: peer_input_view.map_or_else(
+                        Vec::new,
+                        |peer_input_view| {
+                            peer_input_view.list_mark_pane_ids(client_id, typed_pane_id)
+                        },
+                    ),
+                }
             })
             .collect();
         peer_snapshots.sort_unstable_by_key(|peer_snapshot| peer_snapshot.color_index);

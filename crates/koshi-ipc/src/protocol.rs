@@ -606,9 +606,12 @@ pub enum IpcRequestKind {
     },
     /// Say whether the client keeps its keys in one of its local input modes:
     /// the floating pane tray, the notification center, pane placement mode,
-    /// the pane move chooser, or floating pane move mode. While it does, its
-    /// keys reach no pane, and every other client's frame names no pane for
-    /// it ([`FramePeer::typed_pane_id`](crate::frame::FramePeer::typed_pane_id)).
+    /// the pane move chooser, or floating pane move mode. While it does, every
+    /// other client's frame names no pane for it
+    /// ([`FramePeer::typed_pane_id`](crate::frame::FramePeer::typed_pane_id)).
+    /// A key or paste it sends still reaches its pane, and every other
+    /// client's next frame lists that pane for it
+    /// ([`FramePeer::recent_input_pane_ids`](crate::frame::FramePeer::recent_input_pane_ids)).
     /// Nothing answers it. On a connection with no attached client, it closes
     /// the connection.
     SetViewerLocalInputMode {

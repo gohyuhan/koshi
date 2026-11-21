@@ -48,7 +48,8 @@ use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::{
-    build_accepted_hello_result, build_paint_report_request, send_committed_request,
+    build_accepted_hello_result, build_paint_report_request, send_attach_answer_received,
+    send_committed_request,
 };
 
 /// The terminal size the seeded session is bootstrapped at, before any client
@@ -352,20 +353,25 @@ pub struct AttachedTestClient {
 }
 
 /// Attach on `ipc_connection` reporting `viewport_size`, no pane area and no
-/// claim, and return what the reply carried. The connection carries only the
-/// client's event stream afterwards.
+/// claim, send the attach answer receipt under `request_id + 1`
+/// ([`send_attach_answer_received`]), and return what the reply carried. The
+/// connection carries only the client's event stream afterwards.
 pub fn attach_test_client(
     ipc_connection: &mut Connection,
     request_id: u64,
     viewport_size: Size,
 ) -> AttachedTestClient {
-    send_test_attach(ipc_connection, request_id, viewport_size, None, None, None)
+    let attached_test_client =
+        send_test_attach(ipc_connection, request_id, viewport_size, None, None, None);
+    send_attach_answer_received(ipc_connection, request_id + 1);
+    attached_test_client
 }
 
 /// Attach on `ipc_connection` reporting `viewport_size` and `pane_area`,
 /// naming `resume_client_id` and presenting `resume_token`, with
 /// `Prepare` and `Commit`, and return what the reply carried. Panics unless
-/// the reply is `Attached` and answers `request_id`.
+/// the reply is `Attached` and answers `request_id`. Sends no attach answer
+/// receipt.
 pub fn send_test_attach(
     ipc_connection: &mut Connection,
     request_id: u64,
@@ -614,6 +620,36 @@ pub fn read_session_frames_until(
     viewer_connection: impl Into<ViewerConnection>,
     accepts_session_frame: impl Fn(&SessionFrame<SessionEvent>) -> bool + Send + 'static,
 ) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_reporting_paints(viewer_connection, accepts_session_frame, true)
+}
+
+/// [`read_session_frames_until_painted_frame`] that reports no update
+/// painted, as a client does that has not painted yet. The session's writing
+/// thread then sends this connection no update after the first one that waits
+/// for a report.
+pub fn read_session_frames_until_painted_frame_reporting_no_paint(
+    viewer_connection: impl Into<ViewerConnection>,
+    accepts_painted_frame: impl Fn(&ReceivedPaintedFrame) -> bool + Send + 'static,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_reporting_paints(
+        viewer_connection,
+        move |session_frame| match session_frame {
+            SessionFrame::Painted(received_painted_frame) => {
+                accepts_painted_frame(received_painted_frame)
+            }
+            SessionFrame::Event(_) | SessionFrame::ImageChunk(_) => false,
+        },
+        false,
+    )
+}
+
+/// [`read_session_frames_until`], reporting each painted update painted
+/// only when `should_report_paints` is `true`.
+fn read_session_frames_reporting_paints(
+    viewer_connection: impl Into<ViewerConnection>,
+    accepts_session_frame: impl Fn(&SessionFrame<SessionEvent>) -> bool + Send + 'static,
+    should_report_paints: bool,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
     let mut viewer_connection = viewer_connection.into();
     let (read_result_sender, read_result_receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -630,7 +666,9 @@ pub fn read_session_frames_until(
             else {
                 continue;
             };
-            if let SessionFrame::Painted(received_painted_frame) = &session_frame {
+            if let (true, SessionFrame::Painted(received_painted_frame)) =
+                (should_report_paints, &session_frame)
+            {
                 let update_sequence = received_painted_frame.update_sequence;
                 viewer_connection
                     .ipc_connection

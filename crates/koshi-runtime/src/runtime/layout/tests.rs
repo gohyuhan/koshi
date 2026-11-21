@@ -1193,10 +1193,12 @@ fn build_floating_pane_session() -> (Session, TabId) {
 /// The floating panes of [`build_floating_pane_session`], as the layout dump
 /// describes them. The `60%` pane centers at `(16, 4)` in the drawing client's
 /// `80x22` pane area. The `20x6` pane pinned at `(70, 2)` moves left to
-/// `(60, 2)` to lie inside it, and draws over the `60%` pane.
-fn build_expected_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
+/// `(60, 2)` to lie inside it, and draws over the `60%` pane. Each floating
+/// pane id is the one `session` holds.
+fn build_expected_floating_pane_layouts(session: &Session) -> Vec<FloatingPaneLayout> {
     vec![
         FloatingPaneLayout {
+            floating_pane_id: get_floating_pane_id_holding(session, build_percent_pane_id()),
             pane_ids: vec![build_percent_pane_id()],
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
             solved_size: Size {
@@ -1225,6 +1227,7 @@ fn build_expected_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
             ],
         },
         FloatingPaneLayout {
+            floating_pane_id: get_floating_pane_id_holding(session, build_cells_pane_id()),
             pane_ids: vec![build_cells_pane_id()],
             desired_size: build_cells_floating_pane_size(20, 6),
             solved_size: Size {
@@ -1258,6 +1261,7 @@ fn build_expected_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
 #[test]
 fn each_floating_pane_lists_what_every_attached_client_draws_for_it() {
     let (session, _) = build_floating_pane_session();
+    let expected_floating_pane_layouts = build_expected_floating_pane_layouts(&session);
     let server = build_test_runtime_with_session(session);
 
     let session_layout = server
@@ -1266,7 +1270,7 @@ fn each_floating_pane_lists_what_every_attached_client_draws_for_it() {
 
     assert_eq!(
         session_layout.floating_panes,
-        build_expected_floating_pane_layouts()
+        expected_floating_pane_layouts
     );
 }
 
@@ -1298,6 +1302,7 @@ fn a_session_with_no_floating_pane_lists_none() {
 #[test]
 fn narrowing_to_one_tab_or_to_a_missing_tab_still_lists_every_floating_pane() {
     let (session, tab_id) = build_floating_pane_session();
+    let expected_floating_pane_layouts = build_expected_floating_pane_layouts(&session);
     let server = build_test_runtime_with_session(session);
 
     let narrowed_session_layout = server
@@ -1311,12 +1316,12 @@ fn narrowing_to_one_tab_or_to_a_missing_tab_still_lists_every_floating_pane() {
     assert_eq!(narrowed_session_layout.tabs[0].tab_id, tab_id);
     assert_eq!(
         narrowed_session_layout.floating_panes,
-        build_expected_floating_pane_layouts()
+        expected_floating_pane_layouts
     );
     assert_eq!(missing_tab_session_layout.tabs, Vec::new());
     assert_eq!(
         missing_tab_session_layout.floating_panes,
-        build_expected_floating_pane_layouts()
+        expected_floating_pane_layouts
     );
 }
 
@@ -1339,6 +1344,7 @@ fn a_floating_pane_of_two_panes_lists_its_panes_in_layout_order() {
     )
     .expect("the set has room");
     put_pane_beside_in_floating_pane(&mut session, build_cells_pane_id(), build_percent_pane_id());
+    let floating_pane_id = get_floating_pane_id_holding(&session, build_cells_pane_id());
     let server = build_test_runtime_with_session(session);
 
     let session_layout = server
@@ -1348,6 +1354,7 @@ fn a_floating_pane_of_two_panes_lists_its_panes_in_layout_order() {
     assert_eq!(
         session_layout.floating_panes,
         vec![FloatingPaneLayout {
+            floating_pane_id,
             pane_ids: vec![build_cells_pane_id(), build_percent_pane_id()],
             desired_size: build_cells_floating_pane_size(20, 6),
             solved_size: Size {
@@ -1377,6 +1384,7 @@ fn a_floating_pane_with_no_attached_client_lists_no_client_view() {
         NewPaneSpec::default(),
     )
     .expect("the set has room");
+    let floating_pane_id = get_floating_pane_id_holding(&session, build_percent_pane_id());
     let server = build_test_runtime_with_session(session);
 
     let session_layout = server
@@ -1386,6 +1394,7 @@ fn a_floating_pane_with_no_attached_client_lists_no_client_view() {
     assert_eq!(
         session_layout.floating_panes,
         vec![FloatingPaneLayout {
+            floating_pane_id,
             pane_ids: vec![build_percent_pane_id()],
             desired_size: DEFAULT_FLOATING_PANE_SIZE,
             solved_size: Size {

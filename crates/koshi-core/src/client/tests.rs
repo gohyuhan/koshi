@@ -42,6 +42,17 @@ fn sanitize_client_label_folds_whitespace_drops_refused_characters_and_cuts_to_3
         ("   ", String::new()),
         ("", String::new()),
         ("\u{1b}\u{7}", String::new()),
+        ("\u{200B}\u{2060}\u{FEFF}\u{3164}", String::new()),
+        (" \u{200B} \u{200D} ", String::new()),
+        ("host\u{200B}", "host\u{200B}".to_string()),
+        ("a \u{200B}", "a\u{200B}".to_string()),
+        (" \u{200B}a", "\u{200B}a".to_string()),
+        ("a \u{200B} b", "a\u{200B} b".to_string()),
+        (
+            "\u{1F469}\u{200D}\u{1F4BB}",
+            "\u{1F469}\u{200D}\u{1F4BB}".to_string(),
+        ),
+        ("\u{2764}\u{FE0F}", "\u{2764}\u{FE0F}".to_string()),
         (forty_ascii_characters.as_str(), "a".repeat(32)),
         (twenty_wide_characters.as_str(), "日".repeat(16)),
         (thirty_one_ascii_then_wide.as_str(), "a".repeat(31)),
@@ -63,6 +74,120 @@ fn sanitize_client_label_keeps_at_most_512_bytes_of_zero_width_characters() {
 
     assert_eq!(sanitized_label, format!("b{}", "\u{301}".repeat(255)));
     assert_eq!(sanitized_label.len(), 511);
+}
+
+#[test]
+fn sanitize_client_label_gives_an_empty_label_when_the_byte_cut_leaves_no_shown_character() {
+    let zero_width_spaces_then_wide = format!("{}日", "\u{200B}".repeat(170));
+
+    assert_eq!(sanitize_client_label(&zero_width_spaces_then_wide), "");
+    assert_eq!(
+        sanitize_client_label(&format!("{}b", "\u{200B}".repeat(170))),
+        format!("{}b", "\u{200B}".repeat(170))
+    );
+}
+
+#[test]
+fn every_default_ignorable_range_of_unicode_16_is_default_ignorable_and_its_neighbors_are_not() {
+    let default_ignorable_ranges = [
+        ('\u{00AD}', '\u{00AD}'),
+        ('\u{034F}', '\u{034F}'),
+        ('\u{061C}', '\u{061C}'),
+        ('\u{115F}', '\u{1160}'),
+        ('\u{17B4}', '\u{17B5}'),
+        ('\u{180B}', '\u{180F}'),
+        ('\u{200B}', '\u{200F}'),
+        ('\u{202A}', '\u{202E}'),
+        ('\u{2060}', '\u{206F}'),
+        ('\u{3164}', '\u{3164}'),
+        ('\u{FE00}', '\u{FE0F}'),
+        ('\u{FEFF}', '\u{FEFF}'),
+        ('\u{FFA0}', '\u{FFA0}'),
+        ('\u{FFF0}', '\u{FFF8}'),
+        ('\u{1BCA0}', '\u{1BCA3}'),
+        ('\u{1D173}', '\u{1D17A}'),
+        ('\u{E0000}', '\u{E0FFF}'),
+    ];
+    for (first_character, last_character) in default_ignorable_ranges {
+        for character in first_character..=last_character {
+            assert!(
+                is_default_ignorable_character(character),
+                "{:04X} is default ignorable",
+                u32::from(character)
+            );
+        }
+        for neighbor_code_point in [
+            u32::from(first_character) - 1,
+            u32::from(last_character) + 1,
+        ] {
+            let neighbor_character = char::from_u32(neighbor_code_point).expect("a scalar value");
+            let is_neighbor_in_a_range =
+                default_ignorable_ranges
+                    .iter()
+                    .any(|(range_first, range_last)| {
+                        (*range_first..=*range_last).contains(&neighbor_character)
+                    });
+            assert_eq!(
+                is_default_ignorable_character(neighbor_character),
+                is_neighbor_in_a_range,
+                "{neighbor_code_point:04X}"
+            );
+        }
+    }
+    let default_ignorable_count = (0..=u32::from(char::MAX))
+        .filter_map(char::from_u32)
+        .filter(|character| is_default_ignorable_character(*character))
+        .count();
+    assert_eq!(default_ignorable_count, 4174);
+}
+
+#[test]
+fn two_labels_show_the_same_text_exactly_when_they_differ_only_in_default_ignorable_characters() {
+    for (first_label, second_label, expected_is_same) in [
+        ("host", "host", true),
+        ("host", "host\u{200B}", true),
+        ("ho\u{2060}st", "\u{FEFF}host\u{3164}", true),
+        ("\u{1F469}\u{200D}\u{1F4BB}", "\u{1F469}\u{1F4BB}", true),
+        ("bob", "bob-2", false),
+        ("bob", "Bob", false),
+        ("bob", "bo", false),
+        ("e\u{301}", "e", false),
+    ] {
+        assert_eq!(
+            is_same_shown_label(first_label, second_label),
+            expected_is_same,
+            "{first_label:?} and {second_label:?}"
+        );
+        assert_eq!(
+            is_same_shown_label(second_label, first_label),
+            expected_is_same,
+            "{second_label:?} and {first_label:?}"
+        );
+    }
+}
+
+#[test]
+fn resolve_client_label_suffixes_an_identity_that_shows_the_same_text_as_a_held_label() {
+    let held_labels = ["host", "bob"];
+    let is_label_held = |candidate_label: &str| {
+        held_labels
+            .iter()
+            .any(|held_label| is_same_shown_label(held_label, candidate_label))
+    };
+
+    assert_eq!(
+        resolve_client_label(ClientOrigin::Remote, Some("host\u{200B}"), is_label_held),
+        "host\u{200B}-2"
+    );
+    assert_eq!(
+        resolve_client_label(ClientOrigin::Remote, Some("b\u{FEFF}ob"), is_label_held),
+        "b\u{FEFF}ob-2"
+    );
+    assert!(is_generated_client_label(&resolve_client_label(
+        ClientOrigin::Remote,
+        Some("\u{200B}\u{3164}"),
+        is_label_held
+    )));
 }
 
 #[test]

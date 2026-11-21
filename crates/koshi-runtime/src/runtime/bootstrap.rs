@@ -159,6 +159,7 @@ impl Server {
             NotificationSeverity::Warning,
             LAYOUT_NOT_RESTORED_NOTIFICATION_TEXT,
             None,
+            None,
         );
     }
 

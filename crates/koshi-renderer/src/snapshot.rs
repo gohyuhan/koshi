@@ -1010,7 +1010,7 @@ pub struct SessionSnapshot {
 }
 
 /// One other client attached to the session the viewing client sees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerSnapshot {
     /// The other client's stable id.
     pub client_id: ClientId,
@@ -1023,6 +1023,13 @@ pub struct PeerSnapshot {
     /// it zoomed, or its viewer keeps its keys in a local input mode, such as
     /// the floating pane tray.
     pub typed_pane_id: Option<PaneId>,
+    /// The other panes the other client's input reached while the viewing
+    /// client's frames named another pane, or none, as its `typed_pane_id`,
+    /// oldest first. A pane stays listed until 2 seconds after the last input that
+    /// reached it, or after the time the session saw the connection's writing
+    /// thread take a frame that lists it, whichever comes last. Empty
+    /// when there is no such pane.
+    pub recent_input_pane_ids: Vec<PaneId>,
 }
 
 impl SessionSnapshot {

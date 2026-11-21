@@ -1884,6 +1884,7 @@ fn push_typing_peer(
         client_id: ClientId::new(),
         color_index,
         typed_pane_id: Some(typed_pane_id),
+        recent_input_pane_ids: Vec::new(),
     });
     let cursor_snapshot =
         &mut get_pane_snapshot_mut(render_snapshot, typed_pane_id).cursor_snapshot;

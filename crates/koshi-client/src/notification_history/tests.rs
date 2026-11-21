@@ -641,6 +641,56 @@ fn a_repeat_of_a_held_entry_that_a_resync_carries_moves_to_the_newest_place_as_u
 }
 
 #[test]
+fn a_post_that_takes_the_place_of_a_held_entry_replaces_its_text_in_one_card() {
+    let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
+    let (session_id, mut session_queue) = create_session_queue();
+    post_to_session(&mut session_queue, "pane …a1b2 killed by signal 9");
+    let disconnected_entry = session_queue
+        .post_core_entry(
+            NotificationSeverity::Info,
+            "bob (2) disconnected",
+            Some(ClientId::new()),
+            NonZeroU32::MIN,
+            compute_time_after_unix_epoch(2),
+        )
+        .clone();
+    notification_history
+        .take_session_queue(session_id, &session_queue, true)
+        .expect("take the attach queue");
+    let returning_client_id = ClientId::new();
+    let reconnected_entry = session_queue
+        .post_core_entry_replacing(
+            NotificationSeverity::Info,
+            "bob (2) reconnected",
+            Some(returning_client_id),
+            "bob (2) disconnected",
+            compute_time_after_unix_epoch(3),
+        )
+        .clone();
+
+    notification_history
+        .take_session_post(
+            session_queue.get_revision(),
+            reconnected_entry.clone(),
+            true,
+        )
+        .expect("take the post");
+
+    assert_eq!(
+        reconnected_entry.notification_id,
+        disconnected_entry.notification_id
+    );
+    assert_eq!(
+        list_merged_texts_with_repeat_counts(&notification_history),
+        vec![
+            ("pane …a1b2 killed by signal 9".to_string(), 1),
+            ("bob (2) reconnected".to_string(), 2),
+        ]
+    );
+    assert_eq!(get_newest_entry(&notification_history), reconnected_entry);
+}
+
+#[test]
 fn a_repeat_of_a_held_entry_in_a_full_history_evicts_nothing() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
     let (session_id, mut session_queue) = create_session_queue();

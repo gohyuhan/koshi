@@ -120,6 +120,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
                     client_id: peer_snapshot.client_id,
                     color_index: peer_snapshot.color_index,
                     typed_pane_id: peer_snapshot.typed_pane_id,
+                    recent_input_pane_ids: peer_snapshot.recent_input_pane_ids.clone(),
                 })
                 .collect(),
         },

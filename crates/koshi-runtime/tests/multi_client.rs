@@ -31,7 +31,8 @@ use common::{
     create_right_split_pane, get_last_painted_frame, get_seeded_tab_and_pane_ids,
     get_session_overview, open_remote_session_connection, open_session_connection,
     read_session_frames_to_detached, read_session_frames_to_mouse_answer,
-    read_session_frames_until, read_session_frames_until_painted_frame, run_served_test_session,
+    read_session_frames_until, read_session_frames_until_painted_frame,
+    read_session_frames_until_painted_frame_reporting_no_paint, run_served_test_session,
     send_test_attach, serve_test_session, start_serving_test_session, start_test_session,
     submit_test_command, submit_test_command_for_answer, submit_test_command_for_client,
     wait_for_client_count, wait_for_mouse_tracking, AttachedTestClient, ViewerConnection,
@@ -74,9 +75,13 @@ use koshi_runtime::resume::{read_resume_body, read_resume_header};
 use koshi_runtime::runtime::painted_update::{
     ReceivedPaintedFrame, ReceivedPaneView, SessionFrame,
 };
+use koshi_runtime::runtime::peer_input::PEER_INPUT_MARK_DURATION;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::{build_floating_pane_id, build_key_input_for_chord};
+use koshi_test_support::fixtures::{
+    build_floating_pane_id, build_key_input_for_chord, build_paint_report_request,
+    send_attach_answer_received,
+};
 
 /// The PTY size [`common::TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
 /// tabline row and one hint row off the terminal, then a 1-cell pane border.
@@ -205,6 +210,7 @@ fn a_client_reporting_a_pane_area_sizes_the_pty_to_that_area() {
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut client_connection, 3);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             assert_eq!(echoed_pane_area, Some(reported_pane_area));
 
@@ -245,6 +251,7 @@ fn a_starving_client_does_not_shrink_the_tab() {
                 None,
                 None,
             );
+            send_attach_answer_received(&mut large_client_connection, 3);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
 
             let mut starving_client_connection =
@@ -258,6 +265,7 @@ fn a_starving_client_does_not_shrink_the_tab() {
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut starving_client_connection, 3);
             assert_eq!(echoed_pane_area, Some(PaneArea::Starving));
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
@@ -310,6 +318,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut starving_client_connection, 3);
             let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             assert_eq!(echoed_pane_area, Some(PaneArea::Starving));
 
@@ -374,6 +383,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 None,
                 None,
             );
+            send_attach_answer_received(&mut large_client_connection, 3);
             wait_for_client_count(&mut caller_connection, 2, 1000);
 
             (
@@ -419,6 +429,7 @@ fn an_attach_without_a_pane_area_echoes_none() {
                 None,
             )
             .pane_area;
+            send_attach_answer_received(&mut client_connection, 3);
             (vec![client_connection], echoed_pane_area)
         },
     );
@@ -1332,6 +1343,7 @@ fn the_peer_list_in_a_viewers_frames_follows_another_viewer_attaching_changing_i
                     client_id: bob_client_id,
                     color_index: 1,
                     typed_pane_id,
+                    recent_input_pane_ids: Vec::new(),
                 }]
             };
             let read_until_peers =
@@ -1371,6 +1383,94 @@ fn the_peer_list_in_a_viewers_frames_follows_another_viewer_attaching_changing_i
             let alice_connection = read_until_peers(alice_connection, Vec::new());
 
             (vec![alice_connection.ipc_connection], ())
+        },
+    );
+}
+
+/// Bob turns his local input mode on, so frames name no pane for him. Alice
+/// attaches, reads her first painted update and reports no paint, as a client
+/// that paints slowly: every frame after it waits on her queue. Bob's `a` reaches
+/// the seeded pane. More than two seconds after the key, Alice reports that update
+/// painted and reads on: a frame names the seeded pane as Bob's recent input pane, and the
+/// frame that names it no more arrives at least two seconds after she started
+/// reading again.
+#[test]
+fn a_recent_input_pane_reaches_a_client_that_paints_late_and_stays_two_seconds_after_it_reads_on() {
+    let (_server, _fake_pty_backend, ()) = serve_test_session(
+        "late-paint-recent-input",
+        |runtime_directory, session_id, _fake_pty_backend| {
+            let mut bob_connection = open_session_connection(&runtime_directory, session_id);
+            let bob_client_id =
+                attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE).client_id;
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
+            send_viewer_local_input_mode(&mut bob_connection, 4, true);
+            let (bob_connection, _) = read_until_earlier_requests_handled(bob_connection, 5);
+            let build_bob_peers = move |recent_input_pane_ids: Vec<PaneId>| {
+                vec![FramePeer {
+                    client_id: bob_client_id,
+                    color_index: 0,
+                    typed_pane_id: None,
+                    recent_input_pane_ids,
+                }]
+            };
+            let mut alice_connection = open_session_connection(&runtime_directory, session_id);
+            attach_test_client(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
+            let expected_first_peers = build_bob_peers(Vec::new());
+            let (mut alice_connection, alice_first_frames) =
+                read_session_frames_until_painted_frame_reporting_no_paint(
+                    alice_connection,
+                    move |received_painted_frame| {
+                        received_painted_frame.painted_frame.session_snapshot.peers
+                            == expected_first_peers
+                    },
+                );
+            let alice_first_update_sequence =
+                get_last_painted_frame(&alice_first_frames).update_sequence;
+
+            let mut bob_connection = bob_connection;
+            bob_connection
+                .ipc_connection
+                .send(&IpcRequest {
+                    request_id: 6,
+                    request_kind: build_tagged_character_request('a', 0),
+                })
+                .expect("send Bob's key");
+            let (bob_connection, _) = read_until_earlier_requests_handled(bob_connection, 7);
+            std::thread::sleep(PEER_INPUT_MARK_DURATION + Duration::from_secs(1));
+            let reading_resumed_at = Instant::now();
+            alice_connection
+                .ipc_connection
+                .send(&build_paint_report_request(alice_first_update_sequence))
+                .expect("Alice reports her first update painted");
+            let expected_marked_peers = build_bob_peers(vec![pane_id]);
+            let (alice_connection, _) = read_session_frames_until_painted_frame(
+                alice_connection,
+                move |received_painted_frame| {
+                    received_painted_frame.painted_frame.session_snapshot.peers
+                        == expected_marked_peers
+                },
+            );
+            let expected_cleared_peers = build_bob_peers(Vec::new());
+            let (alice_connection, _) = read_session_frames_until_painted_frame(
+                alice_connection,
+                move |received_painted_frame| {
+                    received_painted_frame.painted_frame.session_snapshot.peers
+                        == expected_cleared_peers
+                },
+            );
+            let mark_shown_duration = reading_resumed_at.elapsed();
+            assert!(
+                mark_shown_duration >= PEER_INPUT_MARK_DURATION,
+                "{mark_shown_duration:?}"
+            );
+
+            (
+                vec![
+                    alice_connection.ipc_connection,
+                    bob_connection.ipc_connection,
+                ],
+                (),
+            )
         },
     );
 }
@@ -1485,17 +1585,6 @@ fn two_clients_typing_into_one_pane_never_split_each_others_keys() {
     );
 }
 
-/// Send `AttachAnswerReceived` on the attached `ipc_connection` under
-/// `request_id`: the client read its `Attached` reply.
-fn send_attach_answer_received(ipc_connection: &mut Connection, request_id: u64) {
-    ipc_connection
-        .send(&IpcRequest {
-            request_id,
-            request_kind: IpcRequestKind::AttachAnswerReceived,
-        })
-        .expect("send the attach answer receipt");
-}
-
 /// Send `Leaving` with `is_returning: false` on the attached
 /// `ipc_connection` under `request_id`: the client leaves for good.
 fn send_leaving_for_good(ipc_connection: &mut Connection, request_id: u64) {
@@ -1554,7 +1643,9 @@ fn describe_presence_notice(
 /// `bob (2) joined remotely` once Bob confirms his attach answer. Bob's link
 /// drops with no `Leaving`: Alice reads `bob (2) disconnected`. Bob dials
 /// again with the token his attach minted, comes back as a new client under
-/// the number 2, and Alice reads `bob (2) reconnected`. Bob leaves for good:
+/// the number 2, and Alice reads `bob (2) reconnected`: it takes the place of
+/// the `disconnected` notice, under that notice's id at a count of 2. Bob
+/// leaves for good:
 /// Alice reads `bob (2) left`. Alice reads no other notice.
 #[test]
 fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_each() {
@@ -1563,12 +1654,10 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut alice_connection = open_session_connection(&runtime_directory, session_id);
             attach_test_client(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut alice_connection, 3);
 
             let mut bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             let bob_attachment = attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut bob_connection, 3);
             let (alice_connection, joined_notice) = read_next_posted_notice(alice_connection);
             assert_eq!(
                 describe_presence_notice(&joined_notice),
@@ -1616,8 +1705,12 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
                     NotificationSeverity::Info,
                     "bob (2) reconnected",
                     Some(redialed_bob_attachment.client_id),
-                    1,
+                    2,
                 ),
+            );
+            assert_eq!(
+                reconnected_notice.notification_id,
+                disconnected_notice.notification_id
             );
 
             send_leaving_for_good(&mut redialed_bob_connection, 4);
@@ -1654,12 +1747,10 @@ fn a_second_terminal_of_the_host_account_beside_a_remote_person_posts_no_notice(
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut alice_connection = open_session_connection(&runtime_directory, session_id);
             attach_test_client(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut alice_connection, 3);
             let mut bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             let bob_client_id =
                 attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE).client_id;
-            send_attach_answer_received(&mut bob_connection, 3);
             let (alice_connection, joined_notice) = read_next_posted_notice(alice_connection);
             assert_eq!(joined_notice.text, "bob (2) joined remotely");
 
@@ -1667,7 +1758,6 @@ fn a_second_terminal_of_the_host_account_beside_a_remote_person_posts_no_notice(
             let mut second_alice_connection =
                 open_session_connection(&runtime_directory, session_id);
             attach_test_client(&mut second_alice_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut second_alice_connection, 3);
             send_leaving_for_good(&mut second_alice_connection, 4);
             // The session reads the receipt, then the leaving, on one
             // connection: both are read once the second terminal's record is
@@ -1715,13 +1805,11 @@ fn the_host_accounts_terminals_are_host_and_host_2_and_two_grants_named_bob_are_
             for _ in 0..2 {
                 let mut host_connection = open_session_connection(&runtime_directory, session_id);
                 attach_test_client(&mut host_connection, 2, SMALL_VIEWPORT_SIZE);
-                send_attach_answer_received(&mut host_connection, 3);
                 host_connections.push(host_connection);
             }
             let mut first_bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             attach_test_client(&mut first_bob_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut first_bob_connection, 3);
             let first_host_connection = host_connections.remove(0);
             let (first_host_connection, first_bob_notice) =
                 read_next_posted_notice(first_host_connection);
@@ -1730,7 +1818,6 @@ fn the_host_accounts_terminals_are_host_and_host_2_and_two_grants_named_bob_are_
             let mut second_bob_connection =
                 open_remote_session_connection(&runtime_directory, session_id, "bob");
             attach_test_client(&mut second_bob_connection, 2, SMALL_VIEWPORT_SIZE);
-            send_attach_answer_received(&mut second_bob_connection, 3);
             let (first_host_connection, second_bob_notice) =
                 read_next_posted_notice(first_host_connection);
             assert_eq!(second_bob_notice.text, "bob-2 (4) joined remotely");
@@ -1869,6 +1956,7 @@ fn each_way_the_smaller_client_ends_hands_the_tab_back_and_drops_its_peer_entry_
                             client_id: small_client_id,
                             color_index: 1,
                             typed_pane_id: Some(pane_id),
+                            recent_input_pane_ids: Vec::new(),
                         }],
                         SHARED_PANE_VIEWPORT_SIZE,
                     ),
@@ -2571,6 +2659,7 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                             client_id: second_client_id,
                             color_index: 1,
                             typed_pane_id: Some(cells_pane_id),
+                            recent_input_pane_ids: Vec::new(),
                         }]
                 },
             );
@@ -2611,6 +2700,7 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                             client_id: first_client_id,
                             color_index: 0,
                             typed_pane_id: Some(cells_pane_id),
+                            recent_input_pane_ids: Vec::new(),
                         }]
                 },
             );
@@ -3155,6 +3245,7 @@ fn a_client_changing_its_own_view_leaves_every_field_of_another_clients_view_as_
                                 client_id: alice_client_id,
                                 color_index: 0,
                                 typed_pane_id: None,
+                                recent_input_pane_ids: Vec::new(),
                             }]
                     };
                 let (bob_viewer, _) = read_session_frames_until_painted_frame(

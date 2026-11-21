@@ -118,7 +118,8 @@ fn commit_delivers_the_wire_events_of_the_batch_to_a_subscriber_in_emission_orde
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_id, event_receiver, _) = bus.subscribe();
+    let (subscriber_id, event_receiver, _) = bus.subscribe();
+    bus.release_attach_answer_hold(subscriber_id);
     let mut scope = TransactionScope::new();
     scope.emit(build_test_placement_event(tab));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
@@ -140,8 +141,10 @@ fn commit_delivers_the_batch_to_every_subscriber() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_first_id, first_rx, _) = bus.subscribe();
-    let (_second_id, second_rx, _) = bus.subscribe();
+    let (first_id, first_rx, _) = bus.subscribe();
+    bus.release_attach_answer_hold(first_id);
+    let (second_id, second_rx, _) = bus.subscribe();
+    bus.release_attach_answer_hold(second_id);
     let mut scope = TransactionScope::new();
     scope.emit(build_test_placement_event(tab));
 
@@ -162,8 +165,10 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_gone_id, gone_rx, _) = bus.subscribe();
-    let (_live_id, live_rx, _) = bus.subscribe();
+    let (gone_id, gone_rx, _) = bus.subscribe();
+    bus.release_attach_answer_hold(gone_id);
+    let (live_id, live_rx, _) = bus.subscribe();
+    bus.release_attach_answer_hold(live_id);
     drop(gone_rx);
     let mut scope = TransactionScope::new();
     scope.emit(build_test_placement_event(tab));

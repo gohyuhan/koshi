@@ -7,7 +7,9 @@
 //! screen, and a failed write drops the held bytes. The terminal output
 //! backend writes the bytes of a `CrosstermBackend` for seeded cells, and
 //! writes the cells under a glyph before the glyph. A terminal that reads the
-//! bytes of a frame with a VS16 emoji shows each cell in its own column.
+//! bytes of a frame with a VS16 emoji shows each cell in its own column. A
+//! cluster of uncertain drawn width writes again the cells that a terminal can
+//! draw it over, and the cell after it gets its own move.
 
 use super::*;
 
@@ -136,15 +138,48 @@ impl Backend for SizedCrosstermBackend {
     }
 }
 
+/// The symbols a seeded frame draws: ASCII, a blank, `漢`, `é` written both
+/// ways, `─`, `😀`, `❤️` (`U+2764` `U+FE0F`), `ก` with `U+0E34`, and
+/// `U+17D8`.
+const SEEDED_FRAME_SYMBOLS: &[&str] = &[
+    "a",
+    "Z",
+    " ",
+    "漢",
+    "é",
+    "─",
+    "😀",
+    "\u{2764}\u{FE0F}",
+    "e\u{0301}",
+    "\u{0E01}\u{0E34}",
+    "\u{17D8}",
+];
+
+/// [`SEEDED_FRAME_SYMBOLS`] without `❤️`: no symbol has an uncertain drawn
+/// width ([`find_uncertain_drawn_width`]).
+const CERTAIN_WIDTH_SEEDED_FRAME_SYMBOLS: &[&str] = &[
+    "a",
+    "Z",
+    " ",
+    "漢",
+    "é",
+    "─",
+    "😀",
+    "e\u{0301}",
+    "\u{0E01}\u{0E34}",
+    "\u{17D8}",
+];
+
 /// A source of frames that differ from each other in a few cells, from one
 /// seed: the same seed gives the same frames.
 struct SeededFrameSource {
     seeded_sequence: SeededSequence,
     frame_cells: Buffer,
+    symbols: &'static [&'static str],
 }
 
 impl SeededFrameSource {
-    fn from_seed(seed: u64, terminal_size: Size) -> Self {
+    fn from_seed(seed: u64, terminal_size: Size, symbols: &'static [&'static str]) -> Self {
         Self {
             seeded_sequence: SeededSequence::from_seed(seed),
             frame_cells: Buffer::empty(Rect::new(
@@ -153,6 +188,7 @@ impl SeededFrameSource {
                 terminal_size.column_count,
                 terminal_size.row_count,
             )),
+            symbols,
         }
     }
 
@@ -206,19 +242,6 @@ impl SeededFrameSource {
             }
             self.frame_cells = resized_frame_cells;
         }
-        let symbols = [
-            "a",
-            "Z",
-            " ",
-            "漢",
-            "é",
-            "─",
-            "😀",
-            "\u{2764}\u{FE0F}",
-            "e\u{0301}",
-            "\u{0E01}\u{0E34}",
-            "\u{17D8}",
-        ];
         let colors = [
             Color::Reset,
             Color::Red,
@@ -243,7 +266,8 @@ impl SeededFrameSource {
                     .compute_next_index(usize::from(frame_area.height)),
             )
             .expect("a row");
-            let picked_symbol = symbols[self.seeded_sequence.compute_next_index(symbols.len())];
+            let picked_symbol =
+                self.symbols[self.seeded_sequence.compute_next_index(self.symbols.len())];
             let is_wide_symbol = matches!(picked_symbol, "漢" | "😀" | "\u{2764}\u{FE0F}");
             let symbol = if is_wide_symbol && column_index + 1 == frame_area.width {
                 "a"
@@ -309,6 +333,8 @@ fn build_buffered_paint_driver(
     (paint_driver, frame_output)
 }
 
+/// Frames of symbols with no uncertain drawn width
+/// ([`CERTAIN_WIDTH_SEEDED_FRAME_SYMBOLS`]).
 #[test]
 fn a_thousand_seeded_frames_write_the_same_bytes_as_a_ratatui_terminal() {
     let first_terminal_size = build_terminal_size(80, 24);
@@ -323,7 +349,11 @@ fn a_thousand_seeded_frames_write_the_same_bytes_as_a_ratatui_terminal() {
         CrosstermBackend::new(driver_sink.clone()),
         first_terminal_size,
     );
-    let mut frame_source = SeededFrameSource::from_seed(0x5eed_f00d_cafe_d00d, first_terminal_size);
+    let mut frame_source = SeededFrameSource::from_seed(
+        0x5eed_f00d_cafe_d00d,
+        first_terminal_size,
+        CERTAIN_WIDTH_SEEDED_FRAME_SYMBOLS,
+    );
 
     for frame_index in 0..1_000 {
         let terminal_size = frame_source.pick_terminal_size(frame_index);
@@ -771,7 +801,11 @@ fn seeded_frames_that_list_their_changed_rows_write_the_same_bytes_as_frames_tha
         CrosstermBackend::new(listed_row_sink.clone()),
         first_terminal_size,
     );
-    let mut frame_source = SeededFrameSource::from_seed(0x5eed_0012_cafe_d00d, first_terminal_size);
+    let mut frame_source = SeededFrameSource::from_seed(
+        0x5eed_0012_cafe_d00d,
+        first_terminal_size,
+        SEEDED_FRAME_SYMBOLS,
+    );
     let mut previous_frame_cells = Buffer::empty(Rect::ZERO);
     let mut listed_frame_count = 0;
     let mut expected_listed_frame_count = 0;
@@ -991,8 +1025,11 @@ fn build_seeded_cell_updates(frame_source: &mut SeededFrameSource) -> Vec<(u16, 
 
 #[test]
 fn the_terminal_output_backend_writes_the_bytes_of_a_crossterm_backend() {
-    let mut frame_source =
-        SeededFrameSource::from_seed(0x5eed_0015_cafe_d00d, build_terminal_size(80, 24));
+    let mut frame_source = SeededFrameSource::from_seed(
+        0x5eed_0015_cafe_d00d,
+        build_terminal_size(80, 24),
+        SEEDED_FRAME_SYMBOLS,
+    );
     let recording_sink = RecordingSink::default();
     let mut frame_output = TerminalOutput::from_terminal_sink(Box::new(recording_sink.clone()));
     let mut terminal_output_backend = TerminalOutputBackend::from_terminal_output(&frame_output);
@@ -1116,7 +1153,6 @@ fn list_row_glyphs(terminal_engine: &TerminalEngine, row_index: u16) -> Vec<(u16
 
 #[test]
 fn vs16_emojis_over_changed_cells_write_their_right_halves_first_and_every_cell_keeps_its_column() {
-    let terminal_size = build_terminal_size(8, 2);
     let frame_area = Rect::new(0, 0, 8, 2);
     let mut first_frame_cells = Buffer::empty(frame_area);
     first_frame_cells.set_string(0, 0, "abcdefgh", Style::default());
@@ -1127,37 +1163,14 @@ fn vs16_emojis_over_changed_cells_write_their_right_halves_first_and_every_cell_
     let listed_rows: &[u16] = &[0];
 
     for changed_rows in [None, Some(listed_rows)] {
-        let recording_sink = RecordingSink::default();
-        let mut frame_output = TerminalOutput::from_terminal_sink(Box::new(recording_sink.clone()));
-        let mut paint_driver = PaintDriver::from_backend(
-            TerminalOutputBackend::from_terminal_output(&frame_output),
-            terminal_size,
+        let (second_frame_bytes, host_terminal) = paint_two_frames_into_host_terminal(
+            &first_frame_cells,
+            &second_frame_cells,
+            changed_rows,
         );
-        let mut host_terminal = TerminalEngine::from_pty_size(PtySize {
-            column_count: 8,
-            row_count: 2,
-        });
-
-        paint_driver
-            .draw_frame(terminal_size, None, |frame_buffer, _| {
-                copy_frame_cells(&first_frame_cells, frame_buffer);
-                None
-            })
-            .expect("the first frame draws");
-        frame_output.flush().expect("the first frame writes out");
-        let _ = host_terminal.process_pty_output(&recording_sink.take_recorded_bytes());
-        paint_driver
-            .draw_frame(terminal_size, changed_rows, |frame_buffer, _| {
-                copy_frame_cells(&second_frame_cells, frame_buffer);
-                None
-            })
-            .expect("the second frame draws");
-        frame_output.flush().expect("the second frame writes out");
-        let second_frame_bytes = recording_sink.take_recorded_bytes();
-        let _ = host_terminal.process_pty_output(&second_frame_bytes);
 
         assert_eq!(
-            String::from_utf8_lossy(&second_frame_bytes),
+            second_frame_bytes,
             "\x1b[1;2H \x1b[1;1H\u{26A0}\u{FE0F}\x1b[1;3HXYZX\x1b[1;8H \x1b[1;7H\u{2764}\u{FE0F}\
              \x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l",
             "changed rows {changed_rows:?}"
@@ -1178,6 +1191,296 @@ fn vs16_emojis_over_changed_cells_write_their_right_halves_first_and_every_cell_
         assert_eq!(
             list_row_glyphs(&host_terminal, 1),
             Vec::<(u16, String)>::new(),
+            "changed rows {changed_rows:?}"
+        );
+    }
+}
+
+/// Paint `first_frame_cells`, then `second_frame_cells` with `changed_rows`,
+/// through a [`PaintDriver`] over a [`TerminalOutputBackend`] into a koshi
+/// terminal engine of the frames' size, and hand back the bytes of the second
+/// frame and that terminal engine.
+fn paint_two_frames_into_host_terminal(
+    first_frame_cells: &Buffer,
+    second_frame_cells: &Buffer,
+    changed_rows: Option<&[u16]>,
+) -> (String, TerminalEngine) {
+    let frame_area = first_frame_cells.area;
+    let terminal_size = build_terminal_size(frame_area.width, frame_area.height);
+    let recording_sink = RecordingSink::default();
+    let mut frame_output = TerminalOutput::from_terminal_sink(Box::new(recording_sink.clone()));
+    let mut paint_driver = PaintDriver::from_backend(
+        TerminalOutputBackend::from_terminal_output(&frame_output),
+        terminal_size,
+    );
+    let mut host_terminal = TerminalEngine::from_pty_size(PtySize {
+        column_count: frame_area.width,
+        row_count: frame_area.height,
+    });
+
+    paint_driver
+        .draw_frame(terminal_size, None, |frame_buffer, _| {
+            copy_frame_cells(first_frame_cells, frame_buffer);
+            None
+        })
+        .expect("the first frame draws");
+    frame_output.flush().expect("the first frame writes out");
+    let _ = host_terminal.process_pty_output(&recording_sink.take_recorded_bytes());
+    paint_driver
+        .draw_frame(terminal_size, changed_rows, |frame_buffer, _| {
+            copy_frame_cells(second_frame_cells, frame_buffer);
+            None
+        })
+        .expect("the second frame draws");
+    frame_output.flush().expect("the second frame writes out");
+    let second_frame_bytes = recording_sink.take_recorded_bytes();
+    let _ = host_terminal.process_pty_output(&second_frame_bytes);
+    (
+        String::from_utf8_lossy(&second_frame_bytes).into_owned(),
+        host_terminal,
+    )
+}
+
+/// The glyphs `(column, text)` in the order given, as [`list_row_glyphs`]
+/// lists them.
+fn build_row_glyphs(row_glyphs: &[(u16, &str)]) -> Vec<(u16, String)> {
+    row_glyphs
+        .iter()
+        .map(|(column_index, glyph_text)| (*column_index, (*glyph_text).to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_symbol_has_an_uncertain_drawn_width_exactly_when_its_characters_take_another_width_than_its_cell(
+) {
+    let mut forced_three_column_cell = Cell::default();
+    forced_three_column_cell
+        .set_symbol("\u{4E16}\u{FF9E}")
+        .set_diff_option(CellDiffOption::ForcedWidth(
+            NonZeroU16::new(3).expect("3 is not 0"),
+        ));
+    let mut uncertain_drawn_widths: Vec<(String, Option<u16>)> = [
+        "a",
+        "漢",
+        "e\u{301}",
+        "\u{1F1EF}\u{1F1F5}",
+        "\u{231A}\u{FE0E}",
+        "\u{26A0}\u{FE0F}",
+        "1\u{FE0F}\u{20E3}",
+        "\u{1F44D}\u{1F3FD}",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+    ]
+    .into_iter()
+    .map(|symbol| {
+        let mut cell = Cell::default();
+        cell.set_symbol(symbol);
+        (symbol.to_owned(), find_uncertain_drawn_width(&cell))
+    })
+    .collect();
+    uncertain_drawn_widths.push((
+        forced_three_column_cell.symbol().to_owned(),
+        find_uncertain_drawn_width(&forced_three_column_cell),
+    ));
+
+    assert_eq!(
+        uncertain_drawn_widths,
+        [
+            ("a", None),
+            ("漢", None),
+            ("e\u{301}", None),
+            ("\u{1F1EF}\u{1F1F5}", None),
+            ("\u{231A}\u{FE0E}", Some(2)),
+            ("\u{26A0}\u{FE0F}", Some(2)),
+            ("1\u{FE0F}\u{20E3}", Some(2)),
+            ("\u{1F44D}\u{1F3FD}", Some(4)),
+            ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", Some(6)),
+            ("\u{4E16}\u{FF9E}", None),
+        ]
+        .map(|(symbol, uncertain_drawn_width)| (symbol.to_owned(), uncertain_drawn_width))
+    );
+}
+
+/// `⌚︎` (`U+231A` `U+FE0E`) replaces `a` in `abcdefgh`: the frame writes
+/// `⌚︎`, then `b` again with its own move. A terminal that draws `⌚︎` 1
+/// column wide shows every glyph in its column.
+#[test]
+fn a_text_presentation_emoji_writes_the_cell_after_it_again_with_its_own_move() {
+    let frame_area = Rect::new(0, 0, 8, 1);
+    let mut first_frame_cells = Buffer::empty(frame_area);
+    first_frame_cells.set_string(0, 0, "abcdefgh", Style::default());
+    let mut second_frame_cells = first_frame_cells.clone();
+    second_frame_cells[(0, 0)].set_symbol("\u{231A}\u{FE0E}");
+    let listed_rows: &[u16] = &[0];
+
+    for changed_rows in [None, Some(listed_rows)] {
+        let (second_frame_bytes, host_terminal) = paint_two_frames_into_host_terminal(
+            &first_frame_cells,
+            &second_frame_cells,
+            changed_rows,
+        );
+
+        assert_eq!(
+            second_frame_bytes,
+            "\x1b[1;1H\u{231A}\u{FE0E}\x1b[1;2Hb\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l",
+            "changed rows {changed_rows:?}"
+        );
+        assert_eq!(
+            list_row_glyphs(&host_terminal, 0),
+            build_row_glyphs(&[
+                (0, "\u{231A}\u{FE0E}"),
+                (1, "b"),
+                (2, "c"),
+                (3, "d"),
+                (4, "e"),
+                (5, "f"),
+                (6, "g"),
+                (7, "h"),
+            ]),
+            "changed rows {changed_rows:?}"
+        );
+    }
+}
+
+/// Over `abcdefghijklmnop`, a ZWJ family at column 0, a skin-toned thumb at
+/// column 6, a flag at column 10 and a keycap at column 12 take their places,
+/// each with a blank under its second column. The family writes `c` to `f`
+/// again, the thumb writes `i` and `j` again, the flag writes nothing more,
+/// and the keycap's blank goes out once. A terminal that draws each cluster
+/// 2 columns wide shows every glyph in its column.
+#[test]
+fn emoji_clusters_write_again_the_cells_a_terminal_can_draw_them_over() {
+    let frame_area = Rect::new(0, 0, 16, 1);
+    let mut first_frame_cells = Buffer::empty(frame_area);
+    first_frame_cells.set_string(0, 0, "abcdefghijklmnop", Style::default());
+    let mut second_frame_cells = first_frame_cells.clone();
+    for (column_index, symbol) in [
+        (0, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+        (1, " "),
+        (6, "\u{1F44D}\u{1F3FD}"),
+        (7, " "),
+        (10, "\u{1F1EF}\u{1F1F5}"),
+        (11, " "),
+        (12, "1\u{FE0F}\u{20E3}"),
+        (13, " "),
+    ] {
+        second_frame_cells[(column_index, 0)].set_symbol(symbol);
+    }
+    let listed_rows: &[u16] = &[0];
+
+    for changed_rows in [None, Some(listed_rows)] {
+        let (second_frame_bytes, host_terminal) = paint_two_frames_into_host_terminal(
+            &first_frame_cells,
+            &second_frame_cells,
+            changed_rows,
+        );
+
+        assert_eq!(
+            second_frame_bytes,
+            "\x1b[1;2H \x1b[1;1H\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\x1b[1;3Hcdef\x1b[1;8H \x1b[1;7H\u{1F44D}\u{1F3FD}\
+             \x1b[1;9Hij\u{1F1EF}\u{1F1F5}\x1b[1;14H \x1b[1;13H1\u{FE0F}\u{20E3}\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l",
+            "changed rows {changed_rows:?}"
+        );
+        assert_eq!(
+            list_row_glyphs(&host_terminal, 0),
+            build_row_glyphs(&[
+                (0, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+                (2, "c"),
+                (3, "d"),
+                (4, "e"),
+                (5, "f"),
+                (6, "\u{1F44D}\u{1F3FD}"),
+                (8, "i"),
+                (9, "j"),
+                (10, "\u{1F1EF}\u{1F1F5}"),
+                (12, "1\u{FE0F}\u{20E3}"),
+                (14, "o"),
+                (15, "p"),
+            ]),
+            "changed rows {changed_rows:?}"
+        );
+    }
+}
+
+/// A ZWJ family replaces `a` and `b` in `abcd👍🏽 ghij`. The run of cells
+/// written again reaches the thumb at column 4, which writes its blank first
+/// and stretches the run to column 7: `c`, `d`, the thumb, `g` and `h`.
+#[test]
+fn an_emoji_cluster_inside_the_written_again_cells_stretches_them_to_its_own_drawn_width() {
+    let frame_area = Rect::new(0, 0, 10, 1);
+    let mut first_frame_cells = Buffer::empty(frame_area);
+    first_frame_cells.set_string(0, 0, "abcd", Style::default());
+    first_frame_cells[(4, 0)].set_symbol("\u{1F44D}\u{1F3FD}");
+    first_frame_cells.set_string(6, 0, "ghij", Style::default());
+    let mut second_frame_cells = first_frame_cells.clone();
+    second_frame_cells[(0, 0)].set_symbol("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+    second_frame_cells[(1, 0)].set_symbol(" ");
+    let listed_rows: &[u16] = &[0];
+
+    for changed_rows in [None, Some(listed_rows)] {
+        let (second_frame_bytes, host_terminal) = paint_two_frames_into_host_terminal(
+            &first_frame_cells,
+            &second_frame_cells,
+            changed_rows,
+        );
+
+        assert_eq!(
+            second_frame_bytes,
+            "\x1b[1;2H \x1b[1;1H\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\x1b[1;3Hcd\x1b[1;6H \x1b[1;5H\u{1F44D}\u{1F3FD}\x1b[1;7Hgh\
+             \x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l",
+            "changed rows {changed_rows:?}"
+        );
+        assert_eq!(
+            list_row_glyphs(&host_terminal, 0),
+            build_row_glyphs(&[
+                (0, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+                (2, "c"),
+                (3, "d"),
+                (4, "\u{1F44D}\u{1F3FD}"),
+                (6, "g"),
+                (7, "h"),
+                (8, "i"),
+                (9, "j"),
+            ]),
+            "changed rows {changed_rows:?}"
+        );
+    }
+}
+
+/// A ZWJ family at column 6 of an 8-column row writes the blank under it and
+/// nothing past the row's end.
+#[test]
+fn an_emoji_cluster_at_the_right_edge_writes_no_cell_past_the_row() {
+    let frame_area = Rect::new(0, 0, 8, 1);
+    let mut first_frame_cells = Buffer::empty(frame_area);
+    first_frame_cells.set_string(0, 0, "abcdefgh", Style::default());
+    let mut second_frame_cells = first_frame_cells.clone();
+    second_frame_cells[(6, 0)].set_symbol("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+    second_frame_cells[(7, 0)].set_symbol(" ");
+    let listed_rows: &[u16] = &[0];
+
+    for changed_rows in [None, Some(listed_rows)] {
+        let (second_frame_bytes, host_terminal) = paint_two_frames_into_host_terminal(
+            &first_frame_cells,
+            &second_frame_cells,
+            changed_rows,
+        );
+
+        assert_eq!(
+            second_frame_bytes,
+            "\x1b[1;8H \x1b[1;7H\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\x1b[39m\x1b[49m\x1b[59m\x1b[0m\x1b[?25l",
+            "changed rows {changed_rows:?}"
+        );
+        assert_eq!(
+            list_row_glyphs(&host_terminal, 0),
+            build_row_glyphs(&[
+                (0, "a"),
+                (1, "b"),
+                (2, "c"),
+                (3, "d"),
+                (4, "e"),
+                (5, "f"),
+                (6, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            ]),
             "changed rows {changed_rows:?}"
         );
     }

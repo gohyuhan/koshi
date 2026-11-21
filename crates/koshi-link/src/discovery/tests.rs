@@ -138,7 +138,7 @@ fn build_session_overview(
         for pane_index in 0..*pane_count {
             pane_discoveries.push(PaneDiscovery {
                 pane_id: PaneId::new(),
-                tab_id: Some(tab_id),
+                layout_area_id: LayoutAreaId::Tab(tab_id),
                 session_id,
                 pane_title: Some(format!("{tab_name}-{pane_index}")),
                 working_directory: None,
@@ -243,38 +243,50 @@ fn tab_rows_span_every_session_in_bar_order() {
 }
 
 #[test]
-fn a_floating_pane_row_follows_the_tiled_rows_and_carries_no_tab() {
+fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
     let mut session_overview = build_session_overview("amber-fox", &[("editor", 1)]);
-    let htop_pane_id = PaneId::new();
-    session_overview.panes.push(PaneDiscovery {
-        pane_id: htop_pane_id,
-        tab_id: None,
-        session_id: session_overview.session.session_id,
-        pane_title: Some("htop".to_string()),
-        working_directory: None,
-        command_argv: None,
-        lifecycle: PaneLifecycle::Running,
-        focused_by_client_ids: Vec::new(),
-    });
-    let tiled_pane_row = PaneRow {
+    let session_id = session_overview.session.session_id;
+    let split_floating_pane_id = FloatingPaneId::new();
+    let alone_floating_pane_id = FloatingPaneId::new();
+    let floating_pane_placements = [
+        ("htop", split_floating_pane_id),
+        ("top", split_floating_pane_id),
+        ("logs", alone_floating_pane_id),
+    ];
+    let mut expected_pane_rows = vec![PaneRow {
         pane_id: session_overview.panes[0].pane_id,
         pane_name: Some("editor-0".to_string()),
-        tab_id: Some(session_overview.tabs[0].tab_id),
-        tab_name: Some("editor".to_string()),
-        session_id: session_overview.session.session_id,
+        layout_area: PaneRowLayoutArea::Tab {
+            tab_id: session_overview.tabs[0].tab_id,
+            tab_name: "editor".to_string(),
+        },
+        session_id,
         session_name: "amber-fox".to_string(),
-    };
-    let floating_pane_row = PaneRow {
-        pane_id: htop_pane_id,
-        pane_name: Some("htop".to_string()),
-        tab_id: None,
-        tab_name: None,
-        session_id: session_overview.session.session_id,
-        session_name: "amber-fox".to_string(),
-    };
+    }];
+    for (pane_title, floating_pane_id) in floating_pane_placements {
+        let pane_id = PaneId::new();
+        session_overview.panes.push(PaneDiscovery {
+            pane_id,
+            layout_area_id: LayoutAreaId::FloatingPane(floating_pane_id),
+            session_id,
+            pane_title: Some(pane_title.to_string()),
+            working_directory: None,
+            command_argv: None,
+            lifecycle: PaneLifecycle::Running,
+            focused_by_client_ids: Vec::new(),
+        });
+        expected_pane_rows.push(PaneRow {
+            pane_id,
+            pane_name: Some(pane_title.to_string()),
+            layout_area: PaneRowLayoutArea::FloatingPane { floating_pane_id },
+            session_id,
+            session_name: "amber-fox".to_string(),
+        });
+    }
+
     assert_eq!(
         build_pane_rows(std::slice::from_ref(&session_overview)),
-        vec![tiled_pane_row, floating_pane_row]
+        expected_pane_rows
     );
 }
 
@@ -291,24 +303,30 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
             PaneRow {
                 pane_id: session_overviews[0].panes[0].pane_id,
                 pane_name: Some("editor-0".to_string()),
-                tab_id: Some(session_overviews[0].tabs[0].tab_id),
-                tab_name: Some("editor".to_string()),
+                layout_area: PaneRowLayoutArea::Tab {
+                    tab_id: session_overviews[0].tabs[0].tab_id,
+                    tab_name: "editor".to_string(),
+                },
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             PaneRow {
                 pane_id: session_overviews[0].panes[1].pane_id,
                 pane_name: Some("editor-1".to_string()),
-                tab_id: Some(session_overviews[0].tabs[0].tab_id),
-                tab_name: Some("editor".to_string()),
+                layout_area: PaneRowLayoutArea::Tab {
+                    tab_id: session_overviews[0].tabs[0].tab_id,
+                    tab_name: "editor".to_string(),
+                },
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
             },
             PaneRow {
                 pane_id: session_overviews[1].panes[0].pane_id,
                 pane_name: Some("shell-0".to_string()),
-                tab_id: Some(session_overviews[1].tabs[0].tab_id),
-                tab_name: Some("shell".to_string()),
+                layout_area: PaneRowLayoutArea::Tab {
+                    tab_id: session_overviews[1].tabs[0].tab_id,
+                    tab_name: "shell".to_string(),
+                },
                 session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
             },
@@ -425,8 +443,10 @@ fn a_pane_whose_child_set_no_title_yields_a_row_with_no_name() {
         vec![PaneRow {
             pane_id: session_overviews[0].panes[0].pane_id,
             pane_name: None,
-            tab_id: Some(session_overviews[0].tabs[0].tab_id),
-            tab_name: Some("editor".to_string()),
+            layout_area: PaneRowLayoutArea::Tab {
+                tab_id: session_overviews[0].tabs[0].tab_id,
+                tab_name: "editor".to_string(),
+            },
             session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
         }]
@@ -1680,8 +1700,8 @@ fn redacting_pane_commands_changes_nothing_but_the_command() {
         original_overview.panes[0].pane_id
     );
     assert_eq!(
-        redacted_overview.panes[0].tab_id,
-        original_overview.panes[0].tab_id
+        redacted_overview.panes[0].layout_area_id,
+        original_overview.panes[0].layout_area_id
     );
     assert_eq!(
         redacted_overview.panes[0].session_id,
@@ -1756,7 +1776,13 @@ fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
 
     let pane_rows = build_pane_rows(std::slice::from_ref(&unfiltered_session_overview));
     assert_eq!(pane_rows[0].pane_name.as_deref(), Some("title"));
-    assert_eq!(pane_rows[0].tab_name.as_deref(), Some("tab"));
+    assert_eq!(
+        pane_rows[0].layout_area,
+        PaneRowLayoutArea::Tab {
+            tab_id: unfiltered_session_overview.tabs[0].tab_id,
+            tab_name: "tab".to_string(),
+        }
+    );
     assert_eq!(pane_rows[0].session_name, "websrv");
 
     let client_rows = build_client_rows(std::slice::from_ref(&unfiltered_session_overview));
