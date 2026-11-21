@@ -60,8 +60,10 @@
 //! attach answer: it receives nothing, and counts what it misses, as a
 //! desynced subscriber does, and takes no resync snapshot and no host write.
 //! `EventBus::release_attach_answer_hold` ends the wait. A subscriber that
-//! missed nothing then turns live, and its first frame is its first delivery.
-//! One that missed a delivery takes a resync snapshot first.
+//! missed nothing then turns live and takes every delivery published after
+//! the release, in publish order: a notification posted after the release
+//! reaches it ahead of its first frame. One that missed a delivery takes a
+//! resync snapshot first.
 //!
 //! [`Event::Quit`] and [`Event::Restarting`] are the exception: each is the
 //! stream's last frame, so it reaches a desynced subscriber as well as a live
@@ -535,7 +537,8 @@ impl EventBus {
 
     /// End `subscriber_id`'s wait for its client's attach answer. A
     /// subscriber that missed no delivery and holds no command rejection turns
-    /// live: its first frame is its first delivery. Any other one stays
+    /// live and takes every delivery published after the release, in publish
+    /// order. Any other one stays
     /// desynced, and the next [`try_resync`](Self::try_resync) puts its
     /// snapshot on its queue. A subscriber that is not registered changes
     /// nothing.

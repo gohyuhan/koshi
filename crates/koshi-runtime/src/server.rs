@@ -713,8 +713,10 @@ impl Server {
     /// does not fit the queue. The subscriber takes nothing until the client
     /// says that it read the session's answer to its attach: its
     /// `AttachAnswerReceived` request.
-    /// Its first delivery is then its first frame, or, when it missed a
-    /// delivery meanwhile, the resync snapshot that
+    /// From then on it takes every delivery published, in publish order: the
+    /// arrival notice that the session posts as that request arrives reaches
+    /// it ahead of its first frame. When it missed a delivery
+    /// meanwhile, its first delivery is the resync snapshot that
     /// [`resync_lagged`](Self::resync_lagged) builds. The subscriber gets a
     /// frame at most once per [`compute_frame_interval`] of
     /// `max_frames_per_second`.

@@ -23876,8 +23876,8 @@ fn focusing_a_collapsed_stack_member_inside_a_floating_pane_opens_it_for_the_cli
                 Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
                     pane_ids: vec![htop_pane_id, zsh_pane_id],
                 }),
-                build_pty_resized(htop_pane_id, 46, 9),
                 build_pane_focused(alice_client_id, None, htop_pane_id, Some(zsh_pane_id)),
+                build_pty_resized(htop_pane_id, 46, 9),
             ],
         }
     );
@@ -23886,6 +23886,75 @@ fn focusing_a_collapsed_stack_member_inside_a_floating_pane_opens_it_for_the_cli
             .get_floating_pane_view(htop_floating_pane_id)
             .map(|floating_pane_view| floating_pane_view.focus_history.clone()),
         Some(vec![htop_pane_id, zsh_pane_id])
+    );
+}
+
+#[test]
+fn focusing_a_collapsed_stack_member_of_a_minimized_floating_pane_reflows_once_after_the_restore() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let (_, stack_command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: Some(htop_pane_id),
+                tab_id: None,
+            },
+            ..build_new_pane_args()
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&stack_command_result),
+        Ok(vec![
+            "PaneCreated",
+            "FloatingPaneLayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let zsh_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id, htop_pane_id]);
+    let (_, minimize_command_result) = dispatch_set_floating_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(htop_pane_id),
+        true,
+    );
+    assert_eq!(
+        get_command_outcome(&minimize_command_result),
+        Ok(vec!["FloatingPaneMinimizedChanged", "PaneFocused"])
+    );
+
+    // The focus restores the floating pane and opens `htop`: `htop` takes
+    // `46x9`, and that resize follows every other event of the command.
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::Pane(htop_pane_id),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
+                    pane_ids: vec![htop_pane_id, zsh_pane_id],
+                }),
+                Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
+                    client_id: alice_client_id,
+                    pane_ids: vec![htop_pane_id, zsh_pane_id],
+                    is_minimized: false,
+                }),
+                build_pane_focused(alice_client_id, None, htop_pane_id, Some(tiled_pane_id)),
+                build_pty_resized(htop_pane_id, 46, 9),
+            ],
+        }
     );
 }
 
@@ -23921,8 +23990,8 @@ fn focusing_another_pane_while_zoomed_inside_a_floating_pane_moves_the_zoom_to_i
                 Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
                     pane_ids: vec![htop_pane_id, zsh_pane_id],
                 }),
-                build_pty_resized(htop_pane_id, 46, 10),
                 build_pane_focused(alice_client_id, None, htop_pane_id, Some(zsh_pane_id)),
+                build_pty_resized(htop_pane_id, 46, 10),
             ],
         }
     );

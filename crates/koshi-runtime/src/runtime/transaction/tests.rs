@@ -118,8 +118,8 @@ fn commit_delivers_the_wire_events_of_the_batch_to_a_subscriber_in_emission_orde
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (id, event_receiver, _) = bus.subscribe();
-    bus.release_attach_answer_hold(id);
+    let (subscriber_id, event_receiver, _) = bus.subscribe();
+    bus.release_attach_answer_hold(subscriber_id);
     let mut scope = TransactionScope::new();
     scope.emit(build_test_placement_event(tab));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));

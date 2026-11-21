@@ -685,24 +685,38 @@ impl Server {
     }
 
     /// Seal `emitted_events` as one committed transaction keyed to
+    /// `command_id`, with no session named for a floating pane reflow
+    /// ([`Self::commit_events_with_floating_reflow`]).
+    fn commit_events(
+        &mut self,
+        command_id: CommandId,
+        emitted_events: Vec<Event>,
+    ) -> CommandResult {
+        self.commit_events_with_floating_reflow(command_id, None, emitted_events)
+    }
+
+    /// Seal `emitted_events` as one committed transaction keyed to
     /// `command_id`: emit each event into a fresh [`TransactionScope`] in
     /// order, then commit it on the server's event bus and recent-events ring
     /// ([`TransactionScope::commit`]). An empty `emitted_events` commits an
     /// empty batch.
     ///
-    /// Before the seal, each session where `emitted_events` holds an
-    /// [`Event::FloatingPaneMinimizedChanged`] reflows its floating panes
-    /// ([`Self::reflow_floating_panes`]), and the events of that reflow follow
-    /// the command's own events in the batch. Example: client A restores a
-    /// floating pane that only client B showed, and A's own solve draws a pane
-    /// of it at `46x9` → the batch ends with the [`Event::PtyResized`] that
-    /// gives that pane `46x9`.
-    fn commit_events(
+    /// Before the seal, the floating panes reflow once
+    /// ([`Self::reflow_floating_panes`]) in `floating_reflow_session_id`, then
+    /// in each other session where `emitted_events` holds an
+    /// [`Event::FloatingPaneMinimizedChanged`]. The events of each reflow
+    /// follow the command's own events in the batch. Example: client A
+    /// restores a floating pane that only client B showed, and A's own solve
+    /// draws a pane of it at `46x9` → the batch ends with the
+    /// [`Event::PtyResized`] that gives that pane `46x9`.
+    fn commit_events_with_floating_reflow(
         &mut self,
         command_id: CommandId,
+        floating_reflow_session_id: Option<SessionId>,
         mut emitted_events: Vec<Event>,
     ) -> CommandResult {
-        let mut minimized_change_session_ids: Vec<SessionId> = Vec::new();
+        let mut reflowed_session_ids: Vec<SessionId> =
+            floating_reflow_session_id.into_iter().collect();
         for emitted_event in &emitted_events {
             let Event::FloatingPaneMinimizedChanged(minimized_change) = emitted_event else {
                 continue;
@@ -710,11 +724,11 @@ impl Server {
             let Some(session) = self.get_session_for_client(minimized_change.client_id) else {
                 continue;
             };
-            if !minimized_change_session_ids.contains(&session.session_id) {
-                minimized_change_session_ids.push(session.session_id);
+            if !reflowed_session_ids.contains(&session.session_id) {
+                reflowed_session_ids.push(session.session_id);
             }
         }
-        for session_id in minimized_change_session_ids {
+        for session_id in reflowed_session_ids {
             let pty_backend = Arc::clone(self.get_pty_backend());
             self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
         }
