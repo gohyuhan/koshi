@@ -516,6 +516,14 @@ column 10: invalid config key `update.auto-check`: expected a boolean (#true or
 | `check-interval-days` | integer — days between checks | `14` | ≥ 0.1.0 |
 | `allow-prerelease` | boolean — offer pre-release builds too; a Homebrew install takes stable releases only | `#false` | ≥ 0.1.0 |
 
+An update does not migrate what a pre-release build runs. A pre-release can
+carry a session protocol or a resume format in a shape that the next build
+cannot read. Example: after an update from 0.7.0-pr.1, every pane and its
+program keep running, but each pane comes back in a tab of its own, and a
+floating pane becomes a tab. A client of the new build that attaches to a
+session that 0.7.0-pr.1 still runs exits with `koshi: the session ended
+unexpectedly`.
+
 ## `allow-beta-features`
 
 Some features are finished code that has not been used enough yet to be turned
