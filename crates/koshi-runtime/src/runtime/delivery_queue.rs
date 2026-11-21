@@ -19,6 +19,11 @@
 //! connection's reading thread: it records the last painted update the
 //! client reported.
 //!
+//! [`DeliverySender::request_frame_taken_notice`] asks the writing thread to
+//! say when it took the last frame on the queue, and
+//! [`DeliveryReceiver::take_frame_taken_notice`] is the writing thread's
+//! check after each delivery it takes.
+//!
 //! Dropping the sender closes the queue: the receiver hands out every queued
 //! delivery, then reports the queue closed. Dropping the receiver closes it
 //! the other way: each send after that drops its delivery and reports the
@@ -44,6 +49,7 @@ pub fn create_delivery_queue(capacity: usize) -> (DeliverySender, DeliveryReceiv
             is_sender_closed: false,
             is_receiver_closed: false,
             painted_update_report: None,
+            is_frame_taken_notice_requested: false,
         }),
         queue_changed: Condvar::new(),
     });
@@ -102,6 +108,9 @@ struct DeliveryQueueState {
     is_receiver_closed: bool,
     /// The newest paint report the receiver has not taken.
     painted_update_report: Option<PaintedUpdateReport>,
+    /// Whether the sender asked to hear when the receiver took the last frame
+    /// on the queue ([`DeliverySender::request_frame_taken_notice`]).
+    is_frame_taken_notice_requested: bool,
 }
 
 impl SharedDeliveryQueue {
@@ -179,6 +188,23 @@ impl DeliverySender {
         Ok(())
     }
 
+    /// Whether a frame or a resync snapshot still waits on the queue for the
+    /// writing thread. When one waits, the queue keeps a request that the
+    /// writing thread's next [`DeliveryReceiver::take_frame_taken_notice`]
+    /// after it took the last one answers `true`. When none waits, or the
+    /// receiver is gone, it returns `false` and keeps no request.
+    ///
+    /// Example: the queue holds `Frame(a)`, then `Event(e)`. This returns
+    /// `true`. The writing thread takes `Frame(a)`, and its check answers
+    /// `true` once.
+    pub fn request_frame_taken_notice(&self) -> bool {
+        let mut queue_state = self.shared_queue.lock_queue_state();
+        let is_frame_waiting =
+            !queue_state.is_receiver_closed && queue_state.deliveries.iter().any(is_frame_delivery);
+        queue_state.is_frame_taken_notice_requested = is_frame_waiting;
+        is_frame_waiting
+    }
+
     /// Wake the receiver with nothing put on the queue: a receiver waiting in
     /// [`DeliveryReceiver::recv_paced`] reads the ending notice again.
     pub fn wake_receiver(&self) {
@@ -216,6 +242,21 @@ impl DeliveryReceiver {
             None if queue_state.is_sender_closed => Err(TryRecvError::Disconnected),
             None => Err(TryRecvError::Empty),
         }
+    }
+
+    /// Whether the sender asked to hear when the last frame on the queue was
+    /// taken ([`DeliverySender::request_frame_taken_notice`]) and no frame or
+    /// resync snapshot waits on the queue now. A `true` answer ends the
+    /// request: the next check answers `false` until the sender asks again.
+    pub fn take_frame_taken_notice(&self) -> bool {
+        let mut queue_state = self.shared_queue.lock_queue_state();
+        if !queue_state.is_frame_taken_notice_requested
+            || queue_state.deliveries.iter().any(is_frame_delivery)
+        {
+            return false;
+        }
+        queue_state.is_frame_taken_notice_requested = false;
+        true
     }
 
     /// The reporter that the connection's reading thread records paint

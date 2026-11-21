@@ -575,6 +575,22 @@ impl EventBus {
             })
     }
 
+    /// Whether a frame or resync snapshot still waits on `subscriber_id`'s
+    /// queue for its writing thread
+    /// ([`DeliverySender::request_frame_taken_notice`]). When one waits, the
+    /// writing thread hands a
+    /// [`RuntimeEvent::QueuedFrameTaken`](crate::runtime::event::RuntimeEvent::QueuedFrameTaken)
+    /// to the dispatcher once it takes the last one. `false` when
+    /// `subscriber_id` is not registered.
+    pub(crate) fn request_frame_taken_notice(&self, subscriber_id: SubscriberId) -> bool {
+        self.find_subscriber_index(subscriber_id)
+            .is_some_and(|subscriber_index| {
+                self.subscribers[subscriber_index]
+                    .delivery_sender
+                    .request_frame_taken_notice()
+            })
+    }
+
     /// Whether `subscriber_id` is live and not owed a frame
     /// ([`is_frame_owed`](Self::is_frame_owed)). `false` when `subscriber_id`
     /// is not registered.

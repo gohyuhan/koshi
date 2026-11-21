@@ -487,6 +487,9 @@ impl Server {
             // The frame the subscriber is owed goes from this pass's
             // `push_due_frames`, at the subscriber's pace.
             RuntimeEvent::QueueRoomFreed => {}
+            // The marks of other clients' input that the taken frame named
+            // count as taken in this pass's `push_due_frames`.
+            RuntimeEvent::QueuedFrameTaken => {}
         }
         self.record_view_changes(sending_client_id);
         ControlFlow::Continue(())
@@ -508,10 +511,11 @@ impl Server {
     ///    at or after both its next animation frame and `current_time`. An
     ///    animation whose clock has not started is due at once. An animation
     ///    that no such client shows sets no wait.
-    /// 4. For each subscriber that can take a frame, the time until the
-    ///    earliest expiry after `current_time` of a mark of another client's
-    ///    input that a sent frame named
-    ///    (`PeerInputView::find_next_mark_expiry`).
+    /// 4. The time until the earliest expiry of a mark of another client's
+    ///    input that a subscriber holds, zero when that expiry is at or before
+    ///    `current_time` (`PeerInputView::find_next_mark_expiry`). A mark has
+    ///    an expiry once the writing thread of the subscriber's connection
+    ///    took a frame that names it.
     ///
     /// Reads no terminal engine.
     ///
@@ -544,14 +548,8 @@ impl Server {
         let peer_input_mark_wakeup = self
             .subscriptions
             .iter()
-            .filter(|frame_subscription| {
-                self.event_bus
-                    .can_take_frame(frame_subscription.subscriber_id)
-            })
             .filter_map(|frame_subscription| {
-                frame_subscription
-                    .peer_input_view
-                    .find_next_mark_expiry(current_time)
+                frame_subscription.peer_input_view.find_next_mark_expiry()
             })
             .min()
             .map(|mark_expiry| mark_expiry.saturating_duration_since(current_time));
@@ -673,9 +671,9 @@ impl Server {
     }
 
     /// Mark the views the pass changed and build again the placement previews
-    /// that read a changed state (`mark_changed_views`), mark the view of
-    /// each subscriber with a mark of another client's input that expired at
-    /// `current_time` changed (`PeerInputView::has_expired_mark`),
+    /// that read a changed state (`mark_changed_views`), bring each
+    /// subscriber's marks of other clients' input up to date at
+    /// `current_time` (`Server::update_peer_input_marks`),
     /// run the timed renders due at `current_time`
     /// ([`advance_due_pane_renders`](Self::advance_due_pane_renders)), hand a
     /// fresh snapshot to each paused subscriber that can take one
@@ -686,14 +684,7 @@ impl Server {
     /// the events it read.
     pub fn push_due_frames(&mut self, current_time: Instant) {
         self.mark_changed_views();
-        for frame_subscription in &mut self.subscriptions {
-            if frame_subscription
-                .peer_input_view
-                .has_expired_mark(current_time)
-            {
-                frame_subscription.frame_pace.mark_view_changed();
-            }
-        }
+        self.update_peer_input_marks(current_time);
         self.advance_due_pane_renders(current_time);
         self.resync_lagged(current_time);
         self.push_frames(current_time);

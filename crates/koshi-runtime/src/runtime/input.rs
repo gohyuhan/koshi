@@ -40,8 +40,6 @@
 //! its viewer's screen still shows, plus `1` when that frame's typed pane is
 //! not the pane that takes the input (`Server::subscribe`).
 
-use std::time::Instant;
-
 use crate::server::Server;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeyInput;
@@ -60,50 +58,6 @@ impl Server {
     pub(crate) fn handle_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
         self.clear_selection_on_pane_input(client_id, pane_id);
         self.snap_view_to_bottom_on_input(client_id, pane_id);
-    }
-
-    /// Record that input of `client_id` reached `pane_id` now, in the record
-    /// of each subscription that views another client of the same session
-    /// ([`PeerInputView::record_input`](crate::runtime::peer_input::PeerInputView::record_input)).
-    /// A subscription whose record makes a mark has its view marked changed:
-    /// its next frame names `pane_id` for `client_id`. A client no session
-    /// holds records nothing.
-    ///
-    /// Five paths call it, each once the pane took the bytes: keystrokes
-    /// ([`Server::handle_key_inputs`]), pasted text
-    /// ([`Server::handle_host_paste`]), a `core:write-to-pane` write from a key
-    /// binding or a mouse action of `client_id`, a forwarded mouse report
-    /// ([`Server::forward_mouse_to_pane`]), and alternate-scroll arrows
-    /// ([`Server::write_alternate_scroll_arrows`]).
-    ///
-    /// Example: Alice's last frame names no pane for Bob, whose floating pane
-    /// tray is open, and Bob's `ls` reaches pane 3: Alice's frame is due, and
-    /// it names pane 3 in Bob's `recent_input_pane_ids`.
-    pub(crate) fn record_client_input_in_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
-        let Some(session_id) = self
-            .get_session_for_client(client_id)
-            .map(|session| session.session_id)
-        else {
-            return;
-        };
-        let input_at = Instant::now();
-        for subscription_index in 0..self.subscriptions.len() {
-            let viewing_client_id = self.subscriptions[subscription_index].client_id;
-            let is_other_client_of_session = viewing_client_id != client_id
-                && self
-                    .get_session_for_client(viewing_client_id)
-                    .is_some_and(|session| session.session_id == session_id);
-            if !is_other_client_of_session {
-                continue;
-            }
-            let frame_subscription = &mut self.subscriptions[subscription_index];
-            if frame_subscription
-                .peer_input_view
-                .record_input(client_id, pane_id, input_at)
-            {
-                frame_subscription.frame_pace.mark_view_changed();
-            }
-        }
     }
 
     /// Return this client's scrollback view of `pane_id` to the newest line.

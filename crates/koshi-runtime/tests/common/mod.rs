@@ -620,6 +620,36 @@ pub fn read_session_frames_until(
     viewer_connection: impl Into<ViewerConnection>,
     accepts_session_frame: impl Fn(&SessionFrame<SessionEvent>) -> bool + Send + 'static,
 ) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_reporting_paints(viewer_connection, accepts_session_frame, true)
+}
+
+/// [`read_session_frames_until_painted_frame`] that reports no update
+/// painted, as a client does that has not painted yet. The session's writing
+/// thread then sends this connection no update after the first one that waits
+/// for a report.
+pub fn read_session_frames_until_painted_frame_reporting_no_paint(
+    viewer_connection: impl Into<ViewerConnection>,
+    accepts_painted_frame: impl Fn(&ReceivedPaintedFrame) -> bool + Send + 'static,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
+    read_session_frames_reporting_paints(
+        viewer_connection,
+        move |session_frame| match session_frame {
+            SessionFrame::Painted(received_painted_frame) => {
+                accepts_painted_frame(received_painted_frame)
+            }
+            SessionFrame::Event(_) | SessionFrame::ImageChunk(_) => false,
+        },
+        false,
+    )
+}
+
+/// [`read_session_frames_until`], reporting each painted update painted
+/// only when `should_report_paints` is `true`.
+fn read_session_frames_reporting_paints(
+    viewer_connection: impl Into<ViewerConnection>,
+    accepts_session_frame: impl Fn(&SessionFrame<SessionEvent>) -> bool + Send + 'static,
+    should_report_paints: bool,
+) -> (ViewerConnection, Vec<SessionFrame<SessionEvent>>) {
     let mut viewer_connection = viewer_connection.into();
     let (read_result_sender, read_result_receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -636,7 +666,9 @@ pub fn read_session_frames_until(
             else {
                 continue;
             };
-            if let SessionFrame::Painted(received_painted_frame) = &session_frame {
+            if let (true, SessionFrame::Painted(received_painted_frame)) =
+                (should_report_paints, &session_frame)
+            {
                 let update_sequence = received_painted_frame.update_sequence;
                 viewer_connection
                     .ipc_connection

@@ -1025,9 +1025,10 @@ pub struct PeerSnapshot {
     pub typed_pane_id: Option<PaneId>,
     /// The other panes the other client's input reached while the viewing
     /// client's frames named another pane, or none, as its `typed_pane_id`,
-    /// oldest first. A pane stays listed until the first frame at least 2
-    /// seconds after the last input that reached it. Empty when there is no
-    /// such pane.
+    /// oldest first. A pane stays listed until 2 seconds after the last input that
+    /// reached it, or after the time the session saw the connection's writing
+    /// thread take a frame that lists it, whichever comes last. Empty
+    /// when there is no such pane.
     pub recent_input_pane_ids: Vec<PaneId>,
 }
 

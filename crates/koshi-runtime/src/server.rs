@@ -76,8 +76,9 @@ pub(crate) struct FrameSubscription {
     /// Whether the client's view changed since its last frame, and when its
     /// next frame may go.
     pub(crate) frame_pace: FramePace,
-    /// The typed pane each other client had in the last frame sent to the
-    /// subscriber, and the marks of the panes their input reached since.
+    /// The typed pane each other client had in the newest frame queued for
+    /// the subscriber, and the marks of the panes their input reached that
+    /// the subscriber's frames name.
     pub(crate) peer_input_view: PeerInputView,
 }
 
@@ -807,8 +808,8 @@ impl Server {
     /// [`push_frames`](Self::push_frames) builds it, and goes with that
     /// client's session's notification queue, regardless of the subscriber's
     /// frame pace. A queued frame counts as the subscriber's frame at
-    /// `current_time`, as a frame that [`push_frames`](Self::push_frames)
-    /// queues does. A subscriber
+    /// `current_time`, and names the subscriber's marks of other clients'
+    /// input, as a frame that [`push_frames`](Self::push_frames) queues does. A subscriber
     /// that views no client, or whose client is no longer attached, has its
     /// subscription dropped.
     ///
@@ -839,9 +840,6 @@ impl Server {
                 continue;
             };
             let client_id = self.subscriptions[subscription_index].client_id;
-            self.subscriptions[subscription_index]
-                .peer_input_view
-                .remove_expired_marks(current_time);
             let (Some(snapshot), Some(notification_queue)) = (
                 self.build_snapshot(client_id),
                 self.get_session_for_client(client_id)
@@ -872,7 +870,8 @@ impl Server {
                     .record_frame_sent(current_time);
                 frame_subscription
                     .peer_input_view
-                    .record_frame_sent(peer_typed_pane_ids);
+                    .record_frame_queued(peer_typed_pane_ids);
+                self.record_peer_input_frames_taken(subscription_index, current_time);
             }
         }
         self.remove_ended_subscriptions();
@@ -885,17 +884,16 @@ impl Server {
     /// A frame is due when the client's view changed since its last frame and
     /// its pace lets a frame go (`FramePace::compute_frame_wait` is
     /// `Some(Duration::ZERO)`). The frame is the subscriber's viewing
-    /// client's, built by [`build_snapshot`](Self::build_snapshot) once the
-    /// subscriber's marks of other clients' input that a sent frame named and
-    /// that expired at `current_time` are gone
-    /// (`PeerInputView::remove_expired_marks`). A
+    /// client's, built by [`build_snapshot`](Self::build_snapshot). A
     /// subscriber that is paused, or owed a frame as
     /// [`resync_lagged`](Self::resync_lagged) states, is skipped, and no frame
     /// is built for it.
     ///
     /// A queued frame counts as the subscriber's frame at `current_time`
-    /// (`FramePace::record_frame_sent`), and every mark the subscriber holds
-    /// counts as named by a sent frame (`PeerInputView::record_frame_sent`).
+    /// (`FramePace::record_frame_sent`), every mark the subscriber holds
+    /// counts as named by a queued frame (`PeerInputView::record_frame_queued`),
+    /// and the queue is asked to report when the writing thread takes it
+    /// (`Server::record_peer_input_frames_taken`).
     /// A frame that does not fit the queue
     /// is dropped, marks the subscriber owed a frame, and leaves its view
     /// change in place: the pass that [`RuntimeEvent::QueueRoomFreed`] starts
@@ -914,9 +912,6 @@ impl Server {
             if !is_frame_due || !self.event_bus.can_take_frame(subscriber_id) {
                 continue;
             }
-            self.subscriptions[subscription_index]
-                .peer_input_view
-                .remove_expired_marks(current_time);
             let Some(snapshot) = self.build_snapshot(client_id) else {
                 self.subscriptions[subscription_index]
                     .frame_pace
@@ -939,7 +934,8 @@ impl Server {
                     .record_frame_sent(current_time);
                 frame_subscription
                     .peer_input_view
-                    .record_frame_sent(peer_typed_pane_ids);
+                    .record_frame_queued(peer_typed_pane_ids);
+                self.record_peer_input_frames_taken(subscription_index, current_time);
             }
         }
         self.remove_ended_subscriptions();

@@ -1138,6 +1138,104 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     );
 }
 
+/// The dispatcher asks to hear when the frame on a client's queue is taken.
+/// The writing thread takes it, writes it as a painted update, and hands one
+/// `QueuedFrameTaken` to the dispatcher. Nothing else hands a second one.
+#[test]
+fn the_writing_thread_tells_the_dispatcher_once_when_it_takes_the_frame_the_dispatcher_asked_about()
+{
+    use crate::runtime::bus::EventBus;
+    use koshi_ipc::transport::ReceivedFrame;
+
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
+    assert!(event_bus.try_send_frame(
+        subscriber_id,
+        Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
+    ));
+    assert!(event_bus.request_frame_taken_notice(subscriber_id));
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+    let runtime_directory = build_test_runtime_directory("frame-taken-notice");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (forwarded_event_sender, forwarded_event_receiver) = mpsc::channel();
+    let dispatcher_thread = std::thread::spawn(move || {
+        let mut unanswered_stream = Some((delivery_receiver, writer_handoff));
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
+            match runtime_event {
+                RuntimeEvent::IpcAttach {
+                    response_sender, ..
+                } => {
+                    if let Some((delivery_receiver, writer_handoff)) = unanswered_stream.take() {
+                        let _ = response_sender.send(Some(build_attach_accepted(
+                            client_id,
+                            session_id,
+                            delivery_receiver,
+                            writer_handoff,
+                            Arc::clone(&ending_notice),
+                        )));
+                    }
+                }
+                RuntimeEvent::ClientAttachAnswerReceived { .. } => {}
+                forwarded_runtime_event => {
+                    let _ = forwarded_event_sender.send(forwarded_runtime_event);
+                }
+            }
+        }
+    });
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+    assert!(matches!(
+        connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the painted update"),
+        ReceivedFrame::Binary(_)
+    ));
+    assert!(
+        matches!(
+            forwarded_event_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the writing thread tells the dispatcher of the take"),
+            RuntimeEvent::QueuedFrameTaken
+        ),
+        "the first forwarded event is the take notice"
+    );
+    event_bus.unsubscribe(subscriber_id);
+    loop {
+        match connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the next frame")
+        {
+            ReceivedFrame::Message(SessionEvent::Detached) => break,
+            ReceivedFrame::Message(_) | ReceivedFrame::Binary(_) => {}
+        }
+    }
+
+    drop(connection);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+    assert_eq!(
+        forwarded_event_receiver
+            .try_iter()
+            .filter(|runtime_event| matches!(runtime_event, RuntimeEvent::QueuedFrameTaken))
+            .count(),
+        0,
+        "the writing thread told the dispatcher once"
+    );
+}
+
 #[test]
 fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_run() {
     use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;

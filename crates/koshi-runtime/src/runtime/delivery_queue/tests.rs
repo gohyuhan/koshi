@@ -1,7 +1,8 @@
 //! Tests for the delivery queue: deliveries come out in the order they went
 //! in, a full queue drops the delivery, a frame takes the place of the
 //! frame at the tail and of nothing else, both ends close the queue, the
-//! newest paint report waits, and a paced receive holds a frame at the head
+//! newest paint report waits, a frame taken notice answers once after the
+//! last waiting frame is taken, and a paced receive holds a frame at the head
 //! until a frame may go, the sender goes or the session ends. A delivery put
 //! on the queue, a paint report, the sender's drop and a wake each end a
 //! paced wait before its deadline.
@@ -148,6 +149,83 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
             Delivery::Frame(build_named_frame(&base_render_snapshot, "d")),
         ]
     );
+}
+
+/// The queue holds frame `a`, an event, then frame `b`, and the sender asks
+/// to hear when the last frame is taken. Taking `a` answers no, taking the
+/// event answers no, and taking `b` answers yes once. With no frame on the
+/// queue, the request answers `false` and the receiver hears nothing.
+#[test]
+fn a_frame_taken_notice_answers_once_after_the_last_waiting_frame_is_taken() {
+    let base_render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(4);
+    let tab_id = TabId::new();
+    delivery_sender
+        .try_send_frame(build_named_frame(&base_render_snapshot, "a"))
+        .expect("frame a fits");
+    delivery_sender
+        .try_send(build_test_placement_delivery(tab_id))
+        .expect("the event fits");
+    delivery_sender
+        .try_send_frame(build_named_frame(&base_render_snapshot, "b"))
+        .expect("frame b fits");
+
+    assert!(delivery_sender.request_frame_taken_notice());
+    let mut notice_answers = Vec::new();
+    while let Ok(delivery) = delivery_receiver.try_recv() {
+        notice_answers.push((delivery, delivery_receiver.take_frame_taken_notice()));
+    }
+    assert_eq!(
+        notice_answers,
+        vec![
+            (
+                Delivery::Frame(build_named_frame(&base_render_snapshot, "a")),
+                false
+            ),
+            (build_test_placement_delivery(tab_id), false),
+            (
+                Delivery::Frame(build_named_frame(&base_render_snapshot, "b")),
+                true
+            ),
+        ]
+    );
+    assert!(!delivery_receiver.take_frame_taken_notice());
+
+    assert!(!delivery_sender.request_frame_taken_notice());
+    assert!(!delivery_receiver.take_frame_taken_notice());
+}
+
+/// The sender asks to hear of the take while frame `a` waits, and frame `b`
+/// takes its place before the receiver takes it. Taking `b` answers yes. A
+/// request after the receiver is gone answers `false`.
+#[test]
+fn a_frame_taken_notice_follows_the_frame_that_replaced_the_waiting_one_and_a_gone_receiver_answers_false(
+) {
+    let base_render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(2);
+    delivery_sender
+        .try_send_frame(build_named_frame(&base_render_snapshot, "a"))
+        .expect("frame a fits");
+    assert!(delivery_sender.request_frame_taken_notice());
+    delivery_sender
+        .try_send_frame(build_named_frame(&base_render_snapshot, "b"))
+        .expect("frame b takes the place of frame a");
+
+    assert!(!delivery_receiver.take_frame_taken_notice());
+    assert_eq!(
+        delivery_receiver.try_recv(),
+        Ok(Delivery::Frame(build_named_frame(
+            &base_render_snapshot,
+            "b"
+        )))
+    );
+    assert!(delivery_receiver.take_frame_taken_notice());
+
+    delivery_sender
+        .try_send_frame(build_named_frame(&base_render_snapshot, "c"))
+        .expect("frame c fits");
+    drop(delivery_receiver);
+    assert!(!delivery_sender.request_frame_taken_notice());
 }
 
 #[test]

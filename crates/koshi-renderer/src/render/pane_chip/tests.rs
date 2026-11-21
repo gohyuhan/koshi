@@ -1252,6 +1252,23 @@ fn a_chip_that_comes_with_no_marker_redraws_only_its_top_border_row() {
 }
 
 #[test]
+fn a_recent_input_pane_that_comes_and_goes_redraws_only_its_top_border_row() {
+    let (mut idle_render_snapshot, _, right_pane_id) = build_two_pane_frame();
+    idle_render_snapshot.session_snapshot.peers[0].typed_pane_id = None;
+    let mut marked_render_snapshot = idle_render_snapshot.clone();
+    marked_render_snapshot.session_snapshot.peers[0].recent_input_pane_ids = vec![right_pane_id];
+
+    assert_eq!(
+        list_core_changed_screen_rows(&idle_render_snapshot, &marked_render_snapshot),
+        Some(vec![1])
+    );
+    assert_eq!(
+        list_core_changed_screen_rows(&marked_render_snapshot, &idle_render_snapshot),
+        Some(vec![1])
+    );
+}
+
+#[test]
 fn a_peer_whose_keys_move_from_a_top_border_to_a_stack_header_redraws_both_rows() {
     let (header_render_snapshot, vim_pane_id, _) = build_stack_frame(30);
     let mut top_border_render_snapshot = header_render_snapshot.clone();

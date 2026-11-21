@@ -31,7 +31,8 @@ use common::{
     create_right_split_pane, get_last_painted_frame, get_seeded_tab_and_pane_ids,
     get_session_overview, open_remote_session_connection, open_session_connection,
     read_session_frames_to_detached, read_session_frames_to_mouse_answer,
-    read_session_frames_until, read_session_frames_until_painted_frame, run_served_test_session,
+    read_session_frames_until, read_session_frames_until_painted_frame,
+    read_session_frames_until_painted_frame_reporting_no_paint, run_served_test_session,
     send_test_attach, serve_test_session, start_serving_test_session, start_test_session,
     submit_test_command, submit_test_command_for_answer, submit_test_command_for_client,
     wait_for_client_count, wait_for_mouse_tracking, AttachedTestClient, ViewerConnection,
@@ -74,10 +75,12 @@ use koshi_runtime::resume::{read_resume_body, read_resume_header};
 use koshi_runtime::runtime::painted_update::{
     ReceivedPaintedFrame, ReceivedPaneView, SessionFrame,
 };
+use koshi_runtime::runtime::peer_input::PEER_INPUT_MARK_DURATION;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::{
-    build_floating_pane_id, build_key_input_for_chord, send_attach_answer_received,
+    build_floating_pane_id, build_key_input_for_chord, build_paint_report_request,
+    send_attach_answer_received,
 };
 
 /// The PTY size [`common::TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
@@ -1380,6 +1383,94 @@ fn the_peer_list_in_a_viewers_frames_follows_another_viewer_attaching_changing_i
             let alice_connection = read_until_peers(alice_connection, Vec::new());
 
             (vec![alice_connection.ipc_connection], ())
+        },
+    );
+}
+
+/// Bob turns his local input mode on, so frames name no pane for him. Alice
+/// attaches, reads her first painted update and reports no paint, as a client
+/// that paints slowly: every frame after it waits on her queue. Bob's `a` reaches
+/// the seeded pane. More than two seconds after the key, Alice reports that update
+/// painted and reads on: a frame names the seeded pane as Bob's recent input pane, and the
+/// frame that names it no more arrives at least two seconds after she started
+/// reading again.
+#[test]
+fn a_recent_input_pane_reaches_a_client_that_paints_late_and_stays_two_seconds_after_it_reads_on() {
+    let (_server, _fake_pty_backend, ()) = serve_test_session(
+        "late-paint-recent-input",
+        |runtime_directory, session_id, _fake_pty_backend| {
+            let mut bob_connection = open_session_connection(&runtime_directory, session_id);
+            let bob_client_id =
+                attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE).client_id;
+            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
+            send_viewer_local_input_mode(&mut bob_connection, 4, true);
+            let (bob_connection, _) = read_until_earlier_requests_handled(bob_connection, 5);
+            let build_bob_peers = move |recent_input_pane_ids: Vec<PaneId>| {
+                vec![FramePeer {
+                    client_id: bob_client_id,
+                    color_index: 0,
+                    typed_pane_id: None,
+                    recent_input_pane_ids,
+                }]
+            };
+            let mut alice_connection = open_session_connection(&runtime_directory, session_id);
+            attach_test_client(&mut alice_connection, 2, SMALL_VIEWPORT_SIZE);
+            let expected_first_peers = build_bob_peers(Vec::new());
+            let (mut alice_connection, alice_first_frames) =
+                read_session_frames_until_painted_frame_reporting_no_paint(
+                    alice_connection,
+                    move |received_painted_frame| {
+                        received_painted_frame.painted_frame.session_snapshot.peers
+                            == expected_first_peers
+                    },
+                );
+            let alice_first_update_sequence =
+                get_last_painted_frame(&alice_first_frames).update_sequence;
+
+            let mut bob_connection = bob_connection;
+            bob_connection
+                .ipc_connection
+                .send(&IpcRequest {
+                    request_id: 6,
+                    request_kind: build_tagged_character_request('a', 0),
+                })
+                .expect("send Bob's key");
+            let (bob_connection, _) = read_until_earlier_requests_handled(bob_connection, 7);
+            std::thread::sleep(PEER_INPUT_MARK_DURATION + Duration::from_secs(1));
+            let reading_resumed_at = Instant::now();
+            alice_connection
+                .ipc_connection
+                .send(&build_paint_report_request(alice_first_update_sequence))
+                .expect("Alice reports her first update painted");
+            let expected_marked_peers = build_bob_peers(vec![pane_id]);
+            let (alice_connection, _) = read_session_frames_until_painted_frame(
+                alice_connection,
+                move |received_painted_frame| {
+                    received_painted_frame.painted_frame.session_snapshot.peers
+                        == expected_marked_peers
+                },
+            );
+            let expected_cleared_peers = build_bob_peers(Vec::new());
+            let (alice_connection, _) = read_session_frames_until_painted_frame(
+                alice_connection,
+                move |received_painted_frame| {
+                    received_painted_frame.painted_frame.session_snapshot.peers
+                        == expected_cleared_peers
+                },
+            );
+            let mark_shown_duration = reading_resumed_at.elapsed();
+            assert!(
+                mark_shown_duration >= PEER_INPUT_MARK_DURATION,
+                "{mark_shown_duration:?}"
+            );
+
+            (
+                vec![
+                    alice_connection.ipc_connection,
+                    bob_connection.ipc_connection,
+                ],
+                (),
+            )
         },
     );
 }

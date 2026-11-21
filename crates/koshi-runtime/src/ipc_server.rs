@@ -1571,6 +1571,15 @@ fn serve_connection(
 /// frame that found the queue full on an idle session is followed by a newer
 /// frame once the writing thread reads the next delivery.
 ///
+/// After each frame or resync snapshot it reads, the writing thread also
+/// checks whether the dispatcher asked to hear when the last frame on the
+/// queue was taken, and no frame or resync snapshot waits now
+/// ([`DeliveryReceiver::take_frame_taken_notice`](crate::runtime::delivery_queue::DeliveryReceiver::take_frame_taken_notice)).
+/// Then it hands one [`RuntimeEvent::QueuedFrameTaken`] to the dispatcher on
+/// the same terms. Example: a frame that names Bob's recent input pane waits
+/// 3 seconds for the client's paint report. The writing thread takes it, and
+/// the event starts the pass that counts Bob's mark as taken.
+///
 /// A frame that arrives whole and does not decode costs the client that one
 /// request. The reading half drops it and reads the next frame, and the client
 /// stays attached. A request kind this build does not have is dropped the same
@@ -1785,6 +1794,12 @@ fn stream_events(
             if writer_handoff.take_owed_frame_mark() {
                 let _ = writer_intake
                     .hand_over_event(&writer_inbox_sender, RuntimeEvent::QueueRoomFreed);
+            }
+            let is_frame_delivery =
+                matches!(delivery, Delivery::Frame(_) | Delivery::Snapshot { .. });
+            if is_frame_delivery && deliveries.take_frame_taken_notice() {
+                let _ = writer_intake
+                    .hand_over_event(&writer_inbox_sender, RuntimeEvent::QueuedFrameTaken);
             }
             let write_started_at = Instant::now();
             let previous_update_sequence = painted_update_sender.get_last_update_sequence();

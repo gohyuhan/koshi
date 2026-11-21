@@ -147,6 +147,7 @@ fn an_event_names_the_client_whose_own_connection_carried_it() {
         )),
         RuntimeEvent::Quit,
         RuntimeEvent::QueueRoomFreed,
+        RuntimeEvent::QueuedFrameTaken,
     ]
     .iter()
     .map(RuntimeEvent::find_sending_client_id)
@@ -160,6 +161,7 @@ fn an_event_names_the_client_whose_own_connection_carried_it() {
             Some(bob_client_id),
             Some(bob_client_id),
             Some(bob_client_id),
+            None,
             None,
             None,
             None,
