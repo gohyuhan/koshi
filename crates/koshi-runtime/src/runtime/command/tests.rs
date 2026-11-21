@@ -23442,6 +23442,42 @@ fn move_pane_inside_a_floating_pane_swaps_with_its_neighbor_and_stops_at_its_edg
 }
 
 #[test]
+fn move_pane_inside_a_floating_pane_the_client_minimized_is_refused_without_changing_the_layout() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let (htop_pane_id, _zsh_pane_id) =
+        create_alice_split_floating_pane(&mut runtime, alice_client_id);
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    let alice_client = runtime
+        .get_client_mut(alice_client_id)
+        .expect("alice is attached");
+    assert!(alice_client.minimize_floating_pane(htop_floating_pane_id));
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::MovePane(MovePaneArgs {
+            pane_id: Some(htop_pane_id),
+            direction: Direction::Right,
+        }),
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!("{htop_pane_id} is minimized; restore it first")),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
 fn a_tab_command_from_a_floating_panes_shell_is_refused_and_a_zoom_acts_inside_it() {
     let FloatingCommandFixture {
         mut runtime,

@@ -729,8 +729,9 @@ client's own key does. A positive `scroll-pane --lines` moves toward history.
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.
 A client that cannot draw floating panes refuses it with `<pane> cannot be
-drawn on this client`. `scroll-pane --pane` on a floating pane that the client
-minimized is refused with `<pane> is minimized; restore it first`.
+drawn on this client`. `scroll-pane --pane` and `move-pane --direction` on a
+pane inside a floating pane that the client minimized are refused with `<pane>
+is minimized; restore it first`.
 
 Without `--pane`, `close-pane`, `resize-pane`, `scroll-pane` and `input` act on
 one pane. Inside a koshi pane, the command acts on that pane. Outside koshi, the
