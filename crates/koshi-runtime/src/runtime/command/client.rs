@@ -6,7 +6,7 @@ use super::*;
 
 use std::collections::HashSet;
 
-use koshi_core::client::resolve_client_label;
+use koshi_core::client::{is_same_shown_label, resolve_client_label};
 use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
@@ -485,7 +485,9 @@ impl Server {
     /// focus, zoom, scrollback offsets, selections, floating view, lock mode,
     /// mouse selection mode, label and `color_index`, and the tab it moves off of
     /// reflows too. A fresh id is registered anew with a label and a
-    /// `color_index` that no attached client holds:
+    /// `color_index` that no attached client holds. A label is held when it
+    /// shows the same text as the label of an attached client
+    /// ([`is_same_shown_label`]):
     ///
     /// - the label is the label of `saved_view` while no attached client holds
     ///   it, else the label [`resolve_client_label`] gives for `client_origin`
@@ -576,18 +578,19 @@ impl Server {
             client.update_origin(client_origin);
             Some(previous_tab_id)
         } else {
-            let held_labels: HashSet<&str> = session
+            let held_labels: Vec<&str> = session
                 .clients
                 .list_attached_clients()
                 .map(Client::get_label)
                 .collect();
+            let is_label_held = |candidate_label: &str| {
+                held_labels
+                    .iter()
+                    .any(|held_label| is_same_shown_label(held_label, candidate_label))
+            };
             let label = match saved_view {
-                Some(saved_view) if !held_labels.contains(saved_view.label.as_str()) => {
-                    saved_view.label.clone()
-                }
-                _ => resolve_client_label(client_origin, granted_identity, |candidate_label| {
-                    held_labels.contains(candidate_label)
-                }),
+                Some(saved_view) if !is_label_held(&saved_view.label) => saved_view.label.clone(),
+                _ => resolve_client_label(client_origin, granted_identity, is_label_held),
             };
             let held_color_indexes: HashSet<u32> = session
                 .clients

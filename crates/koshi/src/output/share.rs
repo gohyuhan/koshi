@@ -118,7 +118,7 @@ pub enum ConfigMismatch {
 /// The name is [`sanitize_client_label`] of `token_identity`: `bob` gives
 /// `Everyone attached to a session this grant reaches sees the name bob.`, and
 /// `"Bob\tSmith"` gives `... sees the name Bob Smith.`. An identity that leaves
-/// nothing, such as `"   "`, gives `Everyone attached to a session this grant
+/// no shown character, such as `"   "` or `"\u{200B}"`, gives `Everyone attached to a session this grant
 /// reaches sees a generated name.`
 #[must_use]
 pub fn render_share_grant(

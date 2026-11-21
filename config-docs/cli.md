@@ -516,7 +516,11 @@ number. The label is the name the session gave the client at attach:
    client whose grant identity cleans to nothing gets one too.
 
 If an attached client already holds the label, the new client gets `-2`, then
-`-3`, and so on: a second terminal of the session's account is `host-2`.
+`-3`, and so on: a second terminal of the session's account is `host-2`. Two
+labels that differ only in characters that show no glyph, such as the zero
+width space U+200B, count as the same label. Example: with `bob` attached, a
+client whose grant identity is `bob` followed by U+200B gets that identity
+followed by `-2`, which shows as `bob-2`.
 `--format json` writes the same values: `"client_number": 2` and
 `"label": "bob"`.
 
@@ -1187,10 +1191,15 @@ Everyone attached to a session this grant reaches sees the name bob.
 The label is the identity with each run of spaces, tabs and line breaks
 folded into one space. Control characters, text direction marks, interlinear
 annotation marks, the noncharacters U+FFFE and U+FFFF, and tag characters are
-removed. The result is cut to 32 cells and 512 bytes. Example: the identity
-`Bob<TAB>Smith` prints `sees the name Bob Smith.` An identity that cleans to
-nothing, such as three spaces, prints `sees a generated name.`, and its
-clients get a generated label, such as `C-swift-otter`.
+removed. Spaces before the first shown character and after the last shown
+character are removed. A shown character is a character with a glyph: the
+zero width space U+200B, the zero width joiner U+200D, the byte order mark
+U+FEFF, the Hangul filler U+3164 and the other Unicode default-ignorable
+characters are not shown characters. The result is cut to 32 cells and 512
+bytes. Example: the identity `Bob<TAB>Smith` prints `sees the name Bob
+Smith.` An identity that cleans to no shown character, such as three spaces or
+U+200B alone, prints `sees a generated name.`, and its clients get a
+generated label, such as `C-swift-otter`.
 
 A listen address in `koshi.kdl` sets the address; it does not open the port.
 With an address set and remote access still off, `koshi share grant` says so

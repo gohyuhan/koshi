@@ -2253,6 +2253,55 @@ fn a_token_whose_index_another_client_took_gets_the_lowest_free_index() {
     );
 }
 
+/// A grant `bob` followed by a grant `bob` with a zero width space shows the
+/// same text: the second client takes `bob\u{200B}-2`. A client whose saved
+/// label `b\u{2060}ob` shows the same text as the attached `bob` takes the
+/// label its grant gives instead.
+#[test]
+fn a_label_that_shows_the_same_text_as_an_attached_label_takes_a_suffix() {
+    let (mut server, _booted_client_id) = boot_server();
+    let now = SystemTime::now();
+    let joined_bob_attachment = attach_from_origin_with_token(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("b\u{2060}ob"),
+        now,
+    );
+    server.save_client_view(joined_bob_attachment.client_id, now);
+    let _ = server.handle_client_detach(joined_bob_attachment.client_id);
+    let plain_bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let spaced_bob_attachment = attach_from_origin_with_token(
+        &mut server,
+        None,
+        ClientOrigin::Remote,
+        Some("bob\u{200B}"),
+        now,
+    );
+
+    let returning_attachment = attach_from_origin_with_token(
+        &mut server,
+        Some(joined_bob_attachment.resume_token),
+        ClientOrigin::Remote,
+        Some("b\u{2060}ob"),
+        now,
+    );
+
+    assert_eq!(
+        get_client_label(&server, plain_bob_attachment.client_id),
+        "bob"
+    );
+    assert_eq!(
+        get_client_label(&server, spaced_bob_attachment.client_id),
+        "bob\u{200B}-2"
+    );
+    assert_eq!(
+        get_client_label(&server, returning_attachment.client_id),
+        "b\u{2060}ob-3"
+    );
+}
+
 /// `bob` and `bob-2` attach with the grant `bob`, `bob` leaves, and `bob-2`'s
 /// link drops: its view is filed, then its record goes. Its redial with the
 /// token comes back as `bob-2`, not as the free `bob`.
