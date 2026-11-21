@@ -76,6 +76,9 @@ pub struct Surface {
 ///   `PaneMinimizedChanged`.
 /// - A floating pane of a `Layout` answer carries `pane_ids`: every pane of the
 ///   floating pane, in layout order. 5 carried one `pane_id`.
+/// - A floating pane of a `Layout` answer carries `floating_pane_id`, the
+///   floating pane's id inside its session. A floating pane without it fails
+///   to decode. 5 has no such field.
 /// - A tab of a painted frame carries its solved tree in `layout_area`:
 ///   `solved_size`, `pane_slots`, `stack_headers`, `layout_mode`,
 ///   `is_every_pane_suppressed` and `gap_cell_count`. 5 carried these fields
@@ -110,6 +113,10 @@ pub struct Surface {
 ///   no such field.
 /// - Each client of a `Discovery` answer carries `label` and `color_index`.
 ///   5 has neither field.
+/// - Each pane of a `Discovery` answer carries `layout_area_id`: `Tab` with
+///   the id of the tab that holds the pane, or `FloatingPane` with the id of
+///   the floating pane that holds it. 5 carried `tab_id`, `null` for a
+///   floating pane.
 /// - Each client of a `Discovery` answer carries `origin`, and a row without
 ///   it fails to decode. Its `Local` arm carries `is_same_user`: whether the
 ///   client runs as the user who started the session. 5 wrote `Local` with no

@@ -34,7 +34,7 @@ use koshi_layout::tree::LayoutNode;
 ///       pane pane-…4 rect 0,0 40x22
 ///       pane pane-…5 rect 40,0 40x22
 ///   floating panes
-///     pane pane-…6 asks 60%x60% size 48x13
+///     floating-pane-… pane pane-…6 asks 60%x60% size 48x13
 ///       client client-… rect 16,4 48x13 layer 0 position default
 ///   clients
 ///     client-… tab tab-… focus pane-…6
@@ -225,6 +225,8 @@ struct StackHeaderReport {
 /// what each attached client draws for it.
 #[derive(Serialize)]
 struct FloatingPaneReport {
+    /// The floating pane id, as `floating-pane-<uuid>`.
+    floating_pane_id: String,
     /// The id of every pane of the floating pane, in layout order.
     pane_ids: Vec<String>,
     /// The size the floating pane asks for, per axis.
@@ -425,6 +427,7 @@ fn build_solved_tab_report(solved_tab: &SolvedTab) -> SolvedTabReport {
 /// One [`FloatingPaneLayout`] as both formats print it.
 fn build_floating_pane_report(floating_pane_layout: &FloatingPaneLayout) -> FloatingPaneReport {
     FloatingPaneReport {
+        floating_pane_id: floating_pane_layout.floating_pane_id.to_string(),
         pane_ids: floating_pane_layout
             .pane_ids
             .iter()
@@ -516,11 +519,11 @@ fn render_solved_tab(rendered_output: &mut String, solved_tab_report: &SolvedTab
     }
 }
 
-/// Append one floating pane: the line with its panes in layout order, the size
-/// it asks for and the size it holds, then one line per client view with what
-/// the client draws and the position it stored. One pane prints as
-/// `pane pane-…6 asks 60%x60% size 48x13`, and two panes as
-/// `panes pane-…6, pane-…7 asks 60%x60% size 48x13`.
+/// Append one floating pane: the line with its id, its panes in layout order,
+/// the size it asks for and the size it holds, then one line per client view with what
+/// the client draws and the position it stored. A floating pane of one pane
+/// prints as `floating-pane-… pane pane-…6 asks 60%x60% size 48x13`, and one of
+/// two panes as `floating-pane-… panes pane-…6, pane-…7 asks 60%x60% size 48x13`.
 ///
 /// A view the client draws prints the floating pane's rectangle and its layer:
 /// `client client-… rect 16,4 48x13 layer 0 position default`. A minimized view
@@ -532,7 +535,8 @@ fn render_floating_pane(rendered_output: &mut String, floating_pane_report: &Flo
         "panes"
     };
     rendered_output.push_str(&format!(
-        "    {pane_noun} {} asks {}x{} size {}\n",
+        "    {} {pane_noun} {} asks {}x{} size {}\n",
+        floating_pane_report.floating_pane_id,
         floating_pane_report.pane_ids.join(", "),
         floating_pane_report.desired_size.width,
         floating_pane_report.desired_size.height,

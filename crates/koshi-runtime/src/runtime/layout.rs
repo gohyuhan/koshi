@@ -111,6 +111,7 @@ impl Server {
             .list_floating_panes()
             .iter()
             .map(|floating_pane| FloatingPaneLayout {
+                floating_pane_id: floating_pane.get_floating_pane_id(),
                 pane_ids: floating_pane.list_pane_ids(),
                 desired_size: floating_pane.get_desired_size(),
                 solved_size: floating_pane.get_solved_size(),

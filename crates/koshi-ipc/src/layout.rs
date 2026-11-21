@@ -14,7 +14,7 @@
 //! colors.
 
 use koshi_core::geometry::{FloatingPanePosition, FloatingPaneSize, Point, Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::LayoutNode;
@@ -97,6 +97,8 @@ pub struct SolvedPane {
 /// what each attached client draws for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingPaneLayout {
+    /// The floating pane's id inside its session.
+    pub floating_pane_id: FloatingPaneId,
     /// Every pane of the floating pane, in layout order.
     pub pane_ids: Vec<PaneId>,
     /// The size the floating pane asks for, per axis: a number of cells, or a

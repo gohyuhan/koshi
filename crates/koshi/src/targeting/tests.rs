@@ -12,7 +12,7 @@ use koshi_core::discovery::{
 };
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcRequestKind, IpcResult};
@@ -64,7 +64,7 @@ fn build_session_overview(
             .iter()
             .map(|(pane_id, tab_id)| PaneDiscovery {
                 pane_id: *pane_id,
-                tab_id: Some(*tab_id),
+                layout_area_id: LayoutAreaId::Tab(*tab_id),
                 session_id,
                 pane_title: None,
                 working_directory: None,
@@ -1596,12 +1596,13 @@ fn an_explicit_id_no_remote_session_carries_asks_nothing() {
     .is_empty());
 }
 
-/// The discovery row of floating pane `pane_id` in session `session_id`: no
-/// tab, no title, no working directory, no command, focused by no client.
+/// The discovery row of pane `pane_id` alone in a new floating pane in
+/// session `session_id`: no title, no working directory, no command, focused
+/// by no client.
 fn build_floating_pane_discovery(pane_id: PaneId, session_id: SessionId) -> PaneDiscovery {
     PaneDiscovery {
         pane_id,
-        tab_id: None,
+        layout_area_id: LayoutAreaId::FloatingPane(FloatingPaneId::new()),
         session_id,
         pane_title: None,
         working_directory: None,

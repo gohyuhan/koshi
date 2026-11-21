@@ -471,7 +471,7 @@ id line.
 | `koshi detach --all [NAME_OR_ID]` | Detach every terminal of that session |
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running one |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tab ids, names, and owning sessions |
-| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, and session ids and names |
+| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, floating pane, and session ids and names |
 | `koshi list-clients [--session <NAME_OR_ID>]` | List client ids, numbers, labels, and owning sessions |
 | `koshi inspect session <NAME_OR_ID>` | Show one session's full record |
 | `koshi inspect tab <NAME_OR_ID>` | Show one tab's full record |
@@ -531,12 +531,27 @@ client-0192f7d0-6c1e-7a51-9d4e-000000000002  2       bob    …        work
 ```
 
 `koshi list-panes` lists the tiled panes of each session in tab order, then
-its floating panes in the order they were created. A floating pane prints
-`float` in the `tab` column and `-` in the `tab_name` column, and `--format
-json` writes `"tab_id": null` and `"tab_name": null` for it. `koshi inspect
-pane` prints `float` as the `tab` of a floating pane. A `--pane` flag finds a
-floating pane's session from outside koshi too: `koshi close-pane --pane
-pane-…` closes that pane inside its floating pane.
+its floating panes in the order they were created, each floating pane's panes
+in layout order. The `floating_pane` column names the floating pane that holds
+the pane, as `floating-pane-<uuid>`. Every pane of one floating pane prints the
+same id. A floating pane prints `-` in the `tab` and `tab_name` columns, and a
+tiled pane prints `-` in the `floating_pane` column. `--format json` writes
+`"floating_pane_id"`, with `null` for a tiled pane, and `"tab_id": null` and
+`"tab_name": null` for a floating pane. `koshi inspect pane` prints the same
+`tab` and `floating_pane` fields. A floating pane that docks into a tab and
+floats again is a new floating pane with a new id. No flag takes a floating
+pane id. A `--pane` flag finds a floating pane's session from outside koshi
+too: `koshi close-pane --pane pane-…` closes that pane inside its floating
+pane.
+
+Example: `htop` and `top` share one floating pane, and `vim` is tiled.
+
+```text
+id      name  tab    tab_name  floating_pane       session    session_name
+pane-…  vim   tab-…  editor    -                   session-…  work
+pane-…  htop  -      -         floating-pane-01a…  session-…  work
+pane-…  top   -      -         floating-pane-01a…  session-…  work
+```
 
 `koshi list-sessions` names each session's machine in its `server` column:
 `local` for a session on this machine, else the saved server it runs on. Its
@@ -1904,8 +1919,9 @@ a pane fullscreen give that tab two sets of rectangles. A tab no client is
 viewing prints its tree and no rectangles.
 
 `dump-layout` prints the floating panes after the tabs, in the order the
-floating panes were created. Each floating pane line names its panes in layout
-order, the size the floating pane asks for and the size it holds. Under it, one
+floating panes were created. Each floating pane line names the floating pane id,
+its panes in layout order, the size the floating pane asks for and the size it
+holds. Under it, one
 line per attached client says what that client draws:
 
 - `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the floating pane
@@ -1920,9 +1936,9 @@ no floating section. `--tab` narrows the tabs only, and every floating pane
 still prints: a floating pane draws over every tab.
 
 Example: one 80x24 terminal shows a floating pane that `koshi new-pane
---floating` opened. The pane prints as `pane pane-… asks 60%x60% size 48x13`,
-and the client line under it prints as `client client-… rect 16,4 48x13 layer 0
-position default`.
+--floating` opened. The floating pane prints as `floating-pane-… pane pane-…
+asks 60%x60% size 48x13`, and the client line under it prints as `client
+client-… rect 16,4 48x13 layer 0 position default`.
 
 Each line under a split ends with how that child is sized, in the words a
 layout file uses: `weight 2`, `size 30` for 30 cells, or `size 60%`, then
@@ -1936,10 +1952,10 @@ has `"node": "pane"` or `"node": "split"`, and a split has `split_direction`
 (`horizontal`, `vertical` or `stacked`) and `weights`, one sizing per child in
 the words above. Each client solve has `layout_mode`
 (`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each floating pane has
-`pane_ids`, its panes in layout order. Each client view of a floating pane has
-`position` (`default`, or `moved` or `pinned` with `stored_cell`) and
-`visibility` (`drawn` with `top_left_cell` and `layer_index`, or
-`minimized`). `desired_size` writes each axis as `--cols`
+`floating_pane_id` and `pane_ids`, its panes in layout order. Each client
+view of a floating pane has `position` (`default`, or `moved` or `pinned`
+with `stored_cell`) and `visibility` (`drawn` with `top_left_cell` and
+`layer_index`, or `minimized`). `desired_size` writes each axis as `--cols`
 and `--rows` take it: `"60%"` or `"80"`.
 
 A session that started before you installed this Koshi cannot report its

@@ -50,7 +50,7 @@ fn build_test_collapsed_pane_id() -> PaneId {
 }
 
 /// The floating pane that asks for `60%` by `60%`.
-fn build_test_percent_floating_pane_id() -> PaneId {
+fn build_test_pane_id_in_percent_floating_pane() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(6))
 }
 
@@ -60,8 +60,19 @@ fn build_test_second_client_id() -> ClientId {
 }
 
 /// The floating pane that asks for `30` columns by `50%`.
-fn build_test_cells_floating_pane_id() -> PaneId {
+fn build_test_pane_id_in_cells_floating_pane() -> PaneId {
     PaneId::from_uuid(build_test_uuid_with_suffix(8))
+}
+
+/// The floating pane that asks for `60%` by `60%`.
+fn build_test_percent_floating_pane_id() -> FloatingPaneId {
+    serde_json::from_value(json!(build_test_uuid_with_suffix(9))).expect("a bare uuid deserializes")
+}
+
+/// The floating pane that asks for `30` columns by `50%`.
+fn build_test_cells_floating_pane_id() -> FloatingPaneId {
+    serde_json::from_value(json!(build_test_uuid_with_suffix(10)))
+        .expect("a bare uuid deserializes")
 }
 
 /// A floating pane axis of `percent` percent.
@@ -82,7 +93,8 @@ fn build_cells_dimension(cell_count: u16) -> FloatingPaneDimension {
 fn build_populated_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
     vec![
         FloatingPaneLayout {
-            pane_ids: vec![build_test_percent_floating_pane_id()],
+            floating_pane_id: build_test_percent_floating_pane_id(),
+            pane_ids: vec![build_test_pane_id_in_percent_floating_pane()],
             desired_size: FloatingPaneSize {
                 width: build_percent_dimension(60),
                 height: build_percent_dimension(60),
@@ -108,7 +120,8 @@ fn build_populated_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
             ],
         },
         FloatingPaneLayout {
-            pane_ids: vec![build_test_cells_floating_pane_id()],
+            floating_pane_id: build_test_cells_floating_pane_id(),
+            pane_ids: vec![build_test_pane_id_in_cells_floating_pane()],
             desired_size: FloatingPaneSize {
                 width: build_cells_dimension(30),
                 height: build_percent_dimension(50),
@@ -287,6 +300,7 @@ fn build_populated_layout_json() -> serde_json::Value {
         }],
         "floating_panes": [
             {
+                "floating_pane_id": "00000000-0000-0000-0000-000000000009",
                 "pane_ids": ["00000000-0000-0000-0000-000000000006"],
                 "desired_size": { "width": { "Percent": 60 }, "height": { "Percent": 60 } },
                 "solved_size": { "column_count": 48, "row_count": 13 },
@@ -309,6 +323,7 @@ fn build_populated_layout_json() -> serde_json::Value {
                 ]
             },
             {
+                "floating_pane_id": "00000000-0000-0000-0000-000000000010",
                 "pane_ids": ["00000000-0000-0000-0000-000000000008"],
                 "desired_size": { "width": { "Cells": 30 }, "height": { "Percent": 50 } },
                 "solved_size": { "column_count": 30, "row_count": 11 },
@@ -638,14 +653,15 @@ fn a_layout_missing_its_floating_panes_is_refused() {
 #[test]
 fn a_floating_pane_carrying_an_unknown_field_ignores_it() {
     let decoded_floating_pane_layout: FloatingPaneLayout = serde_json::from_str(
-        r#"{"pane_ids":["00000000-0000-0000-0000-000000000006"],"desired_size":{"width":{"Percent":60},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[],"junk":5}"#,
+        r#"{"floating_pane_id":"00000000-0000-0000-0000-000000000009","pane_ids":["00000000-0000-0000-0000-000000000006"],"desired_size":{"width":{"Percent":60},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
     assert_eq!(
         decoded_floating_pane_layout,
         FloatingPaneLayout {
-            pane_ids: vec![build_test_percent_floating_pane_id()],
+            floating_pane_id: build_test_percent_floating_pane_id(),
+            pane_ids: vec![build_test_pane_id_in_percent_floating_pane()],
             desired_size: FloatingPaneSize {
                 width: build_percent_dimension(60),
                 height: build_percent_dimension(60),
@@ -656,6 +672,20 @@ fn a_floating_pane_carrying_an_unknown_field_ignores_it() {
             },
             client_views: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn a_floating_pane_missing_its_floating_pane_id_is_refused() {
+    let decoded_floating_pane_result: Result<FloatingPaneLayout, _> = serde_json::from_str(
+        r#"{"pane_ids":["00000000-0000-0000-0000-000000000006"],"desired_size":{"width":{"Percent":60},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[]}"#,
+    );
+
+    assert_eq!(
+        decoded_floating_pane_result
+            .expect_err("a missing field is refused")
+            .to_string(),
+        "missing field `floating_pane_id` at line 1 column 184"
     );
 }
 
@@ -696,7 +726,7 @@ fn a_floating_pane_visibility_this_build_does_not_have_is_refused() {
 #[test]
 fn a_floating_pane_asking_for_zero_percent_is_refused() {
     let decoded_floating_pane_result: Result<FloatingPaneLayout, _> = serde_json::from_str(
-        r#"{"pane_ids":["00000000-0000-0000-0000-000000000006"],"desired_size":{"width":{"Percent":0},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[]}"#,
+        r#"{"pane_ids":["00000000-0000-0000-0000-000000000006"],"desired_size":{"width":{"Percent":0},"height":{"Percent":60}},"solved_size":{"column_count":48,"row_count":13},"client_views":[],"floating_pane_id":"00000000-0000-0000-0000-000000000009"}"#,
     );
 
     assert_eq!(

@@ -39,7 +39,7 @@ use koshi_core::command::CommandResult;
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::{format_member_not_in_session_help, RejectReason, SessionMemberId};
 use koshi_core::geometry::Direction;
-use koshi_core::ids::{ClientId, OwnedSessionId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, LayoutAreaId, OwnedSessionId, PaneId, SessionId, TabId};
 use koshi_ipc::remote_servers::SavedServer;
 use koshi_ipc::remote_wire::RemoteSessionRow;
 
@@ -437,7 +437,10 @@ fn find_bare_dock_pane_tab(
             .panes
             .iter()
             .find(|pane_record| pane_record.pane_id == in_session_context.pane_id)
-            .and_then(|pane_record| pane_record.tab_id);
+            .and_then(|pane_record| match pane_record.layout_area_id {
+                LayoutAreaId::Tab(tab_id) => Some(tab_id),
+                LayoutAreaId::FloatingPane(_) => None,
+            });
         if own_pane_tab_id.is_some() {
             return own_pane_tab_id;
         }

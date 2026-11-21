@@ -13,13 +13,14 @@ use koshi_layout::tree::LayoutNode;
 
 use crate::runtime::command::tests::{
     build_tab, create_session_with_attached_client, get_command_outcome,
+    put_pane_beside_in_floating_pane,
 };
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPanePlacement};
 use koshi_core::discovery::PaneLifecycle;
 use koshi_core::geometry::{Direction, PaneArea, Size};
-use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, LayoutAreaId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::ShellKind;
 use koshi_pane::pane::state::PaneRecord;
@@ -78,7 +79,10 @@ fn bootstrapped_session_reports_its_exact_rows() {
 
     assert_eq!(overview.panes.len(), 1);
     assert_eq!(overview.panes[0].pane_id, pane_id);
-    assert_eq!(overview.panes[0].tab_id, Some(tab.get_tab_id()));
+    assert_eq!(
+        overview.panes[0].layout_area_id,
+        LayoutAreaId::Tab(tab.get_tab_id())
+    );
     assert_eq!(overview.panes[0].session_id, session_id);
     assert_eq!(overview.panes[0].lifecycle, PaneLifecycle::Running);
     assert_eq!(overview.panes[0].focused_by_client_ids, vec![client_id]);
@@ -454,16 +458,16 @@ fn tabs_and_their_panes_come_back_in_tab_bar_order_not_in_id_order() {
         .collect();
     assert_eq!(tab_order, vec![(higher_tab_id, 0), (lower_tab_id, 1)]);
 
-    let pane_order: Vec<(PaneId, Option<TabId>)> = overview
+    let pane_order: Vec<(PaneId, LayoutAreaId)> = overview
         .panes
         .iter()
-        .map(|pane_summary| (pane_summary.pane_id, pane_summary.tab_id))
+        .map(|pane_summary| (pane_summary.pane_id, pane_summary.layout_area_id))
         .collect();
     assert_eq!(
         pane_order,
         vec![
-            (higher_pane_id, Some(higher_tab_id)),
-            (lower_pane_id, Some(lower_tab_id))
+            (higher_pane_id, LayoutAreaId::Tab(higher_tab_id)),
+            (lower_pane_id, LayoutAreaId::Tab(lower_tab_id))
         ],
         "panes follow the tab-bar order of the tabs holding them"
     );
@@ -537,7 +541,7 @@ fn a_layout_leaf_the_registry_does_not_hold_gets_no_row_but_is_still_counted() {
 }
 
 #[test]
-fn floating_panes_follow_the_tiled_panes_in_the_order_they_were_created_with_no_tab() {
+fn floating_panes_follow_the_tiled_panes_and_name_their_floating_pane() {
     let session_id = SessionId::new();
     let mut session = build_empty_session(session_id);
     let tab_id = TabId::from_uuid(build_test_uuid_with_suffix(1));
@@ -562,24 +566,44 @@ fn floating_panes_follow_the_tiled_panes_in_the_order_they_were_created_with_no_
         )
         .expect("the set has room");
     }
+    let beside_pane_id = PaneId::from_uuid(build_test_uuid_with_suffix(5));
+    put_pane_beside_in_floating_pane(&mut session, first_pane_id, beside_pane_id);
+    let first_floating_pane_id = LayoutAreaId::FloatingPane(
+        session
+            .floating_set
+            .find_floating_pane_by_pane_id(first_pane_id)
+            .expect("the first pane is floating")
+            .1
+            .get_floating_pane_id(),
+    );
+    let second_floating_pane_id = LayoutAreaId::FloatingPane(
+        session
+            .floating_set
+            .find_floating_pane_by_pane_id(second_pane_id)
+            .expect("the second pane is floating")
+            .1
+            .get_floating_pane_id(),
+    );
     let mut server = build_test_runtime();
     server.session_by_id.insert(session_id, session);
 
     let overview = server.build_overview().expect("one session is running");
 
-    let pane_rows: Vec<(PaneId, Option<TabId>)> = overview
+    let pane_rows: Vec<(PaneId, LayoutAreaId)> = overview
         .panes
         .iter()
-        .map(|pane_summary| (pane_summary.pane_id, pane_summary.tab_id))
+        .map(|pane_summary| (pane_summary.pane_id, pane_summary.layout_area_id))
         .collect();
+    assert_ne!(first_floating_pane_id, second_floating_pane_id);
     assert_eq!(
         pane_rows,
         vec![
-            (tiled_pane_id, Some(tab_id)),
-            (first_pane_id, None),
-            (second_pane_id, None),
+            (tiled_pane_id, LayoutAreaId::Tab(tab_id)),
+            (first_pane_id, first_floating_pane_id),
+            (beside_pane_id, first_floating_pane_id),
+            (second_pane_id, second_floating_pane_id),
         ]
     );
-    assert_eq!(overview.session.pane_count, 3);
+    assert_eq!(overview.session.pane_count, 4);
     assert_eq!(overview.tabs[0].pane_count, 1);
 }

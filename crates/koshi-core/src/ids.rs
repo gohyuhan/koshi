@@ -12,7 +12,10 @@
 //! wrapped [`Uuid`], a `new` constructor that mints a fresh id, a `from_uuid`
 //! constructor that wraps an existing one, a `get_uuid` accessor, and a
 //! `Display` impl that prefixes the id with its entity name. [`FloatingPaneId`]
-//! has `new` and `Default` only, and no text form.
+//! has `new`, `Default` and the `Display` impl only.
+//!
+//! [`LayoutAreaId`] names the layout tree that holds a pane: the tree of a tab,
+//! or the tree of a floating pane.
 //!
 //! [`OwnedSessionId`] pairs a session id with the user id whose folder of the
 //! shared directory advertises the session, as `1001/session-<uuid>`.
@@ -178,8 +181,10 @@ impl fmt::Display for PaneId {
 }
 
 /// Identifies a floating pane: the container that holds one layout tree of
-/// panes. It names the floating pane inside one session only. A painted frame
-/// carries it on each floating pane; no CLI flag, command or event carries it.
+/// panes. It names the floating pane inside one session only. `Display`
+/// prints it as `floating-pane-<uuid>`. A painted frame and a `Layout` answer
+/// carry it on each floating pane, and a `Discovery` answer on each pane of a
+/// floating pane. No CLI flag reads it, and no command or event carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FloatingPaneId(Uuid);
 
@@ -195,6 +200,22 @@ impl Default for FloatingPaneId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl fmt::Display for FloatingPaneId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "floating-pane-{}", self.0)
+    }
+}
+
+/// The layout tree that holds a pane: the tree of a tab, or the tree of a
+/// floating pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LayoutAreaId {
+    /// The layout tree of the tab `TabId`.
+    Tab(TabId),
+    /// The layout tree of the floating pane `FloatingPaneId`.
+    FloatingPane(FloatingPaneId),
 }
 
 /// Identifies a dispatched command.

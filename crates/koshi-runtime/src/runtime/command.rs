@@ -47,7 +47,7 @@ use koshi_core::{
         Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea,
         PixelCellSize, Point, Rect, Size, DEFAULT_FLOATING_PANE_SIZE,
     },
-    ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId},
+    ids::{ClientId, CommandId, FloatingPaneId, LayoutAreaId, PaneId, SessionId, TabId},
     lock::LockMode,
     naming::{generate_name, NameKind},
     process::{ExitStatus, KillPolicy, PtySize, SpawnSpec},
@@ -89,7 +89,7 @@ use koshi_session::session::{
         find_nearest_floating_pane_dock_target, list_moving_client_ids, DockSource,
         PlacementCommitError,
     },
-    state::{compute_one_pane_floating_content_size, FloatingPane, LayoutAreaId, Session},
+    state::{compute_one_pane_floating_content_size, FloatingPane, Session},
     tab_ops,
 };
 
