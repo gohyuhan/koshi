@@ -12,7 +12,9 @@ use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
 
 use crate::runtime::event::AttachAccepted;
-use crate::runtime::presence_notice::{build_presence_notice, PresenceChange};
+use crate::runtime::presence_notice::{
+    build_presence_notice, format_presence_notice, PresenceChange,
+};
 use crate::runtime::saved_view::SavedView;
 use koshi_session::client::ArrivalNotice;
 
@@ -820,11 +822,18 @@ impl Server {
         ) else {
             return;
         };
+        let replaced_text =
+            presence_change
+                .find_replaced_presence_change()
+                .map(|replaced_presence_change| {
+                    format_presence_notice(client, replaced_presence_change)
+                });
         self.post_session_notification(
             session_id,
             NotificationSeverity::Info,
             &arrival_text,
             Some(client_id),
+            replaced_text.as_deref(),
         );
     }
 
@@ -1000,19 +1009,26 @@ impl Server {
                 .filter(|_| is_arrival_announced)
                 .and_then(|presence_change| {
                     let session = self.session_by_id.get(&session_id)?;
-                    build_presence_notice(
+                    let departure_text = build_presence_notice(
                         &removed_client,
                         session.clients.list_attached_clients(),
                         presence_change,
-                    )
+                    )?;
+                    let replaced_text = presence_change.find_replaced_presence_change().map(
+                        |replaced_presence_change| {
+                            format_presence_notice(&removed_client, replaced_presence_change)
+                        },
+                    );
+                    Some((departure_text, replaced_text))
                 });
 
-        if let Some(departure_notice) = departure_notice {
+        if let Some((departure_text, replaced_text)) = departure_notice {
             self.post_session_notification(
                 session_id,
                 NotificationSeverity::Info,
-                &departure_notice,
+                &departure_text,
                 Some(client_id),
+                replaced_text.as_deref(),
             );
         }
 

@@ -712,6 +712,7 @@ fn a_session_post_to_a_subscriber_whose_receiver_is_gone_loses_its_recorded_clie
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
         None,
+        None,
     );
 
     assert!(!server.event_bus.has_subscriber(subscriber_id));
@@ -4561,6 +4562,7 @@ fn a_session_post_reaches_every_attached_client_once_and_stays_in_the_session_qu
         NotificationSeverity::Error,
         "pane …a1b2 killed by signal 9",
         None,
+        None,
     );
 
     let notification_queue = &server.list_sessions()[&session_id].notification_queue;
@@ -4635,7 +4637,13 @@ fn a_post_to_a_session_this_process_does_not_hold_changes_nothing() {
         .notification_queue
         .clone();
 
-    server.post_session_notification(SessionId::new(), NotificationSeverity::Error, "lost", None);
+    server.post_session_notification(
+        SessionId::new(),
+        NotificationSeverity::Error,
+        "lost",
+        None,
+        None,
+    );
 
     assert_eq!(
         server.list_sessions()[&session_id].notification_queue,
@@ -4656,6 +4664,7 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
         session_id,
         NotificationSeverity::Warning,
         "koshi.kdl: unknown key `tab-bar`",
+        None,
         None,
     );
     let _delivery_backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
@@ -5048,6 +5057,62 @@ fn a_dropped_link_posts_disconnected_and_its_redial_posts_reconnected_under_the_
     );
 }
 
+/// `bob`'s link drops and comes back 3 times while nothing else posts.
+/// Every change reaches the host as it happens, and each one takes the place
+/// of the one before it in the session's queue: the queue holds
+/// `bob (2) joined remotely`, then `bob (2) reconnected` ×6.
+#[test]
+fn a_link_that_drops_and_comes_back_again_and_again_holds_one_entry_in_the_session_queue() {
+    let now = SystemTime::now();
+    let (mut server, host_client_id) = boot_server();
+    let session_id = *server.list_sessions().keys().next().expect("session");
+    let (host_delivery_receiver, _) = server.subscribe(host_client_id, 60, None);
+    server.handle_attach_answer_received(host_client_id);
+    let mut bob_attachment =
+        attach_from_origin_with_token(&mut server, None, ClientOrigin::Remote, Some("bob"), now);
+    let mut expected_posted_notices = vec![build_notice(
+        "bob (2) joined remotely",
+        bob_attachment.client_id,
+    )];
+
+    for _ in 0..3 {
+        let dropped_client_id = bob_attachment.client_id;
+        let _ = server.handle_runtime_event(build_lost_connection_detach(dropped_client_id, true));
+        bob_attachment = attach_from_origin_with_token(
+            &mut server,
+            Some(bob_attachment.resume_token.clone()),
+            ClientOrigin::Remote,
+            Some("bob"),
+            now,
+        );
+        expected_posted_notices.push(build_notice("bob (2) disconnected", dropped_client_id));
+        expected_posted_notices.push(build_notice(
+            "bob (2) reconnected",
+            bob_attachment.client_id,
+        ));
+    }
+
+    assert_eq!(
+        take_posted_notices(&host_delivery_receiver),
+        expected_posted_notices
+    );
+    let notification_queue = &server.list_sessions()[&session_id].notification_queue;
+    assert_eq!(
+        list_queued_notices(notification_queue),
+        vec![
+            expected_posted_notices[0].clone(),
+            build_notice("bob (2) reconnected", bob_attachment.client_id),
+        ]
+    );
+    assert_eq!(
+        notification_queue
+            .list_queued_entries()
+            .map(|queued_entry| queued_entry.repeat_count)
+            .collect::<Vec<u32>>(),
+        vec![1, 6]
+    );
+}
+
 #[test]
 fn a_redial_before_the_drop_is_read_posts_disconnected_then_reconnected() {
     let now = SystemTime::now();
@@ -5365,10 +5430,17 @@ fn a_restart_claim_whose_answer_is_lost_comes_back_with_the_token_it_presented()
 
     assert_eq!(
         list_queued_notices_after(&resumed_server, queued_notice_count),
-        vec![
-            build_notice("bob (2) disconnected", bob_attachment.client_id),
-            build_notice("bob (2) reconnected", redial_attachment.client_id),
-        ]
+        vec![build_notice(
+            "bob (2) reconnected",
+            redial_attachment.client_id
+        )]
+    );
+    assert_eq!(
+        resumed_server
+            .get_session_for_client(redial_attachment.client_id)
+            .and_then(|session| session.notification_queue.list_queued_entries().last())
+            .map(|newest_entry| newest_entry.repeat_count),
+        Some(2)
     );
 }
 
@@ -5416,10 +5488,17 @@ fn a_late_detach_of_a_restart_claim_whose_answer_is_lost_leaves_the_next_dial_at
     assert_eq!(viewed_client_ids, vec![redial_attachment.client_id]);
     assert_eq!(
         list_queued_notices_after(&resumed_server, queued_notice_count),
-        vec![
-            build_notice("bob (2) disconnected", bob_attachment.client_id),
-            build_notice("bob (2) reconnected", redial_attachment.client_id),
-        ]
+        vec![build_notice(
+            "bob (2) reconnected",
+            redial_attachment.client_id
+        )]
+    );
+    assert_eq!(
+        resumed_server
+            .get_session_for_client(redial_attachment.client_id)
+            .and_then(|session| session.notification_queue.list_queued_entries().last())
+            .map(|newest_entry| newest_entry.repeat_count),
+        Some(2)
     );
 }
 

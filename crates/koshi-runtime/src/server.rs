@@ -531,6 +531,7 @@ impl Server {
                         pane_id.format_short_label()
                     ),
                     None,
+                    None,
                 );
                 continue;
             };
@@ -1195,7 +1196,10 @@ impl Server {
     /// `subject_client_id` as the client it reports on
     /// ([`NotificationQueue::post_core_entry`](koshi_core::notification::NotificationQueue::post_core_entry)),
     /// and deliver the post to every client subscribed at that moment as one
-    /// `NotificationPosted`.
+    /// `NotificationPosted`. With `replaced_text`, the post takes the place
+    /// of the newest entry when that entry is from koshi at `severity` and
+    /// holds `replaced_text`
+    /// ([`NotificationQueue::post_core_entry_replacing`](koshi_core::notification::NotificationQueue::post_core_entry_replacing)).
     /// A client that attaches after the post receives the queue in its attach
     /// answer.
     /// Does nothing when this process holds no session `session_id`.
@@ -1208,20 +1212,29 @@ impl Server {
         severity: NotificationSeverity,
         text: &str,
         subject_client_id: Option<ClientId>,
+        replaced_text: Option<&str>,
     ) {
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
             return;
         };
         let notification_queue = &mut session.notification_queue;
-        let posted_entry = notification_queue
-            .post_core_entry(
+        let posted_entry = match replaced_text {
+            Some(replaced_text) => notification_queue.post_core_entry_replacing(
+                severity,
+                text,
+                subject_client_id,
+                replaced_text,
+                SystemTime::now(),
+            ),
+            None => notification_queue.post_core_entry(
                 severity,
                 text,
                 subject_client_id,
                 NonZeroU32::MIN,
                 SystemTime::now(),
-            )
-            .clone();
+            ),
+        }
+        .clone();
         let revision = notification_queue.get_revision();
         let removed_subscriber_ids = self
             .event_bus

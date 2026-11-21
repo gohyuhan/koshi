@@ -268,6 +268,61 @@ impl NotificationQueue {
         self.queued_entries.back().expect("the entry pushed above")
     }
 
+    /// Post `text` from koshi at `severity` once, the post arriving at
+    /// `created_at`, in the place of the newest entry when that entry is from
+    /// koshi at `severity` and holds the text `replaced_text`, and return
+    /// the entry the post made or changed. `subject_client_id` is the client
+    /// the entry reports on, or `None`.
+    ///
+    /// `text` and `replaced_text` lose every character
+    /// [`sanitize_text_to_byte_count`] removes and are cut to
+    /// [`MAX_NOTIFICATION_TEXT_BYTE_COUNT`] bytes. A post in the place of the
+    /// newest entry gives that entry `text` and `subject_client_id`, raises
+    /// its `repeat_count` by 1, and sets its `created_at` to `created_at`. No
+    /// entry is added, and the revision rises by 1. Every other post is
+    /// [`post_core_entry`](Self::post_core_entry) of `text` once.
+    ///
+    /// Example: with the newest entry `bob (2) disconnected` ×1, posting
+    /// `bob (2) reconnected` in the place of `bob (2) disconnected` gives the
+    /// newest entry `bob (2) reconnected` ×2. With the newest entry
+    /// `carol (3) joined remotely`, the same post adds the entry
+    /// `bob (2) reconnected`.
+    pub fn post_core_entry_replacing(
+        &mut self,
+        severity: NotificationSeverity,
+        text: &str,
+        subject_client_id: Option<ClientId>,
+        replaced_text: &str,
+        created_at: SystemTime,
+    ) -> &NotificationEntry {
+        let sanitized_replaced_text =
+            sanitize_text_to_byte_count(replaced_text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
+        let is_replacing = self.queued_entries.back().is_some_and(|newest_entry| {
+            newest_entry.source == NotificationSource::Core
+                && newest_entry.severity == severity
+                && newest_entry.text == sanitized_replaced_text
+        });
+        if !is_replacing {
+            return self.post_core_entry(
+                severity,
+                text,
+                subject_client_id,
+                NonZeroU32::MIN,
+                created_at,
+            );
+        }
+        self.revision += 1;
+        let newest_entry = self
+            .queued_entries
+            .back_mut()
+            .expect("the entry read above");
+        newest_entry.text = sanitize_text_to_byte_count(text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
+        newest_entry.subject_client_id = subject_client_id;
+        newest_entry.repeat_count = newest_entry.repeat_count.saturating_add(1);
+        newest_entry.created_at = created_at;
+        newest_entry
+    }
+
     /// Check a queue another process sent: it holds at most
     /// [`MAX_QUEUED_NOTIFICATION_COUNT`] entries, and every entry's id names
     /// this queue's owner and epoch.

@@ -145,6 +145,11 @@ pub struct Surface {
 /// - A notification entry carries `subject_client_id`: the client a join or
 ///   leave notice reports on, or `null` for every other entry. 5 has no such
 ///   field.
+/// - A `NotificationPosted` that carries the id of an entry posted before, at
+///   a higher `repeat_count`, can carry another `text` and
+///   `subject_client_id`: a `disconnected` or `reconnected` notice that
+///   takes the place of the same terminal's opposite notice. The client keeps
+///   the newest fields under that id.
 /// - The `AttachAnswerReceived` request says that the client read the
 ///   `Attached` answer to its `Attach`. Until it arrives, the session sends
 ///   the client no frame, event or host write, and any request other than it,

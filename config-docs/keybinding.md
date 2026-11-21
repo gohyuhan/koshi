@@ -543,6 +543,14 @@ number:
 - `bob (2) reconnected` for a terminal that attaches again after it
   disconnected.
 
+A `disconnected` notification takes the place of the same terminal's
+`reconnected` notification when that notification is the session's newest,
+and a `reconnected` notification takes the place of a `disconnected` one the
+same way. The card then shows the newest text, and its count rises by 1.
+Example: `bob`'s link drops and comes back 3 times while nothing else posts.
+Every other terminal sees each change as it happens, and keeps one card:
+`[Koshi] Info ×6` above `bob (2) reconnected`.
+
 The arrival notification posts once the new terminal tells the session that
 it got the session's answer to its attach. Until then, the session sends the
 terminal no screen and no notification, and a key or any other request from

@@ -1551,7 +1551,9 @@ fn describe_presence_notice(
 /// `bob (2) joined remotely` once Bob confirms his attach answer. Bob's link
 /// drops with no `Leaving`: Alice reads `bob (2) disconnected`. Bob dials
 /// again with the token his attach minted, comes back as a new client under
-/// the number 2, and Alice reads `bob (2) reconnected`. Bob leaves for good:
+/// the number 2, and Alice reads `bob (2) reconnected`: it takes the place of
+/// the `disconnected` notice, under that notice's id at a count of 2. Bob
+/// leaves for good:
 /// Alice reads `bob (2) left`. Alice reads no other notice.
 #[test]
 fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_each() {
@@ -1611,8 +1613,12 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
                     NotificationSeverity::Info,
                     "bob (2) reconnected",
                     Some(redialed_bob_attachment.client_id),
-                    1,
+                    2,
                 ),
+            );
+            assert_eq!(
+                reconnected_notice.notification_id,
+                disconnected_notice.notification_id
             );
 
             send_leaving_for_good(&mut redialed_bob_connection, 4);
