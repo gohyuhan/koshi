@@ -859,7 +859,7 @@ impl Server {
                 .iter()
                 .map(|peer_snapshot| (peer_snapshot.client_id, peer_snapshot.typed_pane_id))
                 .collect();
-            if self.event_bus.try_resync(
+            if let Some(queued_frame_number) = self.event_bus.try_resync(
                 desynced_subscriber_id,
                 Box::new(snapshot),
                 notification_queue,
@@ -870,7 +870,7 @@ impl Server {
                     .record_frame_sent(current_time);
                 frame_subscription
                     .peer_input_view
-                    .record_frame_queued(peer_typed_pane_ids);
+                    .record_frame_queued(queued_frame_number, peer_typed_pane_ids);
                 self.record_peer_input_frames_taken(subscription_index, current_time);
             }
         }
@@ -892,8 +892,8 @@ impl Server {
     /// A queued frame counts as the subscriber's frame at `current_time`
     /// (`FramePace::record_frame_sent`), every mark the subscriber holds
     /// counts as named by a queued frame (`PeerInputView::record_frame_queued`),
-    /// and the queue is asked to report when the writing thread takes it
-    /// (`Server::record_peer_input_frames_taken`).
+    /// and the queue is asked to report when the writing thread takes the
+    /// first frame that named a mark (`Server::record_peer_input_frames_taken`).
     /// A frame that does not fit the queue
     /// is dropped, marks the subscriber owed a frame, and leaves its view
     /// change in place: the pass that [`RuntimeEvent::QueueRoomFreed`] starts
@@ -924,7 +924,7 @@ impl Server {
                 .iter()
                 .map(|peer_snapshot| (peer_snapshot.client_id, peer_snapshot.typed_pane_id))
                 .collect();
-            if self
+            if let Some(queued_frame_number) = self
                 .event_bus
                 .try_send_frame(subscriber_id, Box::new(snapshot))
             {
@@ -934,7 +934,7 @@ impl Server {
                     .record_frame_sent(current_time);
                 frame_subscription
                     .peer_input_view
-                    .record_frame_queued(peer_typed_pane_ids);
+                    .record_frame_queued(queued_frame_number, peer_typed_pane_ids);
                 self.record_peer_input_frames_taken(subscription_index, current_time);
             }
         }

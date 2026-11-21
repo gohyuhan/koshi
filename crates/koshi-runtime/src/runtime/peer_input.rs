@@ -10,14 +10,16 @@
 //! marks it holds (`recent_input_pane_ids`).
 //!
 //! A mark has three states (`MarkDelivery`): no queued frame names it; a
-//! queued frame names it and waits for the thread that writes the
-//! subscriber's connection; that thread took a frame that names it. The
-//! session learns of the take through the queue
+//! queued frame names it, and the session has not seen the thread that
+//! writes the subscriber's connection take the first frame that named it;
+//! the session saw that thread take that frame. The mark keeps the queue's
+//! frame number of that first frame, and the session learns of the take
+//! through the queue
 //! ([`DeliverySender::request_frame_taken_notice`](crate::runtime::delivery_queue::DeliverySender::request_frame_taken_notice)).
 //! A taken mark ends [`PEER_INPUT_MARK_DURATION`] after its last input, or
-//! after the time the session saw the take, whichever comes last. A mark of a client that is no
-//! longer present, or of a pane the session no longer holds, ends at the next
-//! pass.
+//! after the time the session saw the take, whichever comes last. A mark of a
+//! client that is no longer present, or of a pane the session no longer
+//! holds, ends at the next pass.
 //!
 //! Example: the newest frame queued for Alice names no pane for Bob, whose
 //! floating pane tray is open. Bob's `ls` reaches pane 3, and Alice's next
@@ -33,7 +35,8 @@ use koshi_core::ids::{ClientId, PaneId};
 use crate::server::Server;
 
 /// How long a mark lasts after its last input, or after the time the session
-/// saw the writing thread take a frame that names it, whichever comes last.
+/// saw the writing thread take the first frame that named it, whichever comes
+/// last.
 pub const PEER_INPUT_MARK_DURATION: Duration = Duration::from_secs(2);
 
 /// One subscriber's record of other clients' input: the typed pane that the
@@ -68,11 +71,15 @@ struct PeerInputMark {
 enum MarkDelivery {
     /// No frame queued for the subscriber named the mark yet.
     Unqueued,
-    /// A frame queued for the subscriber names the mark, and a frame waited on
-    /// the queue for the writing thread when the session last looked.
-    Queued,
-    /// The session saw at `taken_at` that the writing thread had taken every
-    /// frame on the queue, the newest of which named the mark.
+    /// The frame numbered `frame_number` on the subscriber's queue is the
+    /// first frame that named the mark, and the session has not seen the
+    /// writing thread take it.
+    Queued {
+        /// The queue's frame number of the first frame that named the mark.
+        frame_number: u64,
+    },
+    /// The session saw at `taken_at` that the writing thread had taken the
+    /// first frame that named the mark.
     Taken {
         /// When the session saw the take.
         taken_at: Instant,
@@ -90,7 +97,7 @@ impl PeerInputMark {
             MarkDelivery::Taken { taken_at } => {
                 Some(taken_at.max(self.last_input_at) + PEER_INPUT_MARK_DURATION)
             }
-            MarkDelivery::Unqueued | MarkDelivery::Queued => None,
+            MarkDelivery::Unqueued | MarkDelivery::Queued { .. } => None,
         }
     }
 }
@@ -153,36 +160,47 @@ impl PeerInputView {
         !self.peer_input_marks.is_empty()
     }
 
-    /// Record that a frame naming `peer_typed_pane_ids`, each other client
-    /// with its `typed_pane_id`, was put on the subscriber's queue. Every
-    /// mark that no queued frame named counts as queued.
+    /// Record that the frame numbered `frame_number`, which names
+    /// `peer_typed_pane_ids`, each other client with its `typed_pane_id`, was
+    /// put on the subscriber's queue. Every mark that no queued frame named
+    /// counts as queued at `frame_number`. A queued mark keeps its number.
     pub(crate) fn record_frame_queued(
         &mut self,
+        frame_number: u64,
         peer_typed_pane_ids: impl IntoIterator<Item = (ClientId, Option<PaneId>)>,
     ) {
         self.queued_typed_pane_id_by_client_id = peer_typed_pane_ids.into_iter().collect();
         for peer_input_mark in &mut self.peer_input_marks {
             if peer_input_mark.mark_delivery == MarkDelivery::Unqueued {
-                peer_input_mark.mark_delivery = MarkDelivery::Queued;
+                peer_input_mark.mark_delivery = MarkDelivery::Queued { frame_number };
             }
         }
     }
 
-    /// Whether a mark that a queued frame names waits for the writing thread
-    /// to take that frame.
-    pub(crate) fn has_queued_mark(&self) -> bool {
+    /// The lowest frame number of a queued mark. `None` when no mark is
+    /// queued.
+    pub(crate) fn find_first_queued_frame_number(&self) -> Option<u64> {
         self.peer_input_marks
             .iter()
-            .any(|peer_input_mark| peer_input_mark.mark_delivery == MarkDelivery::Queued)
+            .filter_map(|peer_input_mark| match peer_input_mark.mark_delivery {
+                MarkDelivery::Queued { frame_number } => Some(frame_number),
+                MarkDelivery::Unqueued | MarkDelivery::Taken { .. } => None,
+            })
+            .min()
     }
 
     /// Record that the session saw at `taken_at` that the writing thread took
-    /// every frame on the queue. Every queued mark counts as taken at
-    /// `taken_at`.
-    pub(crate) fn record_queued_frames_taken(&mut self, taken_at: Instant) {
+    /// the frame numbered `taken_frame_number`. Every mark queued at that
+    /// frame number or a lower one counts as taken at `taken_at`.
+    ///
+    /// Example: marks queued at frames 1 and 2. A take of frame 1 counts the
+    /// first mark as taken, and the second stays queued.
+    pub(crate) fn record_frame_taken(&mut self, taken_frame_number: u64, taken_at: Instant) {
         for peer_input_mark in &mut self.peer_input_marks {
-            if peer_input_mark.mark_delivery == MarkDelivery::Queued {
-                peer_input_mark.mark_delivery = MarkDelivery::Taken { taken_at };
+            if let MarkDelivery::Queued { frame_number } = peer_input_mark.mark_delivery {
+                if frame_number <= taken_frame_number {
+                    peer_input_mark.mark_delivery = MarkDelivery::Taken { taken_at };
+                }
             }
         }
     }
@@ -265,28 +283,38 @@ impl Server {
         }
     }
 
-    /// When subscription `subscription_index` holds a queued mark, ask its
-    /// queue whether a frame still waits for the writing thread
+    /// Count the queued marks of subscription `subscription_index` as taken at
+    /// `current_time`, from the lowest frame number up, for each frame the
+    /// writing thread has taken
     /// ([`EventBus::request_frame_taken_notice`](crate::runtime::bus::EventBus::request_frame_taken_notice)).
-    /// When none waits, every queued mark counts as taken at `current_time`.
-    /// When one waits, the writing thread hands a
+    /// The first frame that still waits keeps a request: the writing thread
+    /// hands a
     /// [`RuntimeEvent::QueuedFrameTaken`](crate::runtime::event::RuntimeEvent::QueuedFrameTaken)
-    /// to the dispatcher once it takes the last one, and the pass that event
-    /// starts asks again.
+    /// to the dispatcher once it takes that frame, and the pass that event
+    /// starts counts again.
+    ///
+    /// Example: Bob's mark is queued at frame 1, and Carol's at frame 2. The
+    /// writing thread took frame 1, and frame 2 waits for a paint report.
+    /// Bob's mark counts as taken, and Carol's waits for the take of frame 2.
     pub(crate) fn record_peer_input_frames_taken(
         &mut self,
         subscription_index: usize,
         current_time: Instant,
     ) {
         let frame_subscription = &mut self.subscriptions[subscription_index];
-        if frame_subscription.peer_input_view.has_queued_mark()
-            && !self
-                .event_bus
-                .request_frame_taken_notice(frame_subscription.subscriber_id)
+        while let Some(first_queued_frame_number) = frame_subscription
+            .peer_input_view
+            .find_first_queued_frame_number()
         {
+            if self.event_bus.request_frame_taken_notice(
+                frame_subscription.subscriber_id,
+                first_queued_frame_number,
+            ) {
+                return;
+            }
             frame_subscription
                 .peer_input_view
-                .record_queued_frames_taken(current_time);
+                .record_frame_taken(first_queued_frame_number, current_time);
         }
     }
 
@@ -297,8 +325,9 @@ impl Server {
     ///    subscriber views ([`Server::list_present_clients`]), or of a pane
     ///    that session no longer holds. A subscriber whose client no session
     ///    holds loses every mark.
-    /// 2. Count the queued marks as taken when the writing thread took every
-    ///    frame on the queue ([`Server::record_peer_input_frames_taken`]).
+    /// 2. Count each queued mark as taken once the writing thread took the
+    ///    first frame that named it
+    ///    ([`Server::record_peer_input_frames_taken`]).
     /// 3. Remove each expired mark ([`PeerInputView::remove_expired_marks`]),
     ///    and mark the subscriber's view changed when one was removed.
     ///

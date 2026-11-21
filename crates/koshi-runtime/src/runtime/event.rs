@@ -434,14 +434,14 @@ pub enum RuntimeEvent {
     /// lets a frame go. A paused subscriber takes its resync snapshot on the same
     /// pass instead.
     QueueRoomFreed,
-    /// The thread that writes one client's connection took the last frame or
-    /// resync snapshot on its queue after the dispatcher asked to hear of it
+    /// The thread that writes one client's connection took the frame or
+    /// resync snapshot whose take the dispatcher asked to hear about
     /// ([`DeliveryReceiver::take_frame_taken_notice`](crate::runtime::delivery_queue::DeliveryReceiver::take_frame_taken_notice)).
     /// The event starts a pass of the serve loop, which handles nothing for
     /// it. The pass's
     /// [`Server::push_due_frames`](crate::server::Server::push_due_frames)
     /// then counts the marks of other clients' input that the taken frame
-    /// named as taken, and their expiry starts.
+    /// named first as taken, and their expiry starts.
     QueuedFrameTaken,
 }
 

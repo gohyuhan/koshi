@@ -34,6 +34,7 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
+use crate::runtime::bus::tests::{build_test_placement_delivery, build_test_placement_event};
 use crate::runtime::command::tests::{
     attach_client_through_server, attach_second_client, build_floating_new_pane_args,
     create_floating_pane, create_session_with_attached_client,
@@ -3118,6 +3119,127 @@ fn a_recent_input_pane_in_a_frame_the_writing_thread_has_not_taken_stays_in_the_
         Some(PEER_INPUT_MARK_DURATION)
     );
     server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Bob, with his tray open, types `a`, and the frame that names the right
+/// pane as his recent input pane waits on Alice's queue. A placement event
+/// follows it, and the frame that output in the left pane puts behind that
+/// event waits too. Alice's writing thread takes only the first frame. The
+/// pass that sees that take starts the mark's two seconds while the newer
+/// frame still waits, and Alice's first frame two seconds after that pass
+/// takes the waiting frame's place and names the pane no more.
+#[test]
+fn a_recent_input_pane_leaves_two_seconds_after_the_take_of_the_first_frame_that_named_it_while_a_newer_frame_waits(
+) {
+    let mut two_client_session = build_two_client_session();
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(mark_frame_time);
+    let destination_tab_id = TabId::new();
+    let _ = server
+        .event_bus
+        .publish(&build_test_placement_event(destination_tab_id));
+    server.handle_pty_output(*left_pane_id, b"more output\r\n");
+    let newer_frame_time = mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(newer_frame_time);
+
+    let Ok(Delivery::Frame(first_render_snapshot)) = alice_delivery_receiver.try_recv() else {
+        panic!("the frame that names Bob's recent input pane is at the head of Alice's queue");
+    };
+    assert_eq!(
+        first_render_snapshot.session_snapshot.peers,
+        build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id])
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let take_seen_at = Instant::now().max(newer_frame_time);
+    server.push_due_frames(take_seen_at);
+    assert_eq!(
+        server.compute_next_render_wakeup(take_seen_at),
+        Some(PEER_INPUT_MARK_DURATION)
+    );
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+
+    assert_eq!(
+        alice_delivery_receiver.try_recv(),
+        Ok(build_test_placement_delivery(destination_tab_id))
+    );
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Bob, with his tray open, types `a` in the right pane, and the frame that
+/// names the right pane goes on Alice's queue. A placement event follows it.
+/// Bob then clicks in the left pane, whose program asks for mouse reports,
+/// and the frame after the event names both panes. Alice's writing thread
+/// takes every delivery before the next pass. That one pass counts both marks
+/// as taken, and Alice's first frame two seconds after it names no pane.
+#[test]
+fn one_pass_counts_the_recent_input_marks_of_every_frame_the_writing_thread_took() {
+    let mut two_client_session = build_two_client_session();
+    let left_pane_id = two_client_session.left_pane_id;
+    two_client_session
+        .server
+        .handle_pty_output(left_pane_id, b"\x1b[?1000h");
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let right_mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(right_mark_frame_time);
+    let _ = server
+        .event_bus
+        .publish(&build_test_placement_event(TabId::new()));
+    server.forward_mouse_to_pane(
+        *bob_client_id,
+        left_pane_id,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        Point { column: 0, row: 0 },
+    );
+    let left_mark_frame_time = right_mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(left_mark_frame_time);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![
+            build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id]),
+            build_bob_peers_in_a_local_input_mode(
+                *bob_client_id,
+                vec![*right_pane_id, left_pane_id]
+            ),
+        ]
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+
+    let take_seen_at = Instant::now().max(left_mark_frame_time);
+    server.push_due_frames(take_seen_at);
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(

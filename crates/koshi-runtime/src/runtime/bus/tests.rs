@@ -235,20 +235,20 @@ fn a_subscriber_awaiting_its_attach_answer_takes_only_the_stream_end() {
     let (subscriber_id, delivery_receiver, writer_handoff) = bus.subscribe();
 
     bus.publish(&build_test_placement_event(tab_id));
-    let is_frame_queued = bus.try_send_frame(subscriber_id, build_test_render_snapshot());
+    let queued_frame_number = bus.try_send_frame(subscriber_id, build_test_render_snapshot());
     let is_host_write_queued = bus.queue_host_write(
         subscriber_id,
         &HostWrite::from_clipboard_copy("c", b"secret"),
     );
-    let is_resync_queued = bus.try_resync(
+    let queued_resync_frame_number = bus.try_resync(
         subscriber_id,
         build_test_render_snapshot(),
         build_test_notification_queue(),
     );
 
-    assert!(!is_frame_queued);
+    assert_eq!(queued_frame_number, None);
     assert!(!is_host_write_queued);
-    assert!(!is_resync_queued);
+    assert_eq!(queued_resync_frame_number, None);
     assert!(!bus.has_desynced_subscribers());
     assert_eq!(
         bus.list_desynced_subscriber_ids(),
@@ -276,7 +276,10 @@ fn a_released_subscriber_that_missed_nothing_turns_live_and_takes_its_first_fram
 
     assert!(!bus.has_desynced_subscribers());
     assert!(bus.can_take_frame(subscriber_id));
-    assert!(bus.try_send_frame(subscriber_id, render_snapshot.clone()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, render_snapshot.clone()),
+        Some(1)
+    );
     assert_eq!(
         delivery_receiver.try_recv(),
         Ok(Delivery::Frame(render_snapshot))
@@ -295,11 +298,14 @@ fn a_released_subscriber_that_missed_a_delivery_takes_a_resync_snapshot_first() 
 
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert!(!bus.can_take_frame(subscriber_id));
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue(),
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue(),
+        ),
+        Some(1)
+    );
     assert_eq!(
         delivery_receiver.try_recv(),
         Ok(Delivery::Snapshot {
@@ -456,11 +462,14 @@ fn a_resync_onto_a_still_full_queue_fails_and_leaves_the_subscriber_desynced() {
     bus.publish(&build_second_test_placement_event(tab_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
 
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     // Nothing was queued: the backlog is still exactly the pre-gap events.
@@ -487,11 +496,14 @@ fn a_resync_queues_the_snapshot_behind_the_backlog_and_ahead_of_live_events() {
     }
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
 
     bus.publish(&build_second_test_placement_event(tab_id));
@@ -534,11 +546,14 @@ fn the_dropped_count_holds_the_trigger_plus_every_withheld_event() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -589,7 +604,10 @@ fn an_ending_that_finds_a_full_queue_wakes_a_writer_held_on_the_frame_at_its_hea
     // writer, and the writer reads the raised notice before its deadline.
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, _) = subscribe_live(&mut bus);
-    assert!(bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, build_test_render_snapshot()),
+        Some(1)
+    );
     let tab_id = TabId::new();
     for _ in 1..SUBSCRIBER_QUEUE_CAPACITY {
         bus.publish(&build_test_placement_event(tab_id));
@@ -716,11 +734,14 @@ fn a_last_frame_that_does_not_fit_a_desynced_queue_is_counted() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
@@ -749,11 +770,14 @@ fn a_desynced_subscriber_whose_receiver_is_gone_is_removed_by_the_resync() {
     );
     drop(subscriber_receiver);
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -767,16 +791,22 @@ fn a_resync_of_a_live_or_unknown_subscriber_does_nothing() {
     let (subscriber_id, subscriber_receiver, _) = subscribe_live(&mut bus);
     bus.publish(&build_test_placement_event(tab_id));
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
-    assert!(!bus.try_resync(
-        SubscriberId::new(),
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
+    assert_eq!(
+        bus.try_resync(
+            SubscriberId::new(),
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -801,11 +831,14 @@ fn a_second_desync_counts_from_one_again() {
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
-    assert!(bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(subscriber_receiver.try_iter().count(), 1);
 
     // Second gap, on a queue refilled from scratch: the count restarts.
@@ -816,11 +849,14 @@ fn a_second_desync_counts_from_one_again() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(2)
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -848,18 +884,24 @@ fn a_resync_of_a_just_resynced_subscriber_does_nothing() {
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
-    assert!(bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(subscriber_receiver.try_iter().count(), 1);
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
 
     // No second frame was queued, and the subscriber is still live.
     assert_eq!(
@@ -894,11 +936,14 @@ fn every_desynced_subscriber_is_listed_in_subscription_order() {
 
     // Resyncing the first leaves the second listed, still in order.
     assert_eq!(first_receiver.try_iter().count(), SUBSCRIBER_QUEUE_CAPACITY);
-    assert!(bus.try_resync(
-        first_subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            first_subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(
         bus.list_desynced_subscriber_ids(),
         vec![second_subscriber_id]
@@ -926,11 +971,14 @@ fn a_desynced_subscriber_whose_receiver_is_gone_survives_every_publish() {
     assert!(bus.has_subscriber(subscriber_id));
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -1000,7 +1048,10 @@ fn a_frame_lands_on_a_live_subscribers_queue() {
     let (subscriber_id, subscriber_receiver, _) = subscribe_live(&mut bus);
     let render_snapshot = build_test_render_snapshot();
 
-    assert!(bus.try_send_frame(subscriber_id, render_snapshot.clone()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, render_snapshot.clone()),
+        Some(1)
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -1014,7 +1065,10 @@ fn a_frame_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
     let (_subscriber_id, subscriber_receiver, _) = subscribe_live(&mut bus);
 
-    assert!(!bus.try_send_frame(SubscriberId::new(), build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(SubscriberId::new(), build_test_render_snapshot()),
+        None
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -1037,7 +1091,10 @@ fn a_frame_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
 
-    assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, build_test_render_snapshot()),
+        None
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -1054,7 +1111,10 @@ fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
     let (subscriber_id, subscriber_receiver, _) = subscribe_live(&mut bus);
     fill_to_capacity(&mut bus, tab_id);
 
-    assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, build_test_render_snapshot()),
+        None
+    );
 
     // A refused frame is not a gap in the stream: the next frame supersedes it,
     // and the subscriber keeps receiving with no snapshot.
@@ -1067,7 +1127,10 @@ fn a_frame_that_does_not_fit_is_refused_and_leaves_the_subscriber_live() {
     );
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_send_frame(subscriber_id, render_snapshot.clone()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, render_snapshot.clone()),
+        Some(1)
+    );
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Frame(render_snapshot)]
@@ -1079,13 +1142,19 @@ fn a_frame_that_does_not_fit_marks_one_owed_frame_and_a_frame_that_fits_marks_no
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver, writer_handoff) = subscribe_live(&mut bus);
-    assert!(bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, build_test_render_snapshot()),
+        Some(1)
+    );
     assert!(!writer_handoff.take_owed_frame_mark());
     assert_eq!(subscriber_receiver.try_iter().count(), 1);
     fill_to_capacity(&mut bus, tab_id);
     assert!(!writer_handoff.take_owed_frame_mark());
 
-    assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, build_test_render_snapshot()),
+        None
+    );
 
     assert!(writer_handoff.take_owed_frame_mark());
     assert!(!writer_handoff.take_owed_frame_mark());
@@ -1101,11 +1170,14 @@ fn a_resync_snapshot_that_does_not_fit_marks_one_owed_frame_and_the_dropped_even
     assert_eq!(bus.list_desynced_subscriber_ids(), vec![subscriber_id]);
     assert!(!writer_handoff.take_owed_frame_mark());
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
 
     assert!(writer_handoff.take_owed_frame_mark());
     assert!(!writer_handoff.take_owed_frame_mark());
@@ -1117,7 +1189,10 @@ fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_frame() {
     let (subscriber_id, subscriber_receiver, _) = subscribe_live(&mut bus);
     drop(subscriber_receiver);
 
-    assert!(!bus.try_send_frame(subscriber_id, build_test_render_snapshot()));
+    assert_eq!(
+        bus.try_send_frame(subscriber_id, build_test_render_snapshot()),
+        None
+    );
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);
@@ -1253,11 +1328,14 @@ fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows(
     );
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
 
     let queued_deliveries: Vec<_> = subscriber_receiver.try_iter().collect();
     assert_eq!(
@@ -1619,11 +1697,14 @@ fn waiting_host_writes_outlast_a_resync_that_fills_the_last_free_slot() {
     );
 
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
 
     let queued_deliveries: Vec<Delivery> = subscriber_receiver.try_iter().collect();
     assert_eq!(queued_deliveries.len(), SUBSCRIBER_QUEUE_CAPACITY);
@@ -1830,11 +1911,14 @@ fn a_rejection_that_finds_the_queue_full_is_held_and_the_resync_carries_it() {
         vec![build_test_placement_delivery(tab_id); SUBSCRIBER_QUEUE_CAPACITY]
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     let resync_delivery = Delivery::Snapshot {
         render_snapshot,
         notification_queue: build_test_notification_queue(),
@@ -1879,11 +1963,14 @@ fn a_desynced_subscriber_merges_equal_rejections_in_a_row_and_misses_none_of_the
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {
@@ -1925,11 +2012,14 @@ fn a_desynced_subscriber_holding_the_most_runs_drops_the_oldest_for_a_new_one() 
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
-    assert!(bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     let Ok(Delivery::Snapshot {
         held_command_rejections,
         dropped_command_rejection_count,
@@ -1988,22 +2078,28 @@ fn a_resync_that_finds_the_queue_full_keeps_the_held_rejections_for_the_next_res
     fill_to_capacity(&mut bus, tab_id);
     send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
 
-    assert!(!bus.try_resync(
-        subscriber_id,
-        build_test_render_snapshot(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            build_test_render_snapshot(),
+            build_test_notification_queue()
+        ),
+        None
+    );
     send_resize_rejection(&mut bus, subscriber_id, "resize-pane-left");
     assert_eq!(
         subscriber_receiver.try_iter().count(),
         SUBSCRIBER_QUEUE_CAPACITY
     );
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -2300,11 +2396,14 @@ fn an_event_with_no_wire_form_reaches_no_subscriber_and_adds_to_no_missed_count(
     assert!(bus.has_subscriber(live_subscriber_id));
     assert!(bus.has_subscriber(gone_subscriber_id));
     let render_snapshot = build_test_render_snapshot();
-    assert!(bus.try_resync(
-        desynced_subscriber_id,
-        render_snapshot.clone(),
-        build_test_notification_queue()
-    ));
+    assert_eq!(
+        bus.try_resync(
+            desynced_subscriber_id,
+            render_snapshot.clone(),
+            build_test_notification_queue()
+        ),
+        Some(1)
+    );
     assert_eq!(
         desynced_subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Snapshot {

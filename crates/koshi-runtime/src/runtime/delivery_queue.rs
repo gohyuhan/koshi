@@ -7,10 +7,14 @@
 //! [`DeliverySender::try_send_frame`] puts a frame in the place of the frame
 //! at the tail when the writing thread has not taken that frame yet. The
 //! queue then holds the newest frame and keeps the order of everything else.
+//! Each frame or resync snapshot put at a place of its own gets the next frame
+//! number, from 1. A frame that takes the place of the tail frame keeps the
+//! tail frame's number.
 //!
-//! Example — the queue holds `Frame(a)`, then `Event(e)`, then `Frame(b)`. A
-//! new `Frame(c)` takes the place of `Frame(b)`: the queue holds `Frame(a)`,
-//! `Event(e)`, `Frame(c)`. The client reads `a`, then `e`, then `c`.
+//! Example — the queue holds `Frame(a)` (frame 1), then `Event(e)`, then
+//! `Frame(b)` (frame 2). A new `Frame(c)` takes the place of `Frame(b)` as
+//! frame 2: the queue holds `Frame(a)`, `Event(e)`, `Frame(c)`. The client
+//! reads `a`, then `e`, then `c`.
 //!
 //! [`DeliveryReceiver`] is the writing thread's end, and it takes deliveries
 //! from the head, oldest first. [`DeliveryReceiver::recv_paced`] holds a
@@ -20,9 +24,9 @@
 //! client reported.
 //!
 //! [`DeliverySender::request_frame_taken_notice`] asks the writing thread to
-//! say when it took the last frame on the queue, and
+//! say when it took the frame with a given frame number, and
 //! [`DeliveryReceiver::take_frame_taken_notice`] is the writing thread's
-//! check after each delivery it takes.
+//! check after each frame or resync snapshot it takes.
 //!
 //! Dropping the sender closes the queue: the receiver hands out every queued
 //! delivery, then reports the queue closed. Dropping the receiver closes it
@@ -34,7 +38,7 @@ use std::sync::mpsc::{TryRecvError, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
-use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
+use koshi_renderer::snapshot::Delivery;
 
 use crate::runtime::event::EndingNotice;
 
@@ -49,7 +53,9 @@ pub fn create_delivery_queue(capacity: usize) -> (DeliverySender, DeliveryReceiv
             is_sender_closed: false,
             is_receiver_closed: false,
             painted_update_report: None,
-            is_frame_taken_notice_requested: false,
+            queued_frame_count: 0,
+            taken_frame_count: 0,
+            frame_taken_notice_frame_number: None,
         }),
         queue_changed: Condvar::new(),
     });
@@ -108,9 +114,35 @@ struct DeliveryQueueState {
     is_receiver_closed: bool,
     /// The newest paint report the receiver has not taken.
     painted_update_report: Option<PaintedUpdateReport>,
-    /// Whether the sender asked to hear when the receiver took the last frame
-    /// on the queue ([`DeliverySender::request_frame_taken_notice`]).
-    is_frame_taken_notice_requested: bool,
+    /// How many frames and resync snapshots were put on the queue at a place
+    /// of their own: the frame number of the newest one.
+    queued_frame_count: u64,
+    /// How many frames and resync snapshots the receiver took.
+    taken_frame_count: u64,
+    /// The frame number of the frame whose take the sender asked to hear about
+    /// ([`DeliverySender::request_frame_taken_notice`]).
+    frame_taken_notice_frame_number: Option<u64>,
+}
+
+impl DeliveryQueueState {
+    /// Put `delivery` at the tail, and count it when it is a frame or a resync
+    /// snapshot.
+    fn push_delivery(&mut self, delivery: Delivery) {
+        if is_frame_delivery(&delivery) {
+            self.queued_frame_count += 1;
+        }
+        self.deliveries.push_back(delivery);
+    }
+
+    /// Take the delivery at the head, and count it when it is a frame or a
+    /// resync snapshot.
+    fn pop_delivery(&mut self) -> Option<Delivery> {
+        let delivery = self.deliveries.pop_front()?;
+        if is_frame_delivery(&delivery) {
+            self.taken_frame_count += 1;
+        }
+        Some(delivery)
+    }
 }
 
 impl SharedDeliveryQueue {
@@ -152,56 +184,67 @@ impl DeliverySender {
         if queue_state.deliveries.len() >= queue_state.capacity {
             return Err(TrySendError::Full(delivery));
         }
-        queue_state.deliveries.push_back(delivery);
+        queue_state.push_delivery(delivery);
         self.shared_queue.queue_changed.notify_all();
         Ok(())
     }
 
-    /// Put the frame `render_snapshot` in the place of the frame at the tail
-    /// of the queue, or at the tail when the tail holds no frame. A resync
-    /// snapshot at the tail keeps its place.
+    /// Put `frame_delivery`, a frame or a resync snapshot, on the queue, and
+    /// return its frame number. A frame takes the place of the frame at the
+    /// tail of the queue, and keeps that frame's number. A frame goes to the
+    /// tail when the tail holds no frame, and a resync snapshot always goes to
+    /// the tail. Each delivery that goes to the tail gets the next frame
+    /// number.
+    ///
+    /// Example: on an empty queue, `Frame(a)` returns 1. A `Frame(b)` before
+    /// the writing thread takes `Frame(a)` takes its place and returns 1. A
+    /// resync snapshot after that returns 2.
     ///
     /// # Errors
     /// [`TrySendError::Full`] when the queue holds its capacity, and
     /// [`TrySendError::Disconnected`] when the receiver is gone.
-    /// `render_snapshot` is dropped then. A frame that replaces the tail frame
+    /// `frame_delivery` is dropped then. A frame that replaces the tail frame
     /// always fits.
-    pub fn try_send_frame(
-        &self,
-        render_snapshot: Box<RenderSnapshot>,
-    ) -> Result<(), TrySendError<()>> {
+    pub fn try_send_frame(&self, frame_delivery: Delivery) -> Result<u64, TrySendError<()>> {
         let mut queue_state = self.shared_queue.lock_queue_state();
         if queue_state.is_receiver_closed {
             return Err(TrySendError::Disconnected(()));
         }
-        if let Some(Delivery::Frame(tail_render_snapshot)) = queue_state.deliveries.back_mut() {
-            *tail_render_snapshot = render_snapshot;
-            return Ok(());
-        }
+        let frame_delivery = match (frame_delivery, queue_state.deliveries.back_mut()) {
+            (Delivery::Frame(render_snapshot), Some(Delivery::Frame(tail_render_snapshot))) => {
+                *tail_render_snapshot = render_snapshot;
+                return Ok(queue_state.queued_frame_count);
+            }
+            (frame_delivery, _) => frame_delivery,
+        };
         if queue_state.deliveries.len() >= queue_state.capacity {
             return Err(TrySendError::Full(()));
         }
-        queue_state
-            .deliveries
-            .push_back(Delivery::Frame(render_snapshot));
+        queue_state.push_delivery(frame_delivery);
         self.shared_queue.queue_changed.notify_all();
-        Ok(())
+        Ok(queue_state.queued_frame_count)
     }
 
-    /// Whether a frame or a resync snapshot still waits on the queue for the
-    /// writing thread. When one waits, the queue keeps a request that the
-    /// writing thread's next [`DeliveryReceiver::take_frame_taken_notice`]
-    /// after it took the last one answers `true`. When none waits, or the
-    /// receiver is gone, it returns `false` and keeps no request.
+    /// Whether the frame numbered `frame_number`
+    /// ([`DeliverySender::try_send_frame`]) still waits on the queue for the
+    /// writing thread. When it waits, the queue keeps a request in the place of
+    /// any earlier one: the writing thread's first
+    /// [`DeliveryReceiver::take_frame_taken_notice`] after it took that frame
+    /// answers `true`. When it does not wait, or the receiver is gone, this
+    /// returns `false` and the queue keeps no request.
     ///
-    /// Example: the queue holds `Frame(a)`, then `Event(e)`. This returns
-    /// `true`. The writing thread takes `Frame(a)`, and its check answers
-    /// `true` once.
-    pub fn request_frame_taken_notice(&self) -> bool {
+    /// Example: the queue holds frame 1, then `Event(e)`, then frame 2. A
+    /// request for frame 1 returns `true`. The writing thread takes frame 1,
+    /// and its check answers `true` once, while frame 2 still waits.
+    pub fn request_frame_taken_notice(&self, frame_number: u64) -> bool {
         let mut queue_state = self.shared_queue.lock_queue_state();
         let is_frame_waiting =
-            !queue_state.is_receiver_closed && queue_state.deliveries.iter().any(is_frame_delivery);
-        queue_state.is_frame_taken_notice_requested = is_frame_waiting;
+            !queue_state.is_receiver_closed && queue_state.taken_frame_count < frame_number;
+        queue_state.frame_taken_notice_frame_number = if is_frame_waiting {
+            Some(frame_number)
+        } else {
+            None
+        };
         is_frame_waiting
     }
 
@@ -237,26 +280,27 @@ impl DeliveryReceiver {
     /// sender is gone.
     pub fn try_recv(&self) -> Result<Delivery, TryRecvError> {
         let mut queue_state = self.shared_queue.lock_queue_state();
-        match queue_state.deliveries.pop_front() {
+        match queue_state.pop_delivery() {
             Some(delivery) => Ok(delivery),
             None if queue_state.is_sender_closed => Err(TryRecvError::Disconnected),
             None => Err(TryRecvError::Empty),
         }
     }
 
-    /// Whether the sender asked to hear when the last frame on the queue was
-    /// taken ([`DeliverySender::request_frame_taken_notice`]) and no frame or
-    /// resync snapshot waits on the queue now. A `true` answer ends the
-    /// request: the next check answers `false` until the sender asks again.
+    /// Whether the receiver took the frame whose take the sender asked to hear
+    /// about ([`DeliverySender::request_frame_taken_notice`]). A `true` answer
+    /// ends the request: the next check answers `false` until the sender asks
+    /// again.
     pub fn take_frame_taken_notice(&self) -> bool {
         let mut queue_state = self.shared_queue.lock_queue_state();
-        if !queue_state.is_frame_taken_notice_requested
-            || queue_state.deliveries.iter().any(is_frame_delivery)
-        {
-            return false;
+        let taken_frame_count = queue_state.taken_frame_count;
+        let is_requested_frame_taken = queue_state
+            .frame_taken_notice_frame_number
+            .is_some_and(|frame_number| frame_number <= taken_frame_count);
+        if is_requested_frame_taken {
+            queue_state.frame_taken_notice_frame_number = None;
         }
-        queue_state.is_frame_taken_notice_requested = false;
-        true
+        is_requested_frame_taken
     }
 
     /// The reporter that the connection's reading thread records paint
@@ -301,7 +345,7 @@ impl DeliveryReceiver {
                 is_frame_delivery(delivery) && !is_frame_allowed && !queue_state.is_sender_closed
             });
             if !is_head_held {
-                if let Some(delivery) = queue_state.deliveries.pop_front() {
+                if let Some(delivery) = queue_state.pop_delivery() {
                     return PacedReceive::Delivery(delivery);
                 }
                 if queue_state.is_sender_closed {

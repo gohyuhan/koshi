@@ -1572,13 +1572,14 @@ fn serve_connection(
 /// frame once the writing thread reads the next delivery.
 ///
 /// After each frame or resync snapshot it reads, the writing thread also
-/// checks whether the dispatcher asked to hear when the last frame on the
-/// queue was taken, and no frame or resync snapshot waits now
+/// checks whether the dispatcher asked to hear when it took that frame or an
+/// earlier one
 /// ([`DeliveryReceiver::take_frame_taken_notice`](crate::runtime::delivery_queue::DeliveryReceiver::take_frame_taken_notice)).
 /// Then it hands one [`RuntimeEvent::QueuedFrameTaken`] to the dispatcher on
 /// the same terms. Example: a frame that names Bob's recent input pane waits
 /// 3 seconds for the client's paint report. The writing thread takes it, and
-/// the event starts the pass that counts Bob's mark as taken.
+/// the event starts the pass that counts Bob's mark as taken, while a newer
+/// frame still waits on the queue.
 ///
 /// A frame that arrives whole and does not decode costs the client that one
 /// request. The reading half drops it and reads the next frame, and the client

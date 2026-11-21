@@ -283,8 +283,8 @@ impl WriterHandoff {
     /// Put `delivery`, a frame or a resync snapshot, on `delivery_sender`
     /// while holding the owed-frame mark, and set the mark when the queue is
     /// full. A frame takes the place of a frame at the tail of the queue
-    /// ([`DeliverySender::try_send_frame`]). Returns what the send returned,
-    /// without the delivery.
+    /// ([`DeliverySender::try_send_frame`]). Returns what the send returned:
+    /// the delivery's frame number on the queue, or the error.
     ///
     /// # Panics
     /// When a thread panicked while it held the mark.
@@ -292,17 +292,9 @@ impl WriterHandoff {
         &self,
         delivery_sender: &DeliverySender,
         delivery: Delivery,
-    ) -> Result<(), TrySendError<()>> {
+    ) -> Result<u64, TrySendError<()>> {
         let mut is_frame_owed = self.is_frame_owed.lock().expect("owed frame mark");
-        let send_result = match delivery {
-            Delivery::Frame(render_snapshot) => delivery_sender.try_send_frame(render_snapshot),
-            delivery => delivery_sender
-                .try_send(delivery)
-                .map_err(|send_error| match send_error {
-                    TrySendError::Full(_) => TrySendError::Full(()),
-                    TrySendError::Disconnected(_) => TrySendError::Disconnected(()),
-                }),
-        };
+        let send_result = delivery_sender.try_send_frame(delivery);
         if let Err(TrySendError::Full(())) = send_result {
             *is_frame_owed = true;
         }
@@ -575,19 +567,23 @@ impl EventBus {
             })
     }
 
-    /// Whether a frame or resync snapshot still waits on `subscriber_id`'s
-    /// queue for its writing thread
-    /// ([`DeliverySender::request_frame_taken_notice`]). When one waits, the
+    /// Whether the frame numbered `frame_number` still waits on
+    /// `subscriber_id`'s queue for its writing thread
+    /// ([`DeliverySender::request_frame_taken_notice`]). When it waits, the
     /// writing thread hands a
     /// [`RuntimeEvent::QueuedFrameTaken`](crate::runtime::event::RuntimeEvent::QueuedFrameTaken)
-    /// to the dispatcher once it takes the last one. `false` when
+    /// to the dispatcher once it takes that frame. `false` when
     /// `subscriber_id` is not registered.
-    pub(crate) fn request_frame_taken_notice(&self, subscriber_id: SubscriberId) -> bool {
+    pub(crate) fn request_frame_taken_notice(
+        &self,
+        subscriber_id: SubscriberId,
+        frame_number: u64,
+    ) -> bool {
         self.find_subscriber_index(subscriber_id)
             .is_some_and(|subscriber_index| {
                 self.subscribers[subscriber_index]
                     .delivery_sender
-                    .request_frame_taken_notice()
+                    .request_frame_taken_notice(frame_number)
             })
     }
 
@@ -622,23 +618,22 @@ impl EventBus {
     /// live delivery, reporting how many deliveries it missed and carrying the
     /// command rejections it held.
     ///
-    /// Returns `true` once the snapshot is queued. Returns `false` when `subscriber_id` is
-    /// unknown, when it is already live, when it awaits its client's attach
-    /// answer, or when its queue is full. A full
-    /// queue marks the subscriber's [`WriterHandoff`] owed a frame. A
-    /// subscriber whose receiver is gone is removed.
+    /// Returns the snapshot's frame number on the queue
+    /// ([`DeliverySender::try_send_frame`]) once the snapshot is queued.
+    /// Returns `None` when `subscriber_id` is unknown, when it is already
+    /// live, when it awaits its client's attach answer, or when its queue is
+    /// full. A full queue marks the subscriber's [`WriterHandoff`] owed a
+    /// frame. A subscriber whose receiver is gone is removed.
     pub(crate) fn try_resync(
         &mut self,
         subscriber_id: SubscriberId,
         render_snapshot: Box<RenderSnapshot>,
         notification_queue: Box<NotificationQueue>,
-    ) -> bool {
-        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
-            return false;
-        };
+    ) -> Option<u64> {
+        let subscriber_index = self.find_subscriber_index(subscriber_id)?;
         let subscriber = &mut self.subscribers[subscriber_index];
         if subscriber.is_awaiting_attach_answer {
-            return false;
+            return None;
         }
         let DeliveryState::Desynced {
             dropped_event_count,
@@ -646,7 +641,7 @@ impl EventBus {
             dropped_command_rejection_count,
         } = &subscriber.delivery_state
         else {
-            return false;
+            return None;
         };
         let dropped_event_count = *dropped_event_count;
         let lag_report = SubscriberLagged {
@@ -667,7 +662,7 @@ impl EventBus {
                 dropped_command_rejection_count,
             },
         ) {
-            Ok(()) => {
+            Ok(frame_number) => {
                 subscriber.delivery_state = DeliveryState::Live;
                 tracing::info!(
                     subscriber_id = %subscriber_id,
@@ -676,12 +671,12 @@ impl EventBus {
                     dropped_command_rejection_count,
                     "snapshot queued; subscriber resynced"
                 );
-                true
+                Some(frame_number)
             }
-            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Full(_)) => None,
             Err(TrySendError::Disconnected(_)) => {
                 self.subscribers.remove(subscriber_index);
-                false
+                None
             }
         }
     }
@@ -692,32 +687,31 @@ impl EventBus {
     /// `Frame(b)`, and a new `Frame(c)` leaves `Frame(a)`, `Event(e)`,
     /// `Frame(c)`.
     ///
-    /// Returns `true` once the frame is queued. Returns `false` when `subscriber_id` is
-    /// unknown, when it is desynced — a paused subscriber takes its resync
-    /// snapshot first — or when its queue is full. A full queue marks the
-    /// subscriber's [`WriterHandoff`] owed a frame. A subscriber whose receiver
-    /// is gone is removed.
+    /// Returns the frame's number on the queue
+    /// ([`DeliverySender::try_send_frame`]) once the frame is queued. Returns
+    /// `None` when `subscriber_id` is unknown, when it is desynced — a paused
+    /// subscriber takes its resync snapshot first — or when its queue is full.
+    /// A full queue marks the subscriber's [`WriterHandoff`] owed a frame. A
+    /// subscriber whose receiver is gone is removed.
     pub(crate) fn try_send_frame(
         &mut self,
         subscriber_id: SubscriberId,
         render_snapshot: Box<RenderSnapshot>,
-    ) -> bool {
-        let Some(subscriber_index) = self.find_subscriber_index(subscriber_id) else {
-            return false;
-        };
+    ) -> Option<u64> {
+        let subscriber_index = self.find_subscriber_index(subscriber_id)?;
         let subscriber = &mut self.subscribers[subscriber_index];
         if subscriber.delivery_state != DeliveryState::Live {
-            return false;
+            return None;
         }
         match subscriber.writer_handoff.send_or_mark_frame_owed(
             &subscriber.delivery_sender,
             Delivery::Frame(render_snapshot),
         ) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => false,
+            Ok(frame_number) => Some(frame_number),
+            Err(TrySendError::Full(_)) => None,
             Err(TrySendError::Disconnected(_)) => {
                 self.subscribers.remove(subscriber_index);
-                false
+                None
             }
         }
     }

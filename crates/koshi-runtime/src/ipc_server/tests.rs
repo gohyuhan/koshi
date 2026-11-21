@@ -1056,10 +1056,13 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
         event_bus.publish(&build_test_placement_event(tab_id));
     }
-    assert!(!event_bus.try_send_frame(
-        subscriber_id,
-        Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
-    ));
+    assert_eq!(
+        event_bus.try_send_frame(
+            subscriber_id,
+            Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
+        ),
+        None
+    );
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     let runtime_directory = build_test_runtime_directory("owed-frame-wake");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
@@ -1152,11 +1155,14 @@ fn the_writing_thread_tells_the_dispatcher_once_when_it_takes_the_frame_the_disp
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
     event_bus.release_attach_answer_hold(subscriber_id);
-    assert!(event_bus.try_send_frame(
-        subscriber_id,
-        Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
-    ));
-    assert!(event_bus.request_frame_taken_notice(subscriber_id));
+    assert_eq!(
+        event_bus.try_send_frame(
+            subscriber_id,
+            Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
+        ),
+        Some(1)
+    );
+    assert!(event_bus.request_frame_taken_notice(subscriber_id, 1));
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     let runtime_directory = build_test_runtime_directory("frame-taken-notice");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
@@ -1298,7 +1304,10 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
     // The frame, then a host write and its wake, wait on the queue before the
     // client attaches. The writing thread writes the host write first, then
     // stays on the frame: it never reads the wake.
-    assert!(event_bus.try_send_frame(subscriber_id, Box::new(large_snapshot)));
+    assert_eq!(
+        event_bus.try_send_frame(subscriber_id, Box::new(large_snapshot)),
+        Some(1)
+    );
     let host_write = HostWrite::from_clipboard_copy("c", b"hi");
     assert!(event_bus.queue_host_write(subscriber_id, &host_write));
     let ending_notice = Arc::new(EndingNotice::default());
@@ -1913,12 +1922,12 @@ fn an_event_between_two_painted_updates_keeps_its_place_and_the_earlier_update_i
     let second_render_snapshot = build_alternating_grid_snapshot(frame_stream.client_id, 3, 4);
     frame_stream
         .delivery_sender
-        .try_send_frame(Box::new(first_render_snapshot.clone()))
+        .try_send_frame(Delivery::Frame(Box::new(first_render_snapshot.clone())))
         .expect("the first frame fits");
     let command_rejection_event = frame_stream.send_command_rejection();
     frame_stream
         .delivery_sender
-        .try_send_frame(Box::new(second_render_snapshot.clone()))
+        .try_send_frame(Delivery::Frame(Box::new(second_render_snapshot.clone())))
         .expect("the second frame fits");
 
     assert_eq!(
@@ -8546,11 +8555,14 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
     let render_snapshot = build_alternating_grid_snapshot(ClientId::new(), 2, 2);
     let notification_queue =
         build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(SessionId::new()));
-    assert!(event_bus.try_resync(
-        subscriber_id,
-        Box::new(render_snapshot.clone()),
-        Box::new(notification_queue.clone()),
-    ));
+    assert_eq!(
+        event_bus.try_resync(
+            subscriber_id,
+            Box::new(render_snapshot.clone()),
+            Box::new(notification_queue.clone()),
+        ),
+        Some(1)
+    );
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
 
