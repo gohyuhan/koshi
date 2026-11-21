@@ -230,7 +230,16 @@ fn a_dial_tries_the_other_address_family_second() {
     let refusing_address = build_refusing_loopback_address();
     let ipv4_listener = TcpListener::bind("127.0.0.1:0").expect("bind IPv4 loopback");
     let ipv4_listening_address = ipv4_listener.local_addr().expect("read the bound address");
-    let ipv6_listener = TcpListener::bind("[::1]:0").expect("bind IPv6 loopback");
+    let ipv6_listener = match TcpListener::bind("[::1]:0") {
+        Ok(ipv6_listener) => ipv6_listener,
+        Err(bind_error) => {
+            eprintln!(
+                "skipped `a_dial_tries_the_other_address_family_second`: \
+                 this machine binds no IPv6 loopback address: {bind_error}"
+            );
+            return;
+        }
+    };
     let ipv6_listening_address = ipv6_listener.local_addr().expect("read the bound address");
 
     let (_socket, reached_address) = connect_first_reachable_address(
