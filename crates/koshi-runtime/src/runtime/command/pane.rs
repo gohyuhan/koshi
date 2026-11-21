@@ -2304,8 +2304,10 @@ impl Server {
     /// retargeted the zoom, then one [`Event::FloatingPaneMinimizedChanged`] per
     /// floating pane minimized, then [`Event::PaneFocused`] when the client's
     /// input actually moved, naming as `previous_pane_id` the pane that took it
-    /// before; focusing the pane that already takes the client's input
-    /// completes with no events. A rejected focus mutates nothing.
+    /// before, then one [`Event::PtyResized`] per pane whose PTY size the
+    /// minimize moved ([`Self::commit_events`]); focusing the pane that
+    /// already takes the client's input completes with no events. A rejected
+    /// focus mutates nothing.
     pub(super) fn handle_focus_pane(
         &mut self,
         command_id: CommandId,
@@ -2435,8 +2437,10 @@ impl Server {
     /// [`Event::FloatingPaneMinimizedChanged`] with `is_minimized: false`
     /// reports a floating pane the client had minimized, and one
     /// [`Event::PaneFocused`] with `tab_id: None` names the pane and, as
-    /// `previous_pane_id`, the pane that took the client's input before. Every
-    /// other client's view stays as it is.
+    /// `previous_pane_id`, the pane that took the client's input before. Then
+    /// one [`Event::PtyResized`] follows per pane whose PTY size the restore
+    /// moved ([`Self::commit_events`]). Every other client's view stays as it
+    /// is.
     fn handle_focus_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -2539,7 +2543,9 @@ impl Server {
     /// Emits [`Event::LayoutChanged`] plus one [`Event::PtyResized`] per PTY
     /// whose solved size changed, then, on entry, one
     /// [`Event::FloatingPaneMinimizedChanged`] per floating pane minimized and the
-    /// [`Event::PaneFocused`] of a focus that moved. A pane another client
+    /// [`Event::PaneFocused`] of a focus that moved, then one
+    /// [`Event::PtyResized`] per pane whose PTY size the minimize moved
+    /// ([`Self::commit_events`]). A pane another client
     /// still draws tiled keeps the size that client shows. A rejected toggle
     /// mutates nothing. A pane inside a floating pane toggles through
     /// [`Self::toggle_pane_fullscreen_in_floating_pane`].
@@ -2654,7 +2660,9 @@ impl Server {
     /// [`Event::PtyResized`] per resized PTY ([`Self::reflow_floating_panes`]),
     /// then, on entry, the [`Event::FloatingPaneMinimizedChanged`] of a
     /// floating pane restored for the client and the [`Event::PaneFocused`] of
-    /// an input that moved. In `[vim | htop]`, a zoom of `htop` gives `htop`'s
+    /// an input that moved, then one [`Event::PtyResized`] per pane whose PTY
+    /// size the restore moved ([`Self::commit_events`]). In `[vim | htop]`, a
+    /// zoom of `htop` gives `htop`'s
     /// PTY the floating pane's whole content area, unless another client
     /// draws `htop` smaller.
     fn toggle_pane_fullscreen_in_floating_pane(

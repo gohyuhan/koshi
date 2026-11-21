@@ -689,11 +689,35 @@ impl Server {
     /// order, then commit it on the server's event bus and recent-events ring
     /// ([`TransactionScope::commit`]). An empty `emitted_events` commits an
     /// empty batch.
+    ///
+    /// Before the seal, each session where `emitted_events` holds an
+    /// [`Event::FloatingPaneMinimizedChanged`] reflows its floating panes
+    /// ([`Self::reflow_floating_panes`]), and the events of that reflow follow
+    /// the command's own events in the batch. Example: client A restores a
+    /// floating pane that only client B showed, and A's own solve draws a pane
+    /// of it at `46x9` → the batch ends with the [`Event::PtyResized`] that
+    /// gives that pane `46x9`.
     fn commit_events(
         &mut self,
         command_id: CommandId,
-        emitted_events: Vec<Event>,
+        mut emitted_events: Vec<Event>,
     ) -> CommandResult {
+        let mut minimized_change_session_ids: Vec<SessionId> = Vec::new();
+        for emitted_event in &emitted_events {
+            let Event::FloatingPaneMinimizedChanged(minimized_change) = emitted_event else {
+                continue;
+            };
+            let Some(session) = self.get_session_for_client(minimized_change.client_id) else {
+                continue;
+            };
+            if !minimized_change_session_ids.contains(&session.session_id) {
+                minimized_change_session_ids.push(session.session_id);
+            }
+        }
+        for session_id in minimized_change_session_ids {
+            let pty_backend = Arc::clone(self.get_pty_backend());
+            self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
+        }
         let mut scope = TransactionScope::new();
         for event in emitted_events {
             scope.emit(event);
@@ -1163,11 +1187,18 @@ impl Server {
     /// stays as it is.
     ///
     /// Then the PTY of each pane of a floating pane takes the smallest content
-    /// rect that an attached client with a floating viewport draws it at, each
-    /// client by its own solve of the floating pane
+    /// rect that an attached client with a floating viewport, and that shows
+    /// the floating pane ([`Client::is_floating_pane_shown`]), draws it at,
+    /// each client by its own solve of the floating pane
     /// ([`Session::compute_client_floating_pane_solve`],
-    /// [`Self::merge_smallest_content_rects`]). With no such client, it takes
-    /// its content rect in the floating pane's own solve
+    /// [`Self::merge_smallest_content_rects`]). A client that holds the
+    /// floating pane minimized does not count: client A holds
+    /// `stack(vim, logs)` minimized with `vim` expanded, and client B shows it
+    /// with `logs` expanded at `46x9` → `logs` takes `46x9`, and `vim` keeps
+    /// its PTY size. While no client with a floating viewport shows the
+    /// floating pane, every client with a floating viewport counts, each by
+    /// its own solve. With no attached client that has a floating viewport,
+    /// each pane takes its content rect in the floating pane's own solve
     /// ([`FloatingPane::get_layout_solve`](koshi_session::session::state::FloatingPane::get_layout_solve)).
     /// A pane suppressed in every such solve keeps its PTY size. A `40x12`
     /// floating pane of one pane gives `38x9`. A pane undocked while no client
@@ -1194,16 +1225,26 @@ impl Server {
             emitted_events.extend(session.update_floating_pane_sizes(shared_floating_viewport));
         }
         let session = &*session;
+        let floating_viewers: Vec<&Client> = session
+            .clients
+            .list_attached_clients()
+            .filter(|client| client.get_floating_viewport().is_some())
+            .collect();
         let content_rects: Vec<(PaneId, Option<Rect>)> = session
             .floating_set
             .list_floating_panes()
             .iter()
             .flat_map(|floating_pane| {
                 let floating_pane_id = floating_pane.get_floating_pane_id();
-                let per_viewer_content_rects: Vec<Vec<(PaneId, Option<Rect>)>> = session
-                    .clients
-                    .list_attached_clients()
-                    .filter(|client| client.get_floating_viewport().is_some())
+                let is_shown_by_floating_viewer = floating_viewers
+                    .iter()
+                    .any(|client| client.is_floating_pane_shown(floating_pane_id));
+                let per_viewer_content_rects: Vec<Vec<(PaneId, Option<Rect>)>> = floating_viewers
+                    .iter()
+                    .filter(|client| {
+                        !is_shown_by_floating_viewer
+                            || client.is_floating_pane_shown(floating_pane_id)
+                    })
                     .filter_map(|client| {
                         session
                             .compute_client_floating_pane_solve(client, floating_pane_id)

@@ -1584,6 +1584,202 @@ fn a_client_with_no_floating_viewport_sizes_no_pane_of_a_floating_stack() {
     );
 }
 
+#[test]
+fn a_floating_stack_takes_its_pty_sizes_from_the_clients_that_show_it() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let [vim_pane_id, logs_pane_id] = [
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+    ];
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    // Only bob shows the stack. alice holds it minimized, with `vim` first in
+    // her focus history inside it.
+    let stack_floating_pane_id = replace_floating_panes_with_stack(
+        &mut runtime,
+        session_id,
+        [vim_pane_id, logs_pane_id],
+        &[bob_client_id],
+    );
+    runtime
+        .get_client_mut(bob_client_id)
+        .expect("bob is attached")
+        .update_floating_pane_focused_pane(stack_floating_pane_id, logs_pane_id);
+    let vim_pty_size_before = get_last_pty_size(&fake_pty_backend, vim_pane_id);
+
+    runtime.reflow_floating_panes(fake_pty_backend.as_ref(), session_id, &mut Vec::new());
+
+    assert_eq!(
+        vim_pty_size_before,
+        Some(PtySize {
+            column_count: 46,
+            row_count: 10
+        })
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, vim_pane_id),
+        vim_pty_size_before,
+        "no client that shows the stack expands vim"
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, logs_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 9
+        })
+    );
+
+    let (_, restore_result) = dispatch_set_floating_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(vim_pane_id),
+        false,
+    );
+
+    let CommandResult::Ok { emitted_events, .. } = &restore_result else {
+        panic!("expected the restore to apply, got {restore_result:?}");
+    };
+    assert_eq!(
+        emitted_events.last(),
+        Some(&Event::PtyResized(PtyResized {
+            pane_id: vim_pane_id,
+            pty_size: PtySize {
+                column_count: 46,
+                row_count: 9
+            },
+        })),
+        "the restore's batch carries the reflow of the stack"
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, vim_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 9
+        }),
+        "alice expands vim once she shows the stack"
+    );
+}
+
+#[test]
+fn a_client_that_takes_back_a_view_showing_a_floating_pane_sizes_its_panes_again() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let (htop_pane_id, zsh_pane_id) =
+        create_alice_split_floating_pane(&mut runtime, alice_client_id);
+    // alice zooms `zsh` while she alone shows the floating pane.
+    let _ =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, Command::TogglePaneFullscreen);
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, zsh_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 10
+        })
+    );
+    let bob_attachment = runtime
+        .handle_ipc_attach(
+            None,
+            None,
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            ClientOrigin::Local { is_same_user: true },
+            None,
+            60,
+            None,
+            None,
+            false,
+        )
+        .expect("the session mints bob");
+    // bob shows the floating pane tiled: he draws `zsh` at `22x10`.
+    let _ = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(bob_attachment.client_id),
+        FocusTarget::Pane(htop_pane_id),
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, zsh_pane_id),
+        Some(PtySize {
+            column_count: 22,
+            row_count: 10
+        })
+    );
+
+    // bob dials again with his token: his record goes, and the new client
+    // takes back his view.
+    let _ = runtime
+        .handle_ipc_attach(
+            None,
+            Some(bob_attachment.resume_token),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            ClientOrigin::Local { is_same_user: true },
+            None,
+            60,
+            None,
+            None,
+            false,
+        )
+        .expect("the session takes bob back");
+
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, zsh_pane_id),
+        Some(PtySize {
+            column_count: 22,
+            row_count: 10
+        }),
+        "the view bob took back shows the floating pane tiled"
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_sizes(zsh_pane_id)
+            .expect("zsh spawned")
+            .iter()
+            .rev()
+            .take(2)
+            .copied()
+            .collect::<Vec<PtySize>>(),
+        vec![
+            PtySize {
+                column_count: 22,
+                row_count: 10
+            },
+            PtySize {
+                column_count: 46,
+                row_count: 10
+            },
+        ],
+        "zsh grew to alice's zoom while bob's record was gone"
+    );
+}
+
 /// The client's scroll offset for the pane — `0` follows live output.
 fn get_client_scroll_offset(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> usize {
     runtime
@@ -23393,6 +23589,8 @@ fn leaving_a_zoom_on_a_pane_the_floating_panes_tree_suppresses_focuses_a_pane_it
     let (command_id, command_result) =
         dispatch_key_binding_command(&mut runtime, alice_client_id, Command::TogglePaneFullscreen);
 
+    // Only alice shows the floating pane. While her zoom of `zsh` hid `htop`,
+    // `htop` kept its PTY size; her split draws `htop` at `5x1`.
     assert_eq!(
         command_result,
         CommandResult::Ok {
@@ -23407,6 +23605,7 @@ fn leaving_a_zoom_on_a_pane_the_floating_panes_tree_suppresses_focuses_a_pane_it
                     pane_id: htop_pane_id,
                     previous_pane_id: Some(zsh_pane_id),
                 }),
+                build_pty_resized(htop_pane_id, 5, 1),
             ],
         }
     );

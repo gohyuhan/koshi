@@ -398,7 +398,10 @@ impl Server {
     /// `tab_id: None` for a floating pane. The events of the tab's solve
     /// ([`Self::reflow_tab_if_viewed`]) and its [`Event::PtyResized`] events
     /// follow it. A client that cannot draw floating panes minimizes, in that
-    /// solve, every floating pane the restored view shows.
+    /// solve, every floating pane the restored view shows. The session's
+    /// floating panes then reflow ([`Self::reflow_floating_panes`]), with this
+    /// client counted for each floating pane the restored view shows, and one
+    /// [`Event::PtyResized`] follows for each pane whose PTY size changed.
     ///
     /// Returns no event when the session or the client is gone.
     fn restore_saved_view(
@@ -465,6 +468,7 @@ impl Server {
             active_tab_id,
             &mut emitted_events,
         );
+        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
 
         emitted_events
     }
@@ -1333,7 +1337,9 @@ impl Server {
     /// floating panes and focuses it ([`Client::focus_floating_pane`]). Either
     /// change emits one [`Event::FloatingPaneMinimizedChanged`] that names
     /// every pane of the floating pane, then one [`Event::PaneFocused`] when
-    /// the client's input moved to a pane. A view that already has the asked
+    /// the client's input moved to a pane, then one [`Event::PtyResized`] per
+    /// pane whose PTY size the client's change moved
+    /// ([`Self::reflow_floating_panes`]). A view that already has the asked
     /// state changes nothing and emits nothing. Every other client's view
     /// stays as it is.
     pub(super) fn handle_pane_minimize_change(
@@ -1411,7 +1417,9 @@ impl Server {
     ///
     /// A change emits one [`Event::FloatingPaneMinimizedChanged`] per changed
     /// floating pane, in that order, then one [`Event::PaneFocused`] when the
-    /// client's input moved to a pane. With no floating pane to change,
+    /// client's input moved to a pane, then one [`Event::PtyResized`] per pane
+    /// whose PTY size the client's change moved
+    /// ([`Self::reflow_floating_panes`]). With no floating pane to change,
     /// nothing changes and nothing is emitted.
     /// Every other client's view stays as it is.
     pub(super) fn handle_all_floating_panes_minimize_change(
