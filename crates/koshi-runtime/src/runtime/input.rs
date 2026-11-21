@@ -40,6 +40,8 @@
 //! its viewer's screen still shows, plus `1` when that frame's typed pane is
 //! not the pane that takes the input (`Server::subscribe`).
 
+use std::time::Instant;
+
 use crate::server::Server;
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeyInput;
@@ -58,6 +60,50 @@ impl Server {
     pub(crate) fn handle_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
         self.clear_selection_on_pane_input(client_id, pane_id);
         self.snap_view_to_bottom_on_input(client_id, pane_id);
+    }
+
+    /// Record that input of `client_id` reached `pane_id` now, in the record
+    /// of each subscription that views another client of the same session
+    /// ([`PeerInputView::record_input`](crate::runtime::peer_input::PeerInputView::record_input)).
+    /// A subscription whose record makes a mark has its view marked changed:
+    /// its next frame names `pane_id` for `client_id`. A client no session
+    /// holds records nothing.
+    ///
+    /// Five paths call it, each once the pane took the bytes: keystrokes
+    /// ([`Server::handle_key_inputs`]), pasted text
+    /// ([`Server::handle_host_paste`]), a `core:write-to-pane` write from a key
+    /// binding or a mouse action of `client_id`, a forwarded mouse report
+    /// ([`Server::forward_mouse_to_pane`]), and alternate-scroll arrows
+    /// ([`Server::write_alternate_scroll_arrows`]).
+    ///
+    /// Example: Alice's last frame names no pane for Bob, whose floating pane
+    /// tray is open, and Bob's `ls` reaches pane 3: Alice's frame is due, and
+    /// it names pane 3 in Bob's `recent_input_pane_ids`.
+    pub(crate) fn record_client_input_in_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
+        let Some(session_id) = self
+            .get_session_for_client(client_id)
+            .map(|session| session.session_id)
+        else {
+            return;
+        };
+        let input_at = Instant::now();
+        for subscription_index in 0..self.subscriptions.len() {
+            let viewing_client_id = self.subscriptions[subscription_index].client_id;
+            let is_other_client_of_session = viewing_client_id != client_id
+                && self
+                    .get_session_for_client(viewing_client_id)
+                    .is_some_and(|session| session.session_id == session_id);
+            if !is_other_client_of_session {
+                continue;
+            }
+            let frame_subscription = &mut self.subscriptions[subscription_index];
+            if frame_subscription
+                .peer_input_view
+                .record_input(client_id, pane_id, input_at)
+            {
+                frame_subscription.frame_pace.mark_view_changed();
+            }
+        }
     }
 
     /// Return this client's scrollback view of `pane_id` to the newest line.
@@ -93,8 +139,10 @@ impl Server {
     /// Nothing is written when `pasted_text` is empty, when the client's lock mode
     /// does not pass input to the pane
     /// (`LockMode::should_pass_unbound_input_to_pane`), or when
-    /// `Server::find_typed_pane` names no pane. A write clears the client's
-    /// highlight in that pane and returns the client's view to live output.
+    /// `Server::find_typed_pane` names no pane. A write marks the pane for the
+    /// other clients' frames (`Server::record_client_input_in_pane`), clears
+    /// the client's highlight in that pane and returns the client's view to
+    /// live output.
     pub fn handle_host_paste(&mut self, client_id: ClientId, pasted_text: &str) {
         if pasted_text.is_empty() {
             return;
@@ -128,6 +176,7 @@ impl Server {
             .write_pane_input(pane_id, &paste_output_bytes)
             .is_ok()
         {
+            self.record_client_input_in_pane(client_id, pane_id);
             self.handle_input_reached_pane(client_id, pane_id);
         }
     }
@@ -187,30 +236,18 @@ impl Server {
             })
     }
 
-    /// Drop a key or paste request of `client_id`, typed against a frame
-    /// carrying `painted_input_pane_moved_by_others_count`, that no pane takes:
-    /// the client keeps its keys in a local input mode
-    /// ([`Client::is_viewer_local_input_mode_on`](koshi_session::client::Client::is_viewer_local_input_mode_on)),
-    /// or the request is stale ([`is_input_stale`](Self::is_input_stale)). A
-    /// drop adds one to the client's dropped request count
+    /// Drop a key or paste request of `client_id` typed against a frame
+    /// carrying `painted_input_pane_moved_by_others_count` when it is stale
+    /// ([`is_input_stale`](Self::is_input_stale)): add one to the client's
+    /// dropped request count
     /// ([`Client::record_dropped_input_request`](koshi_session::client::Client::record_dropped_input_request)),
     /// which its next frame carries. Returns whether the request was dropped.
-    ///
-    /// Example: a client whose floating pane tray is open sends the keys
-    /// `ls` → no pane takes them, and its dropped request count goes from
-    /// `0` to `1`.
-    pub(crate) fn drop_refused_input(
+    pub(crate) fn drop_stale_input(
         &mut self,
         client_id: ClientId,
         painted_input_pane_moved_by_others_count: u64,
     ) -> bool {
-        let is_viewer_local_input_mode_on = self
-            .get_session_for_client(client_id)
-            .and_then(|session| session.clients.get_client_by_id(client_id))
-            .is_some_and(|attached_client| attached_client.is_viewer_local_input_mode_on());
-        if !is_viewer_local_input_mode_on
-            && !self.is_input_stale(client_id, painted_input_pane_moved_by_others_count)
-        {
+        if !self.is_input_stale(client_id, painted_input_pane_moved_by_others_count) {
             return false;
         }
         if let Some(attached_client) = self.get_client_mut(client_id) {
@@ -230,8 +267,10 @@ impl Server {
     /// any. A pane with no terminal engine encodes with no keyboard flags and
     /// application cursor keys off. A write the backend refuses, such as one
     /// past the pane's queued input limit, writes none of the keys and leaves
-    /// the client's view as it is. A write clears the client's highlight in
-    /// that pane and returns the client's view to live output.
+    /// the client's view as it is. A write marks the pane for the other
+    /// clients' frames (`Server::record_client_input_in_pane`), clears the
+    /// client's highlight in that pane and returns the client's view to live
+    /// output.
     pub fn handle_key_inputs(&mut self, client_id: ClientId, key_inputs: &[KeyInput]) {
         let Some(pane_id) = self.find_typed_pane(client_id) else {
             return;
@@ -263,6 +302,7 @@ impl Server {
             .write_pane_input(pane_id, &encoded_key_input_bytes)
             .is_ok()
         {
+            self.record_client_input_in_pane(client_id, pane_id);
             self.handle_input_reached_pane(client_id, pane_id);
         }
     }

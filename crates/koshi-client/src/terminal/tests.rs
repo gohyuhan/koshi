@@ -6072,6 +6072,7 @@ fn a_peer_cursor_that_moves_under_an_image_leaves_the_outer_terminal_showing_the
             client_id: ClientId::new(),
             color_index: 1,
             typed_pane_id: Some(image_pane_id),
+            recent_input_pane_ids: Vec::new(),
         }];
 
         // The image starts at the pane's first cell, so the peer's cursor at

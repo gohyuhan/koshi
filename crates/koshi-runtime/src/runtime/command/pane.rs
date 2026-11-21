@@ -2735,7 +2735,9 @@ impl Server {
     ///
     /// The write changes no session state, and a successful write commits no
     /// events; the child's response returns
-    /// through the normal PTY output path. A backend write failure is
+    /// through the normal PTY output path. A write from a key binding or a
+    /// mouse action of a client marks the pane for the other clients' frames
+    /// ([`Self::record_client_input_in_pane`]). A backend write failure is
     /// reported to the caller as [`RejectReason::InvalidState`] `pane is not
     /// accepting input`: for example, the backend holds no entry for the pane,
     /// the pane's writer ended with its child, or the pane's input queue is
@@ -2766,8 +2768,15 @@ impl Server {
         // Bytes that reach the child count as input from the acting client —
         // the client whose focus picked the pane, else the issuing client —
         // the same as if typed there: the client's highlight drops and its
-        // view follows back to live output. An empty payload leaves both alone.
+        // view follows back to live output. Bytes from a key binding or a
+        // mouse action mark the pane for the other clients' frames as input
+        // of the issuing client. An empty payload changes none of these.
         if !command_args.pane_input_bytes.is_empty() {
+            if let CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } =
+                command_source
+            {
+                self.record_client_input_in_pane(*client_id, pane_target.pane_id);
+            }
             if let Some(client_id) = pane_target
                 .focusing_client_id
                 .or(command_source.get_client_id())

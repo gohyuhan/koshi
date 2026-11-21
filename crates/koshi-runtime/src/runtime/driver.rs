@@ -177,17 +177,16 @@ impl Server {
             // An attached client's viewer already read these events: its
             // keymap bound nothing to them, or no chord could name them. The
             // pane write reads each whole event: the receiving pane's keyboard
-            // flags decide which of its fields reach that pane. Events of a
-            // client that keeps its keys in a local input mode, and events typed
+            // flags decide which of its fields reach that pane. Events typed
             // against a frame older than the last move of the client's input
-            // pane by others, reach no pane (`drop_refused_input`).
+            // pane by others reach no pane (`drop_stale_input`).
             RuntimeEvent::ClientKeyboard {
                 client_id,
                 key_inputs,
                 painted_input_pane_moved_by_others_count,
             } => {
                 self.allow_client_frame_now(client_id);
-                if !self.drop_refused_input(client_id, painted_input_pane_moved_by_others_count) {
+                if !self.drop_stale_input(client_id, painted_input_pane_moved_by_others_count) {
                     self.handle_key_inputs(client_id, &key_inputs);
                 }
             }
@@ -238,16 +237,15 @@ impl Server {
             RuntimeEvent::HostPaste { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a paste no attached viewer read");
             }
-            // A paste of a client that keeps its keys in a local input mode,
-            // and a paste typed against a frame older than the last move of the
-            // client's input pane by others, reach no pane, as keys do.
+            // A paste typed against a frame older than the last move of the
+            // client's input pane by others reaches no pane, as keys do.
             RuntimeEvent::ClientPaste {
                 client_id,
                 pasted_text,
                 painted_input_pane_moved_by_others_count,
             } => {
                 self.allow_client_frame_now(client_id);
-                if !self.drop_refused_input(client_id, painted_input_pane_moved_by_others_count) {
+                if !self.drop_stale_input(client_id, painted_input_pane_moved_by_others_count) {
                     self.handle_host_paste(client_id, &pasted_text);
                 }
             }
@@ -496,7 +494,7 @@ impl Server {
 
     /// How long the loop may block at `current_time` before
     /// [`push_due_frames`](Self::push_due_frames) must run: `None` to sleep
-    /// until an event, else the shortest of three waits (`Some(ZERO)` to run
+    /// until an event, else the shortest of four waits (`Some(ZERO)` to run
     /// now):
     ///
     /// 1. For each subscriber that can take a frame and whose client's view
@@ -510,6 +508,10 @@ impl Server {
     ///    at or after both its next animation frame and `current_time`. An
     ///    animation whose clock has not started is due at once. An animation
     ///    that no such client shows sets no wait.
+    /// 4. For each subscriber that can take a frame, the time until the
+    ///    earliest expiry after `current_time` of a mark of another client's
+    ///    input that a sent frame named
+    ///    (`PeerInputView::find_next_mark_expiry`).
     ///
     /// Reads no terminal engine.
     ///
@@ -539,10 +541,29 @@ impl Server {
         let animation_wakeup = self
             .find_shown_animation_wakeup_at(current_time)
             .map(|animation_wakeup_at| animation_wakeup_at.saturating_duration_since(current_time));
-        [frame_wakeup, synchronized_output_wakeup, animation_wakeup]
-            .into_iter()
-            .flatten()
+        let peer_input_mark_wakeup = self
+            .subscriptions
+            .iter()
+            .filter(|frame_subscription| {
+                self.event_bus
+                    .can_take_frame(frame_subscription.subscriber_id)
+            })
+            .filter_map(|frame_subscription| {
+                frame_subscription
+                    .peer_input_view
+                    .find_next_mark_expiry(current_time)
+            })
             .min()
+            .map(|mark_expiry| mark_expiry.saturating_duration_since(current_time));
+        [
+            frame_wakeup,
+            synchronized_output_wakeup,
+            animation_wakeup,
+            peer_input_mark_wakeup,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The earliest time at which an animation frame can reach a client, as
@@ -652,7 +673,9 @@ impl Server {
     }
 
     /// Mark the views the pass changed and build again the placement previews
-    /// that read a changed state (`mark_changed_views`),
+    /// that read a changed state (`mark_changed_views`), mark the view of
+    /// each subscriber with a mark of another client's input that expired at
+    /// `current_time` changed (`PeerInputView::has_expired_mark`),
     /// run the timed renders due at `current_time`
     /// ([`advance_due_pane_renders`](Self::advance_due_pane_renders)), hand a
     /// fresh snapshot to each paused subscriber that can take one
@@ -663,6 +686,14 @@ impl Server {
     /// the events it read.
     pub fn push_due_frames(&mut self, current_time: Instant) {
         self.mark_changed_views();
+        for frame_subscription in &mut self.subscriptions {
+            if frame_subscription
+                .peer_input_view
+                .has_expired_mark(current_time)
+            {
+                frame_subscription.frame_pace.mark_view_changed();
+            }
+        }
         self.advance_due_pane_renders(current_time);
         self.resync_lagged(current_time);
         self.push_frames(current_time);

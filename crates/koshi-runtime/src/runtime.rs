@@ -5,7 +5,8 @@
 //! highlight upkeep, clipboard writes, PTY (pseudo-terminal, a child process's
 //! terminal connection) forwarding and output handling, config reload
 //! transactions, render scheduling, the saved views a detached client can take
-//! back, the join and leave notices, per-client scrollback scrolling, staged
+//! back, the join and leave notices, the panes other clients' input reached
+//! that a subscriber's frames must show, per-client scrollback scrolling, staged
 //! shutdown, the render-snapshot builder, the wire-frame builder, the painted-update sender and receiver, the
 //! discovery-overview builder, the layout-dump builder, and event transactions.
 //! The [`Server`](crate::server::Server) type these modules extend lives in
@@ -24,6 +25,7 @@ pub mod input;
 pub mod layout;
 pub mod mouse;
 pub mod painted_update;
+pub(crate) mod peer_input;
 pub(crate) mod placement_preview;
 pub(crate) mod presence_notice;
 pub mod pty_inbox;

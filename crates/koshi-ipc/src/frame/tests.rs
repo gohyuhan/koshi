@@ -1,7 +1,7 @@
 //! Tests for painted-frame wire encoding, image placement and transfer limits,
 //! and compatibility defaults. They verify that exact field names stay on the
-//! wire, that a frame without its floating pane slots or its peer list is
-//! refused, and that a
+//! wire, that a frame without its floating pane slots or its peer list, or a
+//! peer without its recent input panes, is refused, and that a
 //! floating pane slot with no pane slot, or naming a pane outside its layout
 //! area, is refused.
 
@@ -142,11 +142,13 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                     client_id: ClientId::from_uuid(Uuid::from_u128(12)),
                     color_index: 0,
                     typed_pane_id: Some(pane_id),
+                    recent_input_pane_ids: Vec::new(),
                 },
                 FramePeer {
                     client_id: ClientId::from_uuid(Uuid::from_u128(13)),
                     color_index: 7,
                     typed_pane_id: None,
+                    recent_input_pane_ids: vec![pane_id],
                 },
             ],
         },
@@ -247,6 +249,24 @@ fn a_frame_without_its_peer_list_is_refused() {
         .expect_err("a frame without its peer list decoded instead of failing");
 
     assert_eq!(decode_error.to_string(), "missing field `peers`");
+}
+
+#[test]
+fn a_frame_peer_without_its_recent_input_panes_is_refused() {
+    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+    encoded_json["session_snapshot"]["peers"][1]
+        .as_object_mut()
+        .expect("a frame peer is an object")
+        .remove("recent_input_pane_ids")
+        .expect("the recent input pane list is present");
+
+    let decode_error = serde_json::from_value::<PaintedFrame>(encoded_json)
+        .expect_err("a frame peer without its recent input panes decoded instead of failing");
+
+    assert_eq!(
+        decode_error.to_string(),
+        "missing field `recent_input_pane_ids`"
+    );
 }
 
 #[test]
@@ -552,12 +572,14 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     {
                         "client_id": "00000000-0000-0000-0000-00000000000c",
                         "color_index": 0,
-                        "typed_pane_id": "00000000-0000-0000-0000-000000000004"
+                        "typed_pane_id": "00000000-0000-0000-0000-000000000004",
+                        "recent_input_pane_ids": []
                     },
                     {
                         "client_id": "00000000-0000-0000-0000-00000000000d",
                         "color_index": 7,
-                        "typed_pane_id": null
+                        "typed_pane_id": null,
+                        "recent_input_pane_ids": ["00000000-0000-0000-0000-000000000004"]
                     }
                 ]
             },

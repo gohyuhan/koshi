@@ -830,14 +830,6 @@ impl Client {
         self.is_viewer_local_input_mode_on = is_viewer_local_input_mode_on;
     }
 
-    /// Whether this client's viewer keeps its keys in one of its local input
-    /// modes, as its last report says
-    /// ([`set_viewer_local_input_mode_on`](Self::set_viewer_local_input_mode_on)).
-    #[must_use]
-    pub fn is_viewer_local_input_mode_on(&self) -> bool {
-        self.is_viewer_local_input_mode_on
-    }
-
     /// The pane this client's keys reach, as every other client's peer list
     /// names it: the checked pane
     /// ([`get_checked_typed_pane_id`](Self::get_checked_typed_pane_id)), or

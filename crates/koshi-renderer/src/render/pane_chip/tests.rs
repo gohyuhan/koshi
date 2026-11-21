@@ -939,6 +939,45 @@ fn state_7_a_peer_whose_keys_reach_no_pane_draws_no_chip_and_changes_no_pane_are
 }
 
 #[test]
+fn a_peer_whose_keys_reach_no_pane_draws_its_chip_on_its_recent_input_pane_and_no_marker() {
+    let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
+    show_blank_grid_with_cursor(&mut render_snapshot, left_pane_id);
+    render_snapshot.session_snapshot.peers[0].typed_pane_id = None;
+    render_snapshot.session_snapshot.peers[0].recent_input_pane_ids = vec![left_pane_id];
+
+    assert_eq!(list_core_active_tab_markers(&render_snapshot), Vec::new());
+    assert_eq!(
+        list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default()),
+        vec![build_bob_group(FrameLayer::ActiveTab, left_pane_id, 1, 25)]
+    );
+}
+
+#[test]
+fn a_peer_typing_in_one_pane_with_recent_input_in_another_draws_its_chip_on_both() {
+    let (mut render_snapshot, left_pane_id, right_pane_id) = build_two_pane_frame();
+    render_snapshot.session_snapshot.peers[0].recent_input_pane_ids = vec![right_pane_id];
+    let mut expected_pane_chip_groups = vec![
+        (
+            left_pane_id,
+            build_bob_group(FrameLayer::ActiveTab, left_pane_id, 1, 25),
+        ),
+        (
+            right_pane_id,
+            build_bob_group(FrameLayer::ActiveTab, right_pane_id, 1, 55),
+        ),
+    ];
+    expected_pane_chip_groups.sort_by_key(|(pane_id, _)| *pane_id);
+
+    assert_eq!(
+        list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default()),
+        expected_pane_chip_groups
+            .into_iter()
+            .map(|(_, pane_chip_group)| pane_chip_group)
+            .collect::<Vec<PaneChipGroup>>()
+    );
+}
+
+#[test]
 fn state_8_a_peer_in_a_pane_with_a_hidden_cursor_draws_the_chip_and_no_marker() {
     let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
     show_blank_grid_with_cursor(&mut render_snapshot, left_pane_id);

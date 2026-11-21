@@ -106,10 +106,11 @@ pub struct FrameSession {
 /// One other client attached to the session the viewing client sees.
 ///
 /// A client with index `1` whose keys reach a pane travels as
-/// `{"client_id": …, "color_index": 1, "typed_pane_id": …}`, and with its
-/// floating pane tray open as `{"client_id": …, "color_index": 1,
-/// "typed_pane_id": null}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `{"client_id": …, "color_index": 1, "typed_pane_id": …,
+/// "recent_input_pane_ids": []}`, and with its floating pane tray open as
+/// `{"client_id": …, "color_index": 1, "typed_pane_id": null,
+/// "recent_input_pane_ids": []}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePeer {
     /// The other client's stable id.
     pub client_id: ClientId,
@@ -121,6 +122,12 @@ pub struct FramePeer {
     /// it zoomed, or its viewer keeps its keys in a local input mode, such as
     /// the floating pane tray.
     pub typed_pane_id: Option<PaneId>,
+    /// The other panes the other client's input reached while the viewing
+    /// client's frames named another pane, or none, as its `typed_pane_id`,
+    /// oldest first. A pane stays listed until the first frame at least 2
+    /// seconds after the last input that reached it. A frame peer without it
+    /// fails to decode.
+    pub recent_input_pane_ids: Vec<PaneId>,
 }
 
 /// One floating pane of the session, shown or minimized for the viewing

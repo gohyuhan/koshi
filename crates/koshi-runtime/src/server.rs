@@ -55,6 +55,7 @@ use crate::{
         delivery_queue::DeliveryReceiver,
         event::{RuntimeEvent, SessionEnding},
         mouse::HeldMouseButton,
+        peer_input::PeerInputView,
         placement_preview::ClientPlacementPreview,
         pty_inbox::PaneOutputQueue,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
@@ -63,8 +64,9 @@ use crate::{
     },
 };
 
-/// One bus subscriber, the client it views as, and the pace of that client's
-/// frames on its queue.
+/// One bus subscriber, the client it views as, the pace of that client's
+/// frames on its queue, and the panes other clients' input reached that its
+/// frames must show.
 #[derive(Debug)]
 pub(crate) struct FrameSubscription {
     /// The subscriber whose queue the frames go on.
@@ -74,6 +76,9 @@ pub(crate) struct FrameSubscription {
     /// Whether the client's view changed since its last frame, and when its
     /// next frame may go.
     pub(crate) frame_pace: FramePace,
+    /// The typed pane each other client had in the last frame sent to the
+    /// subscriber, and the marks of the panes their input reached since.
+    pub(crate) peer_input_view: PeerInputView,
 }
 
 /// How long an announcement waits for every attached client's writing thread to
@@ -768,6 +773,7 @@ impl Server {
             frame_pace: FramePace::with_frame_interval(compute_frame_interval(
                 max_frames_per_second,
             )),
+            peer_input_view: PeerInputView::default(),
         });
         (delivery_receiver, writer_handoff)
     }
@@ -797,10 +803,12 @@ impl Server {
     /// ([`push_due_frames`](Self::push_due_frames)).
     ///
     /// The frame is this subscriber's viewing client's, built by
-    /// [`build_snapshot`](Self::build_snapshot), and goes with that client's
-    /// session's notification queue, regardless of the subscriber's frame
-    /// pace. A queued frame counts as the subscriber's
-    /// frame at `current_time` (`FramePace::record_frame_sent`). A subscriber
+    /// [`build_snapshot`](Self::build_snapshot) as
+    /// [`push_frames`](Self::push_frames) builds it, and goes with that
+    /// client's session's notification queue, regardless of the subscriber's
+    /// frame pace. A queued frame counts as the subscriber's frame at
+    /// `current_time`, as a frame that [`push_frames`](Self::push_frames)
+    /// queues does. A subscriber
     /// that views no client, or whose client is no longer attached, has its
     /// subscription dropped.
     ///
@@ -831,6 +839,9 @@ impl Server {
                 continue;
             };
             let client_id = self.subscriptions[subscription_index].client_id;
+            self.subscriptions[subscription_index]
+                .peer_input_view
+                .remove_expired_marks(current_time);
             let (Some(snapshot), Some(notification_queue)) = (
                 self.build_snapshot(client_id),
                 self.get_session_for_client(client_id)
@@ -844,14 +855,24 @@ impl Server {
                 self.event_bus.unsubscribe(desynced_subscriber_id);
                 continue;
             };
+            let peer_typed_pane_ids: Vec<(ClientId, Option<PaneId>)> = snapshot
+                .session_snapshot
+                .peers
+                .iter()
+                .map(|peer_snapshot| (peer_snapshot.client_id, peer_snapshot.typed_pane_id))
+                .collect();
             if self.event_bus.try_resync(
                 desynced_subscriber_id,
                 Box::new(snapshot),
                 notification_queue,
             ) {
-                self.subscriptions[subscription_index]
+                let frame_subscription = &mut self.subscriptions[subscription_index];
+                frame_subscription
                     .frame_pace
                     .record_frame_sent(current_time);
+                frame_subscription
+                    .peer_input_view
+                    .record_frame_sent(peer_typed_pane_ids);
             }
         }
         self.remove_ended_subscriptions();
@@ -864,13 +885,18 @@ impl Server {
     /// A frame is due when the client's view changed since its last frame and
     /// its pace lets a frame go (`FramePace::compute_frame_wait` is
     /// `Some(Duration::ZERO)`). The frame is the subscriber's viewing
-    /// client's, built by [`build_snapshot`](Self::build_snapshot). A
+    /// client's, built by [`build_snapshot`](Self::build_snapshot) once the
+    /// subscriber's marks of other clients' input that a sent frame named and
+    /// that expired at `current_time` are gone
+    /// (`PeerInputView::remove_expired_marks`). A
     /// subscriber that is paused, or owed a frame as
     /// [`resync_lagged`](Self::resync_lagged) states, is skipped, and no frame
     /// is built for it.
     ///
     /// A queued frame counts as the subscriber's frame at `current_time`
-    /// (`FramePace::record_frame_sent`). A frame that does not fit the queue
+    /// (`FramePace::record_frame_sent`), and every mark the subscriber holds
+    /// counts as named by a sent frame (`PeerInputView::record_frame_sent`).
+    /// A frame that does not fit the queue
     /// is dropped, marks the subscriber owed a frame, and leaves its view
     /// change in place: the pass that [`RuntimeEvent::QueueRoomFreed`] starts
     /// sends a newer one. A client the session no longer shows a frame for
@@ -888,19 +914,32 @@ impl Server {
             if !is_frame_due || !self.event_bus.can_take_frame(subscriber_id) {
                 continue;
             }
+            self.subscriptions[subscription_index]
+                .peer_input_view
+                .remove_expired_marks(current_time);
             let Some(snapshot) = self.build_snapshot(client_id) else {
                 self.subscriptions[subscription_index]
                     .frame_pace
                     .clear_view_change();
                 continue;
             };
+            let peer_typed_pane_ids: Vec<(ClientId, Option<PaneId>)> = snapshot
+                .session_snapshot
+                .peers
+                .iter()
+                .map(|peer_snapshot| (peer_snapshot.client_id, peer_snapshot.typed_pane_id))
+                .collect();
             if self
                 .event_bus
                 .try_send_frame(subscriber_id, Box::new(snapshot))
             {
-                self.subscriptions[subscription_index]
+                let frame_subscription = &mut self.subscriptions[subscription_index];
+                frame_subscription
                     .frame_pace
                     .record_frame_sent(current_time);
+                frame_subscription
+                    .peer_input_view
+                    .record_frame_sent(peer_typed_pane_ids);
             }
         }
         self.remove_ended_subscriptions();

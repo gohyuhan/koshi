@@ -2184,7 +2184,7 @@ fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_wri
 
     // The program switches to application cursor keys before the write.
     server.handle_pty_output(pane_id, b"\x1b[?1h");
-    server.write_alternate_scroll_arrows(pane_id, true, 3);
+    server.write_alternate_scroll_arrows(client_id, pane_id, true, 3);
 
     assert_eq!(
         fake_pty_backend
@@ -2224,7 +2224,7 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
 
     // The program leaves the alternate screen before the write.
     server.handle_pty_output(pane_id, b"\x1b[?1049l");
-    server.write_alternate_scroll_arrows(pane_id, true, 3);
+    server.write_alternate_scroll_arrows(client_id, pane_id, true, 3);
 
     assert_eq!(
         fake_pty_backend
@@ -2251,7 +2251,7 @@ fn the_mouse_write_methods_do_nothing_for_a_pane_that_is_gone() {
         BindingModifierFlags::NONE,
         Point { column: 5, row: 5 },
     );
-    server.write_alternate_scroll_arrows(missing_pane_id, true, 3);
+    server.write_alternate_scroll_arrows(client_id, missing_pane_id, true, 3);
     let applied_cell_count = server.drag_resize(client_id, missing_pane_id, Direction::Right, 1, 3);
 
     assert_eq!(
@@ -2286,11 +2286,11 @@ fn the_mouse_write_methods_do_nothing_for_a_pane_that_is_gone() {
 fn a_zero_line_notch_sends_no_arrow_keys() {
     // `mouse.scroll_lines 0` reaches `write_alternate_scroll_arrows` as a count
     // of zero.
-    let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
 
-    server.write_alternate_scroll_arrows(pane_id, true, 0);
+    server.write_alternate_scroll_arrows(client_id, pane_id, true, 0);
 
     assert_eq!(
         fake_pty_backend
@@ -2306,13 +2306,18 @@ fn arrows_whose_bytes_would_pass_the_pane_input_limit_write_nothing() {
     // An arrow is 3 bytes here. A count that overflows the byte count, and the
     // smallest count whose bytes pass the limit, are refused before anything is
     // allocated for them.
-    let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
 
-    server.write_alternate_scroll_arrows(pane_id, true, usize::MAX);
-    server.write_alternate_scroll_arrows(pane_id, true, MAX_QUEUED_PANE_INPUT_BYTE_COUNT / 3 + 1);
-    server.write_alternate_scroll_arrows(pane_id, false, 768);
+    server.write_alternate_scroll_arrows(client_id, pane_id, true, usize::MAX);
+    server.write_alternate_scroll_arrows(
+        client_id,
+        pane_id,
+        true,
+        MAX_QUEUED_PANE_INPUT_BYTE_COUNT / 3 + 1,
+    );
+    server.write_alternate_scroll_arrows(client_id, pane_id, false, 768);
 
     assert_eq!(
         fake_pty_backend
@@ -2325,11 +2330,11 @@ fn arrows_whose_bytes_would_pass_the_pane_input_limit_write_nothing() {
 
 #[test]
 fn a_one_line_notch_sends_one_arrow() {
-    let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
+    let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
 
-    server.write_alternate_scroll_arrows(pane_id, false, 1);
+    server.write_alternate_scroll_arrows(client_id, pane_id, false, 1);
 
     assert_eq!(
         fake_pty_backend

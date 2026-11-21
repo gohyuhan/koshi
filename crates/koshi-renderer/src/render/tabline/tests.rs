@@ -1732,6 +1732,7 @@ fn set_attached_clients(
             client_id: ClientId::new(),
             color_index: *color_index,
             typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
         })
         .collect();
 }

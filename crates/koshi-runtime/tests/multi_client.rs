@@ -1340,6 +1340,7 @@ fn the_peer_list_in_a_viewers_frames_follows_another_viewer_attaching_changing_i
                     client_id: bob_client_id,
                     color_index: 1,
                     typed_pane_id,
+                    recent_input_pane_ids: Vec::new(),
                 }]
             };
             let read_until_peers =
@@ -1864,6 +1865,7 @@ fn each_way_the_smaller_client_ends_hands_the_tab_back_and_drops_its_peer_entry_
                             client_id: small_client_id,
                             color_index: 1,
                             typed_pane_id: Some(pane_id),
+                            recent_input_pane_ids: Vec::new(),
                         }],
                         SHARED_PANE_VIEWPORT_SIZE,
                     ),
@@ -2566,6 +2568,7 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                             client_id: second_client_id,
                             color_index: 1,
                             typed_pane_id: Some(cells_pane_id),
+                            recent_input_pane_ids: Vec::new(),
                         }]
                 },
             );
@@ -2606,6 +2609,7 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                             client_id: first_client_id,
                             color_index: 0,
                             typed_pane_id: Some(cells_pane_id),
+                            recent_input_pane_ids: Vec::new(),
                         }]
                 },
             );
@@ -3150,6 +3154,7 @@ fn a_client_changing_its_own_view_leaves_every_field_of_another_clients_view_as_
                                 client_id: alice_client_id,
                                 color_index: 0,
                                 typed_pane_id: None,
+                                recent_input_pane_ids: Vec::new(),
                             }]
                     };
                 let (bob_viewer, _) = read_session_frames_until_painted_frame(
