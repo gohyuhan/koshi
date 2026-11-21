@@ -10,12 +10,13 @@
 //! 150 000 bytes leaves in three writes of 65 536, 65 536 and 18 928 bytes.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::ops::Range;
 use std::rc::Rc;
 
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, IntoCrossterm, WindowSize};
-use ratatui::buffer::{Buffer, Cell, CellWidth};
+use ratatui::buffer::{Buffer, Cell, CellDiffOption, CellWidth};
 use ratatui::crossterm::cursor::MoveTo;
 use ratatui::crossterm::queue;
 use ratatui::crossterm::style::{
@@ -25,6 +26,7 @@ use ratatui::crossterm::style::{
 use ratatui::layout::{Position, Rect, Size as RatatuiSize};
 use ratatui::style::{Color, Modifier};
 
+use koshi_core::display_width::compute_character_display_width;
 use koshi_core::geometry::Size;
 use koshi_renderer::DrawnRows;
 
@@ -185,6 +187,11 @@ impl Backend for TerminalOutputBackend {
     /// own `MoveTo`. Example: `⚠️` (`U+26A0` `U+FE0F`) at `(0, 0)`, a blank at
     /// `(1, 0)` and `x` at `(2, 0)` write `ESC [ 1 ; 2 H`, the blank,
     /// `ESC [ 1 ; 1 H`, `⚠️`, `ESC [ 1 ; 3 H`, then `x`.
+    ///
+    /// The cell after a cell of uncertain drawn width
+    /// ([`find_uncertain_drawn_width`]) gets its own `MoveTo` too. Example:
+    /// `⌚︎` (`U+231A` `U+FE0E`) at `(0, 0)` and `x` at `(1, 0)` write
+    /// `ESC [ 1 ; 1 H`, `⌚︎`, `ESC [ 1 ; 2 H`, then `x`.
     fn draw<'a, I>(&mut self, cell_updates: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
@@ -242,6 +249,9 @@ impl Backend for TerminalOutputBackend {
                 underline_color = cell.underline_color;
             }
             queue!(self.cell_output, Print(cell.symbol()))?;
+            if find_uncertain_drawn_width(cell).is_some() {
+                last_position = None;
+            }
         }
         queue!(
             self.cell_output,
@@ -301,6 +311,138 @@ fn is_cell_under_glyph(cell_update: (u16, u16, &Cell), glyph_update: (u16, u16, 
     row_index == glyph_row_index
         && column_index > glyph_column_index
         && u32::from(column_index) < glyph_end_column_index
+}
+
+/// The most columns a terminal can draw the symbol of `cell` across, when a
+/// terminal can draw it across another number of columns than the cell's width
+/// ([`CellWidth::cell_width`]): the larger of that width and the sum of the
+/// columns each character of the symbol takes alone
+/// ([`compute_character_display_width`]). `None` for a symbol of one
+/// character, and for a symbol whose characters together take the cell's
+/// width.
+///
+/// Example: `👨‍👩‍👧` in a 2-column cell gives `Some(6)`, `👍🏽` in a 2-column
+/// cell gives `Some(4)`, `⌚︎` (`U+231A` `U+FE0E`) in a 1-column cell gives
+/// `Some(2)`, and `⚠️` (`U+26A0` `U+FE0F`) in a 2-column cell gives
+/// `Some(2)`. `🇯🇵` in a 2-column cell and `é` (`e` `U+0301`) in a 1-column
+/// cell give `None`.
+fn find_uncertain_drawn_width(cell: &Cell) -> Option<u16> {
+    let symbol = cell.symbol();
+    if symbol.chars().count() < 2 {
+        return None;
+    }
+    let character_width_sum: usize = symbol
+        .chars()
+        .map(|character| compute_character_display_width(character).unwrap_or(0))
+        .sum();
+    let character_width_sum = u16::try_from(character_width_sum).unwrap_or(u16::MAX);
+    let cell_width = cell.cell_width();
+    if character_width_sum == cell_width {
+        return None;
+    }
+    Some(character_width_sum.max(cell_width))
+}
+
+/// `cell_updates`, the cells of `next_buffer` that differ from `shown_buffer`
+/// in diff order, with the cells around each cell of uncertain drawn width
+/// ([`find_uncertain_drawn_width`]) written again. Right after such a cell
+/// come, in column order on its row:
+///
+/// 1. Each cell under it ([`CellWidth::cell_width`]) whose symbol differs
+///    from the shown one.
+/// 2. Every cell from the end of its width up to its uncertain drawn width,
+///    cut at the end of the row. A cell of uncertain drawn width among them
+///    is followed by every cell under it, and the run reaches at least its own
+///    uncertain drawn width.
+///
+/// A cell that [`CellDiffOption::Skip`] marks is left out of both. A cell of
+/// `cell_updates` that one of these runs already wrote is left out.
+///
+/// Example: in a row `👨‍👩‍👧abcd` where only `👨‍👩‍👧` changed, the updates
+/// are `👨‍👩‍👧` at column 0, then `a`, `b`, `c` and `d` at columns 2 to 5.
+fn add_uncertain_width_repairs<'cells>(
+    mut cell_updates: impl Iterator<Item = (u16, u16, &'cells Cell)>,
+    shown_buffer: &'cells Buffer,
+    next_buffer: &'cells Buffer,
+) -> impl Iterator<Item = (u16, u16, &'cells Cell)> {
+    let mut queued_repairs = VecDeque::new();
+    let mut repaired_run_end: Option<Position> = None;
+    std::iter::from_fn(move || {
+        if let Some(queued_repair) = queued_repairs.pop_front() {
+            return Some(queued_repair);
+        }
+        let (column_index, row_index, cell) =
+            cell_updates.find(|(column_index, row_index, _)| {
+                repaired_run_end.is_none_or(|repaired_run_end| {
+                    *row_index != repaired_run_end.y || *column_index >= repaired_run_end.x
+                })
+            })?;
+        if let Some(run_end_column_index) = queue_uncertain_width_repairs(
+            Position::new(column_index, row_index),
+            cell,
+            shown_buffer,
+            next_buffer,
+            &mut queued_repairs,
+        ) {
+            repaired_run_end = Some(Position::new(run_end_column_index, row_index));
+        }
+        Some((column_index, row_index, cell))
+    })
+}
+
+/// Queue on `queued_repairs` the cells of `next_buffer` that
+/// [`add_uncertain_width_repairs`] writes right after `cell`, which sits at
+/// `cell_position`, and return the column after the last column its run
+/// reaches. `None`, with nothing queued, when `cell` has no uncertain drawn
+/// width ([`find_uncertain_drawn_width`]).
+fn queue_uncertain_width_repairs<'cells>(
+    cell_position: Position,
+    cell: &Cell,
+    shown_buffer: &Buffer,
+    next_buffer: &'cells Buffer,
+    queued_repairs: &mut VecDeque<(u16, u16, &'cells Cell)>,
+) -> Option<u16> {
+    let uncertain_drawn_width = find_uncertain_drawn_width(cell)?;
+    let Position {
+        x: column_index,
+        y: row_index,
+    } = cell_position;
+    let row_end_column_index = next_buffer.area.right();
+    let covered_end_column_index = column_index
+        .saturating_add(cell.cell_width())
+        .min(row_end_column_index);
+    for covered_column_index in column_index + 1..covered_end_column_index {
+        let covered_cell = &next_buffer[(covered_column_index, row_index)];
+        if covered_cell.diff_option != CellDiffOption::Skip
+            && covered_cell.symbol() != shown_buffer[(covered_column_index, row_index)].symbol()
+        {
+            queued_repairs.push_back((covered_column_index, row_index, covered_cell));
+        }
+    }
+    let mut run_end_column_index = column_index
+        .saturating_add(uncertain_drawn_width)
+        .min(row_end_column_index)
+        .max(covered_end_column_index);
+    let mut repaired_column_index = covered_end_column_index;
+    while repaired_column_index < run_end_column_index {
+        let repaired_cell = &next_buffer[(repaired_column_index, row_index)];
+        let next_column_offset = match find_uncertain_drawn_width(repaired_cell) {
+            Some(nested_uncertain_drawn_width) => {
+                run_end_column_index = run_end_column_index.max(
+                    repaired_column_index
+                        .saturating_add(nested_uncertain_drawn_width)
+                        .min(row_end_column_index),
+                );
+                1
+            }
+            None => repaired_cell.cell_width().max(1),
+        };
+        if repaired_cell.diff_option != CellDiffOption::Skip {
+            queued_repairs.push_back((repaired_column_index, row_index, repaired_cell));
+        }
+        repaired_column_index = repaired_column_index.saturating_add(next_column_offset);
+    }
+    Some(run_end_column_index.max(repaired_column_index))
 }
 
 /// Write the SGR sequences that change the text attributes from
@@ -406,8 +548,10 @@ enum ShownScreen {
 /// that writes the cells of each new frame that differ from them.
 ///
 /// [`PaintDriver::draw_frame`] makes the same backend calls, in the same
-/// order, as `ratatui::Terminal::draw` with a full-screen viewport. It reads
-/// no terminal size: the caller passes the size from the last resize event.
+/// order, as `ratatui::Terminal::draw` with a full-screen viewport, except
+/// the cells it writes again around a cell of uncertain drawn width
+/// ([`add_uncertain_width_repairs`]). It reads no terminal size: the caller
+/// passes the size from the last resize event.
 pub(crate) struct PaintDriver<B: Backend> {
     /// The backend each frame's cells and cursor go through.
     pub(crate) backend: B,
@@ -454,7 +598,8 @@ impl<B: Backend> PaintDriver<B> {
     /// draws each listed row whole. The backend gets:
     ///
     /// 1. One [`Backend::draw`] with every cell of a listed row that differs
-    ///    from the shown cell, as a whole-buffer diff gives them.
+    ///    from the shown cell, as a whole-buffer diff gives them, and the cells
+    ///    [`add_uncertain_width_repairs`] adds.
     /// 2. `hide_cursor`, or `show_cursor` then `set_cursor_position`.
     /// 3. `flush`.
     ///
@@ -465,7 +610,8 @@ impl<B: Backend> PaintDriver<B> {
     ///    clear of the whole screen, two when the terminal is narrower than
     ///    the last frame. After a clear, every cell that is not blank is
     ///    drawn.
-    /// 2. Every cell that differs from the shown cells ([`Backend::draw`]).
+    /// 2. Every cell that differs from the shown cells, and the cells
+    ///    [`add_uncertain_width_repairs`] adds ([`Backend::draw`]).
     /// 3. `hide_cursor`, or `show_cursor` then `set_cursor_position`.
     /// 4. `flush`.
     ///
@@ -555,8 +701,11 @@ impl<B: Backend> PaintDriver<B> {
             self.shown_buffer.resize(frame_area);
             self.shown_buffer.reset();
         }
-        self.backend
-            .draw(self.shown_buffer.diff_iter(&self.next_buffer))?;
+        self.backend.draw(add_uncertain_width_repairs(
+            self.shown_buffer.diff_iter(&self.next_buffer),
+            &self.shown_buffer,
+            &self.next_buffer,
+        ))?;
         self.write_cursor_and_flush(cursor_position)
     }
 
@@ -589,16 +738,18 @@ impl<B: Backend> PaintDriver<B> {
             self.drawn_rows_buffer.content[stacked_row_cells]
                 .clone_from_slice(&self.next_buffer.content[row_cells]);
         }
-        let changed_cells = self
-            .shown_rows_buffer
-            .diff_iter(&self.drawn_rows_buffer)
-            .map(|(column_index, stacked_row_index, changed_cell)| {
-                (
-                    column_index,
-                    listed_rows[usize::from(stacked_row_index)],
-                    changed_cell,
-                )
-            });
+        let changed_cells = add_uncertain_width_repairs(
+            self.shown_rows_buffer.diff_iter(&self.drawn_rows_buffer),
+            &self.shown_rows_buffer,
+            &self.drawn_rows_buffer,
+        )
+        .map(|(column_index, stacked_row_index, changed_cell)| {
+            (
+                column_index,
+                listed_rows[usize::from(stacked_row_index)],
+                changed_cell,
+            )
+        });
         self.backend.draw(changed_cells)?;
         self.write_cursor_and_flush(cursor_position)
     }

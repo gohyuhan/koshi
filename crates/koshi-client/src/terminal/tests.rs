@@ -2970,7 +2970,7 @@ fn terminal_modes_are_enabled_after_entering_the_alternate_screen() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?u"
+        b"\x1b[?1049h\x1b[?7l\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?u"
     );
 }
 
@@ -3050,7 +3050,7 @@ fn sixel_modes_are_saved_before_application_modes() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?u"
+        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[?7l\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[?u"
     );
 }
 
@@ -3068,7 +3068,7 @@ fn terminal_cleanup_reverses_modes_and_deletes_kitty_images() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
     assert!(is_image_cleanup_claimed.load(Ordering::Acquire));
 }
@@ -3092,7 +3092,7 @@ fn sixel_cleanup_aborts_a_control_string_before_restoring_modes() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b[?80r\x1b[?8452r\x1b[?1070r\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b[?80r\x1b[?8452r\x1b[?1070r\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 }
 
@@ -3115,7 +3115,7 @@ fn terminal_cleanup_attempts_mode_resets_after_image_delete_fails() {
     assert_eq!(cleanup_error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(
         writer.written_bytes,
-        b"\x18\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 }
 
@@ -3133,7 +3133,7 @@ fn terminal_cleanup_cancels_a_partial_kitty_apc_before_deleting_images() {
     .expect("cleanup writes after the partial packet");
     assert_eq!(
         &writer[partial_kitty_packet.len()..],
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 
     let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
@@ -3168,7 +3168,7 @@ fn terminal_application_modes_are_restored_once_across_cleanup_paths() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
     assert!(!has_active_application_modes.load(Ordering::Acquire));
     assert!(is_image_cleanup_claimed.load(Ordering::Acquire));
