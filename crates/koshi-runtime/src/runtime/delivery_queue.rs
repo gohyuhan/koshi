@@ -225,27 +225,28 @@ impl DeliverySender {
         Ok(queue_state.queued_frame_count)
     }
 
-    /// Whether the frame numbered `frame_number`
-    /// ([`DeliverySender::try_send_frame`]) still waits on the queue for the
-    /// writing thread. When it waits, the queue keeps a request in the place of
-    /// any earlier one: the writing thread's first
-    /// [`DeliveryReceiver::take_frame_taken_notice`] after it took that frame
-    /// answers `true`. When it does not wait, or the receiver is gone, this
-    /// returns `false` and the queue keeps no request.
+    /// Ask to hear when the writing thread takes the frame numbered
+    /// `frame_number` ([`DeliverySender::try_send_frame`]).
     ///
-    /// Example: the queue holds frame 1, then `Event(e)`, then frame 2. A
-    /// request for frame 1 returns `true`. The writing thread takes frame 1,
-    /// and its check answers `true` once, while frame 2 still waits.
-    pub fn request_frame_taken_notice(&self, frame_number: u64) -> bool {
+    /// When the writing thread took that frame already, this returns how many
+    /// frames and resync snapshots it took, and the queue keeps no request.
+    /// Otherwise it returns `None`, and the queue keeps the request in the
+    /// place of any earlier one: the writing thread's first
+    /// [`DeliveryReceiver::take_frame_taken_notice`] after it took that frame
+    /// answers `true`. A request after the receiver is gone is never answered.
+    ///
+    /// Example: the queue held frame 1, then `Event(e)`, then frame 2, and the
+    /// writing thread took frame 1. A request for frame 1 returns `Some(1)`. A
+    /// request for frame 2 returns `None`, and the writing thread's check
+    /// answers `true` once it takes frame 2.
+    pub fn request_frame_taken_notice(&self, frame_number: u64) -> Option<u64> {
         let mut queue_state = self.shared_queue.lock_queue_state();
-        let is_frame_waiting =
-            !queue_state.is_receiver_closed && queue_state.taken_frame_count < frame_number;
-        queue_state.frame_taken_notice_frame_number = if is_frame_waiting {
-            Some(frame_number)
-        } else {
-            None
-        };
-        is_frame_waiting
+        if queue_state.taken_frame_count >= frame_number {
+            queue_state.frame_taken_notice_frame_number = None;
+            return Some(queue_state.taken_frame_count);
+        }
+        queue_state.frame_taken_notice_frame_number = Some(frame_number);
+        None
     }
 
     /// Wake the receiver with nothing put on the queue: a receiver waiting in

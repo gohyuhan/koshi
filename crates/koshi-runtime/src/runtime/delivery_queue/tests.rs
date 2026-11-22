@@ -173,8 +173,8 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
 /// The queue holds frame `a` (frame 1), an event, then frame `b` (frame 2).
 /// The sender asks to hear of the take of frame 2, then of frame 1 in its
 /// place. Taking `a` answers yes once, while `b` still waits. Taking the
-/// event and `b` answers no. A request for a frame the receiver took answers
-/// `false`, and the receiver hears nothing.
+/// event and `b` answers no. A request for a frame the receiver took returns
+/// the taken frame count, and the receiver hears nothing.
 #[test]
 fn a_frame_taken_notice_answers_once_when_the_requested_frame_is_taken_while_a_newer_frame_waits() {
     let base_render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
@@ -198,8 +198,8 @@ fn a_frame_taken_notice_answers_once_when_the_requested_frame_is_taken_while_a_n
         Ok(2)
     );
 
-    assert!(delivery_sender.request_frame_taken_notice(2));
-    assert!(delivery_sender.request_frame_taken_notice(1));
+    assert_eq!(delivery_sender.request_frame_taken_notice(2), None);
+    assert_eq!(delivery_sender.request_frame_taken_notice(1), None);
     let mut notice_answers = Vec::new();
     while let Ok(delivery) = delivery_receiver.try_recv() {
         notice_answers.push((delivery, delivery_receiver.take_frame_taken_notice()));
@@ -219,17 +219,18 @@ fn a_frame_taken_notice_answers_once_when_the_requested_frame_is_taken_while_a_n
         ]
     );
 
-    assert!(!delivery_sender.request_frame_taken_notice(2));
+    assert_eq!(delivery_sender.request_frame_taken_notice(2), Some(2));
     assert!(!delivery_receiver.take_frame_taken_notice());
 }
 
 /// The sender asks to hear of the take of frame 1 while frame `a` waits, and
 /// frame `b` takes its place as frame 1. Taking `b` answers yes. A resync
 /// snapshot then takes frame number 2 and frame `c` frame number 3, and a
-/// request for frame 3 answers yes once `c` is taken. A request after the
-/// receiver is gone answers `false`.
+/// request for frame 3 answers yes once `c` is taken. A request for frame 2
+/// then returns 3, the count of every frame taken. A request after the
+/// receiver is gone returns `None`.
 #[test]
-fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_and_a_gone_receiver_answers_false(
+fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_and_a_gone_receiver_gives_no_count(
 ) {
     let base_render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
     let (delivery_sender, delivery_receiver) = create_delivery_queue(2);
@@ -251,7 +252,7 @@ fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_a
         ))),
         Ok(1)
     );
-    assert!(delivery_sender.request_frame_taken_notice(1));
+    assert_eq!(delivery_sender.request_frame_taken_notice(1), None);
     assert_eq!(
         delivery_sender.try_send_frame(Delivery::Frame(build_named_frame(
             &base_render_snapshot,
@@ -281,7 +282,7 @@ fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_a
         ))),
         Ok(3)
     );
-    assert!(delivery_sender.request_frame_taken_notice(3));
+    assert_eq!(delivery_sender.request_frame_taken_notice(3), None);
     assert_eq!(delivery_receiver.try_recv(), Ok(build_resync_snapshot()));
     assert!(!delivery_receiver.take_frame_taken_notice());
     assert_eq!(
@@ -292,6 +293,7 @@ fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_a
         )))
     );
     assert!(delivery_receiver.take_frame_taken_notice());
+    assert_eq!(delivery_sender.request_frame_taken_notice(2), Some(3));
 
     assert_eq!(
         delivery_sender.try_send_frame(Delivery::Frame(build_named_frame(
@@ -301,7 +303,35 @@ fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_a
         Ok(4)
     );
     drop(delivery_receiver);
-    assert!(!delivery_sender.request_frame_taken_notice(4));
+    assert_eq!(delivery_sender.request_frame_taken_notice(4), None);
+}
+
+/// The sender asks to hear of the take of frame 1, and the receiver takes
+/// that frame before its check. A second request for frame 1 returns the
+/// taken frame count 1 and ends the first request: the receiver's check
+/// answers no.
+#[test]
+fn a_request_for_a_taken_frame_ends_the_request_that_waited_for_it() {
+    let base_render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
+    let (delivery_sender, delivery_receiver) = create_delivery_queue(2);
+    assert_eq!(
+        delivery_sender.try_send_frame(Delivery::Frame(build_named_frame(
+            &base_render_snapshot,
+            "a"
+        ))),
+        Ok(1)
+    );
+    assert_eq!(delivery_sender.request_frame_taken_notice(1), None);
+    assert_eq!(
+        delivery_receiver.try_recv(),
+        Ok(Delivery::Frame(build_named_frame(
+            &base_render_snapshot,
+            "a"
+        )))
+    );
+
+    assert_eq!(delivery_sender.request_frame_taken_notice(1), Some(1));
+    assert!(!delivery_receiver.take_frame_taken_notice());
 }
 
 #[test]

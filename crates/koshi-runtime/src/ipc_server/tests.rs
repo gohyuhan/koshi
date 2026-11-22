@@ -1162,7 +1162,7 @@ fn the_writing_thread_tells_the_dispatcher_once_when_it_takes_the_frame_the_disp
         ),
         Some(1)
     );
-    assert!(event_bus.request_frame_taken_notice(subscriber_id, 1));
+    assert_eq!(event_bus.request_frame_taken_notice(subscriber_id, 1), None);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     let runtime_directory = build_test_runtime_directory("frame-taken-notice");
     let (inbox_sender, inbox_receiver) = mpsc::channel();

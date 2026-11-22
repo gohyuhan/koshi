@@ -92,7 +92,7 @@ fn a_mark_taken_after_a_slow_paint_ends_its_duration_after_the_take() {
     peer_input_view.record_frame_queued(1, [(bob_client_id, None)]);
     let taken_at = input_at + SLOW_PAINT_DURATION;
 
-    peer_input_view.record_frame_taken(1, taken_at);
+    peer_input_view.record_frames_taken(1, taken_at);
 
     let mark_expiry = taken_at + PEER_INPUT_MARK_DURATION;
     assert_eq!(peer_input_view.find_first_queued_frame_number(), None);
@@ -115,7 +115,7 @@ fn new_input_in_a_taken_mark_moves_its_end_and_makes_no_mark() {
     let input_at = Instant::now();
     let _ = peer_input_view.record_input(bob_client_id, pane_id, input_at);
     peer_input_view.record_frame_queued(1, [(bob_client_id, None)]);
-    peer_input_view.record_frame_taken(1, input_at);
+    peer_input_view.record_frames_taken(1, input_at);
     let later_input_at = input_at + PEER_INPUT_MARK_DURATION;
 
     assert!(!peer_input_view.record_input(bob_client_id, pane_id, later_input_at));
@@ -133,7 +133,7 @@ fn an_overdue_mark_keeps_its_past_expiry_until_it_is_removed() {
     let input_at = Instant::now();
     let _ = peer_input_view.record_input(bob_client_id, PaneId::new(), input_at);
     peer_input_view.record_frame_queued(1, [(bob_client_id, None)]);
-    peer_input_view.record_frame_taken(1, input_at);
+    peer_input_view.record_frames_taken(1, input_at);
 
     assert_eq!(
         peer_input_view.find_next_mark_expiry(),
@@ -151,7 +151,7 @@ fn a_queued_frame_queues_only_the_marks_no_frame_named_and_a_take_leaves_earlier
     let first_input_at = Instant::now();
     let _ = peer_input_view.record_input(bob_client_id, first_pane_id, first_input_at);
     peer_input_view.record_frame_queued(1, [(bob_client_id, None)]);
-    peer_input_view.record_frame_taken(1, first_input_at);
+    peer_input_view.record_frames_taken(1, first_input_at);
     let second_input_at = first_input_at + Duration::from_secs(1);
     let _ = peer_input_view.record_input(bob_client_id, second_pane_id, second_input_at);
     assert_eq!(peer_input_view.find_first_queued_frame_number(), None);
@@ -159,7 +159,7 @@ fn a_queued_frame_queues_only_the_marks_no_frame_named_and_a_take_leaves_earlier
     peer_input_view.record_frame_queued(2, [(bob_client_id, None)]);
     assert_eq!(peer_input_view.find_first_queued_frame_number(), Some(2));
     let second_taken_at = second_input_at + SLOW_PAINT_DURATION;
-    peer_input_view.record_frame_taken(2, second_taken_at);
+    peer_input_view.record_frames_taken(2, second_taken_at);
 
     assert!(peer_input_view.remove_expired_marks(first_input_at + PEER_INPUT_MARK_DURATION));
     assert_eq!(
@@ -180,7 +180,7 @@ fn an_absent_client_or_pane_removes_its_marks_in_every_state() {
     let input_at = Instant::now();
     let _ = peer_input_view.record_input(bob_client_id, kept_pane_id, input_at);
     peer_input_view.record_frame_queued(1, []);
-    peer_input_view.record_frame_taken(1, input_at);
+    peer_input_view.record_frames_taken(1, input_at);
     let _ = peer_input_view.record_input(bob_client_id, closed_pane_id, input_at);
     peer_input_view.record_frame_queued(2, []);
     let _ = peer_input_view.record_input(carol_client_id, kept_pane_id, input_at);
@@ -217,7 +217,7 @@ fn a_take_counts_only_the_marks_whose_first_frame_is_the_taken_frame_or_an_earli
     assert_eq!(peer_input_view.find_first_queued_frame_number(), Some(1));
 
     let first_taken_at = input_at + Duration::from_secs(1);
-    peer_input_view.record_frame_taken(1, first_taken_at);
+    peer_input_view.record_frames_taken(1, first_taken_at);
 
     assert_eq!(peer_input_view.find_first_queued_frame_number(), Some(2));
     assert_eq!(
@@ -231,11 +231,39 @@ fn a_take_counts_only_the_marks_whose_first_frame_is_the_taken_frame_or_an_earli
     );
 
     let second_taken_at = input_at + SLOW_PAINT_DURATION * 2;
-    peer_input_view.record_frame_taken(2, second_taken_at);
+    peer_input_view.record_frames_taken(2, second_taken_at);
 
     assert_eq!(peer_input_view.find_first_queued_frame_number(), None);
     assert_eq!(
         peer_input_view.find_next_mark_expiry(),
         Some(second_taken_at + PEER_INPUT_MARK_DURATION)
+    );
+}
+
+/// Bob's marks are queued at frames 1, 2 and 4. One taken frame count of 3
+/// counts the marks of frames 1 and 2 as taken, and the mark of frame 4 stays
+/// queued.
+#[test]
+fn one_taken_frame_count_counts_every_mark_queued_at_or_below_it() {
+    let mut peer_input_view = PeerInputView::default();
+    let bob_client_id = ClientId::new();
+    let [first_pane_id, second_pane_id, third_pane_id] =
+        [PaneId::new(), PaneId::new(), PaneId::new()];
+    let input_at = Instant::now();
+    let _ = peer_input_view.record_input(bob_client_id, first_pane_id, input_at);
+    peer_input_view.record_frame_queued(1, [(bob_client_id, None)]);
+    let _ = peer_input_view.record_input(bob_client_id, second_pane_id, input_at);
+    peer_input_view.record_frame_queued(2, [(bob_client_id, None)]);
+    let _ = peer_input_view.record_input(bob_client_id, third_pane_id, input_at);
+    peer_input_view.record_frame_queued(4, [(bob_client_id, None)]);
+    let taken_at = input_at + Duration::from_secs(1);
+
+    peer_input_view.record_frames_taken(3, taken_at);
+
+    assert_eq!(peer_input_view.find_first_queued_frame_number(), Some(4));
+    assert!(peer_input_view.remove_expired_marks(taken_at + PEER_INPUT_MARK_DURATION));
+    assert_eq!(
+        peer_input_view.list_mark_pane_ids(bob_client_id, None),
+        vec![third_pane_id]
     );
 }

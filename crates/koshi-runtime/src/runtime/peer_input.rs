@@ -190,15 +190,15 @@ impl PeerInputView {
     }
 
     /// Record that the session saw at `taken_at` that the writing thread took
-    /// the frame numbered `taken_frame_number`. Every mark queued at that
-    /// frame number or a lower one counts as taken at `taken_at`.
+    /// frames 1 through `taken_frame_count`. Every mark queued at one of
+    /// those frames counts as taken at `taken_at`.
     ///
-    /// Example: marks queued at frames 1 and 2. A take of frame 1 counts the
-    /// first mark as taken, and the second stays queued.
-    pub(crate) fn record_frame_taken(&mut self, taken_frame_number: u64, taken_at: Instant) {
+    /// Example: marks queued at frames 1, 2 and 4. A taken frame count of 2
+    /// counts the first two marks as taken, and the third stays queued.
+    pub(crate) fn record_frames_taken(&mut self, taken_frame_count: u64, taken_at: Instant) {
         for peer_input_mark in &mut self.peer_input_marks {
             if let MarkDelivery::Queued { frame_number } = peer_input_mark.mark_delivery {
-                if frame_number <= taken_frame_number {
+                if frame_number <= taken_frame_count {
                     peer_input_mark.mark_delivery = MarkDelivery::Taken { taken_at };
                 }
             }
@@ -284,18 +284,20 @@ impl Server {
     }
 
     /// Count the queued marks of subscription `subscription_index` as taken at
-    /// `current_time`, from the lowest frame number up, for each frame the
-    /// writing thread has taken
+    /// `current_time` when the writing thread took the first frame that named
+    /// them
     /// ([`EventBus::request_frame_taken_notice`](crate::runtime::bus::EventBus::request_frame_taken_notice)).
-    /// The first frame that still waits keeps a request: the writing thread
-    /// hands a
+    /// Each queue answer counts the marks of every frame the writing thread
+    /// took. The lowest frame number that still waits keeps a request: the
+    /// writing thread hands a
     /// [`RuntimeEvent::QueuedFrameTaken`](crate::runtime::event::RuntimeEvent::QueuedFrameTaken)
     /// to the dispatcher once it takes that frame, and the pass that event
     /// starts counts again.
     ///
-    /// Example: Bob's mark is queued at frame 1, and Carol's at frame 2. The
-    /// writing thread took frame 1, and frame 2 waits for a paint report.
-    /// Bob's mark counts as taken, and Carol's waits for the take of frame 2.
+    /// Example: Bob's mark is queued at frame 1, Carol's at frame 2, and Dan's
+    /// at frame 4. The writing thread took frames 1 to 3, and frame 4 waits
+    /// for a paint report. One answer counts Bob's and Carol's marks as taken,
+    /// and Dan's mark waits for the take of frame 4.
     pub(crate) fn record_peer_input_frames_taken(
         &mut self,
         subscription_index: usize,
@@ -306,15 +308,15 @@ impl Server {
             .peer_input_view
             .find_first_queued_frame_number()
         {
-            if self.event_bus.request_frame_taken_notice(
+            let Some(taken_frame_count) = self.event_bus.request_frame_taken_notice(
                 frame_subscription.subscriber_id,
                 first_queued_frame_number,
-            ) {
+            ) else {
                 return;
-            }
+            };
             frame_subscription
                 .peer_input_view
-                .record_frame_taken(first_queued_frame_number, current_time);
+                .record_frames_taken(taken_frame_count, current_time);
         }
     }
 

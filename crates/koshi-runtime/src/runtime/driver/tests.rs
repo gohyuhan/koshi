@@ -3249,6 +3249,82 @@ fn one_pass_counts_the_recent_input_marks_of_every_frame_the_writing_thread_took
     );
 }
 
+/// Bob, with his tray open, types `a` in the right pane, and frame 1 names
+/// the right pane on Alice's queue. A placement event follows it. Bob then
+/// clicks in the left pane, whose program asks for mouse reports, and the
+/// next frame names both panes. Alice's writing thread takes the first frame
+/// only. The pass that sees that take counts the right pane's mark, and asks
+/// to hear of the take of the newer frame: the writing thread's check after
+/// it takes that frame answers yes, and Alice's first frame two seconds after
+/// the pass that sees the second take names no pane.
+#[test]
+fn a_pass_that_counts_a_taken_frame_asks_to_hear_of_the_take_of_the_next_waiting_frame() {
+    let mut two_client_session = build_two_client_session();
+    let left_pane_id = two_client_session.left_pane_id;
+    two_client_session
+        .server
+        .handle_pty_output(left_pane_id, b"\x1b[?1000h");
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let right_mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(right_mark_frame_time);
+    let destination_tab_id = TabId::new();
+    let _ = server
+        .event_bus
+        .publish(&build_test_placement_event(destination_tab_id));
+    server.forward_mouse_to_pane(
+        *bob_client_id,
+        left_pane_id,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        Point { column: 0, row: 0 },
+    );
+    let left_mark_frame_time = right_mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(left_mark_frame_time);
+
+    let Ok(Delivery::Frame(first_render_snapshot)) = alice_delivery_receiver.try_recv() else {
+        panic!("the frame that names the right pane is at the head of Alice's queue");
+    };
+    assert_eq!(
+        first_render_snapshot.session_snapshot.peers,
+        build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id])
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let first_take_seen_at = Instant::now().max(left_mark_frame_time);
+    server.push_due_frames(first_take_seen_at);
+
+    assert_eq!(
+        alice_delivery_receiver.try_recv(),
+        Ok(build_test_placement_delivery(destination_tab_id))
+    );
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            vec![*right_pane_id, left_pane_id]
+        )]
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let second_take_seen_at = Instant::now().max(first_take_seen_at);
+    server.push_due_frames(second_take_seen_at);
+    server.push_due_frames(second_take_seen_at + PEER_INPUT_MARK_DURATION);
+
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
 /// A pass sees the take of the frame that names Bob's recent input pane, and
 /// the loop computes its next wait only after that mark's end: the wait is
 /// zero, and the pass it starts sends Alice the frame without the pane. No
