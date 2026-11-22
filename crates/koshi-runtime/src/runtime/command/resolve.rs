@@ -496,7 +496,7 @@ impl Server {
     /// Resolve a move target and the client view used to choose its neighbor:
     /// a tiled pane in that client's active tab
     /// ([`Self::require_pane_in_active_tab`]), or a pane inside a floating
-    /// pane that client holds a view of ([`Self::require_floating_pane_view`]).
+    /// pane that client shows ([`Self::require_floating_pane_shown`]).
     pub(super) fn resolve_move_pane_target(
         &self,
         command_args: &MovePaneArgs,
@@ -522,10 +522,7 @@ impl Server {
                 }))
             }
             LayoutAreaId::FloatingPane(floating_pane_id) => {
-                Self::require_floating_pane_view(
-                    Self::require_client(session, client_id)?,
-                    floating_pane_id,
-                )?;
+                Self::require_floating_pane_shown(session, client_id, pane_target.pane_id)?;
                 Ok(ClientViewPaneTarget::Floating(FloatingPaneViewTarget {
                     session_id: pane_target.session_id,
                     client_id,

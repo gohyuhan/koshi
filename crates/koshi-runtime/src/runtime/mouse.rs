@@ -280,9 +280,10 @@ impl Server {
     /// left release from `client-1` at cell `(0, 0)` writes
     /// `ESC [ < 0 ; 1 ; 1 m` under SGR encoding.
     ///
-    /// A report the pane takes also drops this client's highlight in that
-    /// pane. A wheel tick leaves the highlight standing. A report the pane
-    /// refuses leaves the highlight standing.
+    /// A report the pane takes marks the pane for the other clients' frames
+    /// (`Server::record_client_input_in_pane`), and drops this client's
+    /// highlight in that pane. A wheel tick leaves the highlight standing. A
+    /// report the pane refuses leaves the highlight standing.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
@@ -309,6 +310,7 @@ impl Server {
         if !self.write_mouse_report(pane_id, mouse_kind, modifier_flags, pane_local_cell) {
             return;
         }
+        self.record_client_input_in_pane(client_id, pane_id);
         match (mouse_kind, held_mouse_button_index) {
             (MouseKind::Press(pressed_button), None) => {
                 self.held_mouse_buttons.push(HeldMouseButton {
@@ -451,9 +453,11 @@ impl Server {
             .is_ok()
     }
 
-    /// Send `arrow_count` cursor arrow keys to `pane_id` for a wheel tick — the
-    /// alternate-scroll (`?1007`) translation. `is_scrolling_up` sends up-arrows, otherwise
-    /// down-arrows.
+    /// Send `arrow_count` cursor arrow keys to `pane_id` for a wheel tick of
+    /// `client_id` — the alternate-scroll (`?1007`) translation.
+    /// `is_scrolling_up` sends up-arrows, otherwise down-arrows. Arrows the
+    /// pane takes mark it for the other clients' frames
+    /// (`Server::record_client_input_in_pane`).
     ///
     /// The pane must still be on the alternate screen with alternate scroll on,
     /// read here at the moment of the write: a pane whose program left the
@@ -467,6 +471,7 @@ impl Server {
     /// would pass [`MAX_QUEUED_PANE_INPUT_BYTE_COUNT`].
     pub fn write_alternate_scroll_arrows(
         &mut self,
+        client_id: ClientId,
         pane_id: PaneId,
         is_scrolling_up: bool,
         arrow_count: usize,
@@ -504,10 +509,13 @@ impl Server {
             return;
         }
         let arrow_key_bytes_to_write = arrow_key_bytes.repeat(arrow_count);
-        if !arrow_key_bytes_to_write.is_empty() {
-            let _ = self
+        if !arrow_key_bytes_to_write.is_empty()
+            && self
                 .get_pty_backend()
-                .write_pane_input(pane_id, &arrow_key_bytes_to_write);
+                .write_pane_input(pane_id, &arrow_key_bytes_to_write)
+                .is_ok()
+        {
+            self.record_client_input_in_pane(client_id, pane_id);
         }
     }
 
@@ -577,7 +585,12 @@ impl Server {
                     is_scrolling_up,
                     arrow_count,
                 } => {
-                    self.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                    self.write_alternate_scroll_arrows(
+                        client_id,
+                        pane_id,
+                        is_scrolling_up,
+                        arrow_count,
+                    );
                 }
                 WireMouseAction::Resize {
                     pane_id,

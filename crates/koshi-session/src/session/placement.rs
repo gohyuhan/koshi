@@ -26,7 +26,7 @@ use koshi_core::event::{Event, LayoutChanged, PaneFocused, TabFocused};
 use koshi_core::geometry::{
     FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, Point, Rect, Size,
 };
-use koshi_core::ids::{ClientId, FloatingPaneId, PaneId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, LayoutAreaId, PaneId, TabId};
 use koshi_layout::placement::{
     find_insertion_at_point, list_placement_destinations, solve_placed_tab, CrossTabPlacement,
     PlacementTabSizes,
@@ -43,7 +43,7 @@ use crate::session::cascade::{
 };
 use crate::session::focus::build_floating_pane_minimized_changed_events;
 use crate::session::pane_ops::show_new_floating_pane;
-use crate::session::state::{FloatingPane, LayoutAreaId, Session, Tab};
+use crate::session::state::{FloatingPane, Session, Tab};
 use crate::session::tab_ops::{close_and_refocus_tab, find_nearest_surviving_tab};
 
 /// A checked placement could not be installed because its tabs or source pane

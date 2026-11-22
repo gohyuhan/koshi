@@ -145,6 +145,7 @@ fn build_render_snapshot_with_images(
                     client_id: frame_peer.client_id,
                     color_index: frame_peer.color_index,
                     typed_pane_id: frame_peer.typed_pane_id,
+                    recent_input_pane_ids: frame_peer.recent_input_pane_ids.clone(),
                 })
                 .collect(),
         },

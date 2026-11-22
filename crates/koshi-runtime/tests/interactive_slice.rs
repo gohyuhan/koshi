@@ -15,6 +15,7 @@ use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::process::{ExitStatus, KillPolicy};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_runtime::runtime::driver::DispatchPassOutcome;
+use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
 #[test]
@@ -32,8 +33,11 @@ fn bootstrap_opens_one_shell_and_its_first_subscriber_gets_a_frame_at_once() {
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(render_snapshot.pane_snapshots.len(), 1);
 
-    // A new subscriber is owed its first frame, which is due immediately.
+    // A new subscriber is owed its first frame, which is due as soon as its
+    // client says it read the attach answer.
     let (_delivery_receiver, _writer_handoff) = server.subscribe(client_id, 60, None);
+    assert_eq!(server.compute_next_render_wakeup(Instant::now()), None);
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientAttachAnswerReceived { client_id });
     assert_eq!(
         server.compute_next_render_wakeup(Instant::now()),
         Some(Duration::ZERO)

@@ -1571,6 +1571,16 @@ fn serve_connection(
 /// frame that found the queue full on an idle session is followed by a newer
 /// frame once the writing thread reads the next delivery.
 ///
+/// After each frame or resync snapshot it reads, the writing thread also
+/// checks whether the dispatcher asked to hear when it took that frame or an
+/// earlier one
+/// ([`DeliveryReceiver::take_frame_taken_notice`](crate::runtime::delivery_queue::DeliveryReceiver::take_frame_taken_notice)).
+/// Then it hands one [`RuntimeEvent::QueuedFrameTaken`] to the dispatcher on
+/// the same terms. Example: a frame that names Bob's recent input pane waits
+/// 3 seconds for the client's paint report. The writing thread takes it, and
+/// the event starts the pass that counts Bob's mark as taken, while a newer
+/// frame still waits on the queue.
+///
 /// A frame that arrives whole and does not decode costs the client that one
 /// request. The reading half drops it and reads the next frame, and the client
 /// stays attached. A request kind this build does not have is dropped the same
@@ -1627,6 +1637,13 @@ fn serve_connection(
 /// [`SessionEvent::Detached`] in place of the session's frame, or nothing
 /// after a failed read: it left before the session did. The thread counts
 /// itself on the notice for as long as it runs.
+///
+/// Until the client sends `AttachAnswerReceived`, the reading loop takes only
+/// that request, `Ping` and `Leaving`: any other request ends the loop, and
+/// the client is detached. Its subscriber takes nothing until then
+/// ([`Server::handle_attach_answer_received`](crate::server::Server::handle_attach_answer_received)).
+/// Example: a client that sends `Keyboard` right after the `Attached`
+/// answer reads no frame, and no key of it reaches a pane.
 ///
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
@@ -1779,6 +1796,12 @@ fn stream_events(
                 let _ = writer_intake
                     .hand_over_event(&writer_inbox_sender, RuntimeEvent::QueueRoomFreed);
             }
+            let is_frame_delivery =
+                matches!(delivery, Delivery::Frame(_) | Delivery::Snapshot { .. });
+            if is_frame_delivery && deliveries.take_frame_taken_notice() {
+                let _ = writer_intake
+                    .hand_over_event(&writer_inbox_sender, RuntimeEvent::QueuedFrameTaken);
+            }
             let write_started_at = Instant::now();
             let previous_update_sequence = painted_update_sender.get_last_update_sequence();
             let send_result = match &delivery {
@@ -1885,6 +1908,7 @@ fn stream_events(
     // is read, then `is_remote`.
     let mut is_returning = is_returning_before_first_request;
     let mut has_sent_leaving = false;
+    let mut has_attach_answer_arrived = false;
     loop {
         let incoming_request_result = frame_reader.recv::<IncomingRequest>();
         // The setting is read again after each read on this connection,
@@ -1925,6 +1949,19 @@ fn stream_events(
                 continue;
             }
         };
+        // Before `AttachAnswerReceived`, the connection carries only that
+        // request, `Ping` and `Leaving`. Any other request ends the loop.
+        if !has_attach_answer_arrived
+            && !matches!(
+                request_kind,
+                IpcRequestKind::AttachAnswerReceived
+                    | IpcRequestKind::Ping
+                    | IpcRequestKind::Leaving { .. }
+            )
+        {
+            tracing::debug!(%client_id, "a request before the attach answer arrived");
+            break;
+        }
         let runtime_event = match request_kind {
             IpcRequestKind::CellSize { cell_size } => RuntimeEvent::CellSize {
                 client_id,
@@ -2025,6 +2062,7 @@ fn stream_events(
             },
             IpcRequestKind::Ping => continue,
             IpcRequestKind::AttachAnswerReceived => {
+                has_attach_answer_arrived = true;
                 RuntimeEvent::ClientAttachAnswerReceived { client_id }
             }
             IpcRequestKind::PaintedUpdate { update_sequence } => {

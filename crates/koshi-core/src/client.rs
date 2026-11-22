@@ -36,39 +36,49 @@ pub const MAX_CLIENT_LABEL_CELL_COUNT: usize = 32;
 
 /// `raw_label` as a client label:
 ///
-/// 1. Each run of whitespace ([`char::is_whitespace`]: space, tab, newline,
-///    `U+0085`, `U+2028` and the rest) becomes one space.
-/// 2. Every character [`sanitize_reported_text`](crate::text::sanitize_reported_text)
+/// 1. Every character [`sanitize_reported_text`](crate::text::sanitize_reported_text)
 ///    removes is removed: control, bidi-control, noncharacter, interlinear
 ///    annotation and tag characters.
-/// 3. Leading and trailing spaces are removed.
-/// 4. The label is cut, on a whole character, to at most
+/// 2. Each run of whitespace ([`char::is_whitespace`]: space, tab, newline,
+///    `U+0085`, `U+2028` and the rest) between two shown characters becomes
+///    one space. A shown character is a character without the Unicode
+///    `Default_Ignorable_Code_Point` property: the zero width space `U+200B`
+///    and the variation selector `U+FE0F` are not shown characters.
+///    Whitespace before the first shown character or after the last shown
+///    character is removed.
+/// 3. The label is cut, on a whole character, to at most
 ///    [`MAX_CLIENT_LABEL_CELL_COUNT`] cells, measured with
 ///    [`compute_text_display_width`], and at most
 ///    [`MAX_REPORTED_TEXT_BYTE_COUNT`] bytes. A space the cut leaves at the
 ///    end is removed.
 ///
-/// The result is empty when nothing is left.
+/// The result is empty when it holds no shown character.
 ///
 /// - `"Bob\tSmith\n"` → `"Bob Smith"`
 /// - `"\u{1b}[31mbob"` → `"[31mbob"`
 /// - `"ali\u{202E}nimda"` → `"alinimda"`
 /// - `"a \u{202E} b"` → `"a b"`
+/// - `"a \u{200B}"` → `"a\u{200B}"`
 /// - 40 `a` → 32 `a`; 20 `日` → 16 `日`; 31 `a` then `日` → 31 `a`
-/// - `"   "` → `""`
+/// - `"   "` → `""`; `"\u{200B}\u{FEFF}"` → `""`
 #[must_use]
 pub fn sanitize_client_label(raw_label: &str) -> String {
     let mut folded_label = String::new();
+    let mut has_shown_character = false;
     let mut is_space_pending = false;
     for character in raw_label.chars() {
         if folded_label.len() > MAX_REPORTED_TEXT_BYTE_COUNT {
             break;
         }
         if character.is_whitespace() {
-            is_space_pending = !folded_label.is_empty();
+            is_space_pending = has_shown_character;
             continue;
         }
         if is_refused_character(character) {
+            continue;
+        }
+        if is_default_ignorable_character(character) {
+            folded_label.push(character);
             continue;
         }
         if is_space_pending {
@@ -76,13 +86,51 @@ pub fn sanitize_client_label(raw_label: &str) -> String {
             is_space_pending = false;
         }
         folded_label.push(character);
+        has_shown_character = true;
     }
-    cut_client_label(
+    let cut_label = cut_client_label(
         &folded_label,
         MAX_CLIENT_LABEL_CELL_COUNT,
         MAX_REPORTED_TEXT_BYTE_COUNT,
+    );
+    if cut_label.chars().all(is_default_ignorable_character) {
+        return String::new();
+    }
+    cut_label.to_owned()
+}
+
+/// Whether `character` is default ignorable: it has the Unicode
+/// `Default_Ignorable_Code_Point` property (Unicode 16.0
+/// `DerivedCoreProperties.txt`), and shows no glyph of its own. Examples: the
+/// zero width space `U+200B`, the zero width joiner `U+200D`, the word joiner
+/// `U+2060`, the zero width no-break space `U+FEFF`, the Hangul filler
+/// `U+3164`, and the variation selectors `U+FE00`–`U+FE0F`.
+fn is_default_ignorable_character(character: char) -> bool {
+    matches!(character,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}'..='\u{1160}'
+        | '\u{17B4}'..='\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}'
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}'
     )
-    .to_owned()
+}
+
+/// Whether `first_label` and `second_label` show the same text: they are
+/// equal once every default-ignorable character
+/// (Unicode `Default_Ignorable_Code_Point`, such as `U+200B`) is removed
+/// from both.
+///
+/// - `"host"` and `"host\u{200B}"` → `true`
+/// - `"bob"` and `"bob-2"` → `false`
+#[must_use]
+pub fn is_same_shown_label(first_label: &str, second_label: &str) -> bool {
+    let is_shown_character = |character: &char| !is_default_ignorable_character(*character);
+    first_label
+        .chars()
+        .filter(is_shown_character)
+        .eq(second_label.chars().filter(is_shown_character))
 }
 
 /// The longest start of `label` that takes at most `max_cell_count` cells,
@@ -106,7 +154,8 @@ fn cut_client_label(label: &str, max_cell_count: usize, max_byte_count: usize) -
 
 /// The label a client takes when it is registered, given `client_origin`, the
 /// grant identity its connection carried, and `is_label_held`, which reports a
-/// label another client of the session already holds.
+/// label that shows the same text as a label another client of the session
+/// already holds ([`is_same_shown_label`]).
 ///
 /// The base label is:
 ///

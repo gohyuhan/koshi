@@ -93,8 +93,10 @@ impl Server {
     /// Nothing is written when `pasted_text` is empty, when the client's lock mode
     /// does not pass input to the pane
     /// (`LockMode::should_pass_unbound_input_to_pane`), or when
-    /// `Server::find_typed_pane` names no pane. A write clears the client's
-    /// highlight in that pane and returns the client's view to live output.
+    /// `Server::find_typed_pane` names no pane. A write marks the pane for the
+    /// other clients' frames (`Server::record_client_input_in_pane`), clears
+    /// the client's highlight in that pane and returns the client's view to
+    /// live output.
     pub fn handle_host_paste(&mut self, client_id: ClientId, pasted_text: &str) {
         if pasted_text.is_empty() {
             return;
@@ -128,6 +130,7 @@ impl Server {
             .write_pane_input(pane_id, &paste_output_bytes)
             .is_ok()
         {
+            self.record_client_input_in_pane(client_id, pane_id);
             self.handle_input_reached_pane(client_id, pane_id);
         }
     }
@@ -218,8 +221,10 @@ impl Server {
     /// any. A pane with no terminal engine encodes with no keyboard flags and
     /// application cursor keys off. A write the backend refuses, such as one
     /// past the pane's queued input limit, writes none of the keys and leaves
-    /// the client's view as it is. A write clears the client's highlight in
-    /// that pane and returns the client's view to live output.
+    /// the client's view as it is. A write marks the pane for the other
+    /// clients' frames (`Server::record_client_input_in_pane`), clears the
+    /// client's highlight in that pane and returns the client's view to live
+    /// output.
     pub fn handle_key_inputs(&mut self, client_id: ClientId, key_inputs: &[KeyInput]) {
         let Some(pane_id) = self.find_typed_pane(client_id) else {
             return;
@@ -251,6 +256,7 @@ impl Server {
             .write_pane_input(pane_id, &encoded_key_input_bytes)
             .is_ok()
         {
+            self.record_client_input_in_pane(client_id, pane_id);
             self.handle_input_reached_pane(client_id, pane_id);
         }
     }

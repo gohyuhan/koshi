@@ -17,11 +17,11 @@ use koshi_core::action::ActionReference;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     ClosePaneArgs, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
-    LockModeArgs, MoveFloatingPaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
+    LockModeArgs, MoveFloatingPaneArgs, ScrollPaneArgs, ToggleLockModeArgs, WriteToPaneArgs,
 };
-use koshi_core::event::RejectReason;
+use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_core::geometry::{Direction, Point, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
@@ -34,12 +34,14 @@ use koshi_terminal::engine::TerminalEngine;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
+use crate::runtime::bus::tests::{build_test_placement_delivery, build_test_placement_event};
 use crate::runtime::command::tests::{
     attach_client_through_server, attach_second_client, build_floating_new_pane_args,
     create_floating_pane, create_session_with_attached_client,
 };
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::event::{AttachAccepted, RuntimeEvent};
+use crate::runtime::peer_input::PEER_INPUT_MARK_DURATION;
 use crate::runtime::render_schedule::tests::{
     mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
 };
@@ -480,6 +482,7 @@ fn a_new_subscriber_gets_its_first_frame_at_once_and_one_push_sends_it() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let current_time = Instant::now();
 
     assert_eq!(
@@ -491,6 +494,29 @@ fn a_new_subscriber_gets_its_first_frame_at_once_and_one_push_sends_it() {
     assert_eq!(server.compute_next_render_wakeup(current_time), None);
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 0);
+}
+
+/// A client that has not said it read its attach answer takes no frame, and
+/// the loop sets no wakeup for it. Its receipt makes its first frame due at
+/// once, and one push sends it.
+#[test]
+fn a_subscriber_takes_its_first_frame_only_after_its_client_read_the_attach_answer() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    let current_time = Instant::now();
+
+    assert_eq!(server.compute_next_render_wakeup(current_time), None);
+    server.push_due_frames(current_time);
+    assert_eq!(delivery_receiver.try_iter().count(), 0);
+
+    server.handle_attach_answer_received(client_id);
+    assert_eq!(
+        server.compute_next_render_wakeup(current_time),
+        Some(Duration::ZERO)
+    );
+    server.push_due_frames(current_time);
+    assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
 }
 
 #[test]
@@ -520,6 +546,7 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
         .try_recv()
         .expect("the attach is answered")
         .expect("a session is running");
+    server.handle_attach_answer_received(attach_accepted.client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&attach_accepted.deliveries).len(), 1);
@@ -548,7 +575,11 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
     let client_ids = [first_client_id, second_client_id, third_client_id];
     let delivery_receivers: Vec<DeliveryReceiver> = client_ids
         .iter()
-        .map(|&client_id| server.subscribe(client_id, 60, None).0)
+        .map(|&client_id| {
+            let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+            server.handle_attach_answer_received(client_id);
+            delivery_receiver
+        })
         .collect();
     let mut last_frames: Vec<Option<RenderSnapshot>> = vec![None; client_ids.len()];
     let mut random_state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -635,7 +666,9 @@ fn a_command_that_fails_validation_marks_no_view_and_a_lock_toggle_marks_the_vie
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
+    server.handle_attach_answer_received(other_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     let rejected_command_id = CommandId::new();
@@ -737,6 +770,7 @@ fn a_change_right_after_a_frame_waits_out_the_frame_interval() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
@@ -771,7 +805,9 @@ fn list_frame_waits_after_input_event(
     let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let (_other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
+    server.handle_attach_answer_received(other_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 
@@ -880,6 +916,7 @@ fn the_exit_of_a_tiled_pane_and_of_a_floating_pane_each_mark_every_view() {
         build_floating_new_pane_args(None, None, false),
     );
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let first_exit_time = Instant::now();
     server.push_due_frames(first_exit_time);
 
@@ -979,6 +1016,7 @@ fn an_animated_pane_marks_the_view_that_shows_it_only_when_its_frame_changes() {
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let start_time = Instant::now();
     server.push_due_frames(start_time);
 
@@ -1001,6 +1039,7 @@ fn an_animation_that_starts_after_an_idle_stretch_shows_its_first_frame_for_its_
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let idle_time = Instant::now();
     server.push_due_frames(idle_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
@@ -1046,6 +1085,7 @@ fn an_overdue_animation_frame_wakes_the_loop_at_the_first_grid_time_after_now() 
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let start_time = Instant::now();
     // The pass sends the first frame and starts the animation clock: the red
     // frame ends at `start_time + 100 ms`.
@@ -1083,6 +1123,7 @@ fn a_detached_session_sets_no_wakeup_for_its_animation_and_an_attach_sees_the_fr
     // 10150 ms is 25 loops of 400 ms and 150 ms into the next one: blue.
     let attach_time = start_time + Duration::from_millis(10_150);
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     server.push_due_frames(attach_time);
 
     assert_eq!(get_shown_rgba_bytes(&server, pane_id), BLUE_RGBA_BYTES);
@@ -1137,6 +1178,7 @@ fn a_three_loop_animation_that_ends_while_hidden_shows_its_last_frame_when_its_t
     );
     server.insert_terminal_engine(pane_id, terminal_engine);
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     open_new_tab_for_client(&mut server, client_id);
     assert!(!server.is_pane_shown_to_client(client_id, pane_id));
     let start_time = Instant::now();
@@ -1165,6 +1207,7 @@ fn a_client_that_switches_to_the_tab_of_a_running_animation_gets_its_frames_from
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     open_new_tab_for_client(&mut server, client_id);
     let start_time = Instant::now();
     server.push_due_frames(start_time);
@@ -1202,6 +1245,7 @@ fn a_two_frame_animation_of_one_ms_frames_wakes_a_session_at_60_frames_a_second_
         build_two_frame_animated_terminal_engine_with_gaps(1, 1),
     );
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let start_time = Instant::now();
     let end_time = start_time + Duration::from_secs(1);
 
@@ -1590,7 +1634,9 @@ fn a_refused_key_binding_command_goes_back_to_the_pressing_client_alone_with_its
     let (client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let other_client_id = attach_second_client(&mut server, client_id, Some(pane_id));
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let (other_delivery_receiver, _) = server.subscribe(other_client_id, 60, None);
+    server.handle_attach_answer_received(other_client_id);
     let command_id = CommandId::new();
 
     let control_flow = server.handle_runtime_event(build_fired_command_event(
@@ -1631,6 +1677,7 @@ fn a_key_that_finds_no_pane_in_its_direction_or_no_floating_pane_goes_back_as_no
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     for (focus_target, fired_action) in [
         (FocusTarget::Direction(Direction::Left), "focus-pane-left"),
@@ -1663,6 +1710,7 @@ fn a_refused_command_from_the_command_line_goes_back_to_no_client() {
     let session_id = SessionId::new();
     let (client_id, pane_id) = bootstrap_test_session(&mut server, session_id);
     let (delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -1737,7 +1785,9 @@ fn a_key_typed_before_another_client_closed_its_pane_is_dropped_and_a_key_typed_
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -1805,6 +1855,7 @@ fn a_key_typed_before_the_clients_own_focus_move_reaches_the_pane_it_moved_to() 
     let (mut server, fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let _ = server.handle_runtime_event(build_command_event(
         CommandSource::from_key_binding(client_id),
         Command::NewPane(build_new_pane_args()),
@@ -1847,6 +1898,7 @@ fn a_key_typed_before_a_command_line_moved_the_clients_focus_is_dropped() {
     let (client_id, left_pane_id) = bootstrap_test_session(&mut server, session_id);
     let right_pane_id = split_focused_pane(&mut server, client_id);
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     let _ = server.handle_runtime_event(build_command_event(
         CommandSource::from_external_cli(Some(session_id), Some(client_id)),
@@ -1889,6 +1941,7 @@ fn a_key_and_a_paste_typed_before_their_pane_exited_are_dropped() {
     let (client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let right_pane_id = split_focused_pane(&mut server, client_id);
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     fake_pty_backend
         .trigger_child_exit(right_pane_id, koshi_core::process::ExitStatus::ExitCode(0))
@@ -1932,6 +1985,7 @@ fn a_key_typed_before_its_floating_pane_exited_is_dropped() {
         build_floating_new_pane_args(None, None, false),
     );
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     fake_pty_backend
         .trigger_child_exit(
@@ -1968,7 +2022,9 @@ fn a_key_typed_before_another_client_changed_the_view_reaches_a_pane_that_did_no
     let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(left_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
 
     let _ = server.handle_runtime_event(build_command_event(
         CommandSource::from_key_binding(alice_client_id),
@@ -2003,7 +2059,9 @@ fn a_key_binding_fired_before_another_client_moved_its_pane_is_refused_to_that_c
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2070,7 +2128,9 @@ fn a_directional_focus_key_fired_before_another_client_moved_its_pane_is_refused
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2122,7 +2182,9 @@ fn build_session_where_another_client_closed_bobs_pane(
     let right_pane_id = split_focused_pane(server, alice_client_id);
     let bob_client_id = attach_second_client(server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2247,8 +2309,11 @@ fn a_client_viewed_by_two_subscribers_counts_one_move_when_another_client_closes
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_first_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let (_second_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
 
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
@@ -2440,7 +2505,9 @@ fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_at_the_name
     let right_pane_id = split_focused_pane(&mut server, alice_client_id);
     let bob_client_id = attach_second_client(&mut server, alice_client_id, Some(right_pane_id));
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     let _ = server.handle_runtime_event(build_fired_command_event(
         CommandId::new(),
         CommandSource::from_key_binding(alice_client_id),
@@ -2471,6 +2538,7 @@ fn a_new_connection_of_a_kept_client_record_starts_both_input_counts_at_the_name
             dropped_input_request_count: 0,
         }),
     );
+    server.handle_attach_answer_received(bob_client_id);
 
     let next_connection_snapshot = get_client_snapshot(&server, bob_client_id);
     assert_eq!(
@@ -2511,7 +2579,8 @@ fn build_viewer_local_input_mode_event(
 /// One session that two subscribed clients share. Alice, with color index
 /// `0`, types in the left pane. Bob, with color index `1`, types in the right
 /// pane, which he split off the left pane with his own keybinding. The left
-/// pane holds 30 lines of output, so a view of it can scroll up.
+/// pane holds 30 lines of output, so a view of it can scroll up. Alice's
+/// delivery receiver comes first in `delivery_receivers`, then Bob's.
 struct TwoClientSession {
     server: Server,
     fake_pty_backend: Arc<FakePtyBackend>,
@@ -2519,7 +2588,7 @@ struct TwoClientSession {
     bob_client_id: ClientId,
     left_pane_id: PaneId,
     right_pane_id: PaneId,
-    _delivery_receivers: [DeliveryReceiver; 2],
+    delivery_receivers: [DeliveryReceiver; 2],
 }
 
 fn build_two_client_session() -> TwoClientSession {
@@ -2530,7 +2599,9 @@ fn build_two_client_session() -> TwoClientSession {
     let right_pane_id = split_focused_pane(&mut server, bob_client_id);
     server.handle_pty_output(left_pane_id, "line\r\n".repeat(30).as_bytes());
     let (alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (bob_delivery_receiver, _) = server.subscribe(bob_client_id, 60, None);
+    server.handle_attach_answer_received(bob_client_id);
     TwoClientSession {
         server,
         fake_pty_backend,
@@ -2538,7 +2609,7 @@ fn build_two_client_session() -> TwoClientSession {
         bob_client_id,
         left_pane_id,
         right_pane_id,
-        _delivery_receivers: [alice_delivery_receiver, bob_delivery_receiver],
+        delivery_receivers: [alice_delivery_receiver, bob_delivery_receiver],
     }
 }
 
@@ -2581,8 +2652,11 @@ fn a_frame_lists_every_other_attached_client_in_color_index_order_with_the_pane_
     let dave_client_id =
         attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let (_carol_delivery_receiver, _) = server.subscribe(carol_client_id, 60, None);
+    server.handle_attach_answer_received(carol_client_id);
     let (_dave_delivery_receiver, _) = server.subscribe(dave_client_id, 60, None);
+    server.handle_attach_answer_received(dave_client_id);
 
     assert_eq!(
         list_frame_peer_snapshots(&server, alice_client_id),
@@ -2591,11 +2665,13 @@ fn a_frame_lists_every_other_attached_client_in_color_index_order_with_the_pane_
                 client_id: dave_client_id,
                 color_index: 1,
                 typed_pane_id: Some(pane_id),
+                recent_input_pane_ids: Vec::new(),
             },
             PeerSnapshot {
                 client_id: carol_client_id,
                 color_index: 2,
                 typed_pane_id: Some(pane_id),
+                recent_input_pane_ids: Vec::new(),
             },
         ]
     );
@@ -2606,11 +2682,13 @@ fn a_frame_lists_every_other_attached_client_in_color_index_order_with_the_pane_
                 client_id: alice_client_id,
                 color_index: 0,
                 typed_pane_id: Some(pane_id),
+                recent_input_pane_ids: Vec::new(),
             },
             PeerSnapshot {
                 client_id: dave_client_id,
                 color_index: 1,
                 typed_pane_id: Some(pane_id),
+                recent_input_pane_ids: Vec::new(),
             },
         ]
     );
@@ -2621,6 +2699,7 @@ fn the_frame_of_the_only_client_of_a_session_lists_no_peers() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_delivery_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
 
     assert_eq!(
         list_frame_peer_snapshots(&server, client_id),
@@ -2637,6 +2716,7 @@ fn a_client_restored_after_a_restart_and_not_claimed_again_is_not_listed_as_a_pe
     let bob_client_id =
         attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
 
     server.client_ids_awaiting_reconnect.insert(bob_client_id);
 
@@ -2671,6 +2751,7 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
             client_id: bob_client_id,
             color_index: 1,
             typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
         }]
     );
     assert_eq!(
@@ -2683,6 +2764,7 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
             client_id: alice_client_id,
             color_index: 0,
             typed_pane_id: Some(left_pane_id),
+            recent_input_pane_ids: Vec::new(),
         }]
     );
 
@@ -2694,7 +2776,792 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
             client_id: bob_client_id,
             color_index: 1,
             typed_pane_id: Some(right_pane_id),
+            recent_input_pane_ids: Vec::new(),
         }]
+    );
+}
+
+/// Send the first frames of Alice and Bob at `Instant::now()`, then turn Bob's
+/// local input mode on, and send Alice's frame that names no pane for Bob one
+/// frame interval after them. Returns the time of that frame.
+fn send_alice_a_frame_with_bob_in_a_local_input_mode(
+    two_client_session: &mut TwoClientSession,
+) -> Instant {
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = two_client_session;
+    let first_frame_time = Instant::now();
+    server.push_due_frames(first_frame_time);
+    let _ = server.handle_runtime_event(build_viewer_local_input_mode_event(*bob_client_id, true));
+    let frame_time = first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(frame_time);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver).last(),
+        Some(&vec![PeerSnapshot {
+            client_id: *bob_client_id,
+            color_index: 1,
+            typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
+        }])
+    );
+    frame_time
+}
+
+/// The peer list of each frame waiting on `delivery_receiver`, oldest frame
+/// first. Takes every delivery off the queue.
+fn list_queued_frame_peers(delivery_receiver: &DeliveryReceiver) -> Vec<Vec<PeerSnapshot>> {
+    take_queued_frames(delivery_receiver)
+        .into_iter()
+        .map(|render_snapshot| render_snapshot.session_snapshot.peers)
+        .collect()
+}
+
+/// Bob opens his floating pane tray, then types `a` in one session and pastes
+/// `ls` in another: the right pane takes each, and Bob's dropped request count
+/// stays `0`. Alice's next frame names no pane as Bob's typed pane, and the
+/// right pane as his recent input pane.
+#[test]
+fn a_key_or_a_paste_a_viewer_sends_in_a_local_input_mode_reaches_the_pane_and_shows_in_the_other_clients_next_frame(
+) {
+    for is_paste in [false, true] {
+        let mut two_client_session = build_two_client_session();
+        let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+        let TwoClientSession {
+            server,
+            fake_pty_backend,
+            bob_client_id,
+            right_pane_id,
+            delivery_receivers: [alice_delivery_receiver, _],
+            ..
+        } = &mut two_client_session;
+        let (bob_input_event, expected_pane_write_bytes) = if is_paste {
+            (
+                RuntimeEvent::ClientPaste {
+                    client_id: *bob_client_id,
+                    pasted_text: String::from("ls"),
+                    painted_input_pane_moved_by_others_count: 0,
+                },
+                b"ls".to_vec(),
+            )
+        } else {
+            (
+                build_painted_key_press_event(*bob_client_id, 'a', 0),
+                b"a".to_vec(),
+            )
+        };
+
+        let _ = server.handle_runtime_event(bob_input_event);
+        server.push_due_frames(frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+
+        assert_eq!(
+            fake_pty_backend
+                .list_pane_write_bytes(*right_pane_id)
+                .expect("writes"),
+            vec![expected_pane_write_bytes],
+            "is_paste: {is_paste}"
+        );
+        assert_eq!(
+            get_client_snapshot(server, *bob_client_id).dropped_input_request_count,
+            0,
+            "is_paste: {is_paste}"
+        );
+        assert_eq!(
+            list_queued_frame_peers(alice_delivery_receiver),
+            vec![vec![PeerSnapshot {
+                client_id: *bob_client_id,
+                color_index: 1,
+                typed_pane_id: None,
+                recent_input_pane_ids: vec![*right_pane_id],
+            }]],
+            "is_paste: {is_paste}"
+        );
+    }
+}
+
+/// Publish events until the queue of `subscriber_id` overflows and pauses it,
+/// then take every delivery off its queue, `delivery_receiver`.
+fn pause_and_drain_subscriber(
+    server: &mut Server,
+    subscriber_id: SubscriberId,
+    delivery_receiver: &DeliveryReceiver,
+) {
+    while !server
+        .event_bus
+        .list_desynced_subscriber_ids()
+        .contains(&subscriber_id)
+    {
+        let _ = server.event_bus.publish(&Event::Quit(QuitCause::Requested));
+    }
+    let _delivery_backlog: Vec<Delivery> = delivery_receiver.try_iter().collect();
+}
+
+/// Bob, with his tray open, types `a` while Alice's queue is full: Alice's
+/// resync snapshot names the right pane as Bob's recent input pane, her queue
+/// asks her writing thread to report its take, and her first frame two seconds
+/// after the pass that saw the snapshot taken names it no more.
+#[test]
+fn a_recent_input_pane_a_resync_snapshot_names_leaves_the_other_clients_frames_two_seconds_after_a_pass_saw_the_take(
+) {
+    let mut two_client_session = build_two_client_session();
+    let _ = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let alice_subscriber_id = server.subscriptions[0].subscriber_id;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let input_ended_at = Instant::now();
+    pause_and_drain_subscriber(server, alice_subscriber_id, alice_delivery_receiver);
+
+    server.resync_lagged(input_ended_at);
+    let resync_peers: Vec<Vec<PeerSnapshot>> = alice_delivery_receiver
+        .try_iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::Snapshot {
+                render_snapshot, ..
+            } => Some(render_snapshot.session_snapshot.peers),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        resync_peers,
+        vec![vec![PeerSnapshot {
+            client_id: *bob_client_id,
+            color_index: 1,
+            typed_pane_id: None,
+            recent_input_pane_ids: vec![*right_pane_id],
+        }]]
+    );
+
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let take_seen_at = Instant::now().max(input_ended_at);
+    server.push_due_frames(take_seen_at);
+    assert_eq!(
+        server.compute_next_render_wakeup(take_seen_at),
+        Some(PEER_INPUT_MARK_DURATION)
+    );
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Alice's queue is full, and her resync snapshot names the right pane as
+/// Bob's typed pane. Bob types `a` there: no frame of Alice's is due.
+#[test]
+fn a_key_in_the_pane_a_resync_snapshot_names_marks_no_frame() {
+    let mut two_client_session = build_two_client_session();
+    let TwoClientSession {
+        server,
+        alice_client_id,
+        bob_client_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let current_time = Instant::now();
+    server.push_due_frames(current_time);
+    let alice_subscriber_id = server.subscriptions[0].subscriber_id;
+    pause_and_drain_subscriber(server, alice_subscriber_id, alice_delivery_receiver);
+    server.resync_lagged(current_time);
+
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(server, *alice_client_id, current_time),
+        None
+    );
+}
+
+/// Bob, with his tray open, reports no local input mode, types `a`, and
+/// reports the mode on again, all before Alice's next frame: that frame names
+/// no pane as Bob's typed pane, and the right pane as his recent input pane.
+#[test]
+fn a_key_sent_between_two_local_input_mode_reports_shows_in_the_other_clients_next_frame() {
+    let mut two_client_session = build_two_client_session();
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+
+    let _ = server.handle_runtime_event(build_viewer_local_input_mode_event(*bob_client_id, false));
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let _ = server.handle_runtime_event(build_viewer_local_input_mode_event(*bob_client_id, true));
+    server.push_due_frames(frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![vec![PeerSnapshot {
+            client_id: *bob_client_id,
+            color_index: 1,
+            typed_pane_id: None,
+            recent_input_pane_ids: vec![*right_pane_id],
+        }]]
+    );
+}
+
+/// The peer list Alice's frames show for Bob, with his floating pane tray
+/// open and `recent_input_pane_ids` as his recent input panes.
+fn build_bob_peers_in_a_local_input_mode(
+    bob_client_id: ClientId,
+    recent_input_pane_ids: Vec<PaneId>,
+) -> Vec<PeerSnapshot> {
+    vec![PeerSnapshot {
+        client_id: bob_client_id,
+        color_index: 1,
+        typed_pane_id: None,
+        recent_input_pane_ids,
+    }]
+}
+
+/// Alice's frame names the right pane as Bob's recent input pane after his
+/// `a`, and her queue asks her writing thread to report its take. Until a
+/// pass sees that her writing thread took that frame, the mark sets no render
+/// wakeup. From the pass that sees the take, the wakeup waits
+/// two seconds, no frame goes before then, and Alice's first frame at that
+/// time names the pane no more.
+#[test]
+fn a_recent_input_pane_leaves_the_other_clients_frames_two_seconds_after_a_pass_saw_the_take() {
+    let mut two_client_session = build_two_client_session();
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(mark_frame_time);
+    assert_eq!(server.compute_next_render_wakeup(mark_frame_time), None);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            vec![*right_pane_id]
+        )]
+    );
+
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let take_seen_at = Instant::now().max(mark_frame_time);
+    server.push_due_frames(take_seen_at);
+    assert_eq!(
+        server.compute_next_render_wakeup(take_seen_at),
+        Some(PEER_INPUT_MARK_DURATION)
+    );
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION - Duration::from_nanos(1));
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        Vec::<Vec<PeerSnapshot>>::new()
+    );
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Bob, with his tray open, types `a`, and the frame that names the right
+/// pane as his recent input pane waits on Alice's queue: her writing thread
+/// takes nothing. A pass more than two seconds after the key keeps the mark,
+/// and the frame that output in the left pane puts in the waiting frame's
+/// place still names the right pane. Once a pass saw the take of that frame,
+/// Alice's first frame two seconds after that pass names the pane no more.
+#[test]
+fn a_recent_input_pane_in_a_frame_the_writing_thread_has_not_taken_stays_in_the_frame_that_replaces_it(
+) {
+    let mut two_client_session = build_two_client_session();
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    server.push_due_frames(frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+    let slow_paint_time = Instant::now() + PEER_INPUT_MARK_DURATION + Duration::from_secs(1);
+    server.handle_pty_output(*left_pane_id, b"more output\r\n");
+
+    server.push_due_frames(slow_paint_time);
+
+    assert_eq!(server.compute_next_render_wakeup(slow_paint_time), None);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            vec![*right_pane_id]
+        )]
+    );
+    let take_seen_at = slow_paint_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(take_seen_at);
+    assert_eq!(
+        server.compute_next_render_wakeup(take_seen_at),
+        Some(PEER_INPUT_MARK_DURATION)
+    );
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Bob, with his tray open, types `a`, and the frame that names the right
+/// pane as his recent input pane waits on Alice's queue. A placement event
+/// follows it, and the frame that output in the left pane puts behind that
+/// event waits too. Alice's writing thread takes only the first frame. The
+/// pass that sees that take starts the mark's two seconds while the newer
+/// frame still waits, and Alice's first frame two seconds after that pass
+/// takes the waiting frame's place and names the pane no more.
+#[test]
+fn a_recent_input_pane_leaves_two_seconds_after_the_take_of_the_first_frame_that_named_it_while_a_newer_frame_waits(
+) {
+    let mut two_client_session = build_two_client_session();
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(mark_frame_time);
+    let destination_tab_id = TabId::new();
+    let _ = server
+        .event_bus
+        .publish(&build_test_placement_event(destination_tab_id));
+    server.handle_pty_output(*left_pane_id, b"more output\r\n");
+    let newer_frame_time = mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(newer_frame_time);
+
+    let Ok(Delivery::Frame(first_render_snapshot)) = alice_delivery_receiver.try_recv() else {
+        panic!("the frame that names Bob's recent input pane is at the head of Alice's queue");
+    };
+    assert_eq!(
+        first_render_snapshot.session_snapshot.peers,
+        build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id])
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let take_seen_at = Instant::now().max(newer_frame_time);
+    server.push_due_frames(take_seen_at);
+    assert_eq!(
+        server.compute_next_render_wakeup(take_seen_at),
+        Some(PEER_INPUT_MARK_DURATION)
+    );
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+
+    assert_eq!(
+        alice_delivery_receiver.try_recv(),
+        Ok(build_test_placement_delivery(destination_tab_id))
+    );
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Bob, with his tray open, types `a` in the right pane, and the frame that
+/// names the right pane goes on Alice's queue. A placement event follows it.
+/// Bob then clicks in the left pane, whose program asks for mouse reports,
+/// and the frame after the event names both panes. Alice's writing thread
+/// takes every delivery before the next pass. That one pass counts both marks
+/// as taken, and Alice's first frame two seconds after it names no pane.
+#[test]
+fn one_pass_counts_the_recent_input_marks_of_every_frame_the_writing_thread_took() {
+    let mut two_client_session = build_two_client_session();
+    let left_pane_id = two_client_session.left_pane_id;
+    two_client_session
+        .server
+        .handle_pty_output(left_pane_id, b"\x1b[?1000h");
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let right_mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(right_mark_frame_time);
+    let _ = server
+        .event_bus
+        .publish(&build_test_placement_event(TabId::new()));
+    server.forward_mouse_to_pane(
+        *bob_client_id,
+        left_pane_id,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        Point { column: 0, row: 0 },
+    );
+    let left_mark_frame_time = right_mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(left_mark_frame_time);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![
+            build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id]),
+            build_bob_peers_in_a_local_input_mode(
+                *bob_client_id,
+                vec![*right_pane_id, left_pane_id]
+            ),
+        ]
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+
+    let take_seen_at = Instant::now().max(left_mark_frame_time);
+    server.push_due_frames(take_seen_at);
+    server.push_due_frames(take_seen_at + PEER_INPUT_MARK_DURATION);
+
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// Bob, with his tray open, types `a` in the right pane, and frame 1 names
+/// the right pane on Alice's queue. A placement event follows it. Bob then
+/// clicks in the left pane, whose program asks for mouse reports, and the
+/// next frame names both panes. Alice's writing thread takes the first frame
+/// only. The pass that sees that take counts the right pane's mark, and asks
+/// to hear of the take of the newer frame: the writing thread's check after
+/// it takes that frame answers yes, and Alice's first frame two seconds after
+/// the pass that sees the second take names no pane.
+#[test]
+fn a_pass_that_counts_a_taken_frame_asks_to_hear_of_the_take_of_the_next_waiting_frame() {
+    let mut two_client_session = build_two_client_session();
+    let left_pane_id = two_client_session.left_pane_id;
+    two_client_session
+        .server
+        .handle_pty_output(left_pane_id, b"\x1b[?1000h");
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let right_mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(right_mark_frame_time);
+    let destination_tab_id = TabId::new();
+    let _ = server
+        .event_bus
+        .publish(&build_test_placement_event(destination_tab_id));
+    server.forward_mouse_to_pane(
+        *bob_client_id,
+        left_pane_id,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        Point { column: 0, row: 0 },
+    );
+    let left_mark_frame_time = right_mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(left_mark_frame_time);
+
+    let Ok(Delivery::Frame(first_render_snapshot)) = alice_delivery_receiver.try_recv() else {
+        panic!("the frame that names the right pane is at the head of Alice's queue");
+    };
+    assert_eq!(
+        first_render_snapshot.session_snapshot.peers,
+        build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id])
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let first_take_seen_at = Instant::now().max(left_mark_frame_time);
+    server.push_due_frames(first_take_seen_at);
+
+    assert_eq!(
+        alice_delivery_receiver.try_recv(),
+        Ok(build_test_placement_delivery(destination_tab_id))
+    );
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            vec![*right_pane_id, left_pane_id]
+        )]
+    );
+    assert!(alice_delivery_receiver.take_frame_taken_notice());
+    let second_take_seen_at = Instant::now().max(first_take_seen_at);
+    server.push_due_frames(second_take_seen_at);
+    server.push_due_frames(second_take_seen_at + PEER_INPUT_MARK_DURATION);
+
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+}
+
+/// A pass sees the take of the frame that names Bob's recent input pane, and
+/// the loop computes its next wait only after that mark's end: the wait is
+/// zero, and the pass it starts sends Alice the frame without the pane. No
+/// wait is left after that pass.
+#[test]
+fn a_recent_input_pane_whose_end_passed_before_the_next_wait_wakes_the_loop_at_once() {
+    let mut two_client_session = build_two_client_session();
+    let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
+    let TwoClientSession {
+        server,
+        bob_client_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = &mut two_client_session;
+    let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
+    let mark_frame_time = frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    server.push_due_frames(mark_frame_time);
+    let _ = list_queued_frame_peers(alice_delivery_receiver);
+    let take_seen_at = Instant::now().max(mark_frame_time);
+    server.push_due_frames(take_seen_at);
+    let late_wait_time = take_seen_at + PEER_INPUT_MARK_DURATION + Duration::from_millis(5);
+
+    assert_eq!(
+        server.compute_next_render_wakeup(late_wait_time),
+        Some(Duration::ZERO)
+    );
+    server.push_due_frames(late_wait_time);
+    assert_eq!(
+        list_queued_frame_peers(alice_delivery_receiver),
+        vec![build_bob_peers_in_a_local_input_mode(
+            *bob_client_id,
+            Vec::new()
+        )]
+    );
+    assert_eq!(server.compute_next_render_wakeup(late_wait_time), None);
+}
+
+/// Alice's connection has not said that it read the attach answer, so her
+/// subscription takes no frame. Bob's `a` in the right pane marks it for her,
+/// and closing the right pane removes that mark at the next pass. His `b` in
+/// the left pane marks it, and his detach removes that mark at the next pass.
+#[test]
+fn a_closed_pane_and_a_departed_client_remove_their_marks_from_a_subscriber_that_takes_no_frame() {
+    let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
+    let (alice_client_id, left_pane_id) = bootstrap_test_session(&mut server, SessionId::new());
+    let bob_client_id =
+        attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
+    let right_pane_id = split_focused_pane(&mut server, bob_client_id);
+    let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'a', 0));
+    assert_eq!(
+        server.subscriptions[0]
+            .peer_input_view
+            .list_mark_pane_ids(bob_client_id, None),
+        vec![right_pane_id]
+    );
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(bob_client_id),
+        Command::ClosePane(ClosePaneArgs {
+            pane_id: Some(right_pane_id),
+            should_force_close: false,
+            should_kill_process_tree: false,
+        }),
+        "close-pane",
+    ));
+    server.push_due_frames(Instant::now());
+    assert!(!server.subscriptions[0].peer_input_view.has_marks());
+
+    let _ = server.handle_runtime_event(build_painted_key_press_event(bob_client_id, 'b', 0));
+    assert_eq!(
+        server.subscriptions[0]
+            .peer_input_view
+            .list_mark_pane_ids(bob_client_id, None),
+        vec![left_pane_id]
+    );
+    let _ = server.handle_client_detach(bob_client_id);
+    server.push_due_frames(Instant::now());
+    assert!(!server.subscriptions[0].peer_input_view.has_marks());
+}
+
+/// Bob types `a` in the right pane, which Alice's last frame names as his
+/// typed pane: no frame of Alice's is due, and Bob's own view did not change.
+#[test]
+fn a_key_in_the_pane_the_other_clients_last_frame_names_marks_no_frame() {
+    let frame_waits = list_frame_waits_after_action(|two_client_session| {
+        let bob_client_id = two_client_session.bob_client_id;
+        let _ = two_client_session
+            .server
+            .handle_runtime_event(build_painted_key_press_event(bob_client_id, 'a', 0));
+    });
+
+    assert_eq!(frame_waits, (None, None));
+}
+
+/// Bob, typing in the right pane, fires a binding that writes `ls` to the
+/// left pane: the left pane takes it, and Alice's next frame names the right
+/// pane as Bob's typed pane and the left pane as his recent input pane.
+#[test]
+fn a_write_to_pane_binding_into_another_pane_shows_in_the_other_clients_next_frame() {
+    let TwoClientSession {
+        mut server,
+        fake_pty_backend,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = build_two_client_session();
+    let first_frame_time = Instant::now();
+    server.push_due_frames(first_frame_time);
+    let _ = take_queued_frames(&alice_delivery_receiver);
+
+    let _ = server.handle_runtime_event(build_fired_command_event(
+        CommandId::new(),
+        CommandSource::from_key_binding(bob_client_id),
+        Command::WriteToPane(WriteToPaneArgs {
+            pane_id: Some(left_pane_id),
+            pane_input_bytes: b"ls".to_vec(),
+        }),
+        "write-to-pane",
+    ));
+    server.push_due_frames(first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_write_bytes(left_pane_id)
+            .expect("writes"),
+        vec![b"ls".to_vec()]
+    );
+    assert_eq!(
+        list_queued_frame_peers(&alice_delivery_receiver),
+        vec![vec![PeerSnapshot {
+            client_id: bob_client_id,
+            color_index: 1,
+            typed_pane_id: Some(right_pane_id),
+            recent_input_pane_ids: vec![left_pane_id],
+        }]]
+    );
+}
+
+/// A CLI command outside every pane writes `ls` to the left pane: no client
+/// sent it, and no frame of Alice's or Bob's is due.
+#[test]
+fn a_write_to_pane_from_the_cli_marks_no_frame() {
+    let frame_waits = list_frame_waits_after_action(|two_client_session| {
+        let session_id = two_client_session
+            .server
+            .get_session_for_client(two_client_session.alice_client_id)
+            .expect("alice is attached")
+            .session_id;
+        let left_pane_id = two_client_session.left_pane_id;
+        let _ = two_client_session
+            .server
+            .handle_runtime_event(build_command_event(
+                CommandSource::ExternalCli {
+                    session_id: Some(session_id),
+                    target_client_id: None,
+                },
+                Command::WriteToPane(WriteToPaneArgs {
+                    pane_id: Some(left_pane_id),
+                    pane_input_bytes: b"ls".to_vec(),
+                }),
+            ));
+    });
+
+    assert_eq!(frame_waits, (None, None));
+}
+
+/// The program in the left pane asks for mouse reports, and Bob, typing in
+/// the right pane, clicks in the left pane: Alice's next frame names the left
+/// pane as Bob's recent input pane.
+#[test]
+fn a_mouse_report_into_another_pane_shows_in_the_other_clients_next_frame() {
+    let TwoClientSession {
+        mut server,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = build_two_client_session();
+    server.handle_pty_output(left_pane_id, b"\x1b[?1000h");
+    let first_frame_time = Instant::now();
+    server.push_due_frames(first_frame_time);
+    let _ = take_queued_frames(&alice_delivery_receiver);
+
+    server.forward_mouse_to_pane(
+        bob_client_id,
+        left_pane_id,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
+        Point { column: 0, row: 0 },
+    );
+    server.push_due_frames(first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+
+    assert_eq!(
+        list_queued_frame_peers(&alice_delivery_receiver),
+        vec![vec![PeerSnapshot {
+            client_id: bob_client_id,
+            color_index: 1,
+            typed_pane_id: Some(right_pane_id),
+            recent_input_pane_ids: vec![left_pane_id],
+        }]]
+    );
+}
+
+/// The program in the left pane is on the alternate screen with alternate
+/// scroll on, and Bob's wheel tick over it writes one up-arrow: Alice's next
+/// frame names the left pane as Bob's recent input pane.
+#[test]
+fn alternate_scroll_arrows_into_another_pane_show_in_the_other_clients_next_frame() {
+    let TwoClientSession {
+        mut server,
+        bob_client_id,
+        left_pane_id,
+        right_pane_id,
+        delivery_receivers: [alice_delivery_receiver, _],
+        ..
+    } = build_two_client_session();
+    server.handle_pty_output(left_pane_id, b"\x1b[?1049h\x1b[?1007h");
+    let first_frame_time = Instant::now();
+    server.push_due_frames(first_frame_time);
+    let _ = take_queued_frames(&alice_delivery_receiver);
+
+    server.write_alternate_scroll_arrows(bob_client_id, left_pane_id, true, 1);
+    server.push_due_frames(first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+
+    assert_eq!(
+        list_queued_frame_peers(&alice_delivery_receiver),
+        vec![vec![PeerSnapshot {
+            client_id: bob_client_id,
+            color_index: 1,
+            typed_pane_id: Some(right_pane_id),
+            recent_input_pane_ids: vec![left_pane_id],
+        }]]
     );
 }
 
@@ -2741,6 +3608,7 @@ fn a_pane_move_by_another_client_during_a_viewer_local_input_mode_still_drops_a_
             client_id: bob_client_id,
             color_index: 1,
             typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
         }]
     );
 
@@ -2753,6 +3621,7 @@ fn a_pane_move_by_another_client_during_a_viewer_local_input_mode_still_drops_a_
             client_id: bob_client_id,
             color_index: 1,
             typed_pane_id: Some(left_pane_id),
+            recent_input_pane_ids: Vec::new(),
         }]
     );
     assert_eq!(
@@ -2862,6 +3731,7 @@ fn an_attach_from_a_viewer_in_a_local_input_mode_is_listed_as_typing_in_no_pane(
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (alice_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
 
     let attach_accepted = server
         .handle_ipc_attach(
@@ -2886,6 +3756,7 @@ fn an_attach_from_a_viewer_in_a_local_input_mode_is_listed_as_typing_in_no_pane(
             client_id: attach_accepted.client_id,
             color_index: 1,
             typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
         }]
     );
     assert_eq!(
@@ -2901,6 +3772,7 @@ fn a_client_attaching_marks_the_frame_of_every_other_client() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (alice_client_id, _pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 
@@ -2953,6 +3825,7 @@ fn dropping_a_restored_record_no_viewer_claimed_marks_no_frame() {
         attach_client_through_server(&mut server, alice_client_id, TEST_VIEWPORT_SIZE, None);
     server.client_ids_awaiting_reconnect.insert(bob_client_id);
     let (_alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
+    server.handle_attach_answer_received(alice_client_id);
     let current_time = Instant::now();
     server.push_due_frames(current_time);
 

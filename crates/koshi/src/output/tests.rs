@@ -19,7 +19,7 @@ use koshi_core::geometry::{
     AxisPercent, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea, Point,
     Rect, Size, SplitDirection,
 };
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, FloatingPaneId, LayoutAreaId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::recent_event::{self, RecentEvent};
@@ -38,6 +38,7 @@ use super::*;
 use crate::cli::OutputFormat;
 use crate::keymap::tests::build_partial_keybindings_config_with_binding;
 use crate::keymap::{build_keymap_view_from_partial, KeymapValidationOutcome, KeymapView};
+use koshi_link::discovery::PaneRowLayoutArea;
 use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
 /// The fixed UUID every fake id of the output tests uses:
@@ -75,7 +76,7 @@ fn build_test_tab_discovery() -> TabDiscovery {
 fn build_test_pane_discovery() -> PaneDiscovery {
     PaneDiscovery {
         pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-        tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+        layout_area_id: LayoutAreaId::Tab(TabId::from_uuid(build_fixed_test_uuid())),
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         pane_title: Some("htop".to_string()),
         working_directory: Some(PathBuf::from("/home/user")),
@@ -107,11 +108,22 @@ fn build_test_pane_row() -> PaneRow {
     PaneRow {
         pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
         pane_name: Some("htop".to_string()),
-        tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-        tab_name: Some("amber-fox".to_string()),
+        layout_area: PaneRowLayoutArea::Tab {
+            tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            tab_name: "amber-fox".to_string(),
+        },
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         session_name: "quiet-lake".to_string(),
     }
+}
+
+/// The floating pane `floating-pane-00000000-0000-0000-0000-0000000000NN`, where
+/// `NN` is `suffix_number` in two decimal digits.
+fn build_test_floating_pane_id(suffix_number: u8) -> FloatingPaneId {
+    serde_json::from_value(serde_json::json!(build_test_uuid_with_suffix(
+        suffix_number
+    )))
+    .expect("a bare uuid deserializes")
 }
 
 fn build_test_client_row() -> ClientRow {
@@ -243,6 +255,7 @@ fn pane_list_json_carries_the_whole_id_chain() {
     "pane_name": "htop",
     "tab_id": "tab-00000000-0000-0000-0000-000000000001",
     "tab_name": "amber-fox",
+    "floating_pane_id": null,
     "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
@@ -268,6 +281,7 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
     "pane_name": null,
     "tab_id": "tab-00000000-0000-0000-0000-000000000001",
     "tab_name": "amber-fox",
+    "floating_pane_id": null,
     "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
@@ -316,6 +330,7 @@ fn pane_json_schema_is_stable() {
     let expected_text = r#"{
   "pane_id": "pane-00000000-0000-0000-0000-000000000001",
   "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+  "floating_pane_id": null,
   "session_id": "session-00000000-0000-0000-0000-000000000001",
   "pane_title": "htop",
   "working_directory": "/home/user",
@@ -342,6 +357,7 @@ fn a_non_utf8_working_directory_renders_lossily_in_json() {
     let expected_text = r#"{
   "pane_id": "pane-00000000-0000-0000-0000-000000000001",
   "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+  "floating_pane_id": null,
   "session_id": "session-00000000-0000-0000-0000-000000000001",
   "pane_title": "htop",
   "working_directory": "/tmp/f�oo",
@@ -566,8 +582,8 @@ tab-00000000-0000-0000-0000-000000000001  amber-fox  session-00000000-0000-0000-
 #[test]
 fn pane_table_names_the_owning_tab_and_session() {
     let expected_text = "\
-id                                         name  tab                                       tab_name   session                                       session_name
-pane-00000000-0000-0000-0000-000000000001  htop  tab-00000000-0000-0000-0000-000000000001  amber-fox  session-00000000-0000-0000-0000-000000000001  quiet-lake
+id                                         name  tab                                       tab_name   floating_pane  session                                       session_name
+pane-00000000-0000-0000-0000-000000000001  htop  tab-00000000-0000-0000-0000-000000000001  amber-fox  -              session-00000000-0000-0000-0000-000000000001  quiet-lake
 ";
     assert_eq!(
         render_panes(&[build_test_pane_row()], OutputFormat::Table),
@@ -591,6 +607,7 @@ fn an_untitled_pane_lists_a_dash_for_its_name() {
             "-",
             "tab-00000000-0000-0000-0000-000000000001",
             "amber-fox",
+            "-",
             "session-00000000-0000-0000-0000-000000000001",
             "quiet-lake",
         ]
@@ -598,10 +615,11 @@ fn an_untitled_pane_lists_a_dash_for_its_name() {
 }
 
 #[test]
-fn a_floating_pane_lists_a_null_tab_in_json() {
+fn a_floating_pane_lists_its_floating_pane_id_and_a_null_tab_in_json() {
     let floating_pane_row = PaneRow {
-        tab_id: None,
-        tab_name: None,
+        layout_area: PaneRowLayoutArea::FloatingPane {
+            floating_pane_id: build_test_floating_pane_id(11),
+        },
         ..build_test_pane_row()
     };
     assert_eq!(
@@ -612,6 +630,7 @@ fn a_floating_pane_lists_a_null_tab_in_json() {
     "pane_name": "htop",
     "tab_id": null,
     "tab_name": null,
+    "floating_pane_id": "floating-pane-00000000-0000-0000-0000-000000000011",
     "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
@@ -621,34 +640,43 @@ fn a_floating_pane_lists_a_null_tab_in_json() {
 }
 
 #[test]
-fn a_floating_pane_lists_float_and_a_dash_for_its_tab() {
-    let floating_pane_row = PaneRow {
-        tab_id: None,
-        tab_name: None,
+fn panes_of_one_floating_pane_list_the_same_floating_pane_id_and_dashes_for_their_tab() {
+    let pane_rows = [11, 11, 12].map(|floating_pane_suffix_number| PaneRow {
+        layout_area: PaneRowLayoutArea::FloatingPane {
+            floating_pane_id: build_test_floating_pane_id(floating_pane_suffix_number),
+        },
         ..build_test_pane_row()
-    };
-    let rendered_text = render_panes(&[floating_pane_row], OutputFormat::Table);
-    let rendered_row = rendered_text.lines().nth(1).expect("one data row");
-    let rendered_cells: Vec<&str> = rendered_row.split_whitespace().collect();
-    assert_eq!(
-        rendered_cells,
-        vec![
-            "pane-00000000-0000-0000-0000-000000000001",
-            "htop",
-            "float",
-            "-",
-            "session-00000000-0000-0000-0000-000000000001",
-            "quiet-lake",
-        ]
-    );
+    });
+    let expected_text = "\
+id                                         name  tab  tab_name  floating_pane                                       session                                       session_name
+pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000011  session-00000000-0000-0000-0000-000000000001  quiet-lake
+pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000011  session-00000000-0000-0000-0000-000000000001  quiet-lake
+pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000012  session-00000000-0000-0000-0000-000000000001  quiet-lake
+";
+    assert_eq!(render_panes(&pane_rows, OutputFormat::Table), expected_text);
 }
 
 #[test]
-fn a_floating_pane_inspect_prints_float_as_its_tab() {
-    let mut pane_discovery = build_test_pane_discovery();
-    pane_discovery.tab_id = None;
+fn a_floating_pane_inspect_prints_its_floating_pane_and_a_dash_for_its_tab() {
+    let pane_discovery = PaneDiscovery {
+        layout_area_id: LayoutAreaId::FloatingPane(build_test_floating_pane_id(11)),
+        ..build_test_pane_discovery()
+    };
     let rendered_text = render_pane(&pane_discovery, OutputFormat::Table);
-    assert_eq!(rendered_text.lines().nth(1), Some("tab: float"));
+    assert_eq!(
+        rendered_text,
+        "\
+id: pane-00000000-0000-0000-0000-000000000001
+tab: -
+floating_pane: floating-pane-00000000-0000-0000-0000-000000000011
+session: session-00000000-0000-0000-0000-000000000001
+title: htop
+cwd: /home/user
+command: htop --tree
+state: running
+focused_by: 1
+"
+    );
 }
 
 #[test]
@@ -663,6 +691,7 @@ fn absent_pane_fields_render_as_dashes() {
         "\
 id: pane-00000000-0000-0000-0000-000000000001
 tab: tab-00000000-0000-0000-0000-000000000001
+floating_pane: -
 session: session-00000000-0000-0000-0000-000000000001
 title: -
 cwd: -
@@ -1935,6 +1964,7 @@ fn pane_inspect_renders_as_field_lines() {
     let expected_text = "\
 id: pane-00000000-0000-0000-0000-000000000001
 tab: tab-00000000-0000-0000-0000-000000000001
+floating_pane: -
 session: session-00000000-0000-0000-0000-000000000001
 title: htop
 cwd: /home/user
@@ -2105,8 +2135,8 @@ id                                        session                               
 tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
 
 panes
-id                                         tab                                       session                                       title  cwd         command      state    focused_by
-pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
+id                                         tab                                       floating_pane  session                                       title  cwd         command      state    focused_by
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  -              session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
 id                                           number  label          session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
@@ -2129,7 +2159,7 @@ tabs
 id  session  name  index  active_pane  panes
 
 panes
-id  tab  session  title  cwd  command  state  focused_by
+id  tab  floating_pane  session  title  cwd  command  state  focused_by
 
 clients
 id  number  label  session  attached_at  viewport  pane_area  active_tab  focused_pane  lock
@@ -2159,8 +2189,8 @@ id                                        session                               
 tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
 
 panes
-id                                         tab                                       session                                       title  cwd         command    state    focused_by
-pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  mysql ***  running  1
+id                                         tab                                       floating_pane  session                                       title  cwd         command    state    focused_by
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  -              session-00000000-0000-0000-0000-000000000001  htop   /home/user  mysql ***  running  1
 
 clients
 id                                           number  label          session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
@@ -2196,9 +2226,9 @@ tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000
 tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
 
 panes
-id                                         tab                                       session                                       title  cwd         command      state    focused_by
-pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
-pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
+id                                         tab                                       floating_pane  session                                       title  cwd         command      state    focused_by
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  -              session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  -              session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
 
 clients
 id                                           number  label          session                                       attached_at           viewport  pane_area  active_tab                                focused_pane  lock
@@ -2236,6 +2266,7 @@ fn dump_state_json_is_an_array_of_whole_overviews() {
             "panes": [{
                 "pane_id": "pane-00000000-0000-0000-0000-000000000001",
                 "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+                "floating_pane_id": null,
                 "session_id": "session-00000000-0000-0000-0000-000000000001",
                 "pane_title": "htop",
                 "working_directory": "/home/user",
@@ -2773,6 +2804,7 @@ fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
         FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("1 to 100"));
     vec![
         FloatingPaneLayout {
+            floating_pane_id: build_test_floating_pane_id(11),
             pane_ids: vec![build_test_percent_pane_id()],
             desired_size: FloatingPaneSize {
                 width: sixty_percent,
@@ -2799,6 +2831,7 @@ fn build_test_floating_pane_layouts() -> Vec<FloatingPaneLayout> {
             ],
         },
         FloatingPaneLayout {
+            floating_pane_id: build_test_floating_pane_id(12),
             pane_ids: vec![
                 build_test_cells_first_pane_id(),
                 build_test_cells_second_pane_id(),
@@ -2857,10 +2890,10 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
       pane pane-00000000-0000-0000-0000-000000000004
     no client views this tab
   floating panes
-    pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
+    floating-pane-00000000-0000-0000-0000-000000000011 pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
       client client-00000000-0000-0000-0000-000000000003 rect 16,4 48x13 layer 0 position default
       client client-00000000-0000-0000-0000-000000000007 minimized position pinned 20,5
-    panes pane-00000000-0000-0000-0000-000000000008, pane-00000000-0000-0000-0000-000000000010 asks 30x50% size 30x11
+    floating-pane-00000000-0000-0000-0000-000000000012 panes pane-00000000-0000-0000-0000-000000000008, pane-00000000-0000-0000-0000-000000000010 asks 30x50% size 30x11
       client client-00000000-0000-0000-0000-000000000003 rect 2,1 30x11 layer 1 position moved 2,1
       client client-00000000-0000-0000-0000-000000000007 minimized position default
   clients
@@ -2882,7 +2915,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
       pane pane-00000000-0000-0000-0000-000000000004
     no client views this tab
   floating panes
-    pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
+    floating-pane-00000000-0000-0000-0000-000000000011 pane pane-00000000-0000-0000-0000-000000000006 asks 60%x60% size 48x13
   clients
 ";
     let mut floating_pane_layouts = build_test_floating_pane_layouts();
@@ -2924,6 +2957,7 @@ fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
             }],
             "floating_panes": [
                 {
+                    "floating_pane_id": "floating-pane-00000000-0000-0000-0000-000000000011",
                     "pane_ids": ["pane-00000000-0000-0000-0000-000000000006"],
                     "desired_size": { "width": "60%", "height": "60%" },
                     "solved_size": { "column_count": 48, "row_count": 13 },
@@ -2944,6 +2978,7 @@ fn dump_layout_json_carries_each_floating_pane_and_each_client_view() {
                     ]
                 },
                 {
+                    "floating_pane_id": "floating-pane-00000000-0000-0000-0000-000000000012",
                     "pane_ids": [
                         "pane-00000000-0000-0000-0000-000000000008",
                         "pane-00000000-0000-0000-0000-000000000010"

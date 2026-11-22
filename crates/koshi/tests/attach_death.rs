@@ -100,12 +100,12 @@ fn start_attaching_client(home_directory: &Path, session_id: SessionId) -> Runni
 /// The bytes `koshi attach` writes to its terminal when it enters its modes.
 #[cfg(unix)]
 const APPLICATION_MODE_SETUP_BYTES: &[u8] =
-    b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h";
+    b"\x1b[?1049h\x1b[?7l\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?1004h";
 
 /// The bytes `koshi attach` writes to its terminal when it leaves its modes.
 #[cfg(unix)]
 const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
-    b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
+    b"\x1b[>0s\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?7h\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// A `koshi attach` client whose three standard streams are the follower side
 /// of a pseudo terminal, and the bytes a thread has read from the leader side

@@ -1004,6 +1004,7 @@ fn seed_shell_after_failed_restore(
         NotificationSeverity::Error,
         SESSION_NOT_RESTORED_NOTIFICATION_TEXT,
         None,
+        None,
     );
     let fresh_pane_ids: Vec<PaneId> = session_server
         .list_sessions()
@@ -2390,6 +2391,7 @@ fn post_config_warnings(
             session_id,
             NotificationSeverity::Warning,
             config_warning,
+            None,
             None,
         );
     }

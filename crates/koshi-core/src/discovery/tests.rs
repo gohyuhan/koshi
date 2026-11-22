@@ -28,7 +28,7 @@ fn build_session_discovery(created_at: SystemTime) -> SessionDiscovery {
 fn build_pane_discovery(working_directory: Option<PathBuf>) -> PaneDiscovery {
     PaneDiscovery {
         pane_id: PaneId::from_uuid(build_fixed_uuid()),
-        tab_id: Some(TabId::from_uuid(build_fixed_uuid())),
+        layout_area_id: LayoutAreaId::Tab(TabId::from_uuid(build_fixed_uuid())),
         session_id: SessionId::from_uuid(build_fixed_uuid()),
         pane_title: None,
         working_directory,
@@ -253,9 +253,11 @@ fn pane_discovery_round_trips_with_every_optional_field_set() {
 }
 
 #[test]
-fn a_floating_pane_row_carries_a_null_tab_and_round_trips() {
+fn a_floating_pane_row_names_its_floating_pane_and_round_trips() {
+    let floating_pane_id: crate::ids::FloatingPaneId =
+        serde_json::from_value(json!(build_fixed_uuid())).expect("a bare uuid deserializes");
     let floating_pane_discovery = PaneDiscovery {
-        tab_id: None,
+        layout_area_id: LayoutAreaId::FloatingPane(floating_pane_id),
         ..build_pane_discovery(None)
     };
 
@@ -263,7 +265,10 @@ fn a_floating_pane_row_carries_a_null_tab_and_round_trips() {
     let decoded_pane_discovery: PaneDiscovery =
         serde_json::from_value(pane_discovery_json.clone()).expect("deserializes");
 
-    assert_eq!(pane_discovery_json["tab_id"], serde_json::Value::Null);
+    assert_eq!(
+        pane_discovery_json["layout_area_id"],
+        json!({"FloatingPane": "00000000-0000-0000-0000-000000000001"})
+    );
     assert_eq!(decoded_pane_discovery, floating_pane_discovery);
 }
 

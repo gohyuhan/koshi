@@ -99,6 +99,7 @@ fn a_request_reaches_the_clients_queue_and_its_answer_reaches_the_caller() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
@@ -123,6 +124,7 @@ fn a_client_refusal_reaches_the_caller_with_its_reason_and_help() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, None);
     let client_action_request_id = take_client_action_request_id(&delivery_receiver);
@@ -152,6 +154,7 @@ fn an_answer_from_another_client_or_after_the_first_answer_is_dropped() {
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let other_client_id = attach_second_client(&mut runtime, client_id, None);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
     let client_action_request_id = take_client_action_request_id(&delivery_receiver);
@@ -184,6 +187,7 @@ fn requests_carry_rising_numbers_and_the_first_one_has_the_earliest_deadline() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let earliest_request_time = Instant::now();
     let _first_request = request_external_client_action(&mut runtime, session_id, None);
@@ -216,6 +220,7 @@ fn a_client_not_attached_to_the_session_is_refused_by_name() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let session_name = runtime.session_by_id[&session_id].session_name.clone();
     let absent_client_id = ClientId::new();
 
@@ -300,6 +305,7 @@ fn a_client_whose_queue_is_full_is_refused_as_not_reading() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, tab_id, _) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let queued_events: Vec<Event> = (0..SUBSCRIBER_QUEUE_CAPACITY)
         .map(|_| build_test_placement_event(tab_id))
         .collect();
@@ -354,7 +360,9 @@ fn a_request_from_a_pane_reaches_the_client_that_pane_names() {
     let (session_id, _, pane_id) = get_only_session_slot(&runtime);
     let other_client_id = attach_second_client(&mut runtime, client_id, None);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (other_delivery_receiver, _) = runtime.subscribe(other_client_id, 60, None);
+    runtime.handle_attach_answer_received(other_client_id);
     let (response_sender, response_receiver) = mpsc::channel();
     let command_id = CommandId::new();
 
@@ -383,7 +391,9 @@ fn a_client_that_leaves_before_it_answers_is_answered_for() {
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let other_client_id = attach_second_client(&mut runtime, client_id, None);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (_other_delivery_receiver, _) = runtime.subscribe(other_client_id, 60, None);
+    runtime.handle_attach_answer_received(other_client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
     let (other_command_id, other_response_receiver) =
@@ -412,6 +422,7 @@ fn a_request_past_its_deadline_is_answered_for_and_a_late_answer_is_dropped() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
     let client_action_request_id = take_client_action_request_id(&delivery_receiver);
@@ -448,6 +459,7 @@ fn every_waiting_request_is_answered_when_the_session_ends() {
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
 
@@ -471,6 +483,7 @@ fn every_waiting_request_is_answered_when_the_restart_carries_the_session_out() 
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
 
@@ -494,6 +507,7 @@ fn a_request_after_the_session_told_its_clients_it_restarts_is_refused_with_rest
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     runtime.announce_restarting();
     while delivery_receiver.try_recv().is_ok() {}
 
@@ -515,6 +529,7 @@ fn a_request_waiting_when_the_session_tells_its_clients_it_restarts_keeps_waitin
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
 
@@ -549,6 +564,7 @@ fn a_request_after_the_session_told_its_clients_it_ended_is_refused_as_stopping(
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     runtime.announce_quit();
 
     let (command_id, response_receiver) =
@@ -569,6 +585,7 @@ fn a_dispatch_pass_with_nothing_to_do_wakes_at_the_answer_deadline_and_answers()
     let (mut runtime, client_id) = build_runtime_with_one_client();
     let (session_id, _, _) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let (command_id, response_receiver) =
         request_external_client_action(&mut runtime, session_id, Some(client_id));
     let answer_deadline = Instant::now() + Duration::from_millis(50);

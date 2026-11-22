@@ -64,6 +64,7 @@ fn build_selection_runtime_with_outer_terminal() -> (Server, ViewerClient, PaneI
 {
     let (mut server, client_id, pane_id) = build_selection_server();
     let (outer_terminal_receiver, _) = server.subscribe(client_id, 60, None);
+    server.handle_attach_answer_received(client_id);
     let viewer = build_viewer(client_id);
     (server, viewer, pane_id, outer_terminal_receiver)
 }

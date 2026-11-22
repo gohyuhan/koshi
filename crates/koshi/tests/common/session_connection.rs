@@ -31,7 +31,9 @@ use koshi_ipc::protocol::{
 };
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_runtime::runtime::painted_update::{PaintedUpdateReceiver, SessionFrame};
-use koshi_test_support::fixtures::{build_paint_report_request, send_committed_request};
+use koshi_test_support::fixtures::{
+    build_paint_report_request, send_attach_answer_received, send_committed_request,
+};
 
 use super::{POLL_INTERVAL_DURATION, WAIT_DURATION};
 
@@ -150,9 +152,9 @@ fn try_open_advertised_session_connection(
 }
 
 /// Send [`build_attach_request`] on `connection` as a `Prepare` and its
-/// `Commit`, and hand back the client the session server minted. The
-/// connection carries only that client's event stream and that client's own
-/// requests afterwards.
+/// `Commit`, read the answer, send the attach answer receipt numbered 3, and
+/// hand back the client the session server minted. The connection carries only
+/// that client's event stream and that client's own requests afterwards.
 ///
 /// # Panics
 /// When the `Prepare` is not answered `Prepared`, or the reply to the
@@ -173,6 +175,7 @@ pub fn attach_client_on_connection(connection: &mut Connection, session_id: Sess
         );
     };
     assert_eq!(joined_session_id, session_id);
+    send_attach_answer_received(connection, 3);
     client_id
 }
 

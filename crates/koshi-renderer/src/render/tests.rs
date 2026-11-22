@@ -130,6 +130,7 @@ pub(crate) fn build_peer_snapshot(color_index: u32, typed_pane_id: Option<PaneId
         client_id: ClientId::new(),
         color_index,
         typed_pane_id,
+        recent_input_pane_ids: Vec::new(),
     }
 }
 
@@ -6068,6 +6069,7 @@ fn build_frame_with_peers(viewer_color_index: u32, peer_color_indices: &[u32]) -
             client_id: ClientId::new(),
             color_index,
             typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
         });
     }
     render_snapshot

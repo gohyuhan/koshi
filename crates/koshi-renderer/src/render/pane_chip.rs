@@ -132,11 +132,12 @@ struct PaneChipRoom {
 /// each of `placed_floating_panes`, at its own layout origin. Each group is
 /// cut to the columns and rows of `viewport_area`.
 ///
-/// A pane has a group when a peer's `typed_pane_id` names it, the layout
-/// area has a row for its chips ([`find_pane_chip_room`]), and that row has
-/// room for the `+N` mark of every such peer. Its chips are those peers, in
-/// `color_index` order. The group takes at most half of the row's width,
-/// and at least the width of that mark, inside the row's room. A chip that
+/// A pane has a group when a peer's `typed_pane_id` or one of its
+/// `recent_input_pane_ids` names it, the layout area has a row for its chips
+/// ([`find_pane_chip_room`]), and that row has room for the `+N` mark of
+/// every such peer. Its chips are those peers, in `color_index` order. The
+/// group takes at most half of the row's width, and at least the width of that
+/// mark, inside the row's room. A chip that
 /// does not fit is dropped whole into the mark ([`solve_client_chip_group`]).
 ///
 /// Example: Bob, of index `1`, typing in a tiled pane whose `30`-column box
@@ -155,12 +156,12 @@ pub(super) fn list_frame_pane_chip_groups(
         .peers
         .iter()
         .zip(peer_client_colors)
-        .filter_map(|(peer_snapshot, client_color)| {
-            Some((
-                peer_snapshot.typed_pane_id?,
-                peer_snapshot.color_index,
-                *client_color,
-            ))
+        .flat_map(|(peer_snapshot, client_color)| {
+            peer_snapshot
+                .typed_pane_id
+                .iter()
+                .chain(&peer_snapshot.recent_input_pane_ids)
+                .map(|pane_id| (*pane_id, peer_snapshot.color_index, *client_color))
         })
         .collect();
     if typed_peers.is_empty() {

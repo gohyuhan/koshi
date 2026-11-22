@@ -1584,6 +1584,202 @@ fn a_client_with_no_floating_viewport_sizes_no_pane_of_a_floating_stack() {
     );
 }
 
+#[test]
+fn a_floating_stack_takes_its_pty_sizes_from_the_clients_that_show_it() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        session_id,
+        alice_client_id,
+        tab_id,
+        ..
+    } = build_floating_command_fixture();
+    let [vim_pane_id, logs_pane_id] = [
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+        create_alice_floating_pane(&mut runtime, alice_client_id),
+    ];
+    let bob_client_id = attach_bob(
+        &mut runtime,
+        session_id,
+        tab_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+    );
+    // Only bob shows the stack. alice holds it minimized, with `vim` first in
+    // her focus history inside it.
+    let stack_floating_pane_id = replace_floating_panes_with_stack(
+        &mut runtime,
+        session_id,
+        [vim_pane_id, logs_pane_id],
+        &[bob_client_id],
+    );
+    runtime
+        .get_client_mut(bob_client_id)
+        .expect("bob is attached")
+        .update_floating_pane_focused_pane(stack_floating_pane_id, logs_pane_id);
+    let vim_pty_size_before = get_last_pty_size(&fake_pty_backend, vim_pane_id);
+
+    runtime.reflow_floating_panes(fake_pty_backend.as_ref(), session_id, &mut Vec::new());
+
+    assert_eq!(
+        vim_pty_size_before,
+        Some(PtySize {
+            column_count: 46,
+            row_count: 10
+        })
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, vim_pane_id),
+        vim_pty_size_before,
+        "no client that shows the stack expands vim"
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, logs_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 9
+        })
+    );
+
+    let (_, restore_result) = dispatch_set_floating_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(vim_pane_id),
+        false,
+    );
+
+    let CommandResult::Ok { emitted_events, .. } = &restore_result else {
+        panic!("expected the restore to apply, got {restore_result:?}");
+    };
+    assert_eq!(
+        emitted_events.last(),
+        Some(&Event::PtyResized(PtyResized {
+            pane_id: vim_pane_id,
+            pty_size: PtySize {
+                column_count: 46,
+                row_count: 9
+            },
+        })),
+        "the restore's batch carries the reflow of the stack"
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, vim_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 9
+        }),
+        "alice expands vim once she shows the stack"
+    );
+}
+
+#[test]
+fn a_client_that_takes_back_a_view_showing_a_floating_pane_sizes_its_panes_again() {
+    let FloatingCommandFixture {
+        mut runtime,
+        fake_pty_backend,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let (htop_pane_id, zsh_pane_id) =
+        create_alice_split_floating_pane(&mut runtime, alice_client_id);
+    // alice zooms `zsh` while she alone shows the floating pane.
+    let _ =
+        dispatch_key_binding_command(&mut runtime, alice_client_id, Command::TogglePaneFullscreen);
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, zsh_pane_id),
+        Some(PtySize {
+            column_count: 46,
+            row_count: 10
+        })
+    );
+    let bob_attachment = runtime
+        .handle_ipc_attach(
+            None,
+            None,
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            ClientOrigin::Local { is_same_user: true },
+            None,
+            60,
+            None,
+            None,
+            false,
+        )
+        .expect("the session mints bob");
+    // bob shows the floating pane tiled: he draws `zsh` at `22x10`.
+    let _ = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(bob_attachment.client_id),
+        FocusTarget::Pane(htop_pane_id),
+    );
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, zsh_pane_id),
+        Some(PtySize {
+            column_count: 22,
+            row_count: 10
+        })
+    );
+
+    // bob dials again with his token: his record goes, and the new client
+    // takes back his view.
+    let _ = runtime
+        .handle_ipc_attach(
+            None,
+            Some(bob_attachment.resume_token),
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+            ClientOrigin::Local { is_same_user: true },
+            None,
+            60,
+            None,
+            None,
+            false,
+        )
+        .expect("the session takes bob back");
+
+    assert_eq!(
+        get_last_pty_size(&fake_pty_backend, zsh_pane_id),
+        Some(PtySize {
+            column_count: 22,
+            row_count: 10
+        }),
+        "the view bob took back shows the floating pane tiled"
+    );
+    assert_eq!(
+        fake_pty_backend
+            .list_pane_sizes(zsh_pane_id)
+            .expect("zsh spawned")
+            .iter()
+            .rev()
+            .take(2)
+            .copied()
+            .collect::<Vec<PtySize>>(),
+        vec![
+            PtySize {
+                column_count: 22,
+                row_count: 10
+            },
+            PtySize {
+                column_count: 46,
+                row_count: 10
+            },
+        ],
+        "zsh grew to alice's zoom while bob's record was gone"
+    );
+}
+
 /// The client's scroll offset for the pane — `0` follows live output.
 fn get_client_scroll_offset(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> usize {
     runtime
@@ -3510,6 +3706,7 @@ fn copying_a_pane_with_no_highlight_writes_nothing_and_is_not_an_error() {
         ..
     } = build_resize_fixture();
     let (outer_terminal_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_mouse(client_id),
@@ -10509,6 +10706,7 @@ fn a_confirmation_that_no_longer_matches_the_session_is_rejected_and_answered() 
         })),
     );
     let (delivery_receiver, _writer_handoff) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let _ = take_session_view_changes(&mut runtime, session_id);
     let session_records_before = serialize_session_records(&runtime);
     let command_id = CommandId::new();
@@ -10572,6 +10770,7 @@ fn a_key_confirmation_typed_against_a_frame_before_the_input_moved_is_refused_an
     let placement_snapshot =
         build_server_placement_snapshot(&mut runtime, client_id, root_pane_id, tab_id);
     let (delivery_receiver, _writer_handoff) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     set_client_input_pane_moved_by_others_count(&mut runtime, client_id, 1);
     let _ = take_session_view_changes(&mut runtime, session_id);
     let session_records_before = serialize_session_records(&runtime);
@@ -20171,6 +20370,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -20237,8 +20437,10 @@ fn detach_all_takes_every_attached_client() {
         None,
     );
     let (initial_client_delivery_receiver, _) = runtime.subscribe(initial_client_id, 60, None);
+    runtime.handle_attach_answer_received(initial_client_id);
     let (additional_client_delivery_receiver, _) =
         runtime.subscribe(additional_client_id, 60, None);
+    runtime.handle_attach_answer_received(additional_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -20401,6 +20603,7 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(only_client_id, 60, None);
+    runtime.handle_attach_answer_received(only_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -20544,6 +20747,7 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
     let target_session_id = SessionId::new();
 
     let command_envelope = build_command_envelope(
@@ -20595,6 +20799,7 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -20636,6 +20841,7 @@ fn a_switch_to_another_users_session_with_this_sessions_id_is_queued() {
     .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -20724,6 +20930,7 @@ fn a_client_that_switched_away_ends_the_session_under_auto_close() {
     // An attach registers the client and its subscriber together, so a client
     // that can be moved always has one.
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     let command_envelope = build_command_envelope(
         build_in_session_source(session_id, Some(client_id), pane_id),
@@ -20778,6 +20985,7 @@ fn a_switch_moves_the_client_it_names_with_several_attached() {
         None,
     );
     let (delivery_receiver, _) = runtime.subscribe(initial_client_id, 60, None);
+    runtime.handle_attach_answer_received(initial_client_id);
     let target_session_id = SessionId::new();
 
     // An external source names no client of its own: `client_id` names the
@@ -20830,6 +21038,7 @@ fn a_switch_is_refused_when_the_clients_queue_is_full() {
     .expect("bootstrap the genesis client");
     let (session_id, tab_id, pane_id) = get_only_session_slot(&runtime);
     let (_delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
+    runtime.handle_attach_answer_received(client_id);
 
     // Nothing reads the queue: publishing its whole capacity fills it.
     let queued_events: Vec<Event> = (0..crate::runtime::bus::SUBSCRIBER_QUEUE_CAPACITY)
@@ -23233,6 +23442,42 @@ fn move_pane_inside_a_floating_pane_swaps_with_its_neighbor_and_stops_at_its_edg
 }
 
 #[test]
+fn move_pane_inside_a_floating_pane_the_client_minimized_is_refused_without_changing_the_layout() {
+    let FloatingCommandFixture {
+        mut runtime,
+        alice_client_id,
+        ..
+    } = build_floating_command_fixture();
+    let (htop_pane_id, _zsh_pane_id) =
+        create_alice_split_floating_pane(&mut runtime, alice_client_id);
+    let htop_floating_pane_id = get_floating_pane_id_holding(&runtime, htop_pane_id);
+    let alice_client = runtime
+        .get_client_mut(alice_client_id)
+        .expect("alice is attached");
+    assert!(alice_client.minimize_floating_pane(htop_floating_pane_id));
+    let session_records_before = serialize_session_records(&runtime);
+
+    let (command_id, command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::MovePane(MovePaneArgs {
+            pane_id: Some(htop_pane_id),
+            direction: Direction::Right,
+        }),
+    );
+
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some(format!("{htop_pane_id} is minimized; restore it first")),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), session_records_before);
+}
+
+#[test]
 fn a_tab_command_from_a_floating_panes_shell_is_refused_and_a_zoom_acts_inside_it() {
     let FloatingCommandFixture {
         mut runtime,
@@ -23393,6 +23638,8 @@ fn leaving_a_zoom_on_a_pane_the_floating_panes_tree_suppresses_focuses_a_pane_it
     let (command_id, command_result) =
         dispatch_key_binding_command(&mut runtime, alice_client_id, Command::TogglePaneFullscreen);
 
+    // Only alice shows the floating pane. While her zoom of `zsh` hid `htop`,
+    // `htop` kept its PTY size; her split draws `htop` at `5x1`.
     assert_eq!(
         command_result,
         CommandResult::Ok {
@@ -23407,6 +23654,7 @@ fn leaving_a_zoom_on_a_pane_the_floating_panes_tree_suppresses_focuses_a_pane_it
                     pane_id: htop_pane_id,
                     previous_pane_id: Some(zsh_pane_id),
                 }),
+                build_pty_resized(htop_pane_id, 5, 1),
             ],
         }
     );
@@ -23628,8 +23876,8 @@ fn focusing_a_collapsed_stack_member_inside_a_floating_pane_opens_it_for_the_cli
                 Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
                     pane_ids: vec![htop_pane_id, zsh_pane_id],
                 }),
-                build_pty_resized(htop_pane_id, 46, 9),
                 build_pane_focused(alice_client_id, None, htop_pane_id, Some(zsh_pane_id)),
+                build_pty_resized(htop_pane_id, 46, 9),
             ],
         }
     );
@@ -23638,6 +23886,75 @@ fn focusing_a_collapsed_stack_member_inside_a_floating_pane_opens_it_for_the_cli
             .get_floating_pane_view(htop_floating_pane_id)
             .map(|floating_pane_view| floating_pane_view.focus_history.clone()),
         Some(vec![htop_pane_id, zsh_pane_id])
+    );
+}
+
+#[test]
+fn focusing_a_collapsed_stack_member_of_a_minimized_floating_pane_reflows_once_after_the_restore() {
+    let FloatingCommandFixture {
+        mut runtime,
+        session_id,
+        alice_client_id,
+        tiled_pane_id,
+        ..
+    } = build_floating_command_fixture();
+    let htop_pane_id = create_alice_floating_pane(&mut runtime, alice_client_id);
+    let (_, stack_command_result) = dispatch_key_binding_command(
+        &mut runtime,
+        alice_client_id,
+        Command::NewPane(NewPaneArgs {
+            placement: NewPanePlacement::Stacked {
+                source_pane_id: Some(htop_pane_id),
+                tab_id: None,
+            },
+            ..build_new_pane_args()
+        }),
+    );
+    assert_eq!(
+        get_command_outcome(&stack_command_result),
+        Ok(vec![
+            "PaneCreated",
+            "FloatingPaneLayoutChanged",
+            "PaneFocused",
+            "PtyResized"
+        ])
+    );
+    let zsh_pane_id = find_other_pane_id(&runtime, session_id, &[tiled_pane_id, htop_pane_id]);
+    let (_, minimize_command_result) = dispatch_set_floating_pane_minimized(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        Some(htop_pane_id),
+        true,
+    );
+    assert_eq!(
+        get_command_outcome(&minimize_command_result),
+        Ok(vec!["FloatingPaneMinimizedChanged", "PaneFocused"])
+    );
+
+    // The focus restores the floating pane and opens `htop`: `htop` takes
+    // `46x9`, and that resize follows every other event of the command.
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_key_binding(alice_client_id),
+        FocusTarget::Pane(htop_pane_id),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
+                    pane_ids: vec![htop_pane_id, zsh_pane_id],
+                }),
+                Event::FloatingPaneMinimizedChanged(FloatingPaneMinimizedChanged {
+                    client_id: alice_client_id,
+                    pane_ids: vec![htop_pane_id, zsh_pane_id],
+                    is_minimized: false,
+                }),
+                build_pane_focused(alice_client_id, None, htop_pane_id, Some(tiled_pane_id)),
+                build_pty_resized(htop_pane_id, 46, 9),
+            ],
+        }
     );
 }
 
@@ -23673,8 +23990,8 @@ fn focusing_another_pane_while_zoomed_inside_a_floating_pane_moves_the_zoom_to_i
                 Event::FloatingPaneLayoutChanged(FloatingPaneLayoutChanged {
                     pane_ids: vec![htop_pane_id, zsh_pane_id],
                 }),
-                build_pty_resized(htop_pane_id, 46, 10),
                 build_pane_focused(alice_client_id, None, htop_pane_id, Some(zsh_pane_id)),
+                build_pty_resized(htop_pane_id, 46, 10),
             ],
         }
     );

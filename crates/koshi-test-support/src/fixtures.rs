@@ -774,6 +774,39 @@ pub fn read_prepared_and_send_commit(connection: &mut Connection, request_id: u6
         .expect("send the Commit");
 }
 
+/// Send the `AttachAnswerReceived` numbered `request_id` on `connection`: the
+/// viewer read its `Attached` answer.
+///
+/// # Panics
+///
+/// Panics when the request cannot be written.
+#[track_caller]
+pub fn send_attach_answer_received(connection: &mut Connection, request_id: u64) {
+    connection
+        .send(&IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::AttachAnswerReceived,
+        })
+        .expect("send the attach answer receipt");
+}
+
+/// Send the `AttachAnswerReceived` numbered `request_id` through
+/// `frame_writer`, as [`send_attach_answer_received`] does on a whole
+/// connection.
+///
+/// # Panics
+///
+/// Panics when the request cannot be written.
+#[track_caller]
+pub fn send_attach_answer_received_through_halves(frame_writer: &mut FrameWriter, request_id: u64) {
+    frame_writer
+        .send(&IpcRequest {
+            request_id,
+            request_kind: IpcRequestKind::AttachAnswerReceived,
+        })
+        .expect("send the attach answer receipt");
+}
+
 /// Send `ipc_request` with [`send_prepare_request`], then
 /// [`read_prepared_and_send_commit`] under its request id. The held request's
 /// answer is the next frame on `connection`, under that id.

@@ -55,7 +55,8 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::hold_update_lock;
 #[cfg(unix)]
 use koshi_test_support::fixtures::{
-    build_accepted_hello_result, build_restarting_refusal, BUSY_PROGRAM_RETRY_INTERVAL_DURATION,
+    build_accepted_hello_result, build_restarting_refusal,
+    send_attach_answer_received_through_halves, BUSY_PROGRAM_RETRY_INTERVAL_DURATION,
     BUSY_PROGRAM_WAIT_DURATION,
 };
 #[cfg(unix)]
@@ -193,8 +194,9 @@ fn assert_socket_serves_carried_recent_events(
     );
 }
 
-/// Join the seeded session the way an attach over the control socket does, and
-/// hand back what the dispatcher minted: the client's client identifier and its own queue.
+/// Join the seeded session the way an attach over the control socket does,
+/// hand the client's attach answer receipt over, and hand back what the
+/// dispatcher minted: the client's client identifier and its own queue.
 fn attach_test_client(server: &mut Server) -> AttachAccepted {
     let (attach_response_sender, attach_response_receiver) = mpsc::channel();
     let _ = server.handle_runtime_event(RuntimeEvent::IpcAttach {
@@ -212,10 +214,14 @@ fn attach_test_client(server: &mut Server) -> AttachAccepted {
         painted_input_view: None,
         is_viewer_local_input_mode_on: false,
     });
-    attach_response_receiver
+    let attach_accepted = attach_response_receiver
         .try_recv()
         .expect("the loop answered the attach request")
-        .expect("a session is running")
+        .expect("a session is running");
+    let _ = server.handle_runtime_event(RuntimeEvent::ClientAttachAnswerReceived {
+        client_id: attach_accepted.client_id,
+    });
+    attach_accepted
 }
 
 /// Take every delivery `delivery_receiver` holds now, oldest first.
@@ -2554,6 +2560,12 @@ fn a_line_a_client_sends_after_reading_the_restart_frame_reaches_its_pane_before
     let IpcResult::Attached { client_id, .. } = attach_response.answer_result else {
         panic!("the attach is accepted, got {attach_response:?}");
     };
+    send_attach_answer_received_through_halves(&mut frame_writer, 3);
+    let answer_receipt_event = server
+        .get_inbox_receiver()
+        .recv_timeout(GREETED_SESSION_READ_WAIT_DURATION)
+        .expect("the attach answer receipt reaches the dispatcher");
+    let _ = server.handle_runtime_event(answer_receipt_event);
 
     let swap_thread = std::thread::spawn(move || {
         let (mut rebuilt_server, _rebound_session_socket) = swap_session_image(

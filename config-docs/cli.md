@@ -471,7 +471,7 @@ id line.
 | `koshi detach --all [NAME_OR_ID]` | Detach every terminal of that session |
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running one |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tab ids, names, and owning sessions |
-| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, and session ids and names |
+| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, floating pane, and session ids and names |
 | `koshi list-clients [--session <NAME_OR_ID>]` | List client ids, numbers, labels, and owning sessions |
 | `koshi inspect session <NAME_OR_ID>` | Show one session's full record |
 | `koshi inspect tab <NAME_OR_ID>` | Show one tab's full record |
@@ -516,7 +516,11 @@ number. The label is the name the session gave the client at attach:
    client whose grant identity cleans to nothing gets one too.
 
 If an attached client already holds the label, the new client gets `-2`, then
-`-3`, and so on: a second terminal of the session's account is `host-2`.
+`-3`, and so on: a second terminal of the session's account is `host-2`. Two
+labels that differ only in characters that show no glyph, such as the zero
+width space U+200B, count as the same label. Example: with `bob` attached, a
+client whose grant identity is `bob` followed by U+200B gets that identity
+followed by `-2`, which shows as `bob-2`.
 `--format json` writes the same values: `"client_number": 2` and
 `"label": "bob"`.
 
@@ -527,12 +531,27 @@ client-0192f7d0-6c1e-7a51-9d4e-000000000002  2       bob    …        work
 ```
 
 `koshi list-panes` lists the tiled panes of each session in tab order, then
-its floating panes in the order they were created. A floating pane prints
-`float` in the `tab` column and `-` in the `tab_name` column, and `--format
-json` writes `"tab_id": null` and `"tab_name": null` for it. `koshi inspect
-pane` prints `float` as the `tab` of a floating pane. A `--pane` flag finds a
-floating pane's session from outside koshi too: `koshi close-pane --pane
-pane-…` closes that pane inside its floating pane.
+its floating panes in the order they were created, each floating pane's panes
+in layout order. The `floating_pane` column names the floating pane that holds
+the pane, as `floating-pane-<uuid>`. Every pane of one floating pane prints the
+same id. A floating pane prints `-` in the `tab` and `tab_name` columns, and a
+tiled pane prints `-` in the `floating_pane` column. `--format json` writes
+`"floating_pane_id"`, with `null` for a tiled pane, and `"tab_id": null` and
+`"tab_name": null` for a floating pane. `koshi inspect pane` prints the same
+`tab` and `floating_pane` fields. A floating pane that docks into a tab and
+floats again is a new floating pane with a new id. No flag takes a floating
+pane id. A `--pane` flag finds a floating pane's session from outside koshi
+too: `koshi close-pane --pane pane-…` closes that pane inside its floating
+pane.
+
+Example: `htop` and `top` share one floating pane, and `vim` is tiled.
+
+```text
+id      name  tab    tab_name  floating_pane       session    session_name
+pane-…  vim   tab-…  editor    -                   session-…  work
+pane-…  htop  -      -         floating-pane-01a…  session-…  work
+pane-…  top   -      -         floating-pane-01a…  session-…  work
+```
 
 `koshi list-sessions` names each session's machine in its `server` column:
 `local` for a session on this machine, else the saved server it runs on. Its
@@ -725,8 +744,9 @@ client's own key does. A positive `scroll-pane --lines` moves toward history.
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.
 A client that cannot draw floating panes refuses it with `<pane> cannot be
-drawn on this client`. `scroll-pane --pane` on a floating pane that the client
-minimized is refused with `<pane> is minimized; restore it first`.
+drawn on this client`. `scroll-pane --pane` and `move-pane --direction` on a
+pane inside a floating pane that the client minimized are refused with `<pane>
+is minimized; restore it first`.
 
 Without `--pane`, `close-pane`, `resize-pane`, `scroll-pane` and `input` act on
 one pane. Inside a koshi pane, the command acts on that pane. Outside koshi, the
@@ -1187,10 +1207,15 @@ Everyone attached to a session this grant reaches sees the name bob.
 The label is the identity with each run of spaces, tabs and line breaks
 folded into one space. Control characters, text direction marks, interlinear
 annotation marks, the noncharacters U+FFFE and U+FFFF, and tag characters are
-removed. The result is cut to 32 cells and 512 bytes. Example: the identity
-`Bob<TAB>Smith` prints `sees the name Bob Smith.` An identity that cleans to
-nothing, such as three spaces, prints `sees a generated name.`, and its
-clients get a generated label, such as `C-swift-otter`.
+removed. Spaces before the first shown character and after the last shown
+character are removed. A shown character is a character with a glyph: the
+zero width space U+200B, the zero width joiner U+200D, the byte order mark
+U+FEFF, the Hangul filler U+3164 and the other Unicode default-ignorable
+characters are not shown characters. The result is cut to 32 cells and 512
+bytes. Example: the identity `Bob<TAB>Smith` prints `sees the name Bob
+Smith.` An identity that cleans to no shown character, such as three spaces or
+U+200B alone, prints `sees a generated name.`, and its clients get a
+generated label, such as `C-swift-otter`.
 
 A listen address in `koshi.kdl` sets the address; it does not open the port.
 With an address set and remote access still off, `koshi share grant` says so
@@ -1894,8 +1919,9 @@ a pane fullscreen give that tab two sets of rectangles. A tab no client is
 viewing prints its tree and no rectangles.
 
 `dump-layout` prints the floating panes after the tabs, in the order the
-floating panes were created. Each floating pane line names its panes in layout
-order, the size the floating pane asks for and the size it holds. Under it, one
+floating panes were created. Each floating pane line names the floating pane id,
+its panes in layout order, the size the floating pane asks for and the size it
+holds. Under it, one
 line per attached client says what that client draws:
 
 - `rect <x>,<y> <cols>x<rows> layer <n>`: the client draws the floating pane
@@ -1910,9 +1936,9 @@ no floating section. `--tab` narrows the tabs only, and every floating pane
 still prints: a floating pane draws over every tab.
 
 Example: one 80x24 terminal shows a floating pane that `koshi new-pane
---floating` opened. The pane prints as `pane pane-… asks 60%x60% size 48x13`,
-and the client line under it prints as `client client-… rect 16,4 48x13 layer 0
-position default`.
+--floating` opened. The floating pane prints as `floating-pane-… pane pane-…
+asks 60%x60% size 48x13`, and the client line under it prints as `client
+client-… rect 16,4 48x13 layer 0 position default`.
 
 Each line under a split ends with how that child is sized, in the words a
 layout file uses: `weight 2`, `size 30` for 30 cells, or `size 60%`, then
@@ -1926,10 +1952,10 @@ has `"node": "pane"` or `"node": "split"`, and a split has `split_direction`
 (`horizontal`, `vertical` or `stacked`) and `weights`, one sizing per child in
 the words above. Each client solve has `layout_mode`
 (`tiled`, or `fullscreen` with `fullscreen_pane_id`). Each floating pane has
-`pane_ids`, its panes in layout order. Each client view of a floating pane has
-`position` (`default`, or `moved` or `pinned` with `stored_cell`) and
-`visibility` (`drawn` with `top_left_cell` and `layer_index`, or
-`minimized`). `desired_size` writes each axis as `--cols`
+`floating_pane_id` and `pane_ids`, its panes in layout order. Each client
+view of a floating pane has `position` (`default`, or `moved` or `pinned`
+with `stored_cell`) and `visibility` (`drawn` with `top_left_cell` and
+`layer_index`, or `minimized`). `desired_size` writes each axis as `--cols`
 and `--rows` take it: `"60%"` or `"80"`.
 
 A session that started before you installed this Koshi cannot report its

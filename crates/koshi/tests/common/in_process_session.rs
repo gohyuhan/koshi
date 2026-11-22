@@ -30,7 +30,9 @@ use koshi_runtime::runtime::painted_update::PaintedUpdateReceiver;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::{build_test_runtime_directory, send_committed_request};
+use koshi_test_support::fixtures::{
+    build_test_runtime_directory, send_attach_answer_received, send_committed_request,
+};
 use tempfile::TempDir;
 
 use super::session_connection::{
@@ -230,9 +232,10 @@ pub struct AttachedClient {
     pub session_events: mpsc::Receiver<SessionEvent>,
 }
 
-/// Attach to `session` straight over its control socket — the Hello, then the
-/// Attach as a `Prepare` and its `Commit`, on one connection — and hand back
-/// the client the server minted and its event stream.
+/// Attach to `session` straight over its control socket — the Hello, the
+/// Attach as a `Prepare` and its `Commit`, then the attach answer receipt
+/// numbered 3, on one connection — and hand back the client the server minted
+/// and its event stream.
 ///
 /// The connection moves into the thread [`forward_session_events`] starts,
 /// which ends when the session closes it or the [`AttachedClient`] is dropped.
@@ -257,6 +260,7 @@ pub fn attach_test_client(session: &RunningSession) -> AttachedClient {
         );
     };
     assert_eq!(session_id, session.session_id);
+    send_attach_answer_received(&mut connection, 3);
 
     AttachedClient {
         client_id,

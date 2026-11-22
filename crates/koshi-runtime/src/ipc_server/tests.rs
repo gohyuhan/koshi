@@ -44,7 +44,8 @@ use koshi_test_support::fixtures::{
     build_accepted_hello_result, build_counting_bytes, build_fixed_epoch_notification_queue,
     build_image_chunk_frame, build_key_input_for_chord, build_paint_report_request,
     build_restarting_refusal, count_program_runs, read_prepared_and_send_commit,
-    send_committed_request, send_prepare_request, write_printing_program,
+    send_attach_answer_received, send_committed_request, send_prepare_request,
+    write_printing_program,
 };
 
 use crate::executable_watch::RESTART_RETRY_INTERVAL_DURATION;
@@ -477,8 +478,9 @@ fn spawn_frame_dispatcher(
 /// `client_id`, holds the delivery queue it hands out open, and closes those
 /// queues on a detach. The writing thread of each attached connection stays
 /// blocked until then. It answers each `IpcPrepare` probe
-/// ([`answer_prepare_probe`]). Every other event it drains is forwarded to the
-/// returned receiver. Exits when every inbox sender is gone.
+/// ([`answer_prepare_probe`]) and drops each `ClientAttachAnswerReceived`.
+/// Every other event it drains is forwarded to the returned receiver. Exits
+/// when every inbox sender is gone.
 fn spawn_attaching_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
@@ -504,6 +506,7 @@ fn spawn_attaching_dispatcher(
                         Arc::clone(&ending_notice),
                     )));
                 }
+                RuntimeEvent::ClientAttachAnswerReceived { .. } => {}
                 detached_event @ RuntimeEvent::ClientDetached { .. } => {
                     delivery_senders.clear();
                     if runtime_event_sender.send(detached_event).is_err() {
@@ -767,7 +770,8 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_ending() {
         ),
     ] {
         let mut event_bus = EventBus::new();
-        let (_, delivery_receiver, writer_handoff) = event_bus.subscribe();
+        let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+        event_bus.release_attach_answer_hold(subscriber_id);
         let tab_id = TabId::new();
         for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
             event_bus.publish(&build_test_placement_event(tab_id));
@@ -801,6 +805,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
 
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     event_bus.publish(&build_test_placement_event(TabId::new()));
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
@@ -831,7 +836,8 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     use crate::runtime::bus::EventBus;
 
     let mut event_bus = EventBus::new();
-    let (_, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     event_bus.publish(&build_test_placement_event(TabId::new()));
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     event_bus.publish(&Event::Quit(QuitCause::Requested));
@@ -875,6 +881,7 @@ fn host_writes_queued_before_the_session_ends_reach_the_client_ahead_of_its_last
     ] {
         let mut event_bus = EventBus::new();
         let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+        event_bus.release_attach_answer_hold(subscriber_id);
         event_bus.publish(&build_test_placement_event(TabId::new()));
         assert!(
             event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one"))
@@ -929,6 +936,7 @@ fn viewer_action_requests_queued_before_the_session_ends_reach_the_client_ahead_
             .expect("the action name is valid");
         let mut event_bus = EventBus::new();
         let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+        event_bus.release_attach_answer_hold(subscriber_id);
         event_bus.publish(&build_test_placement_event(TabId::new()));
         assert!(event_bus.try_send_client_action_request(
             subscriber_id,
@@ -967,6 +975,7 @@ fn host_writes_that_wait_reach_the_client_ahead_of_the_deliveries_queued_after_t
     let next_session_id = SessionId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("c", b"one")));
     assert!(event_bus.queue_host_write(subscriber_id, &HostWrite::from_clipboard_copy("p", b"two")));
     assert!(event_bus.try_send_switch(subscriber_id, next_session_id, None));
@@ -1004,6 +1013,7 @@ fn a_host_write_whose_wake_found_the_queue_full_still_reaches_the_client() {
     let tab_id = TabId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
         event_bus.publish(&build_test_placement_event(tab_id));
     }
@@ -1042,13 +1052,17 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     let tab_id = TabId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
         event_bus.publish(&build_test_placement_event(tab_id));
     }
-    assert!(!event_bus.try_send_frame(
-        subscriber_id,
-        Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
-    ));
+    assert_eq!(
+        event_bus.try_send_frame(
+            subscriber_id,
+            Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
+        ),
+        None
+    );
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
     let runtime_directory = build_test_runtime_directory("owed-frame-wake");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
@@ -1070,6 +1084,7 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
                         )));
                     }
                 }
+                RuntimeEvent::ClientAttachAnswerReceived { .. } => {}
                 forwarded_runtime_event => {
                     let _ = forwarded_event_sender.send(forwarded_runtime_event);
                 }
@@ -1126,6 +1141,107 @@ fn a_dropped_frame_wakes_the_dispatcher_for_its_client_after_the_next_read() {
     );
 }
 
+/// The dispatcher asks to hear when the frame on a client's queue is taken.
+/// The writing thread takes it, writes it as a painted update, and hands one
+/// `QueuedFrameTaken` to the dispatcher. Nothing else hands a second one.
+#[test]
+fn the_writing_thread_tells_the_dispatcher_once_when_it_takes_the_frame_the_dispatcher_asked_about()
+{
+    use crate::runtime::bus::EventBus;
+    use koshi_ipc::transport::ReceivedFrame;
+
+    let client_id = ClientId::new();
+    let session_id = SessionId::new();
+    let mut event_bus = EventBus::new();
+    let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
+    assert_eq!(
+        event_bus.try_send_frame(
+            subscriber_id,
+            Box::new(build_alternating_grid_snapshot(client_id, 2, 2))
+        ),
+        Some(1)
+    );
+    assert_eq!(event_bus.request_frame_taken_notice(subscriber_id, 1), None);
+    let ending_notice = Arc::clone(event_bus.get_ending_notice());
+    let runtime_directory = build_test_runtime_directory("frame-taken-notice");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (forwarded_event_sender, forwarded_event_receiver) = mpsc::channel();
+    let dispatcher_thread = std::thread::spawn(move || {
+        let mut unanswered_stream = Some((delivery_receiver, writer_handoff));
+        for runtime_event in inbox_receiver.iter().filter_map(answer_prepare_probe) {
+            match runtime_event {
+                RuntimeEvent::IpcAttach {
+                    response_sender, ..
+                } => {
+                    if let Some((delivery_receiver, writer_handoff)) = unanswered_stream.take() {
+                        let _ = response_sender.send(Some(build_attach_accepted(
+                            client_id,
+                            session_id,
+                            delivery_receiver,
+                            writer_handoff,
+                            Arc::clone(&ending_notice),
+                        )));
+                    }
+                }
+                RuntimeEvent::ClientAttachAnswerReceived { .. } => {}
+                forwarded_runtime_event => {
+                    let _ = forwarded_event_sender.send(forwarded_runtime_event);
+                }
+            }
+        }
+    });
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        Arc::default(),
+        None,
+        None,
+    )
+    .expect("start serving");
+    let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+
+    assert!(matches!(
+        connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the painted update"),
+        ReceivedFrame::Binary(_)
+    ));
+    assert!(
+        matches!(
+            forwarded_event_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the writing thread tells the dispatcher of the take"),
+            RuntimeEvent::QueuedFrameTaken
+        ),
+        "the first forwarded event is the take notice"
+    );
+    event_bus.unsubscribe(subscriber_id);
+    loop {
+        match connection
+            .recv_message_or_binary::<SessionEvent>()
+            .expect("the next frame")
+        {
+            ReceivedFrame::Message(SessionEvent::Detached) => break,
+            ReceivedFrame::Message(_) | ReceivedFrame::Binary(_) => {}
+        }
+    }
+
+    drop(connection);
+    ipc_server.shutdown();
+    dispatcher_thread.join().expect("dispatcher exits");
+    delete_test_directory(&runtime_directory);
+    assert_eq!(
+        forwarded_event_receiver
+            .try_iter()
+            .filter(|runtime_event| matches!(runtime_event, RuntimeEvent::QueuedFrameTaken))
+            .count(),
+        0,
+        "the writing thread told the dispatcher once"
+    );
+}
+
 #[test]
 fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_run() {
     use koshi_ipc::event::MAX_HOST_WRITE_BYTE_COUNT;
@@ -1135,6 +1251,7 @@ fn a_host_write_longer_than_one_frame_reaches_the_client_as_parts_then_its_last_
 
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     let copied_bytes = vec![b'a'; MAX_HOST_WRITE_BYTE_COUNT];
     let host_write_bytes = encode_osc52_copy("c", &copied_bytes);
     assert_eq!(host_write_bytes.len(), 16_777_180);
@@ -1173,6 +1290,7 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
     let session_id = SessionId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     // One pane of 1000 rows by 1100 columns of alternating `a` and `b`: the
     // painted update is inside the frame cap, and larger than a connection
     // holds while its client reads nothing.
@@ -1186,7 +1304,10 @@ fn a_host_write_after_the_writing_thread_ended_with_its_wake_unread_is_not_taken
     // The frame, then a host write and its wake, wait on the queue before the
     // client attaches. The writing thread writes the host write first, then
     // stays on the frame: it never reads the wake.
-    assert!(event_bus.try_send_frame(subscriber_id, Box::new(large_snapshot)));
+    assert_eq!(
+        event_bus.try_send_frame(subscriber_id, Box::new(large_snapshot)),
+        Some(1)
+    );
     let host_write = HostWrite::from_clipboard_copy("c", b"hi");
     assert!(event_bus.queue_host_write(subscriber_id, &host_write));
     let ending_notice = Arc::new(EndingNotice::default());
@@ -1306,9 +1427,10 @@ fn build_attach_request(
     }
 }
 
-/// Open a connection, say hello, attach on it with `Prepare` and `Commit`, and
-/// read every reply back. The connection comes back carrying `client_id`'s
-/// stream.
+/// Open a connection, say hello, attach on it with `Prepare` and `Commit`,
+/// read every reply back, and send the attach answer receipt
+/// ([`send_attach_answer_received`]). The connection comes back carrying
+/// `client_id`'s stream.
 fn attach_test_client(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -1322,7 +1444,8 @@ fn attach_test_client(
     )
 }
 
-/// Open and attach one connection that reports `graphics_capabilities`.
+/// Open and attach one connection that reports `graphics_capabilities`, as
+/// [`attach_test_client`] does.
 fn attach_test_client_with_graphics(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -1364,6 +1487,7 @@ fn attach_test_client_with_graphics(
             pane_area: None,
         },
     );
+    send_attach_answer_received(&mut connection, 4);
     connection
 }
 
@@ -1443,10 +1567,12 @@ fn an_attach_forwards_its_initial_cell_measurement_and_painted_input_view_before
         )))
         .expect("the dispatcher receives the accepted attach");
     let _: IpcResponse = connection.recv().expect("attach reply");
+    send_attach_answer_received(&mut connection, 4);
+    receive_attach_answer_receipt(&inbox_receiver, client_id);
 
     connection
         .send(&IpcRequest {
-            request_id: 3,
+            request_id: 5,
             request_kind: IpcRequestKind::Resize {
                 viewport_size: CLIENT_VIEWPORT_SIZE,
                 pane_area: None,
@@ -1510,6 +1636,8 @@ fn a_resize_over_the_viewport_cell_limit_is_dropped_and_the_next_resize_crosses(
         )))
         .expect("the dispatcher receives the accepted attach");
     let _: IpcResponse = connection.recv().expect("attach reply");
+    send_attach_answer_received(&mut connection, 4);
+    receive_attach_answer_receipt(&inbox_receiver, client_id);
     let fitting_viewport_size = Size {
         column_count: 2048,
         row_count: 1024,
@@ -1517,20 +1645,20 @@ fn a_resize_over_the_viewport_cell_limit_is_dropped_and_the_next_resize_crosses(
 
     for (request_id, viewport_size) in [
         (
-            3,
+            5,
             Size {
                 column_count: 65_535,
                 row_count: 65_535,
             },
         ),
         (
-            4,
+            6,
             Size {
                 column_count: 2048,
                 row_count: 1025,
             },
         ),
-        (5, fitting_viewport_size),
+        (7, fitting_viewport_size),
     ] {
         connection
             .send(&IpcRequest {
@@ -1794,12 +1922,12 @@ fn an_event_between_two_painted_updates_keeps_its_place_and_the_earlier_update_i
     let second_render_snapshot = build_alternating_grid_snapshot(frame_stream.client_id, 3, 4);
     frame_stream
         .delivery_sender
-        .try_send_frame(Box::new(first_render_snapshot.clone()))
+        .try_send_frame(Delivery::Frame(Box::new(first_render_snapshot.clone())))
         .expect("the first frame fits");
     let command_rejection_event = frame_stream.send_command_rejection();
     frame_stream
         .delivery_sender
-        .try_send_frame(Box::new(second_render_snapshot.clone()))
+        .try_send_frame(Delivery::Frame(Box::new(second_render_snapshot.clone())))
         .expect("the second frame fits");
 
     assert_eq!(
@@ -4758,8 +4886,9 @@ fn build_other_user_hello() -> IpcRequest {
 }
 
 /// Sends the Hello and the Attach as another local user on `caller_connection`,
-/// and checks both replies. The connection carries `client_id`'s event stream
-/// afterwards.
+/// checks both replies, and sends the attach answer receipt
+/// ([`send_attach_answer_received`]). The connection carries `client_id`'s
+/// event stream afterwards.
 fn attach_as_other_user(
     caller_connection: &mut Connection,
     client_id: ClientId,
@@ -4784,6 +4913,7 @@ fn attach_as_other_user(
             pane_area: None,
         }
     );
+    send_attach_answer_received(caller_connection, 4);
 }
 
 #[test]
@@ -5751,9 +5881,10 @@ fn rotating_the_token_hands_requests_to_the_dispatcher_again_after_they_were_ref
     send_committed_request(&mut connection, build_attach_request(None, None));
     let attach_reply: IpcResponse = connection.recv().expect("attach reply");
     assert_eq!(attach_reply.request_id, Some(2));
+    send_attach_answer_received(&mut connection, 4);
     connection
         .send(&IpcRequest {
-            request_id: 3,
+            request_id: 5,
             request_kind: IpcRequestKind::Keyboard {
                 key_inputs: vec![build_key_input_for_chord(typed_key_chord)],
                 painted_input_pane_moved_by_others_count: 0,
@@ -6370,7 +6501,8 @@ fn spawn_origin_reporting_dispatcher(
 }
 
 /// Opens a connection, sends a Hello with `is_remote` and `granted_identity`,
-/// attaches on it, and checks both replies. The connection comes back carrying
+/// attaches on it, checks both replies, and sends the attach answer receipt
+/// ([`send_attach_answer_received`]). The connection comes back carrying
 /// `client_id`'s stream.
 fn attach_saying_remote(
     runtime_directory: &Path,
@@ -6410,6 +6542,7 @@ fn attach_saying_remote(
             pane_area: None,
         },
     );
+    send_attach_answer_received(&mut connection, 4);
     connection
 }
 
@@ -7448,11 +7581,34 @@ fn a_clipboard_request_with_no_dispatcher_closes_the_connection() {
     }
 }
 
+/// Open a connection as [`open_attached_connection_over_link`] does, then send
+/// the attach answer receipt ([`send_attach_answer_received`]).
+fn attach_test_client_over_link(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    client_id: ClientId,
+    is_remote: bool,
+    link_timeout_ms: Option<u32>,
+    resume_client_id: Option<ClientId>,
+) -> Connection {
+    let mut connection = open_attached_connection_over_link(
+        runtime_directory,
+        session_id,
+        client_id,
+        is_remote,
+        link_timeout_ms,
+        resume_client_id,
+    );
+    send_attach_answer_received(&mut connection, 4);
+    connection
+}
+
 /// Open a connection whose Hello carries `is_remote`, attach on it with the
 /// request [`build_attach_request`] gives for `resume_client_id` and
 /// `link_timeout_ms`, and read both replies back. The connection comes back
-/// carrying `client_id`'s stream.
-fn attach_test_client_over_link(
+/// carrying `client_id`'s stream. The client never sends the attach answer
+/// receipt.
+fn open_attached_connection_over_link(
     runtime_directory: &Path,
     session_id: SessionId,
     client_id: ClientId,
@@ -7504,6 +7660,21 @@ fn receive_forwarded_event(received_runtime_events: &Receiver<RuntimeEvent>) -> 
         .expect("the dispatcher was handed an event")
 }
 
+/// Check that the next event the dispatcher was handed is `client_id`'s
+/// attach answer receipt ([`send_attach_answer_received`]).
+fn receive_attach_answer_receipt(
+    received_runtime_events: &Receiver<RuntimeEvent>,
+    client_id: ClientId,
+) {
+    let RuntimeEvent::ClientAttachAnswerReceived {
+        client_id: answered_client_id,
+    } = receive_forwarded_event(received_runtime_events)
+    else {
+        panic!("the first event handed over is the attach answer receipt");
+    };
+    assert_eq!(answered_client_id, client_id);
+}
+
 #[test]
 fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     let client_id = ClientId::new();
@@ -7522,8 +7693,9 @@ fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     )
     .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+    receive_attach_answer_receipt(&forwarded_runtime_events, client_id);
 
-    for request_id in [3, 4] {
+    for request_id in [5, 6] {
         connection
             .send(&IpcRequest {
                 request_id,
@@ -7533,7 +7705,7 @@ fn a_ping_on_an_attached_stream_crosses_nothing_and_gets_no_answer() {
     }
     connection
         .send(&IpcRequest {
-            request_id: 5,
+            request_id: 7,
             request_kind: IpcRequestKind::Leaving { is_returning: true },
         })
         .expect("send leaving");
@@ -7615,24 +7787,12 @@ fn an_attach_answer_receipt_on_an_attached_stream_is_handed_over_and_gets_no_ans
     .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
-    connection
-        .send(&IpcRequest {
-            request_id: 4,
-            request_kind: IpcRequestKind::AttachAnswerReceived,
-        })
-        .expect("send the answer receipt");
-    let RuntimeEvent::ClientAttachAnswerReceived {
-        client_id: answered_client_id,
-    } = receive_forwarded_event(&forwarded_runtime_events)
-    else {
-        panic!("the first event handed over is the answer receipt");
-    };
+    receive_attach_answer_receipt(&forwarded_runtime_events, client_id);
     let rejected_command_id = CommandId::new();
     delivery_sender
         .try_send(build_invalid_state_rejection(rejected_command_id))
         .expect("the writing thread holds the delivery queue");
 
-    assert_eq!(answered_client_id, client_id);
     assert_eq!(
         connection.recv::<SessionEvent>().expect("the client reads"),
         build_invalid_state_rejection_event(rejected_command_id)
@@ -7643,6 +7803,55 @@ fn an_attach_answer_receipt_on_an_attached_stream_is_handed_over_and_gets_no_ans
     ipc_server.shutdown();
     dispatcher_thread.join().expect("dispatcher exits");
     delete_test_directory(&runtime_directory);
+}
+
+/// A client that sends a `Ping`, then `Keyboard`, before its attach answer
+/// receipt is detached: the dispatcher is handed the detach and no key.
+#[test]
+fn a_request_before_the_attach_answer_receipt_detaches_the_client_and_hands_over_no_key() {
+    let client_id = ClientId::new();
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
+        start_attachable_test_server("request-before-receipt", client_id);
+    let mut connection = open_attached_connection_over_link(
+        &runtime_directory,
+        session_id,
+        client_id,
+        false,
+        None,
+        None,
+    );
+
+    connection
+        .send(&IpcRequest {
+            request_id: 3,
+            request_kind: IpcRequestKind::Ping,
+        })
+        .expect("send the ping");
+    connection
+        .send(&IpcRequest {
+            request_id: 4,
+            request_kind: IpcRequestKind::Keyboard {
+                key_inputs: vec![build_key_input_for_chord(KeyChord::from_parts(
+                    BindingModifierFlags::NONE,
+                    Key::Char('a'),
+                ))],
+                painted_input_pane_moved_by_others_count: 0,
+            },
+        })
+        .expect("send the key");
+    let RuntimeEvent::ClientDetached {
+        client_id: detached_client_id,
+        has_sent_leaving,
+        ..
+    } = receive_forwarded_event(&received_runtime_events)
+    else {
+        panic!("the first event handed over is the detach");
+    };
+
+    assert_eq!((detached_client_id, has_sent_leaving), (client_id, false));
+
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
 }
 
 #[test]
@@ -8098,7 +8307,7 @@ fn a_local_attach_that_names_a_client_to_come_back_as_reports_it_returning_until
         let client_id = ClientId::new();
         let (ipc_server, session_id, runtime_directory, dispatcher_thread, received_runtime_events) =
             start_attachable_test_server("end-before-first-request", client_id);
-        let mut connection = attach_test_client_over_link(
+        let mut connection = open_attached_connection_over_link(
             &runtime_directory,
             session_id,
             client_id,
@@ -8107,9 +8316,10 @@ fn a_local_attach_that_names_a_client_to_come_back_as_reports_it_returning_until
             Some(client_id),
         );
         if has_sent_request {
+            send_attach_answer_received(&mut connection, 4);
             connection
                 .send(&IpcRequest {
-                    request_id: 3,
+                    request_id: 5,
                     request_kind: IpcRequestKind::Resize {
                         viewport_size: CLIENT_VIEWPORT_SIZE,
                         pane_area: None,
@@ -8238,6 +8448,7 @@ fn a_stream_the_session_closed_hands_over_one_detach_when_the_client_closes() {
     )
     .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
+    receive_attach_answer_receipt(&forwarded_runtime_events, client_id);
 
     // The closed queue ends the writing thread after its goodbye.
     drop(delivery_sender);
@@ -8296,6 +8507,7 @@ fn a_failed_write_detaches_a_client_whose_connection_stays_open() {
     )
     .expect("start serving");
     let connection = attach_test_client(&runtime_directory, session_id, client_id);
+    receive_attach_answer_receipt(&forwarded_runtime_events, client_id);
     // On Linux, a write to a peer that shut its read direction fails with
     // `EPIPE`. The client keeps its writing direction open.
     connection
@@ -8332,6 +8544,7 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
     let tab_id = TabId::new();
     let mut event_bus = EventBus::new();
     let (subscriber_id, delivery_receiver, writer_handoff) = event_bus.subscribe();
+    event_bus.release_attach_answer_hold(subscriber_id);
     for _ in 0..=SUBSCRIBER_QUEUE_CAPACITY {
         event_bus.publish(&build_test_placement_event(tab_id));
     }
@@ -8342,11 +8555,14 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
     let render_snapshot = build_alternating_grid_snapshot(ClientId::new(), 2, 2);
     let notification_queue =
         build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(SessionId::new()));
-    assert!(event_bus.try_resync(
-        subscriber_id,
-        Box::new(render_snapshot.clone()),
-        Box::new(notification_queue.clone()),
-    ));
+    assert_eq!(
+        event_bus.try_resync(
+            subscriber_id,
+            Box::new(render_snapshot.clone()),
+            Box::new(notification_queue.clone()),
+        ),
+        Some(1)
+    );
     event_bus.unsubscribe(subscriber_id);
     let ending_notice = Arc::clone(event_bus.get_ending_notice());
 

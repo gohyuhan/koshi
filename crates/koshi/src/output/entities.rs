@@ -9,6 +9,8 @@
 use super::*;
 use koshi_core::client::{compute_client_number, ClientOrigin};
 use koshi_core::geometry::PaneArea;
+use koshi_core::ids::LayoutAreaId;
+use koshi_link::discovery::PaneRowLayoutArea;
 
 /// Render a `list-sessions` answer.
 #[must_use]
@@ -244,6 +246,9 @@ struct PaneListingRow {
     tab_id: Option<String>,
     /// That tab's display name, or `None` for a floating pane.
     tab_name: Option<String>,
+    /// The id of the floating pane that holds the pane, as
+    /// `floating-pane-<uuid>`, or `None` for a tiled pane.
+    floating_pane_id: Option<String>,
     /// The id of the session holding the pane, as `session-<uuid>`.
     session_id: String,
     /// That session's display name.
@@ -306,6 +311,9 @@ struct PaneReport {
     /// The id of the tab whose layout holds the pane, as `tab-<uuid>`, or
     /// `None` for a floating pane.
     tab_id: Option<String>,
+    /// The id of the floating pane that holds the pane, as
+    /// `floating-pane-<uuid>`, or `None` for a tiled pane.
+    floating_pane_id: Option<String>,
     /// The id of the session holding the pane, as `session-<uuid>`.
     session_id: String,
     /// The pane's title, or `None` until the child sets one.
@@ -403,11 +411,20 @@ fn build_tab_listing_row(tab_row: &TabRow) -> TabListingRow {
 
 /// One [`PaneRow`] as both formats print it.
 fn build_pane_listing_row(pane_row: &PaneRow) -> PaneListingRow {
+    let (tab_id, tab_name, floating_pane_id) = match &pane_row.layout_area {
+        PaneRowLayoutArea::Tab { tab_id, tab_name } => {
+            (Some(tab_id.to_string()), Some(tab_name.clone()), None)
+        }
+        PaneRowLayoutArea::FloatingPane { floating_pane_id } => {
+            (None, None, Some(floating_pane_id.to_string()))
+        }
+    };
     PaneListingRow {
         pane_id: pane_row.pane_id.to_string(),
         pane_name: pane_row.pane_name.clone(),
-        tab_id: pane_row.tab_id.map(|tab_id| tab_id.to_string()),
-        tab_name: pane_row.tab_name.clone(),
+        tab_id,
+        tab_name,
+        floating_pane_id,
         session_id: pane_row.session_id.to_string(),
         session_name: pane_row.session_name.clone(),
     }
@@ -455,9 +472,14 @@ fn build_tab_report(tab_discovery: &TabDiscovery) -> TabReport {
 
 /// One [`PaneDiscovery`] as both formats print it.
 fn build_pane_report(pane_discovery: &PaneDiscovery) -> PaneReport {
+    let (tab_id, floating_pane_id) = match pane_discovery.layout_area_id {
+        LayoutAreaId::Tab(tab_id) => (Some(tab_id.to_string()), None),
+        LayoutAreaId::FloatingPane(floating_pane_id) => (None, Some(floating_pane_id.to_string())),
+    };
     PaneReport {
         pane_id: pane_discovery.pane_id.to_string(),
-        tab_id: pane_discovery.tab_id.map(|tab_id| tab_id.to_string()),
+        tab_id,
+        floating_pane_id,
         session_id: pane_discovery.session_id.to_string(),
         pane_title: pane_discovery.pane_title.clone(),
         working_directory: pane_discovery
@@ -503,7 +525,15 @@ const SESSION_ROW_HEADERS: &[&str] = &["id", "name", "server", "owner"];
 const TAB_ROW_HEADERS: &[&str] = &["id", "name", "session", "session_name"];
 
 /// Column headers for `list-panes`, matching [`format_pane_row_cells`].
-const PANE_ROW_HEADERS: &[&str] = &["id", "name", "tab", "tab_name", "session", "session_name"];
+const PANE_ROW_HEADERS: &[&str] = &[
+    "id",
+    "name",
+    "tab",
+    "tab_name",
+    "floating_pane",
+    "session",
+    "session_name",
+];
 
 /// Column headers for `list-clients`, matching [`format_client_row_cells`].
 const CLIENT_ROW_HEADERS: &[&str] = &["id", "number", "label", "session", "session_name"];
@@ -518,6 +548,7 @@ const TAB_HEADERS: &[&str] = &["id", "session", "name", "index", "active_pane", 
 const PANE_HEADERS: &[&str] = &[
     "id",
     "tab",
+    "floating_pane",
     "session",
     "title",
     "cwd",
@@ -570,26 +601,18 @@ fn format_tab_row_cells(tab: &TabListingRow) -> Vec<String> {
 }
 
 /// One [`PaneListingRow`] as table cells, in [`PANE_ROW_HEADERS`] order. A pane
-/// the child never titled prints `-`. A floating pane prints `float` as its tab
-/// and `-` as its tab name.
+/// the child never titled prints `-`. A floating pane prints `-` as its tab and
+/// tab name, and a tiled pane prints `-` as its floating pane.
 fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
     vec![
         pane.pane_id.clone(),
         format_optional_cell(pane.pane_name.as_ref()),
-        format_pane_tab_cell(pane.tab_id.as_ref()),
+        format_optional_cell(pane.tab_id.as_ref()),
         format_optional_cell(pane.tab_name.as_ref()),
+        format_optional_cell(pane.floating_pane_id.as_ref()),
         pane.session_id.clone(),
         pane.session_name.clone(),
     ]
-}
-
-/// The tab cell of a pane: the id of the tab whose layout holds it, or `float`
-/// for a floating pane.
-fn format_pane_tab_cell(tab_id: Option<&String>) -> String {
-    match tab_id {
-        Some(tab_id) => tab_id.clone(),
-        None => String::from("float"),
-    }
 }
 
 /// One [`ClientListingRow`] as table cells, in [`CLIENT_ROW_HEADERS`] order.
@@ -630,7 +653,8 @@ fn render_tab_fields(tab_report: &TabReport) -> Vec<String> {
 fn render_pane_fields(pane_report: &PaneReport) -> Vec<String> {
     vec![
         pane_report.pane_id.clone(),
-        format_pane_tab_cell(pane_report.tab_id.as_ref()),
+        format_optional_cell(pane_report.tab_id.as_ref()),
+        format_optional_cell(pane_report.floating_pane_id.as_ref()),
         pane_report.session_id.clone(),
         format_optional_cell(pane_report.pane_title.as_ref()),
         format_optional_cell(pane_report.working_directory.as_ref()),

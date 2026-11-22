@@ -30,6 +30,20 @@ pub(crate) enum PresenceChange {
     Disconnected,
 }
 
+impl PresenceChange {
+    /// The change whose notice a notice of this change takes the place of
+    /// when that notice is the session's newest entry: `Disconnected` for
+    /// `Reconnected`, `Reconnected` for `Disconnected`, and `None` for
+    /// `Joined` and `Left`.
+    pub(crate) fn find_replaced_presence_change(self) -> Option<PresenceChange> {
+        match self {
+            PresenceChange::Reconnected => Some(PresenceChange::Disconnected),
+            PresenceChange::Disconnected => Some(PresenceChange::Reconnected),
+            PresenceChange::Joined | PresenceChange::Left => None,
+        }
+    }
+}
+
 /// The text of the notice that reports `presence_change` for `client`, or
 /// `None` when no notice posts. `session_clients` are the client records
 /// `client`'s session holds after the change, attached or awaiting their
@@ -44,16 +58,7 @@ pub(crate) enum PresenceChange {
 /// counted client is of the host account and at least one counted client is
 /// of another person: the host's first terminal joins, or its last one
 /// leaves, while somebody else is attached or on the way back after a
-/// restart.
-///
-/// The text is the label, the client number in brackets
-/// ([`compute_client_number`]), and the words of the change:
-///
-/// - `Joined`: `joined remotely` for a remote client, `joined from another
-///   account on this machine` for another account, and `joined` for the host
-///   account;
-/// - `Reconnected`, `Left` and `Disconnected`: `reconnected`, `left` and
-///   `disconnected`.
+/// restart. The text is [`format_presence_notice`].
 ///
 /// Example: remote `bob` at `color_index` `1` that joined →
 /// `bob (2) joined remotely`; the host's terminal `host` at `0` that left
@@ -82,7 +87,23 @@ pub(crate) fn build_presence_notice<'a>(
             return None;
         }
     }
-    let change_words = match (presence_change, client_origin) {
+    Some(format_presence_notice(client, presence_change))
+}
+
+/// The text of the notice that reports `presence_change` for `client`: the
+/// label, the client number in brackets ([`compute_client_number`]), and the
+/// words of the change:
+///
+/// - `Joined`: `joined remotely` for a remote client, `joined from another
+///   account on this machine` for another account, and `joined` for the host
+///   account;
+/// - `Reconnected`, `Left` and `Disconnected`: `reconnected`, `left` and
+///   `disconnected`.
+///
+/// Example: remote `bob` at `color_index` `1` that reconnected →
+/// `bob (2) reconnected`.
+pub(crate) fn format_presence_notice(client: &Client, presence_change: PresenceChange) -> String {
+    let change_words = match (presence_change, client.get_origin()) {
         (PresenceChange::Joined, ClientOrigin::Remote) => "joined remotely",
         (
             PresenceChange::Joined,
@@ -95,11 +116,11 @@ pub(crate) fn build_presence_notice<'a>(
         (PresenceChange::Left, _) => "left",
         (PresenceChange::Disconnected, _) => "disconnected",
     };
-    Some(format!(
+    format!(
         "{} ({}) {change_words}",
         client.get_label(),
         compute_client_number(client.get_color_index())
-    ))
+    )
 }
 
 #[cfg(test)]

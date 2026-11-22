@@ -1942,11 +1942,26 @@ fn a_runnable_shell_subsequently_in_path_wins_over_one_that_carries_no_execute_b
     );
 }
 
+/// Whether this process runs as root: user id `0`.
+#[cfg(unix)]
+fn is_running_as_root() -> bool {
+    // SAFETY: `geteuid` reads this process's own identity, takes no argument,
+    // and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
 #[cfg(unix)]
 #[test]
 fn runtime_directory_fails_when_nothing_can_be_created_above_it() {
     use std::os::unix::fs::PermissionsExt;
 
+    if is_running_as_root() {
+        eprintln!(
+            "skipped `runtime_directory_fails_when_nothing_can_be_created_above_it`: \
+             root writes in a directory of mode 000; re-run as another user"
+        );
+        return;
+    }
     let test_directory = TempDir::new().unwrap();
     let sealed_directory = test_directory.path().join("sealed");
     fs::create_dir_all(&sealed_directory).unwrap();
@@ -2143,6 +2158,13 @@ fn runtime_directory_fails_when_a_name_above_it_is_a_regular_file() {
 fn shell_fails_when_the_execute_bits_do_not_apply_to_this_user() {
     use std::os::unix::fs::PermissionsExt;
 
+    if is_running_as_root() {
+        eprintln!(
+            "skipped `shell_fails_when_the_execute_bits_do_not_apply_to_this_user`: \
+             root runs a file that any execute bit is set on; re-run as another user"
+        );
+        return;
+    }
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
     doctor_context.shell_source = ShellSource::Config;

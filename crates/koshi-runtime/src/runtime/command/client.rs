@@ -6,13 +6,15 @@ use super::*;
 
 use std::collections::HashSet;
 
-use koshi_core::client::resolve_client_label;
+use koshi_core::client::{is_same_shown_label, resolve_client_label};
 use koshi_core::geometry::PixelCellSize;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
 
 use crate::runtime::event::AttachAccepted;
-use crate::runtime::presence_notice::{build_presence_notice, PresenceChange};
+use crate::runtime::presence_notice::{
+    build_presence_notice, format_presence_notice, PresenceChange,
+};
 use crate::runtime::saved_view::SavedView;
 use koshi_session::client::ArrivalNotice;
 
@@ -398,7 +400,10 @@ impl Server {
     /// `tab_id: None` for a floating pane. The events of the tab's solve
     /// ([`Self::reflow_tab_if_viewed`]) and its [`Event::PtyResized`] events
     /// follow it. A client that cannot draw floating panes minimizes, in that
-    /// solve, every floating pane the restored view shows.
+    /// solve, every floating pane the restored view shows. The session's
+    /// floating panes then reflow ([`Self::reflow_floating_panes`]), with this
+    /// client counted for each floating pane the restored view shows, and one
+    /// [`Event::PtyResized`] follows for each pane whose PTY size changed.
     ///
     /// Returns no event when the session or the client is gone.
     fn restore_saved_view(
@@ -465,6 +470,7 @@ impl Server {
             active_tab_id,
             &mut emitted_events,
         );
+        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
 
         emitted_events
     }
@@ -479,7 +485,9 @@ impl Server {
     /// focus, zoom, scrollback offsets, selections, floating view, lock mode,
     /// mouse selection mode, label and `color_index`, and the tab it moves off of
     /// reflows too. A fresh id is registered anew with a label and a
-    /// `color_index` that no attached client holds:
+    /// `color_index` that no attached client holds. A label is held when it
+    /// shows the same text as the label of an attached client
+    /// ([`is_same_shown_label`]):
     ///
     /// - the label is the label of `saved_view` while no attached client holds
     ///   it, else the label [`resolve_client_label`] gives for `client_origin`
@@ -570,18 +578,19 @@ impl Server {
             client.update_origin(client_origin);
             Some(previous_tab_id)
         } else {
-            let held_labels: HashSet<&str> = session
+            let held_labels: Vec<&str> = session
                 .clients
                 .list_attached_clients()
                 .map(Client::get_label)
                 .collect();
+            let is_label_held = |candidate_label: &str| {
+                held_labels
+                    .iter()
+                    .any(|held_label| is_same_shown_label(held_label, candidate_label))
+            };
             let label = match saved_view {
-                Some(saved_view) if !held_labels.contains(saved_view.label.as_str()) => {
-                    saved_view.label.clone()
-                }
-                _ => resolve_client_label(client_origin, granted_identity, |candidate_label| {
-                    held_labels.contains(candidate_label)
-                }),
+                Some(saved_view) if !is_label_held(&saved_view.label) => saved_view.label.clone(),
+                _ => resolve_client_label(client_origin, granted_identity, is_label_held),
             };
             let held_color_indexes: HashSet<u32> = session
                 .clients
@@ -767,8 +776,10 @@ impl Server {
         self.saved_view_store.save_client_view(client, detached_at);
     }
 
-    /// Take the proof that `client_id`'s viewer holds its attach answer: the
-    /// token its attach presented stops standing for it
+    /// Take the proof that `client_id`'s viewer holds its attach answer: every
+    /// subscriber that views `client_id` starts taking deliveries
+    /// ([`EventBus::release_attach_answer_hold`](crate::runtime::bus::EventBus::release_attach_answer_hold)),
+    /// the token its attach presented stops standing for it
     /// ([`SavedViewStore::release_presented_token`](crate::runtime::saved_view::SavedViewStore::release_presented_token)),
     /// and the arrival notice it owes the other clients
     /// ([`Client::get_unannounced_arrival`]) posts once, against the client
@@ -779,6 +790,12 @@ impl Server {
     /// Example: remote `bob` attaches as client `2` and its viewer reads the
     /// answer; every other client gets `bob (2) joined remotely`.
     pub(crate) fn handle_attach_answer_received(&mut self, client_id: ClientId) {
+        for frame_subscription in &self.subscriptions {
+            if frame_subscription.client_id == client_id {
+                self.event_bus
+                    .release_attach_answer_hold(frame_subscription.subscriber_id);
+            }
+        }
         self.saved_view_store.release_presented_token(client_id);
         let Some(session) = self.get_session_for_client_mut(client_id) else {
             return;
@@ -808,11 +825,18 @@ impl Server {
         ) else {
             return;
         };
+        let replaced_text =
+            presence_change
+                .find_replaced_presence_change()
+                .map(|replaced_presence_change| {
+                    format_presence_notice(client, replaced_presence_change)
+                });
         self.post_session_notification(
             session_id,
             NotificationSeverity::Info,
             &arrival_text,
             Some(client_id),
+            replaced_text.as_deref(),
         );
     }
 
@@ -988,19 +1012,26 @@ impl Server {
                 .filter(|_| is_arrival_announced)
                 .and_then(|presence_change| {
                     let session = self.session_by_id.get(&session_id)?;
-                    build_presence_notice(
+                    let departure_text = build_presence_notice(
                         &removed_client,
                         session.clients.list_attached_clients(),
                         presence_change,
-                    )
+                    )?;
+                    let replaced_text = presence_change.find_replaced_presence_change().map(
+                        |replaced_presence_change| {
+                            format_presence_notice(&removed_client, replaced_presence_change)
+                        },
+                    );
+                    Some((departure_text, replaced_text))
                 });
 
-        if let Some(departure_notice) = departure_notice {
+        if let Some((departure_text, replaced_text)) = departure_notice {
             self.post_session_notification(
                 session_id,
                 NotificationSeverity::Info,
-                &departure_notice,
+                &departure_text,
                 Some(client_id),
+                replaced_text.as_deref(),
             );
         }
 
@@ -1333,7 +1364,9 @@ impl Server {
     /// floating panes and focuses it ([`Client::focus_floating_pane`]). Either
     /// change emits one [`Event::FloatingPaneMinimizedChanged`] that names
     /// every pane of the floating pane, then one [`Event::PaneFocused`] when
-    /// the client's input moved to a pane. A view that already has the asked
+    /// the client's input moved to a pane, then one [`Event::PtyResized`] per
+    /// pane whose PTY size the client's change moved
+    /// ([`Self::reflow_floating_panes`]). A view that already has the asked
     /// state changes nothing and emits nothing. Every other client's view
     /// stays as it is.
     pub(super) fn handle_pane_minimize_change(
@@ -1411,7 +1444,9 @@ impl Server {
     ///
     /// A change emits one [`Event::FloatingPaneMinimizedChanged`] per changed
     /// floating pane, in that order, then one [`Event::PaneFocused`] when the
-    /// client's input moved to a pane. With no floating pane to change,
+    /// client's input moved to a pane, then one [`Event::PtyResized`] per pane
+    /// whose PTY size the client's change moved
+    /// ([`Self::reflow_floating_panes`]). With no floating pane to change,
     /// nothing changes and nothing is emitted.
     /// Every other client's view stays as it is.
     pub(super) fn handle_all_floating_panes_minimize_change(

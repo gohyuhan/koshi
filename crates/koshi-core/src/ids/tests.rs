@@ -48,6 +48,43 @@ fn id_display_includes_each_type_prefix() {
         SubscriberId::from_uuid(uuid).to_string(),
         "subscriber-00000000-0000-0000-0000-000000000000"
     );
+    let floating_pane_id: FloatingPaneId =
+        serde_json::from_value(serde_json::json!(uuid)).expect("a bare uuid deserializes");
+    assert_eq!(
+        floating_pane_id.to_string(),
+        "floating-pane-00000000-0000-0000-0000-000000000000"
+    );
+}
+
+#[test]
+fn layout_area_id_serializes_as_its_case_and_the_bare_uuid() {
+    let uuid = Uuid::nil();
+    let floating_pane_id: FloatingPaneId =
+        serde_json::from_value(serde_json::json!(uuid)).expect("a bare uuid deserializes");
+    let layout_area_ids = [
+        LayoutAreaId::Tab(TabId::from_uuid(uuid)),
+        LayoutAreaId::FloatingPane(floating_pane_id),
+    ];
+
+    let serialized_layout_area_ids: Vec<String> = layout_area_ids
+        .iter()
+        .map(|layout_area_id| serde_json::to_string(layout_area_id).expect("serialize"))
+        .collect();
+    let deserialized_layout_area_ids: Vec<LayoutAreaId> = serialized_layout_area_ids
+        .iter()
+        .map(|serialized_layout_area_id| {
+            serde_json::from_str(serialized_layout_area_id).expect("deserialize")
+        })
+        .collect();
+
+    assert_eq!(
+        serialized_layout_area_ids,
+        [
+            r#"{"Tab":"00000000-0000-0000-0000-000000000000"}"#,
+            r#"{"FloatingPane":"00000000-0000-0000-0000-000000000000"}"#,
+        ]
+    );
+    assert_eq!(deserialized_layout_area_ids, layout_area_ids);
 }
 
 #[test]

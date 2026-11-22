@@ -125,7 +125,12 @@ pub(crate) fn apply_mouse_actions(
                 is_scrolling_up,
                 arrow_count,
             } => {
-                server.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                server.write_alternate_scroll_arrows(
+                    client_id,
+                    pane_id,
+                    is_scrolling_up,
+                    arrow_count,
+                );
             }
             MouseAction::Resize {
                 pane_id,

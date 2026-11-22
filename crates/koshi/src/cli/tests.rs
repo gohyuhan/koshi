@@ -5147,8 +5147,10 @@ fn every_id_the_json_output_prints_parses_back_through_its_target_flag() {
         &[koshi_link::discovery::PaneRow {
             pane_id,
             pane_name: None,
-            tab_id: Some(tab_id),
-            tab_name: Some("editor".to_string()),
+            layout_area: koshi_link::discovery::PaneRowLayoutArea::Tab {
+                tab_id,
+                tab_name: "editor".to_string(),
+            },
             session_id,
             session_name: "quiet-lake".to_string(),
         }],

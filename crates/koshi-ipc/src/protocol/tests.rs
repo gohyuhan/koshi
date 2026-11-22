@@ -27,7 +27,7 @@ use koshi_core::event::RejectReason;
 use koshi_core::geometry::{
     AxisPercent, Direction, FloatingPaneDimension, FloatingPaneSize, PaneArea, Point, Rect, Size,
 };
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, LayoutAreaId, PaneId, SessionId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
 };
@@ -209,7 +209,7 @@ fn build_populated_test_session_overview() -> SessionOverview {
         }],
         panes: vec![PaneDiscovery {
             pane_id,
-            tab_id: Some(tab_id),
+            layout_area_id: LayoutAreaId::Tab(tab_id),
             session_id,
             pane_title: Some("vim".to_string()),
             working_directory: Some(PathBuf::from("/home/user")),
@@ -653,7 +653,7 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
             }],
             "panes": [{
                 "pane_id": "00000000-0000-0000-0000-000000000001",
-                "tab_id": "00000000-0000-0000-0000-000000000001",
+                "layout_area_id": { "Tab": "00000000-0000-0000-0000-000000000001" },
                 "session_id": "00000000-0000-0000-0000-000000000001",
                 "pane_title": "vim",
                 "working_directory": "/home/user",

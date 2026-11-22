@@ -91,7 +91,8 @@ impl Server {
     /// nothing changes. The designated client is the source's focus client
     /// alone ([`Self::resolve_new_pane_source`]), and
     /// [`pane_ops::commit_new_pane_in_floating_pane`] focuses the new pane for
-    /// it. The floating panes' PTYs reflow ([`Self::reflow_floating_panes`]).
+    /// it. The floating panes' PTYs reflow at the commit
+    /// ([`Self::commit_events_with_floating_reflow`]).
     ///
     /// A [`NewPanePlacement::Floating`] placement goes to
     /// [`Self::handle_new_floating_pane`].
@@ -289,20 +290,20 @@ impl Server {
 
         // Reflow the target tree's live panes to the smallest rect a viewer
         // draws each in. The pane just spawned resizes only when that rect
-        // differs from the size it was spawned at.
-        match new_pane_target.layout_area_id {
-            LayoutAreaId::Tab(tab_id) => self.reflow_tab_if_viewed(
-                pty_backend.as_ref(),
-                new_pane_target.session_id,
-                tab_id,
-                &mut emitted_events,
-            ),
-            LayoutAreaId::FloatingPane(_) => self.reflow_floating_panes(
-                pty_backend.as_ref(),
-                new_pane_target.session_id,
-                &mut emitted_events,
-            ),
-        }
+        // differs from the size it was spawned at. A floating pane's tree
+        // reflows at the commit.
+        let floating_reflow_session_id = match new_pane_target.layout_area_id {
+            LayoutAreaId::Tab(tab_id) => {
+                self.reflow_tab_if_viewed(
+                    pty_backend.as_ref(),
+                    new_pane_target.session_id,
+                    tab_id,
+                    &mut emitted_events,
+                );
+                None
+            }
+            LayoutAreaId::FloatingPane(_) => Some(new_pane_target.session_id),
+        };
 
         // Adoption moved a client off its previous tab; if that tab still has a
         // viewer, reflow its live panes to the tab size it now sizes against. A
@@ -316,7 +317,11 @@ impl Server {
             );
         }
 
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(
+            command_id,
+            floating_reflow_session_id,
+            emitted_events,
+        ))
     }
 
     /// The spawn specification a [`Command::NewPane`] launches: an explicit
@@ -608,7 +613,6 @@ impl Server {
         floating_pane_id: FloatingPaneId,
         pane_id: PaneId,
     ) -> Result<CommandResult, Rejection> {
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -624,18 +628,19 @@ impl Server {
             client.clear_floating_pane_zoom(floating_pane_id);
         }
 
-        let mut emitted_events = remove_pane_from_floating_pane(session, pane_id);
+        let emitted_events = remove_pane_from_floating_pane(session, pane_id);
         let is_floating_pane_kept = session
             .floating_set
             .find_floating_pane_by_id(floating_pane_id)
             .is_some();
 
         self.release_pane_bookkeeping(session_id, pane_id);
-        if is_floating_pane_kept {
-            self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
-        }
         self.kill_pane_off_thread(pane_id, kill_policy);
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(
+            command_id,
+            is_floating_pane_kept.then_some(session_id),
+            emitted_events,
+        ))
     }
 
     /// Handle [`Command::CloseFloatingPane`]: close every pane of the floating
@@ -883,6 +888,7 @@ impl Server {
                         NotificationSeverity::Error,
                         &pane_exit_notice,
                         None,
+                        None,
                     );
                 }
                 return emitted_events;
@@ -928,6 +934,7 @@ impl Server {
                     session_id,
                     NotificationSeverity::Error,
                     &pane_exit_notice,
+                    None,
                     None,
                 );
             }
@@ -1089,7 +1096,6 @@ impl Server {
         pane_target: &PaneTarget,
         floating_pane_id: FloatingPaneId,
     ) -> Result<(CommandResult, Option<u16>), Rejection> {
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let pane_sizing = self.get_pane_sizing();
         let resizing_client_id = pane_target
             .focusing_client_id
@@ -1144,13 +1150,12 @@ impl Server {
         )];
         emitted_events
             .extend(session.update_floating_pane_layout(floating_pane_id, resized_layout_tree));
-        self.reflow_floating_panes(
-            pty_backend.as_ref(),
-            pane_target.session_id,
-            &mut emitted_events,
-        );
         Ok((
-            self.commit_events(command_id, emitted_events),
+            self.commit_events_with_floating_reflow(
+                command_id,
+                Some(pane_target.session_id),
+                emitted_events,
+            ),
             Some(moved_cell_count),
         ))
     }
@@ -1175,7 +1180,6 @@ impl Server {
             desired_size,
             top_left_cell,
         } = floating_pane_resize;
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -1192,9 +1196,7 @@ impl Server {
             let _ = client.set_floating_pane_position(floating_pane_id, top_left_cell);
         }
 
-        let mut emitted_events = Vec::new();
-        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(command_id, Some(session_id), Vec::new()))
     }
 
     /// Handle [`Command::MovePane`]: swap the selected pane with its visible
@@ -1293,7 +1295,6 @@ impl Server {
             floating_pane_id,
             pane_id,
         } = floating_pane_view_target;
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let pane_sizing = self.get_pane_sizing();
         let session = self
             .session_by_id
@@ -1357,8 +1358,7 @@ impl Server {
                 emitted_events.extend(build_pane_focused_event(client, previous_focused_pane_id));
             }
         }
-        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(command_id, Some(session_id), emitted_events))
     }
 
     /// Run the pane placement that `client_id` confirmed from its preview
@@ -1804,12 +1804,11 @@ impl Server {
                 &mut emitted_events,
             );
         }
-        self.reflow_floating_panes(
-            pty_backend.as_ref(),
-            undock_target.session_id,
-            &mut emitted_events,
-        );
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(
+            command_id,
+            Some(undock_target.session_id),
+            emitted_events,
+        ))
     }
 
     /// Dock the panes `dock_source` names into `dock_target`'s destination tab
@@ -1969,14 +1968,11 @@ impl Server {
                 &mut emitted_events,
             );
         }
-        if is_source_floating_pane_kept {
-            self.reflow_floating_panes(
-                pty_backend.as_ref(),
-                dock_target.session_id,
-                &mut emitted_events,
-            );
-        }
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(
+            command_id,
+            is_source_floating_pane_kept.then_some(dock_target.session_id),
+            emitted_events,
+        ))
     }
 
     /// Apply a checked swap, insertion or stack within one tab. A swap or a
@@ -2304,8 +2300,10 @@ impl Server {
     /// retargeted the zoom, then one [`Event::FloatingPaneMinimizedChanged`] per
     /// floating pane minimized, then [`Event::PaneFocused`] when the client's
     /// input actually moved, naming as `previous_pane_id` the pane that took it
-    /// before; focusing the pane that already takes the client's input
-    /// completes with no events. A rejected focus mutates nothing.
+    /// before, then one [`Event::PtyResized`] per pane whose PTY size the
+    /// minimize moved ([`Self::commit_events`]); focusing the pane that
+    /// already takes the client's input completes with no events. A rejected
+    /// focus mutates nothing.
     pub(super) fn handle_focus_pane(
         &mut self,
         command_id: CommandId,
@@ -2430,13 +2428,16 @@ impl Server {
     /// A pane that takes the client's input already, with no stack member to
     /// open and no zoom to move, completes with no events. Otherwise, when a
     /// stack member opened or the zoom moved,
-    /// [`Event::FloatingPaneLayoutChanged`] and one [`Event::PtyResized`] per
-    /// resized PTY come first ([`Self::reflow_floating_panes`]). Then one
+    /// [`Event::FloatingPaneLayoutChanged`] comes first. Then one
     /// [`Event::FloatingPaneMinimizedChanged`] with `is_minimized: false`
     /// reports a floating pane the client had minimized, and one
     /// [`Event::PaneFocused`] with `tab_id: None` names the pane and, as
-    /// `previous_pane_id`, the pane that took the client's input before. Every
-    /// other client's view stays as it is.
+    /// `previous_pane_id`, the pane that took the client's input before. Then
+    /// one [`Event::PtyResized`] follows per pane whose PTY size the opened
+    /// member, the moved zoom or the restore changed: the floating panes
+    /// reflow once, at the commit
+    /// ([`Self::commit_events_with_floating_reflow`]). Every other client's
+    /// view stays as it is.
     fn handle_focus_floating_pane(
         &mut self,
         command_id: CommandId,
@@ -2448,7 +2449,6 @@ impl Server {
             floating_pane_id,
             pane_id,
         } = *floating_pane_view_target;
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -2498,6 +2498,7 @@ impl Server {
         let focus_events =
             apply_floating_pane_focus(client, &session.floating_set, floating_pane_id, pane_id);
         let mut emitted_events = Vec::new();
+        let mut floating_reflow_session_id = None;
         if is_stack_member_opened || is_layout_mode_retargeted {
             emitted_events.push(Event::FloatingPaneLayoutChanged(
                 FloatingPaneLayoutChanged {
@@ -2505,10 +2506,14 @@ impl Server {
                         .list_pane_ids(),
                 },
             ));
-            self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
+            floating_reflow_session_id = Some(session_id);
         }
         emitted_events.extend(focus_events);
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(
+            command_id,
+            floating_reflow_session_id,
+            emitted_events,
+        ))
     }
 
     /// Handle [`Command::TogglePaneFullscreen`]: switch the **target client's**
@@ -2539,7 +2544,9 @@ impl Server {
     /// Emits [`Event::LayoutChanged`] plus one [`Event::PtyResized`] per PTY
     /// whose solved size changed, then, on entry, one
     /// [`Event::FloatingPaneMinimizedChanged`] per floating pane minimized and the
-    /// [`Event::PaneFocused`] of a focus that moved. A pane another client
+    /// [`Event::PaneFocused`] of a focus that moved, then one
+    /// [`Event::PtyResized`] per pane whose PTY size the minimize moved
+    /// ([`Self::commit_events`]). A pane another client
     /// still draws tiled keeps the size that client shows. A rejected toggle
     /// mutates nothing. A pane inside a floating pane toggles through
     /// [`Self::toggle_pane_fullscreen_in_floating_pane`].
@@ -2650,11 +2657,13 @@ impl Server {
     ///   the pane at its content minimum is [`RejectReason::InvalidState`]
     ///   `not enough space to fullscreen the pane`, and nothing changes.
     ///
-    /// Emits [`Event::FloatingPaneLayoutChanged`] plus one
-    /// [`Event::PtyResized`] per resized PTY ([`Self::reflow_floating_panes`]),
-    /// then, on entry, the [`Event::FloatingPaneMinimizedChanged`] of a
-    /// floating pane restored for the client and the [`Event::PaneFocused`] of
-    /// an input that moved. In `[vim | htop]`, a zoom of `htop` gives `htop`'s
+    /// Emits [`Event::FloatingPaneLayoutChanged`], then, on entry, the
+    /// [`Event::FloatingPaneMinimizedChanged`] of a floating pane restored for
+    /// the client and the [`Event::PaneFocused`] of an input that moved, then
+    /// one [`Event::PtyResized`] per pane whose PTY size the zoom or the
+    /// restore changed: the floating panes reflow once, at the commit
+    /// ([`Self::commit_events_with_floating_reflow`]). In `[vim | htop]`, a
+    /// zoom of `htop` gives `htop`'s
     /// PTY the floating pane's whole content area, unless another client
     /// draws `htop` smaller.
     fn toggle_pane_fullscreen_in_floating_pane(
@@ -2668,7 +2677,6 @@ impl Server {
             floating_pane_id,
             pane_id,
         } = *floating_pane_view_target;
-        let pty_backend = Arc::clone(self.get_pty_backend());
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -2717,9 +2725,8 @@ impl Server {
                     .list_pane_ids(),
             },
         )];
-        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
         emitted_events.extend(focus_events);
-        Ok(self.commit_events(command_id, emitted_events))
+        Ok(self.commit_events_with_floating_reflow(command_id, Some(session_id), emitted_events))
     }
 
     /// Handle [`Command::WriteToPane`]: inject raw bytes into a pane's child
@@ -2728,7 +2735,9 @@ impl Server {
     ///
     /// The write changes no session state, and a successful write commits no
     /// events; the child's response returns
-    /// through the normal PTY output path. A backend write failure is
+    /// through the normal PTY output path. A write from a key binding or a
+    /// mouse action of a client marks the pane for the other clients' frames
+    /// ([`Self::record_client_input_in_pane`]). A backend write failure is
     /// reported to the caller as [`RejectReason::InvalidState`] `pane is not
     /// accepting input`: for example, the backend holds no entry for the pane,
     /// the pane's writer ended with its child, or the pane's input queue is
@@ -2759,8 +2768,15 @@ impl Server {
         // Bytes that reach the child count as input from the acting client —
         // the client whose focus picked the pane, else the issuing client —
         // the same as if typed there: the client's highlight drops and its
-        // view follows back to live output. An empty payload leaves both alone.
+        // view follows back to live output. Bytes from a key binding or a
+        // mouse action mark the pane for the other clients' frames as input
+        // of the issuing client. An empty payload changes none of these.
         if !command_args.pane_input_bytes.is_empty() {
+            if let CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } =
+                command_source
+            {
+                self.record_client_input_in_pane(*client_id, pane_target.pane_id);
+            }
             if let Some(client_id) = pane_target
                 .focusing_client_id
                 .or(command_source.get_client_id())
