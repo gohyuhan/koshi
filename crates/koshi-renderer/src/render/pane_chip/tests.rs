@@ -1460,7 +1460,7 @@ fn a_stack_header_chip_is_hoverable_and_names_its_peer() {
     assert_eq!(
         find_client_chip_hover(
             frame_layout,
-            frame_geometry.get_client_chip_groups(),
+            &frame_geometry.client_chip_groups,
             hit_region,
             pointer_position,
         ),
@@ -1505,7 +1505,7 @@ fn a_recent_input_chip_that_expires_under_the_pointer_opens_no_tooltip() {
     );
     assert!(find_client_chip_hover(
         frame_layout,
-        frame_geometry.get_client_chip_groups(),
+        &frame_geometry.client_chip_groups,
         hit_region,
         pointer_position,
     )
@@ -1528,7 +1528,7 @@ fn a_recent_input_chip_that_expires_under_the_pointer_opens_no_tooltip() {
     assert_eq!(
         find_client_chip_hover(
             expired_frame_layout,
-            expired_frame_geometry.get_client_chip_groups(),
+            &expired_frame_geometry.client_chip_groups,
             expired_hit_region,
             pointer_position
         ),
@@ -1582,7 +1582,7 @@ fn a_floating_pane_over_a_chip_makes_that_chip_not_hoverable() {
     assert_eq!(
         find_client_chip_hover(
             frame_layout,
-            frame_geometry.get_client_chip_groups(),
+            &frame_geometry.client_chip_groups,
             hit_region,
             pointer_position
         ),

@@ -33,6 +33,20 @@ fn build_tooltip_frame(
     viewport_column_count: u16,
     viewport_row_count: u16,
 ) -> (RenderSnapshot, CommittedRegions, PaneId) {
+    build_tooltip_frame_with_client_color_indexes(
+        0,
+        1..=peer_count,
+        viewport_column_count,
+        viewport_row_count,
+    )
+}
+
+fn build_tooltip_frame_with_client_color_indexes(
+    viewer_color_index: u32,
+    peer_color_indexes: impl IntoIterator<Item = u32>,
+    viewport_column_count: u16,
+    viewport_row_count: u16,
+) -> (RenderSnapshot, CommittedRegions, PaneId) {
     let pane_id = PaneId::new();
     let viewport_size = Size {
         column_count: viewport_column_count,
@@ -50,8 +64,10 @@ fn build_tooltip_frame(
         LockMode::Normal,
         viewport_size,
     );
+    render_snapshot.client_snapshot.color_index = viewer_color_index;
     render_snapshot.client_snapshot.label = "alice".to_string();
-    render_snapshot.session_snapshot.peers = (1..=peer_count)
+    render_snapshot.session_snapshot.peers = peer_color_indexes
+        .into_iter()
         .map(|color_index| build_peer_snapshot(color_index, None))
         .collect();
     let committed_regions = build_core_regions(viewport_column_count, viewport_row_count);
@@ -168,7 +184,7 @@ fn solve_tooltip_in_viewport(
     )
 }
 
-fn line_text(line: &Line<'_>) -> String {
+fn format_line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())
@@ -188,7 +204,7 @@ fn set_peer(
     peer_snapshot.typed_pane_id = typed_pane_id;
 }
 
-fn hovered_target(
+fn find_hovered_target(
     render_snapshot: &RenderSnapshot,
     hit_region: HitRegion,
     pointer_position: Point,
@@ -263,28 +279,32 @@ fn four_clients_draw_three_chips_and_a_mark_for_the_other_one() {
 
 #[test]
 fn nineteen_clients_with_the_viewer_tenth_draw_the_viewer_the_first_two_peers_and_sixteen_more() {
-    let (render_snapshot, _, _) =
-        build_tooltip_frame(18, VIEWPORT_COLUMN_COUNT, VIEWPORT_ROW_COUNT);
+    let (render_snapshot, committed_regions, _) = build_tooltip_frame_with_client_color_indexes(
+        9,
+        (0..=18).filter(|color_index| *color_index != 9),
+        VIEWPORT_COLUMN_COUNT,
+        VIEWPORT_ROW_COUNT,
+    );
 
     let client_chip_group = build_tab_strip_chip_group(&render_snapshot);
 
     assert_eq!(
         client_chip_group,
         ClientChipGroup {
-            start_column: 53,
+            start_column: 52,
             client_chip_spans: vec![
                 ClientChipSpan {
-                    color_index: 0,
+                    color_index: 9,
                     is_viewer_chip: true,
-                    start_column: 53,
+                    start_column: 52,
                 },
                 ClientChipSpan {
-                    color_index: 1,
+                    color_index: 0,
                     is_viewer_chip: false,
                     start_column: 57,
                 },
                 ClientChipSpan {
-                    color_index: 2,
+                    color_index: 1,
                     is_viewer_chip: false,
                     start_column: 61,
                 },
@@ -294,6 +314,18 @@ fn nineteen_clients_with_the_viewer_tenth_draw_the_viewer_the_first_two_peers_an
                 client_count: 16,
             }),
         }
+    );
+
+    let buffer = render_frame_to_buffer(
+        &render_snapshot,
+        &committed_regions,
+        &Theme::default(),
+        &KeymapHints::default(),
+        ViewerChrome::default(),
+    );
+    assert_eq!(
+        crate::render::tests::format_rendered_cells(&buffer, 0, 52..68),
+        " 10   1   2  +16"
     );
 }
 
@@ -320,7 +352,7 @@ fn every_cell_of_a_tab_strip_chip_opens_its_client_tooltip() {
                 row: 0,
             };
             assert_eq!(
-                hovered_target(&render_snapshot, HitRegion::Tabline, pointer_position),
+                find_hovered_target(&render_snapshot, HitRegion::Tabline, pointer_position),
                 Some(expected_targets[span_index]),
                 "span {span_index} column offset {column_offset}"
             );
@@ -335,7 +367,7 @@ fn the_blank_cell_between_two_tab_strip_chips_opens_no_tooltip() {
     let first_chip_end_column = client_chip_group.client_chip_spans[0].start_column + 3;
 
     assert_eq!(
-        symbol_at(
+        format_row_symbols(
             &render_snapshot,
             first_chip_end_column,
             client_chip_group.client_chip_spans[1].start_column,
@@ -343,7 +375,7 @@ fn the_blank_cell_between_two_tab_strip_chips_opens_no_tooltip() {
         " "
     );
     assert_eq!(
-        hovered_target(
+        find_hovered_target(
             &render_snapshot,
             HitRegion::Tabline,
             Point {
@@ -364,7 +396,7 @@ fn every_cell_of_the_hidden_client_mark_opens_the_hidden_list() {
 
     for column_offset in 0..compute_hidden_client_mark_width(hidden_client_mark.client_count) {
         assert_eq!(
-            hovered_target(
+            find_hovered_target(
                 &render_snapshot,
                 HitRegion::Tabline,
                 Point {
@@ -377,7 +409,11 @@ fn every_cell_of_the_hidden_client_mark_opens_the_hidden_list() {
     }
 }
 
-fn symbol_at(render_snapshot: &RenderSnapshot, left_column: u16, right_column: u16) -> String {
+fn format_row_symbols(
+    render_snapshot: &RenderSnapshot,
+    left_column: u16,
+    right_column: u16,
+) -> String {
     let committed_regions = build_core_regions(VIEWPORT_COLUMN_COUNT, VIEWPORT_ROW_COUNT);
     let buffer = render_frame_to_buffer(
         render_snapshot,
@@ -445,7 +481,7 @@ fn a_pane_chip_under_the_open_tray_opens_no_tooltip() {
     assert_eq!(
         find_client_chip_hover(
             frame_layout,
-            frame_geometry.get_client_chip_groups(),
+            &frame_geometry.client_chip_groups,
             hit_region,
             pointer_position
         ),
@@ -511,7 +547,7 @@ fn a_pane_chip_under_a_toast_opens_no_tooltip() {
     assert_eq!(
         find_client_chip_hover(
             frame_layout,
-            frame_geometry.get_client_chip_groups(),
+            &frame_geometry.client_chip_groups,
             HitRegion::PaneBorder {
                 pane_id,
                 side: Direction::Up,
@@ -528,7 +564,7 @@ fn a_chip_cell_outside_the_tabline_hit_region_opens_no_tooltip() {
     let (render_snapshot, _, _) = build_tooltip_frame(1, VIEWPORT_COLUMN_COUNT, VIEWPORT_ROW_COUNT);
 
     assert_eq!(
-        hovered_target(
+        find_hovered_target(
             &render_snapshot,
             HitRegion::PaneContent {
                 pane_id: PaneId::new(),
@@ -639,9 +675,9 @@ fn a_remote_peer_names_its_remote_origin() {
 
     let tooltip = solve_tab_strip_tooltip(&render_snapshot, hover);
 
-    assert_eq!(line_text(&tooltip.title), " 2 bob ");
+    assert_eq!(format_line_text(&tooltip.title), " 2 bob ");
     assert_eq!(tooltip.text_rows.len(), 1);
-    assert_eq!(line_text(&tooltip.text_rows[0]), "remote");
+    assert_eq!(format_line_text(&tooltip.text_rows[0]), "remote");
 }
 
 #[test]
@@ -662,7 +698,7 @@ fn a_peer_of_another_account_on_this_machine_names_that_account() {
     let tooltip = solve_tab_strip_tooltip(&render_snapshot, hover);
 
     assert_eq!(
-        line_text(&tooltip.text_rows[0]),
+        format_line_text(&tooltip.text_rows[0]),
         "another account on this machine"
     );
 }
@@ -682,7 +718,7 @@ fn a_peer_of_this_account_names_this_account() {
 
     let tooltip = solve_tab_strip_tooltip(&render_snapshot, hover);
 
-    assert_eq!(line_text(&tooltip.text_rows[0]), "this account");
+    assert_eq!(format_line_text(&tooltip.text_rows[0]), "this account");
 }
 
 #[test]
@@ -692,9 +728,9 @@ fn the_viewers_own_chip_names_you_with_one_text_row() {
 
     let tooltip = solve_tab_strip_tooltip(&render_snapshot, hover);
 
-    assert_eq!(line_text(&tooltip.title), " 1 alice ");
+    assert_eq!(format_line_text(&tooltip.title), " 1 alice ");
     assert_eq!(tooltip.text_rows.len(), 1);
-    assert_eq!(line_text(&tooltip.text_rows[0]), "you");
+    assert_eq!(format_line_text(&tooltip.text_rows[0]), "you");
 }
 
 // --- the text of the hidden list --------------------------------------------
@@ -727,13 +763,13 @@ fn the_hidden_list_names_each_hidden_client_in_the_groups_order() {
         build_tab_strip_mark_hover(&render_snapshot),
     );
 
-    assert_eq!(line_text(&tooltip.title), " 2 more ");
+    assert_eq!(format_line_text(&tooltip.title), " 2 more ");
     assert_eq!(tooltip.text_rows.len(), 2);
     assert_eq!(
-        line_text(&tooltip.text_rows[0]),
+        format_line_text(&tooltip.text_rows[0]),
         " 4 host-2 another account on this machine"
     );
-    assert_eq!(line_text(&tooltip.text_rows[1]), " 5 dave   remote");
+    assert_eq!(format_line_text(&tooltip.text_rows[1]), " 5 dave   remote");
 }
 
 #[test]
@@ -766,7 +802,7 @@ fn a_hidden_label_takes_one_column_after_the_widest_hidden_label() {
     assert_eq!(compute_line_cell_count(&tooltip.text_rows[0]), 48);
     assert_eq!(compute_line_cell_count(&tooltip.text_rows[1]), 48);
     assert_eq!(
-        line_text(&tooltip.text_rows[1]),
+        format_line_text(&tooltip.text_rows[1]),
         format!(" 5 界界{}this account", " ".repeat(29))
     );
 }
@@ -784,8 +820,66 @@ fn a_hidden_list_cuts_its_rows_and_counts_the_clients_left_out() {
 
     assert_eq!(tooltip.text_rows.len(), 3);
     assert_eq!(
-        line_text(&tooltip.text_rows[2]),
+        format_line_text(&tooltip.text_rows[2]),
         "…and 16 more · koshi list-clients"
+    );
+}
+
+#[test]
+fn a_pane_of_102_peers_lists_nine_hidden_clients_and_counts_ninety_more() {
+    let (mut render_snapshot, committed_regions, pane_id) =
+        build_tooltip_frame(102, VIEWPORT_COLUMN_COUNT, 15);
+    for peer_snapshot in &mut render_snapshot.session_snapshot.peers {
+        peer_snapshot.label = format!("peer-{}", peer_snapshot.color_index);
+        peer_snapshot.origin = ClientOrigin::Remote;
+        peer_snapshot.typed_pane_id = Some(pane_id);
+    }
+    let viewport_area = RatatuiRect::new(0, 0, VIEWPORT_COLUMN_COUNT, 15);
+    let client_chip_groups =
+        build_client_chip_groups(&render_snapshot, &committed_regions, viewport_area);
+    let pane_chip_group = client_chip_groups
+        .pane_chip_groups
+        .find_pane_chip_group(pane_id, false)
+        .expect("the pane border draws a chip group");
+    let hidden_client_mark = pane_chip_group
+        .client_chip_group
+        .hidden_client_mark
+        .expect("the pane border draws a hidden client mark");
+    let tooltip = solve_tooltip_in_viewport(
+        &render_snapshot,
+        viewport_area,
+        ClientChipHover::Pane {
+            pane_id,
+            is_on_stack_header: false,
+            target: ClientChipHoverTarget::HiddenClients,
+            row_index: pane_chip_group.row_index,
+            start_column: hidden_client_mark.start_column,
+        },
+    )
+    .expect("the hidden client list opens a box");
+
+    assert_eq!(format_line_text(&tooltip.title), " 99 more ");
+    assert_eq!(tooltip.text_rows.len(), 10);
+    let expected_text_rows = (4..=12)
+        .map(|color_index| {
+            let client_number = color_index + 1;
+            let label = format!("peer-{color_index}");
+            format!(
+                " {client_number} {label}{}remote",
+                " ".repeat(8 - label.len())
+            )
+        })
+        .chain(std::iter::once(
+            "…and 90 more · koshi list-clients".to_string(),
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tooltip
+            .text_rows
+            .iter()
+            .map(format_line_text)
+            .collect::<Vec<_>>(),
+        expected_text_rows
     );
 }
 
@@ -801,7 +895,7 @@ fn a_hidden_list_takes_at_most_ten_text_rows() {
 
     assert_eq!(tooltip.text_rows.len(), 10);
     assert_eq!(
-        line_text(&tooltip.text_rows[9]),
+        format_line_text(&tooltip.text_rows[9]),
         "…and 9 more · koshi list-clients"
     );
 }
@@ -931,7 +1025,10 @@ fn opening_the_box_lists_the_rows_it_covers() {
     )
     .expect("the frame is compared row by row");
 
-    assert_eq!(changed_screen_rows, tooltip.list_rows().collect::<Vec<_>>());
+    assert_eq!(
+        changed_screen_rows,
+        (tooltip.get_rect().y..tooltip.get_rect().bottom()).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -981,9 +1078,8 @@ fn a_tooltip_change_lists_the_rows_of_the_old_and_the_new_box() {
     assert_ne!(previous_tooltip, *next_tooltip);
     assert_eq!(
         changed_screen_rows,
-        previous_tooltip
-            .list_rows()
-            .chain(next_tooltip.list_rows())
+        (previous_tooltip.get_rect().y..previous_tooltip.get_rect().bottom())
+            .chain(next_tooltip.get_rect().y..next_tooltip.get_rect().bottom())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>()

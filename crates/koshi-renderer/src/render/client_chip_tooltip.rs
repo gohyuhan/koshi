@@ -302,11 +302,12 @@ pub(crate) fn solve_client_chip_tooltip(
             )
         }
         ClientChipHoverTarget::HiddenClients => {
-            let hidden_clients = list_hidden_clients(render_snapshot, client_chip_groups, hover)?;
-            let hidden_client_count = hidden_clients.len();
+            let hidden_client_list =
+                list_hidden_clients(render_snapshot, client_chip_groups, hover)?;
+            let hidden_client_count = hidden_client_list.hidden_client_count;
             (
                 Line::from(format!(" {hidden_client_count} more ")),
-                build_hidden_client_rows(&hidden_clients, theme),
+                build_hidden_client_rows(&hidden_client_list.visible_clients, theme),
                 Some(hidden_client_count),
             )
         }
@@ -495,18 +496,26 @@ fn find_hovered_chip_target(
         ))
 }
 
-/// The hidden clients of the group of `hover`, in the group's order.
+/// The hidden clients of the group of `hover`, in the group's order: how many
+/// there are, and the first
+/// [`MAX_CLIENT_CHIP_TOOLTIP_TEXT_ROW_COUNT`] of them. A hidden client whose
+/// peer is absent gives `None`.
 fn list_hidden_clients<'a>(
     render_snapshot: &'a RenderSnapshot,
     client_chip_groups: &PaintedClientChipGroups,
     hover: ClientChipHover,
-) -> Option<Vec<TooltipClient<'a>>> {
+) -> Option<HiddenClientList<'a>> {
     match hover {
         ClientChipHover::TabStrip { .. } => {
             let tabline_layout = client_chip_groups.tabline_layout.as_ref()?;
             let client_chip_group = tabline_layout.client_chip_group.as_ref()?;
             let hidden_client_mark = client_chip_group.hidden_client_mark?;
-            let hidden_clients = std::iter::once(TooltipClient::Viewer {
+            let hidden_client_count = 1 + render_snapshot.session_snapshot.peers.len()
+                - client_chip_group.client_chip_spans.len();
+            if hidden_client_count != hidden_client_mark.client_count {
+                return None;
+            }
+            let visible_clients = std::iter::once(TooltipClient::Viewer {
                 color_index: render_snapshot.client_snapshot.color_index,
                 label: &render_snapshot.client_snapshot.label,
             })
@@ -518,8 +527,12 @@ fn list_hidden_clients<'a>(
                     .map(TooltipClient::Peer),
             )
             .skip(client_chip_group.client_chip_spans.len())
-            .collect::<Vec<_>>();
-            (hidden_clients.len() == hidden_client_mark.client_count).then_some(hidden_clients)
+            .take(MAX_CLIENT_CHIP_TOOLTIP_TEXT_ROW_COUNT)
+            .collect();
+            Some(HiddenClientList {
+                hidden_client_count,
+                visible_clients,
+            })
         }
         ClientChipHover::Pane {
             pane_id,
@@ -531,11 +544,19 @@ fn list_hidden_clients<'a>(
                 .find_pane_chip_group(pane_id, is_on_stack_header)?;
             let client_chip_group = &pane_chip_group.client_chip_group;
             let hidden_client_mark = client_chip_group.hidden_client_mark?;
-            let hidden_clients = pane_chip_group
+            let hidden_client_ids = pane_chip_group
                 .client_ids
+                .get(client_chip_group.client_chip_spans.len()..)?;
+            if hidden_client_ids.len() != hidden_client_mark.client_count {
+                return None;
+            }
+            let visible_client_count = hidden_client_ids
+                .len()
+                .min(MAX_CLIENT_CHIP_TOOLTIP_TEXT_ROW_COUNT);
+            let visible_clients = hidden_client_ids
                 .iter()
-                .skip(client_chip_group.client_chip_spans.len())
-                .filter_map(|client_id| {
+                .take(visible_client_count)
+                .map(|client_id| {
                     render_snapshot
                         .session_snapshot
                         .peers
@@ -543,10 +564,20 @@ fn list_hidden_clients<'a>(
                         .find(|peer_snapshot| peer_snapshot.client_id == *client_id)
                         .map(TooltipClient::Peer)
                 })
-                .collect::<Vec<_>>();
-            (hidden_clients.len() == hidden_client_mark.client_count).then_some(hidden_clients)
+                .collect::<Option<Vec<_>>>()?;
+            Some(HiddenClientList {
+                hidden_client_count: hidden_client_mark.client_count,
+                visible_clients,
+            })
         }
     }
+}
+
+/// The hidden clients of one group: how many exist, and the first
+/// [`MAX_CLIENT_CHIP_TOOLTIP_TEXT_ROW_COUNT`] in group order.
+struct HiddenClientList<'a> {
+    hidden_client_count: usize,
+    visible_clients: Vec<TooltipClient<'a>>,
 }
 
 /// The title of one client's tooltip: its chip, its label, and the blank cell
@@ -597,14 +628,16 @@ fn build_hidden_client_rows(
         .collect()
 }
 
-/// The first `row_count` rows of `client_text_rows`. When rows do not all fit,
-/// the last kept row counts the clients left out.
+/// The rows to draw for `hidden_client_count` hidden clients: all of them
+/// when they fit in `row_count`, otherwise the first `row_count - 1` rows and
+/// a last row counting the clients left out.
 fn cut_hidden_client_rows(
     mut client_text_rows: Vec<Line<'static>>,
     row_count: usize,
     hidden_client_count: usize,
 ) -> Vec<Line<'static>> {
-    if client_text_rows.len() <= row_count {
+    if hidden_client_count <= row_count {
+        client_text_rows.truncate(hidden_client_count);
         return client_text_rows;
     }
     if row_count == 0 {

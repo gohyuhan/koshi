@@ -217,7 +217,7 @@ pub(crate) fn handle_mouse_and_update_pointer_hover(
 }
 
 /// A frame holding one plain terminal pane, focused.
-fn build_one_pane_mouse_frame(mouse_pane: MousePane) -> MouseFrame {
+pub(crate) fn build_one_pane_mouse_frame(mouse_pane: MousePane) -> MouseFrame {
     let pane_id = mouse_pane.pane_id;
     build_mouse_frame(&[mouse_pane], Some(pane_id))
 }
@@ -6406,14 +6406,7 @@ fn a_chip_that_leaves_under_the_pointer_closes_the_tooltip() {
         .collect();
     let client_chip_groups = solve_mouse_frame_client_chip_groups(&mouse_frame);
     mouse_frame.client_chip_groups = client_chip_groups.clone();
-    let chip_pointer_position = Point {
-        column: client_chip_groups
-            .get_first_tabline_chip_start_column()
-            .expect("the viewer chip is drawn"),
-        row: client_chip_groups
-            .get_tabline_row()
-            .expect("the tab strip has a row"),
-    };
+    let chip_pointer_position = Point { column: 53, row: 0 };
     let mut client = build_test_client();
     handle_mouse_and_update_pointer_hover(
         &mut client,
@@ -6421,9 +6414,13 @@ fn a_chip_that_leaves_under_the_pointer_closes_the_tooltip() {
         &mouse_frame,
         Instant::now(),
     );
-    assert!(
-        client.pointer_hover.client_chip_hover.is_some(),
-        "the viewer chip at the computed column is hovered"
+    assert_eq!(
+        client.pointer_hover.client_chip_hover,
+        Some(ClientChipHover::TabStrip {
+            target: ClientChipHoverTarget::ViewerClient,
+            row_index: 0,
+            start_column: 53,
+        })
     );
     let mut removed_mouse_frame = mouse_frame.clone();
     removed_mouse_frame.session_snapshot.peers.clear();

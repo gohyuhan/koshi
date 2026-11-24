@@ -215,27 +215,6 @@ pub struct PaintedClientChipGroups {
     pub(crate) pane_chip_groups: FramePaneChipGroups,
 }
 
-impl PaintedClientChipGroups {
-    /// The row the tab strip draws on, or `None` when the frame draws no tab strip.
-    #[must_use]
-    pub fn get_tabline_row(&self) -> Option<u16> {
-        self.tabline_row
-    }
-
-    /// The column of the first tab strip chip, or `None` when the tab strip
-    /// draws no chip.
-    #[must_use]
-    pub fn get_first_tabline_chip_start_column(&self) -> Option<u16> {
-        self.tabline_layout
-            .as_ref()?
-            .client_chip_group
-            .as_ref()?
-            .client_chip_spans
-            .first()
-            .map(|client_chip_span| client_chip_span.start_column)
-    }
-}
-
 /// One layer of panes in a frame. Layers sort back to front: the active
 /// tab's tiled layout, then each floating pane this viewer draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -295,13 +274,6 @@ impl<'a> FrameGeometry<'a> {
     #[must_use]
     pub fn get_client_chip_tooltip(&self) -> Option<&ClientChipTooltip> {
         self.client_chip_tooltip.as_ref()
-    }
-
-    /// The tabline layout and pane chip groups the frame draws. Hover reads
-    /// them through [`find_client_chip_hover`].
-    #[must_use]
-    pub fn get_client_chip_groups(&self) -> &PaintedClientChipGroups {
-        &self.client_chip_groups
     }
 
     /// The cells the placement hover tint covers on `frame_layer`. Empty when

@@ -26,7 +26,7 @@ fn build_client_chip_groups(
         ratatui::layout::Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
         &crate::theme::Theme::default(),
     )
-    .get_client_chip_groups()
+    .client_chip_groups
     .clone()
 }
 

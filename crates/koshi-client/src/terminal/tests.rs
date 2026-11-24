@@ -161,7 +161,9 @@ use koshi_renderer::snapshot::{
     CommittedRegions, GridView, LayoutAreaSnapshot, PaneSlot, PeerSnapshot, PlacementSnapshot,
     PlacementSource, PlacementTabSnapshot, RenderSnapshot, TabSnapshot, ViewerChrome,
 };
-use koshi_renderer::{build_image_cell_snapshot, build_image_paints};
+use koshi_renderer::{
+    build_image_cell_snapshot, build_image_paints, ClientChipHover, ClientChipHoverTarget,
+};
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_terminal::engine::TerminalEngine;
@@ -5466,24 +5468,25 @@ fn a_chip_hover_change_lists_the_rows_of_its_tooltip() {
         frame_layout,
         &client_chip_groups,
         HitRegion::Tabline,
-        Point {
-            column: client_chip_groups
-                .get_first_tabline_chip_start_column()
-                .expect("the viewer chip is drawn"),
-            row: client_chip_groups
-                .get_tabline_row()
-                .expect("the tab strip has a row"),
-        },
+        Point { column: 57, row: 0 },
     )
-    .expect("two peers draw a client chip group");
+    .expect("the viewer chip draws its tooltip");
+    assert_eq!(
+        client_chip_hover,
+        ClientChipHover::TabStrip {
+            target: ClientChipHoverTarget::ViewerClient,
+            row_index: 0,
+            start_column: 57,
+        }
+    );
     let mut changed_frame_inputs = frame_inputs.clone();
     changed_frame_inputs.viewer_chrome.client_chip_hover = Some(client_chip_hover);
     let changed_geometry = build_frame_inputs_geometry(&changed_frame_inputs);
-    let tooltip_rows = changed_geometry
+    let tooltip = changed_geometry
         .get_client_chip_tooltip()
-        .expect("the viewer chip draws its tooltip")
-        .list_rows()
-        .collect::<Vec<_>>();
+        .expect("the viewer chip draws its tooltip");
+    let tooltip_rows = tooltip.list_rows().collect::<Vec<_>>();
+    assert_eq!(tooltip_rows, vec![1, 2, 3]);
 
     assert_eq!(
         frame_inputs.list_changed_screen_rows(&changed_frame_inputs, &changed_geometry),

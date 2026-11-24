@@ -891,8 +891,8 @@ pub struct MouseFrame {
     pub viewer_chrome: ViewerChrome,
     /// The notification cards and the toast this frame drew.
     pub drawn_notifications: DrawnNotifications,
-    /// The tabline layout and pane chip groups this frame drew. Hover reads
-    /// them instead of solving the chips again.
+    /// The tabline layout and pane chip groups the next mouse event is placed
+    /// against. Hover reads them instead of solving the chips again.
     pub client_chip_groups: crate::render::PaintedClientChipGroups,
 }
 
@@ -923,9 +923,9 @@ impl MouseFrame {
         }
     }
 
-    /// Build a mouse frame from a borrowed render snapshot, the regions it was
-    /// painted with, the viewer chrome it was painted with, and the
-    /// notification cards and the toast it drew.
+    /// Build a mouse frame from a borrowed render snapshot, the regions and
+    /// chrome the next mouse event is placed against, the notification cards
+    /// and the toast it drew, and the client chip groups the event reads.
     ///
     /// The mouse frame copies session, client, and per-pane input data. It does
     /// not copy pane grids.
