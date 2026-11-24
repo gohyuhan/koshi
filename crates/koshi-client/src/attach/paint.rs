@@ -144,6 +144,8 @@ fn build_render_snapshot_with_images(
                 .map(|frame_peer| PeerSnapshot {
                     client_id: frame_peer.client_id,
                     color_index: frame_peer.color_index,
+                    label: frame_peer.label.clone(),
+                    origin: frame_peer.origin,
                     typed_pane_id: frame_peer.typed_pane_id,
                     recent_input_pane_ids: frame_peer.recent_input_pane_ids.clone(),
                 })
@@ -160,6 +162,7 @@ fn build_render_snapshot_with_images(
         client_snapshot: ClientSnapshot {
             client_id: painted_frame.client_snapshot.client_id,
             color_index: painted_frame.client_snapshot.color_index,
+            label: painted_frame.client_snapshot.label.clone(),
             viewport_size: painted_frame.client_snapshot.viewport_size,
             active_tab_id: painted_frame.client_snapshot.active_tab_id,
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,

@@ -1576,6 +1576,7 @@ pub(crate) fn build_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id,
             color_index: 0,
+            label: String::new(),
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id,
             focused_pane_id: None,

@@ -217,6 +217,8 @@ impl Server {
                 PeerSnapshot {
                     client_id,
                     color_index: peer_client.get_color_index(),
+                    label: peer_client.get_label().to_owned(),
+                    origin: peer_client.get_origin(),
                     typed_pane_id,
                     recent_input_pane_ids: peer_input_view.map_or_else(
                         Vec::new,
@@ -358,17 +360,18 @@ fn list_floating_pane_slots(session: &Session, client: &Client) -> Vec<FloatingP
         .collect()
 }
 
-/// The viewer state of `client` that a frame carries: its id, index, viewport
-/// size, active tab, the pane that takes its input, its focused pane in the
-/// active tab, lock mode, last settled lock command, last applied floating
-/// pane move and pane placement, whether mouse-select is on, the pane a
-/// keystroke types into as the last check recorded it, how many times others
+/// The viewer state of `client` that a frame carries: its id, index, label,
+/// viewport size, active tab, the pane that takes its input, its focused pane
+/// in the active tab, lock mode, last settled lock command, last applied
+/// floating pane move and pane placement, whether mouse-select is on, the pane
+/// a keystroke types into as the last check recorded it, how many times others
 /// moved its input to another pane, and how many of its key and paste
 /// requests the session dropped.
 fn build_client_snapshot(client: &Client) -> ClientSnapshot {
     ClientSnapshot {
         client_id: client.get_client_id(),
         color_index: client.get_color_index(),
+        label: client.get_label().to_owned(),
         viewport_size: client.get_viewport_size(),
         active_tab_id: client.get_active_tab_id(),
         focused_pane_id: client.get_active_focused_pane_id(),

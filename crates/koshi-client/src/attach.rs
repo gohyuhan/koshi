@@ -173,6 +173,7 @@ use std::time::{Duration, Instant, SystemTime};
 use ratatui::backend::Backend;
 use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
+use ratatui::layout::Rect as RatatuiRect;
 
 use crate::floating_pane_tray::FloatingPaneTrayAnchor;
 use crate::input::{InputReadStamp, KeyOutcome, RequestedClientActionFit};
@@ -190,7 +191,7 @@ use koshi_core::constant::{compute_frame_interval, compute_heartbeat_interval};
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PixelCellSize, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
-use koshi_core::key::{KeyInput, KeySequence};
+use koshi_core::key::{KeyEventKind, KeyInput, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput};
 use koshi_core::notification::NotificationQueue;
@@ -219,6 +220,7 @@ use koshi_renderer::snapshot::{
     PanePlacementPresentation, PaneSnapshot, PlacementPreview, PlacementTabSnapshot, Reconnecting,
     RenderSnapshot, TabSnapshot, ViewerChrome,
 };
+use koshi_renderer::{solve_painted_client_chip_groups, PaintedClientChipGroups};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::painted_update::{
     PaintedUpdateReceiver, ReceivedPaintedFrame, SessionFrame,
@@ -566,11 +568,26 @@ fn update_painted_pointer_hover(
     committed_regions: &CommittedRegions,
     displayed_active_tab_id: TabId,
     viewer_paint: &mut ViewerPaint,
-) {
-    client.update_pointer_hover_for_frame(
-        mouse_frame_snapshot.build_painted_frame_layout(viewer_paint.chrome, committed_regions),
+) -> PaintedClientChipGroups {
+    let frame_layout =
+        mouse_frame_snapshot.build_painted_frame_layout(viewer_paint.chrome, committed_regions);
+    let viewport_size = client.get_viewport_size();
+    let viewport_area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: viewport_size.column_count,
+        height: viewport_size.row_count,
+    };
+    let client_chip_groups = solve_painted_client_chip_groups(
+        mouse_frame_snapshot,
+        committed_regions,
+        viewer_paint.chrome,
+        viewport_area,
+        client.get_theme(),
     );
+    client.update_pointer_hover_for_frame(frame_layout, &client_chip_groups);
     viewer_paint.chrome = client.build_viewer_chrome(displayed_active_tab_id, committed_regions);
+    client_chip_groups
 }
 
 /// The second line of a placement message while the session refuses the
@@ -1065,7 +1082,7 @@ impl<B: Backend> Screen<B> {
             snapshot,
             &committed_regions,
         );
-        update_painted_pointer_hover(
+        let client_chip_groups = update_painted_pointer_hover(
             client,
             if placement_display.is_some() {
                 displayed_snapshot
@@ -1097,6 +1114,7 @@ impl<B: Backend> Screen<B> {
             placement_display
                 .as_ref()
                 .map(|placement_display| &placement_display.displayed_tab_snapshot),
+            &client_chip_groups,
         ) {
             Ok(()) => {
                 if is_native_image_output {
@@ -1147,6 +1165,7 @@ impl<B: Backend> Screen<B> {
             committed_regions,
             painted_viewer_chrome,
             drawn_notifications,
+            client_chip_groups,
         );
         client.record_painted_input_view(
             PaintedInputView {
@@ -1265,7 +1284,7 @@ impl<B: Backend> Screen<B> {
             snapshot
         };
         let shown_pointer_hover = client.pointer_hover;
-        update_painted_pointer_hover(
+        let client_chip_groups = update_painted_pointer_hover(
             client,
             mouse_frame_snapshot,
             &self.committed_regions,
@@ -1293,6 +1312,7 @@ impl<B: Backend> Screen<B> {
             placement_display
                 .as_ref()
                 .map(|placement_display| &placement_display.displayed_tab_snapshot),
+            &client_chip_groups,
         )) {
             client.pointer_hover = shown_pointer_hover;
             return None;
@@ -1316,6 +1336,7 @@ impl<B: Backend> Screen<B> {
             self.committed_regions.clone(),
             painted_viewer_chrome,
             drawn_notifications,
+            client_chip_groups,
         ))
     }
 
@@ -6479,6 +6500,9 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
+            if key_input.key_event_kind != KeyEventKind::Release {
+                client.close_client_chip_tooltip();
+            }
             // A release has no binding chord. Pane placement mode, the move
             // chooser, and floating pane move mode own releases while on; every
             // other release goes to the focused pane.

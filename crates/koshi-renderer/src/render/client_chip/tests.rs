@@ -101,3 +101,25 @@ fn a_room_for_the_mark_alone_counts_every_client_and_a_smaller_room_gives_none()
         None
     );
 }
+
+#[test]
+fn the_cap_and_the_room_together_drop_chips_into_the_mark() {
+    let client_chip_group =
+        solve_client_chip_group((0..6).map(|client_index| (client_index, false)), 6, 8, 20);
+
+    assert_eq!(
+        client_chip_group,
+        Some(ClientChipGroup {
+            start_column: 14,
+            client_chip_spans: vec![ClientChipSpan {
+                color_index: 0,
+                is_viewer_chip: false,
+                start_column: 14,
+            }],
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 18,
+                client_count: 5,
+            }),
+        })
+    );
+}

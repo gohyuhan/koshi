@@ -234,6 +234,7 @@ pub(crate) fn build_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id,
             color_index: 0,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,
@@ -861,6 +862,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         FrameClient {
             client_id: render_snapshot.client_snapshot.client_id,
             color_index: 300,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6

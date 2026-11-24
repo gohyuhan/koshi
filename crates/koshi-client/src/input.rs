@@ -463,13 +463,14 @@ impl Client {
 
     /// End what a loss of the outer terminal's focus ends: a grab-handle
     /// drag, pane placement mode that waits for no placement, the move
-    /// chooser, floating pane move mode that waits for no move, and the
-    /// floating pane tray. Sends nothing.
+    /// chooser, floating pane move mode that waits for no move, the floating
+    /// pane tray, and the client chip tooltip. Sends nothing.
     pub(crate) fn handle_outer_terminal_focus_lost(&mut self) {
         self.cancel_floating_pane_move_drag();
         self.cancel_placement_mode();
         self.close_pane_move_mode();
         self.close_floating_pane_tray();
+        self.close_client_chip_tooltip();
     }
 
     /// Whether floating pane move mode waits for the session's answer to the

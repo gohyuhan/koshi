@@ -5,9 +5,9 @@
 use ratatui::layout::Rect as RatatuiRect;
 
 use koshi_core::geometry::Point;
-use koshi_core::ids::PaneId;
+use koshi_core::ids::{ClientId, PaneId};
 
-use crate::snapshot::{LayoutAreaSnapshot, RenderSnapshot};
+use crate::snapshot::{LayoutAreaSnapshot, SessionSnapshot};
 use crate::theme::ClientColor;
 
 use super::client_chip::{
@@ -40,6 +40,9 @@ pub(crate) struct PaneChipGroup {
     /// The colors of the peers whose keys reach the pane, in `color_index`
     /// order. The chips drawn take the first of them, in order.
     pub(crate) client_colors: Vec<ClientColor>,
+    /// The ids of the peers whose keys reach the pane, in the same order as
+    /// `client_colors`.
+    pub(crate) client_ids: Vec<ClientId>,
 }
 
 /// The pane chip groups of one frame
@@ -62,6 +65,20 @@ impl FramePaneChipGroups {
             .pane_chip_groups
             .partition_point(|pane_chip_group| pane_chip_group.frame_layer <= frame_layer);
         &self.pane_chip_groups[layer_start_index..layer_end_index]
+    }
+
+    /// The group of `pane_id` drawn on the pane's stack header when
+    /// `is_on_stack_header` is `true`, else on its top border. `None` when the
+    /// pane has no such group.
+    pub(super) fn find_pane_chip_group(
+        &self,
+        pane_id: PaneId,
+        is_on_stack_header: bool,
+    ) -> Option<&PaneChipGroup> {
+        self.pane_chip_groups.iter().find(|pane_chip_group| {
+            pane_chip_group.pane_id == pane_id
+                && pane_chip_group.is_on_stack_header == is_on_stack_header
+        })
     }
 
     /// The row of each group that one of these groups and
@@ -144,15 +161,14 @@ struct PaneChipRoom {
 /// starts at buffer `(0, 1)` gives ` 2 ` on columns `25` to `27` of row `1`:
 /// `┌─── vim ──────────────── 2 ─┐`.
 pub(super) fn list_frame_pane_chip_groups(
-    render_snapshot: &RenderSnapshot,
+    session_snapshot: &SessionSnapshot,
     client_colors: &[ClientColor],
     layout_origin: Point,
     viewport_area: RatatuiRect,
     placed_floating_panes: &[PlacedFloatingPane<'_>],
 ) -> FramePaneChipGroups {
     let peer_client_colors = client_colors.iter().skip(1);
-    let mut typed_peers: Vec<(PaneId, u32, ClientColor)> = render_snapshot
-        .session_snapshot
+    let mut typed_peers: Vec<(PaneId, u32, ClientColor, ClientId)> = session_snapshot
         .peers
         .iter()
         .zip(peer_client_colors)
@@ -161,21 +177,25 @@ pub(super) fn list_frame_pane_chip_groups(
                 .typed_pane_id
                 .iter()
                 .chain(&peer_snapshot.recent_input_pane_ids)
-                .map(|pane_id| (*pane_id, peer_snapshot.color_index, *client_color))
+                .map(|pane_id| {
+                    (
+                        *pane_id,
+                        peer_snapshot.color_index,
+                        *client_color,
+                        peer_snapshot.client_id,
+                    )
+                })
         })
         .collect();
     if typed_peers.is_empty() {
         return FramePaneChipGroups::default();
     }
     typed_peers
-        .sort_unstable_by_key(|(typed_pane_id, color_index, _)| (*typed_pane_id, *color_index));
+        .sort_unstable_by_key(|(typed_pane_id, color_index, _, _)| (*typed_pane_id, *color_index));
 
     let active_tab_layer = (
         FrameLayer::ActiveTab,
-        &render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .layout_area,
+        &session_snapshot.active_tab_snapshot.layout_area,
         layout_origin,
     );
     let floating_pane_layers = placed_floating_panes.iter().enumerate().map(
@@ -213,7 +233,7 @@ pub(super) fn list_frame_pane_chip_groups(
             let Some(client_chip_group) = solve_client_chip_group(
                 pane_peers
                     .iter()
-                    .map(|(_, color_index, _)| (*color_index, false)),
+                    .map(|(_, color_index, _, _)| (*color_index, false)),
                 pane_peers.len(),
                 group_room_width,
                 pane_chip_room.end_column,
@@ -228,7 +248,11 @@ pub(super) fn list_frame_pane_chip_groups(
                 client_chip_group,
                 client_colors: pane_peers
                     .iter()
-                    .map(|(_, _, client_color)| *client_color)
+                    .map(|(_, _, client_color, _)| *client_color)
+                    .collect(),
+                client_ids: pane_peers
+                    .iter()
+                    .map(|(_, _, _, client_id)| *client_id)
                     .collect(),
             });
         }

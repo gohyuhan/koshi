@@ -87,7 +87,7 @@ use koshi_renderer::snapshot::{
     PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
     TabMetadata, TabSnapshot,
 };
-use koshi_renderer::{resolve_hit_region, HitRegion};
+use koshi_renderer::{resolve_hit_region, ClientChipHover, ClientChipHoverTarget, HitRegion};
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
@@ -285,6 +285,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
         client_snapshot: FrameClient {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
@@ -5427,6 +5428,52 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
 }
 
 #[test]
+fn a_key_press_closes_the_chip_tooltip_and_still_goes_up_the_connection_whole() {
+    let mut client = build_test_client();
+    client.pointer_hover.client_chip_hover = Some(ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: 0,
+        start_column: 54,
+    });
+    let client_id = client.get_client_id();
+    let mut control_socket = build_test_control_socket();
+    let key_input = crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Char('a'),
+    ));
+
+    process_runtime_input(
+        &mut client,
+        &mut control_socket.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: key_input.clone(),
+        },
+        Instant::now(),
+    );
+
+    assert_eq!(client.pointer_hover.client_chip_hover, None);
+    assert!(client.is_client_chip_hover_suppressed);
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the key");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Keyboard {
+                key_inputs: vec![key_input],
+                painted_input_pane_moved_by_others_count: 0,
+            },
+        }
+    );
+}
+
+#[test]
 fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
@@ -6440,6 +6487,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),

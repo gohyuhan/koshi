@@ -19,6 +19,7 @@
 
 use std::num::NonZeroUsize;
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -105,10 +106,9 @@ pub struct FrameSession {
 
 /// One other client attached to the session the viewing client sees.
 ///
-/// A client with index `1` whose keys reach a pane travels as
-/// `{"client_id": …, "color_index": 1, "typed_pane_id": …,
-/// "recent_input_pane_ids": []}`, and with its floating pane tray open as
-/// `{"client_id": …, "color_index": 1, "typed_pane_id": null,
+/// A client with index `1`, label `bob`, remote origin, and keys that reach
+/// a pane travels as `{"client_id": …, "color_index": 1, "label": "bob",
+/// "origin": "Remote", "typed_pane_id": …,
 /// "recent_input_pane_ids": []}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePeer {
@@ -117,6 +117,12 @@ pub struct FramePeer {
     /// The other client's index as the session assigned it, held by no other
     /// attached client.
     pub color_index: u32,
+    /// The other client's label: at most
+    /// [`MAX_CLIENT_LABEL_CELL_COUNT`](koshi_core::client::MAX_CLIENT_LABEL_CELL_COUNT)
+    /// cells, cleaned by the client label rules. Fixed at attach.
+    pub label: String,
+    /// Whether the other client runs on this machine, and under which account.
+    pub origin: ClientOrigin,
     /// The pane the other client's keys reach, or `None` when they reach no
     /// pane: it focuses none, that pane is suppressed or hidden behind a pane
     /// it zoomed, or its viewer keeps its keys in a local input mode, such as
@@ -653,6 +659,10 @@ pub struct FrameClient {
     /// The client's index as the session assigned it, held by no other
     /// attached client. The same for every frame of one connection.
     pub color_index: u32,
+    /// The client's label: at most
+    /// [`MAX_CLIENT_LABEL_CELL_COUNT`](koshi_core::client::MAX_CLIENT_LABEL_CELL_COUNT)
+    /// cells, cleaned by the client label rules. Fixed at attach.
+    pub label: String,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is viewing.

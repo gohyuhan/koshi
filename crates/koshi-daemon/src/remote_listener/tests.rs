@@ -3253,12 +3253,12 @@ fn a_bridge_to_a_session_whose_swap_window_passes_with_nothing_advertised_does_n
         session_id: SessionId::new(),
     };
     let remaining_window_duration = Duration::from_millis(300);
+    let open_started_at = Instant::now();
     write_aged_resume_file(
         runtime_directory.path(),
         located_session.session_id,
         koshi_ipc::endpoint::RESTART_WINDOW_DURATION - remaining_window_duration,
     );
-    let open_started_at = Instant::now();
 
     let session_bridge = open_local_session_bridge_across_restart(
         &located_session,

@@ -72,6 +72,7 @@ use koshi_renderer::snapshot::{
     PlacementSnapshot, RenderSnapshot, SessionSnapshot,
 };
 use koshi_renderer::theme::Theme;
+use koshi_renderer::ClientChipHover;
 
 use crate::input::InputReadClock;
 use crate::mouse::{LastPress, LeftButtonGesture, MouseCapture, SentFloatingPaneMove, TablinePeek};
@@ -285,6 +286,9 @@ struct PointerHover {
     /// every pane. The renderer draws an unfocused hovered pane in the hover
     /// color.
     hovered_pane_id: Option<PaneId>,
+    /// The client chip or `+N` mark the pointer is over, or `None` over no
+    /// chip. The renderer opens the client chip tooltip at it.
+    client_chip_hover: Option<ClientChipHover>,
     /// Where the pointer rests on a pane's placement handle or on the tiled
     /// top border that shows it, or `None` off both.
     placement_handle_hover: Option<PlacementHandleHover>,
@@ -439,6 +443,9 @@ pub struct Client {
     pointer_position: Option<Point>,
     /// What this viewer's pointer is over at `pointer_position`.
     pointer_hover: PointerHover,
+    /// Whether a key press or focus loss closed the client chip tooltip. The
+    /// tooltip reopens at the next mouse event.
+    is_client_chip_hover_suppressed: bool,
     /// Whether this viewer holds a link to its session, and how it is getting
     /// one back when it does not. The tabline draws
     /// `RECONNECTING (attempt 4, retry in 8s)` while it holds
@@ -513,6 +520,7 @@ impl Client {
             selection_scroll_origin_row_index: None,
             pointer_position: None,
             pointer_hover: PointerHover::default(),
+            is_client_chip_hover_suppressed: false,
             link_status: LinkStatus::Linked,
             placement_state: PlacementState::default(),
             active_tab_id: None,

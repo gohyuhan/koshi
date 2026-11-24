@@ -25,6 +25,7 @@ use koshi_test_support::fixtures::build_floating_pane_id;
 
 use super::*;
 
+use crate::snapshot::CommittedRegions;
 use crate::theme::Theme;
 
 use ratatui::buffer::CellWidth;
@@ -125,6 +126,7 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: Some(tiled_pane_id),
@@ -311,10 +313,9 @@ fn list_core_placed_floating_panes<'a>(
     viewer_chrome: ViewerChrome,
 ) -> Vec<PlacedFloatingPane<'a>> {
     let viewport_size = render_snapshot.client_snapshot.viewport_size;
+    let frame_layout = render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
     list_placed_floating_panes(
-        render_snapshot,
-        committed_regions,
-        viewer_chrome,
+        frame_layout,
         RatatuiRect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
     )
 }

@@ -13,6 +13,7 @@
 //! step draws every row.
 
 use super::*;
+use koshi_renderer::build_frame_geometry;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
@@ -51,6 +52,50 @@ fn paint_frame<B: Backend>(
 /// [`paint_frame_with_writer`]. The frame bytes the backend of `paint_driver`
 /// does not write go nowhere.
 #[allow(clippy::too_many_arguments)]
+fn paint_frame_with_solved_chips<B: Backend, W: Write>(
+    writer: &mut W,
+    paint_driver: &mut PaintDriver<B>,
+    client: &Client,
+    displayed_snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    frame_paint: &ViewerPaint,
+    image_mode: ImageRenderMode,
+    image_output_state: &mut ImageOutputState,
+    cell_size: Option<PixelCellSize>,
+    shown_frame_inputs: &mut Option<FrameInputs>,
+    last_window_title: &mut String,
+    last_cursor_style: &mut Option<CursorStyle>,
+    placement_snapshot: Option<&PlacementSnapshot>,
+    placement_display_tab_snapshot: Option<&PlacementTabSnapshot>,
+) -> Result<(), PaintError<B::Error>> {
+    let viewport_size = client.get_viewport_size();
+    let client_chip_groups = koshi_renderer::solve_painted_client_chip_groups(
+        displayed_snapshot,
+        committed_regions,
+        frame_paint.chrome,
+        ratatui::layout::Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
+        client.get_theme(),
+    );
+    paint_frame_with_writer(
+        writer,
+        paint_driver,
+        client,
+        displayed_snapshot,
+        committed_regions,
+        frame_paint,
+        image_mode,
+        image_output_state,
+        cell_size,
+        shown_frame_inputs,
+        last_window_title,
+        last_cursor_style,
+        placement_snapshot,
+        placement_display_tab_snapshot,
+        &client_chip_groups,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint_frame_with_images<B: Backend>(
     paint_driver: &mut PaintDriver<B>,
     client: &Client,
@@ -63,7 +108,7 @@ fn paint_frame_with_images<B: Backend>(
     last_window_title: &mut String,
     last_cursor_style: &mut Option<CursorStyle>,
 ) -> Result<(), PaintError<B::Error>> {
-    paint_frame_with_writer(
+    paint_frame_with_solved_chips(
         &mut io::sink(),
         paint_driver,
         client,
@@ -839,7 +884,7 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                 let settle_deadline = Instant::now() + Duration::from_secs(5);
                 let mut stage_output_bytes = Vec::new();
                 loop {
-                    paint_frame_with_writer(
+                    paint_frame_with_solved_chips(
                         &mut writer,
                         &mut paint_driver,
                         &client,
@@ -1255,7 +1300,7 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
                 should_show_preview.then(|| build_moving_pane_presentation(pane_id));
             let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                paint_frame_with_writer(
+                paint_frame_with_solved_chips(
                     &mut writer,
                     &mut paint_driver,
                     &client,
@@ -1389,7 +1434,7 @@ fn assert_two_image_trace_output(
             );
             let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                paint_frame_with_writer(
+                paint_frame_with_solved_chips(
                     &mut writer,
                     &mut paint_driver,
                     client,
@@ -1511,7 +1556,7 @@ fn assert_partial_native_frame_write_recovers(
         written_bytes: Vec::new(),
     };
 
-    let paint_error = paint_frame_with_writer(
+    let paint_error = paint_frame_with_solved_chips(
         &mut writer,
         &mut paint_driver,
         &client,
@@ -1621,7 +1666,7 @@ fn a_text_frame_writes_at_once_and_its_image_follows_inside_one_synchronized_upd
             Arc::new(|| {}),
         );
         let mut paint_frame = |image_output_state: &mut ImageOutputState| {
-            paint_frame_with_writer(
+            paint_frame_with_solved_chips(
                 &mut frame_output,
                 &mut paint_driver,
                 &client,
@@ -1848,7 +1893,7 @@ fn assert_image_trace_output(
             );
             let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                paint_frame_with_writer(
+                paint_frame_with_solved_chips(
                     &mut writer,
                     &mut paint_driver,
                     client,
@@ -3737,7 +3782,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
     let mut last_cursor_style = get_cursor_style(&render_snapshot);
     let mut image_output_state = ImageOutputState::from_output_kind(None, Arc::new(|| {}));
 
-    paint_frame_with_writer(
+    paint_frame_with_solved_chips(
         &mut terminal_output_bytes,
         &mut paint_driver,
         &client,
@@ -4846,7 +4891,7 @@ impl ListedRowPaintCheck {
     ) -> Option<Vec<u16>> {
         let committed_regions = build_committed_regions(client.get_viewport_size());
         let previous_frame_inputs = self.shown_frame_inputs.clone();
-        paint_frame_with_writer(
+        paint_frame_with_solved_chips(
             &mut self.frame_writer,
             &mut self.listed_paint_driver,
             client,
@@ -5294,6 +5339,7 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
         notification_revision: 0,
         peer_cursor_markers: FramePeerCursorMarkers::default(),
         pane_chip_groups: FramePaneChipGroups::default(),
+        client_chip_tooltip: None,
     };
     let changes: [FrameInputsChange; 10] = [
         ("the region solve", |frame_inputs| {
@@ -5366,6 +5412,84 @@ fn frame_inputs_list_no_rows_when_an_input_other_than_the_render_snapshot_differ
     }
 }
 
+#[test]
+fn a_chip_hover_change_lists_the_rows_of_its_tooltip() {
+    use koshi_renderer::snapshot::PeerSnapshot;
+    use koshi_renderer::{find_client_chip_hover, HitRegion};
+
+    let (server, client_id, _) = build_test_server_with_pane();
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.peers = (1..=2)
+        .map(|color_index| PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index,
+            label: format!("peer-{color_index}"),
+            origin: ClientOrigin::Remote,
+            typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
+        })
+        .collect();
+    let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
+    let frame_inputs = FrameInputs {
+        render_snapshot,
+        committed_regions,
+        theme: Theme::default(),
+        keymap_hints: KeymapHints::default(),
+        pending_key_sequence: None,
+        viewer_chrome: ViewerChrome::default(),
+        image_mode: ImageRenderMode::Placeholder,
+        unavailable_image_placement_keys: Vec::new(),
+        terminal_size: TEST_VIEWPORT_SIZE,
+        has_placement_state: false,
+        notification_revision: 0,
+        peer_cursor_markers: FramePeerCursorMarkers::default(),
+        pane_chip_groups: FramePaneChipGroups::default(),
+        client_chip_tooltip: None,
+    };
+    let frame_layout = frame_inputs
+        .render_snapshot
+        .build_painted_frame_layout(ViewerChrome::default(), &frame_inputs.committed_regions);
+    let theme = Theme::default();
+    let client_chip_groups = koshi_renderer::solve_painted_client_chip_groups(
+        &frame_inputs.render_snapshot,
+        &frame_inputs.committed_regions,
+        ViewerChrome::default(),
+        ratatui::layout::Rect::new(
+            0,
+            0,
+            TEST_VIEWPORT_SIZE.column_count,
+            TEST_VIEWPORT_SIZE.row_count,
+        ),
+        &theme,
+    );
+    let client_chip_hover = find_client_chip_hover(
+        frame_layout,
+        &client_chip_groups,
+        HitRegion::Tabline,
+        Point {
+            column: client_chip_groups
+                .get_first_tabline_chip_start_column()
+                .expect("the viewer chip is drawn"),
+            row: client_chip_groups
+                .get_tabline_row()
+                .expect("the tab strip has a row"),
+        },
+    )
+    .expect("two peers draw a client chip group");
+    let mut changed_frame_inputs = frame_inputs.clone();
+    changed_frame_inputs.viewer_chrome.client_chip_hover = Some(client_chip_hover);
+    let changed_geometry = build_frame_inputs_geometry(&changed_frame_inputs);
+    let tooltip_rows = changed_geometry
+        .get_client_chip_tooltip()
+        .expect("the viewer chip draws its tooltip")
+        .list_rows()
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        frame_inputs.list_changed_screen_rows(&changed_frame_inputs, &changed_geometry),
+        Some(tooltip_rows)
+    );
+}
 #[test]
 fn a_floating_source_preview_shows_the_pane_in_the_destination_tab_with_its_frame_content() {
     let (session_server, client_id, _tiled_pane_id) = build_test_server_with_pane();
@@ -5593,7 +5717,7 @@ impl EmulatedOuterTerminal {
     /// Paint `render_snapshot` once at the viewport of `client`, write its
     /// bytes to this outer terminal, and return them.
     fn paint_frame(&mut self, client: &Client, render_snapshot: &RenderSnapshot) -> Vec<u8> {
-        paint_frame_with_writer(
+        paint_frame_with_solved_chips(
             &mut self.frame_writer,
             &mut self.paint_driver,
             client,
@@ -6071,6 +6195,8 @@ fn a_peer_cursor_that_moves_under_an_image_leaves_the_outer_terminal_showing_the
         render_snapshot.session_snapshot.peers = vec![PeerSnapshot {
             client_id: ClientId::new(),
             color_index: 1,
+            label: String::new(),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(image_pane_id),
             recent_input_pane_ids: Vec::new(),
         }];

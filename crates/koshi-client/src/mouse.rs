@@ -70,8 +70,8 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::{
     compute_clamped_pane_cell, compute_content_rect, compute_pane_area,
-    compute_tiled_pane_top_border, find_first_visible_tab_index, find_pane_content_rect,
-    resolve_hit_region, HitRegion,
+    compute_tiled_pane_top_border, find_client_chip_hover, find_first_visible_tab_index,
+    find_pane_content_rect, resolve_hit_region, HitRegion, PaintedClientChipGroups,
 };
 
 use crate::input::is_same_tab_placement_noop;
@@ -367,6 +367,11 @@ impl Client {
                 None
             } else {
                 self.pointer_hover.hovered_pane_id
+            },
+            client_chip_hover: if is_pane_placement_visible {
+                None
+            } else {
+                self.pointer_hover.client_chip_hover
             },
             placement_handle_hover: find_shown_placement_handle_hover(
                 self.pointer_hover.placement_handle_hover,
@@ -1979,8 +1984,10 @@ impl Client {
     /// `TiledTopBorder { pane_id: pane-1 }`.
     pub fn update_pointer_hover(&mut self, mouse_input: MouseInput, mouse_frame: &MouseFrame) {
         self.pointer_position = Some(mouse_input.position);
+        self.is_client_chip_hover_suppressed = false;
         let pointer_hover = find_pointer_hover(
             self.build_frame_layout_with_current_chrome(mouse_frame),
+            &mouse_frame.client_chip_groups,
             mouse_input.position,
         );
         let is_pointer_motion = mouse_input.mouse_kind == MouseKind::Motion;
@@ -2004,11 +2011,19 @@ impl Client {
     ///
     /// Example: the pointer rests on the right half of `pane-1`, and a split
     /// puts `pane-2` under it. The frame that draws the split hovers `pane-2`.
-    pub(crate) fn update_pointer_hover_for_frame(&mut self, frame_layout: FrameLayout<'_>) {
+    pub(crate) fn update_pointer_hover_for_frame(
+        &mut self,
+        frame_layout: FrameLayout<'_>,
+        client_chip_groups: &PaintedClientChipGroups,
+    ) {
         let Some(pointer_position) = self.pointer_position else {
             return;
         };
-        let pointer_hover = find_pointer_hover(frame_layout, pointer_position);
+        let mut pointer_hover =
+            find_pointer_hover(frame_layout, client_chip_groups, pointer_position);
+        if self.is_client_chip_hover_suppressed {
+            pointer_hover.client_chip_hover = None;
+        }
         let shown_tiled_handle_pane_id = match self.pointer_hover.placement_handle_hover {
             Some(
                 PlacementHandleHover::TiledTopBorder { pane_id }
@@ -2028,6 +2043,13 @@ impl Client {
             ),
             ..pointer_hover
         };
+    }
+
+    /// Close the client chip tooltip and keep it closed until the next mouse
+    /// event. A key press and focus loss call it.
+    pub(crate) fn close_client_chip_tooltip(&mut self) {
+        self.pointer_hover.client_chip_hover = None;
+        self.is_client_chip_hover_suppressed = true;
     }
 
     /// Start a grab-handle drag of floating pane `floating_pane_id`, drawn with
@@ -2466,36 +2488,45 @@ fn build_core_rect(screen_rect: RatatuiRect) -> Rect {
 ///
 /// Example: in `[vim | htop]`, a content cell of `htop` hovers `htop` with
 /// no placement handle hover, and a cell of the tabline hovers nothing.
-fn find_pointer_hover(frame_layout: FrameLayout<'_>, pointer_position: Point) -> PointerHover {
-    let (hovered_pane_id, placement_handle_hover) =
-        match resolve_hit_region(frame_layout, pointer_position) {
-            HitRegion::PaneContent { pane_id } => (Some(pane_id), None),
-            HitRegion::PlacementHandle { pane_id } => {
-                let placement_handle_hover = match frame_layout
-                    .find_drawn_floating_pane_slot_by_pane_id(pane_id)
-                {
-                    Some(floating_pane_slot) => Some(PlacementHandleHover::FloatingHandle {
-                        floating_pane_id: floating_pane_slot.floating_pane_slot.floating_pane_id,
-                        is_pinned: floating_pane_slot.floating_pane_slot.is_pinned,
-                    }),
-                    None => {
-                        find_tiled_placement_handle_hover(frame_layout, pane_id, pointer_position)
-                    }
-                };
-                (Some(pane_id), placement_handle_hover)
-            }
-            HitRegion::PaneBorder {
-                pane_id,
-                side: Direction::Up,
-                ..
-            } => (
-                Some(pane_id),
-                find_tiled_placement_handle_hover(frame_layout, pane_id, pointer_position),
-            ),
-            _ => (None, None),
-        };
+fn find_pointer_hover(
+    frame_layout: FrameLayout<'_>,
+    client_chip_groups: &PaintedClientChipGroups,
+    pointer_position: Point,
+) -> PointerHover {
+    let hit_region = resolve_hit_region(frame_layout, pointer_position);
+    let client_chip_hover = find_client_chip_hover(
+        frame_layout,
+        client_chip_groups,
+        hit_region,
+        pointer_position,
+    );
+    let (hovered_pane_id, placement_handle_hover) = match hit_region {
+        HitRegion::PaneContent { pane_id } => (Some(pane_id), None),
+        HitRegion::PlacementHandle { pane_id } => {
+            let placement_handle_hover = match frame_layout
+                .find_drawn_floating_pane_slot_by_pane_id(pane_id)
+            {
+                Some(floating_pane_slot) => Some(PlacementHandleHover::FloatingHandle {
+                    floating_pane_id: floating_pane_slot.floating_pane_slot.floating_pane_id,
+                    is_pinned: floating_pane_slot.floating_pane_slot.is_pinned,
+                }),
+                None => find_tiled_placement_handle_hover(frame_layout, pane_id, pointer_position),
+            };
+            (Some(pane_id), placement_handle_hover)
+        }
+        HitRegion::PaneBorder {
+            pane_id,
+            side: Direction::Up,
+            ..
+        } => (
+            Some(pane_id),
+            find_tiled_placement_handle_hover(frame_layout, pane_id, pointer_position),
+        ),
+        _ => (None, None),
+    };
     PointerHover {
         hovered_pane_id,
+        client_chip_hover,
         placement_handle_hover,
     }
 }
