@@ -5,7 +5,7 @@
 use ratatui::layout::Rect as RatatuiRect;
 
 use koshi_core::geometry::Point;
-use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::ids::PaneId;
 
 use crate::snapshot::{LayoutAreaSnapshot, SessionSnapshot};
 use crate::theme::ClientColor;
@@ -40,9 +40,11 @@ pub(crate) struct PaneChipGroup {
     /// The colors of the peers whose keys reach the pane, in `color_index`
     /// order. The chips drawn take the first of them, in order.
     pub(crate) client_colors: Vec<ClientColor>,
-    /// The ids of the peers whose keys reach the pane, in the same order as
-    /// `client_colors`.
-    pub(crate) client_ids: Vec<ClientId>,
+    /// The positions in `session_snapshot.peers` of the peers whose keys
+    /// reach the pane, in the same order as `client_colors`. Peers
+    /// `[bob, carol, dave]` where bob and dave type in the pane give
+    /// `[0, 2]`.
+    pub(crate) peer_indexes: Vec<usize>,
 }
 
 /// The pane chip groups of one frame
@@ -168,21 +170,22 @@ pub(super) fn list_frame_pane_chip_groups(
     placed_floating_panes: &[PlacedFloatingPane<'_>],
 ) -> FramePaneChipGroups {
     let peer_client_colors = client_colors.iter().skip(1);
-    let mut typed_peers: Vec<(PaneId, u32, ClientColor, ClientId)> = session_snapshot
+    let mut typed_peers: Vec<(PaneId, u32, ClientColor, usize)> = session_snapshot
         .peers
         .iter()
+        .enumerate()
         .zip(peer_client_colors)
-        .flat_map(|(peer_snapshot, client_color)| {
+        .flat_map(|((peer_index, peer_snapshot), client_color)| {
             peer_snapshot
                 .typed_pane_id
                 .iter()
                 .chain(&peer_snapshot.recent_input_pane_ids)
-                .map(|pane_id| {
+                .map(move |pane_id| {
                     (
                         *pane_id,
                         peer_snapshot.color_index,
                         *client_color,
-                        peer_snapshot.client_id,
+                        peer_index,
                     )
                 })
         })
@@ -250,9 +253,9 @@ pub(super) fn list_frame_pane_chip_groups(
                     .iter()
                     .map(|(_, _, client_color, _)| *client_color)
                     .collect(),
-                client_ids: pane_peers
+                peer_indexes: pane_peers
                     .iter()
-                    .map(|(_, _, _, client_id)| *client_id)
+                    .map(|(_, _, _, peer_index)| *peer_index)
                     .collect(),
             });
         }

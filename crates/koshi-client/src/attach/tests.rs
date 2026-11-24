@@ -17557,8 +17557,15 @@ fn an_animation_frame_draws_pane_chips_from_the_displayed_frame_and_no_tooltip()
         start_column: 63,
     };
     let mut client = build_test_client();
-    let mut frame_with_groups = mouse_frame.clone();
-    frame_with_groups.client_chip_groups = final_groups.clone();
+    let final_frame_layout =
+        final_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let frame_with_groups = MouseFrame::from_snapshot(
+        &final_snapshot,
+        committed_regions.clone(),
+        ViewerChrome::default(),
+        client.build_drawn_notifications(final_frame_layout),
+        final_groups.clone(),
+    );
     handle_mouse_and_update_pointer_hover(
         &mut client,
         build_mouse_motion(Point { column: 63, row: 1 }),
@@ -17732,14 +17739,22 @@ fn one_frame_with_no_animation_solves_the_chip_groups_once_and_keeps_the_tooltip
         start_column: 63,
     };
     let mut client = build_test_client();
-    let mut frame_with_groups = mouse_frame;
-    frame_with_groups.client_chip_groups = expected_groups.clone();
+    let render_frame_layout =
+        render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let frame_with_groups = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions.clone(),
+        ViewerChrome::default(),
+        client.build_drawn_notifications(render_frame_layout),
+        expected_groups.clone(),
+    );
     handle_mouse_and_update_pointer_hover(
         &mut client,
         build_mouse_motion(Point { column: 63, row: 1 }),
         &frame_with_groups,
         Instant::now(),
     );
+    assert_eq!(client.pointer_hover.client_chip_hover, Some(expected_hover));
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let mut viewer_paint =
         ViewerPaint::from_client(&client, active_tab_id, &render_snapshot, &committed_regions);

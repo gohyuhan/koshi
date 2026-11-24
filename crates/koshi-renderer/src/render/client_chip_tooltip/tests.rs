@@ -826,6 +826,45 @@ fn a_hidden_list_cuts_its_rows_and_counts_the_clients_left_out() {
 }
 
 #[test]
+fn a_hidden_peer_index_past_the_peer_list_opens_no_tooltip() {
+    let (mut render_snapshot, committed_regions, pane_id) =
+        build_tooltip_frame(4, VIEWPORT_COLUMN_COUNT, VIEWPORT_ROW_COUNT);
+    for peer_snapshot in &mut render_snapshot.session_snapshot.peers {
+        peer_snapshot.typed_pane_id = Some(pane_id);
+    }
+    let viewport_area = RatatuiRect::new(0, 0, VIEWPORT_COLUMN_COUNT, VIEWPORT_ROW_COUNT);
+    let client_chip_groups =
+        build_client_chip_groups(&render_snapshot, &committed_regions, viewport_area);
+    let pane_chip_group = client_chip_groups
+        .pane_chip_groups
+        .find_pane_chip_group(pane_id, false)
+        .expect("the pane border draws a chip group");
+    let hidden_client_mark = pane_chip_group
+        .client_chip_group
+        .hidden_client_mark
+        .expect("the pane border draws a hidden client mark");
+    let hover = ClientChipHover::Pane {
+        pane_id,
+        is_on_stack_header: false,
+        target: ClientChipHoverTarget::HiddenClients,
+        row_index: pane_chip_group.row_index,
+        start_column: hidden_client_mark.start_column,
+    };
+    render_snapshot.session_snapshot.peers.clear();
+
+    assert_eq!(
+        solve_client_chip_tooltip(
+            &render_snapshot,
+            viewport_area,
+            &Theme::default(),
+            &client_chip_groups,
+            hover,
+        ),
+        None
+    );
+}
+
+#[test]
 fn a_pane_of_102_peers_lists_nine_hidden_clients_and_counts_ninety_more() {
     let (mut render_snapshot, committed_regions, pane_id) =
         build_tooltip_frame(102, VIEWPORT_COLUMN_COUNT, 15);

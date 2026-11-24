@@ -21,9 +21,7 @@ use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::style::Style as TerminalStyle;
-use koshi_test_support::fixtures::{
-    build_cell_rect, build_floating_pane_id, build_test_uuid_with_suffix,
-};
+use koshi_test_support::fixtures::{build_cell_rect, build_floating_pane_id};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 use ratatui::style::{Color, Modifier};
@@ -240,9 +238,7 @@ fn build_bob_group(
             hidden_client_mark: None,
         },
         client_colors: vec![Theme::default().compute_client_color(BOB_COLOR_INDEX)],
-        client_ids: vec![ClientId::from_uuid(build_test_uuid_with_suffix(
-            BOB_COLOR_INDEX as u8,
-        ))],
+        peer_indexes: vec![0],
     }
 }
 
@@ -391,10 +387,7 @@ fn a_pane_whose_half_row_has_no_room_for_two_chips_counts_them_into_the_mark() {
                 Theme::default().compute_client_color(BOB_COLOR_INDEX),
                 Theme::default().compute_client_color(CAROL_COLOR_INDEX),
             ],
-            client_ids: vec![
-                ClientId::from_uuid(build_test_uuid_with_suffix(BOB_COLOR_INDEX as u8)),
-                ClientId::from_uuid(build_test_uuid_with_suffix(CAROL_COLOR_INDEX as u8)),
-            ],
+            peer_indexes: vec![0, 1],
         }]
     );
     let render_buffer = render_core_frame(&render_snapshot, ViewerChrome::default());
@@ -1373,8 +1366,8 @@ fn a_pane_group_draws_at_most_three_chips_then_the_mark() {
             "peer count {peer_count}"
         );
         assert_eq!(
-            pane_chip_group.client_ids.len(),
-            peer_count as usize,
+            pane_chip_group.peer_indexes,
+            (0..peer_count as usize).collect::<Vec<_>>(),
             "peer count {peer_count}"
         );
     }
@@ -1423,6 +1416,34 @@ fn five_peers_on_a_pane_border_draw_three_chips_and_a_mark_for_two() {
 }
 
 #[test]
+fn pane_peer_indexes_name_each_member_position_in_the_peer_list() {
+    let (mut render_snapshot, left_pane_id, right_pane_id) = build_two_pane_frame();
+    render_snapshot.session_snapshot.peers = (1..=7)
+        .map(|color_index| {
+            let pane_id = if color_index == 2 || color_index == 5 {
+                right_pane_id
+            } else {
+                left_pane_id
+            };
+            build_peer_snapshot(color_index, Some(pane_id))
+        })
+        .collect();
+
+    let pane_chip_groups = list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default());
+    let left_pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == left_pane_id)
+        .expect("the left pane draws its chip group");
+    let right_pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == right_pane_id)
+        .expect("the right pane draws its chip group");
+
+    assert_eq!(left_pane_chip_group.peer_indexes, vec![0, 2, 3, 5, 6]);
+    assert_eq!(right_pane_chip_group.peer_indexes, vec![1, 4]);
+}
+
+#[test]
 fn a_stack_header_chip_is_hoverable_and_names_its_peer() {
     let (mut render_snapshot, _, watch_pane_id) = build_stack_frame(30);
     render_snapshot.session_snapshot.peers = (1..=2)
@@ -1468,7 +1489,8 @@ fn a_stack_header_chip_is_hoverable_and_names_its_peer() {
             pane_id: watch_pane_id,
             is_on_stack_header: true,
             target: ClientChipHoverTarget::PeerClient {
-                client_id: pane_chip_group.client_ids[0],
+                client_id: render_snapshot.session_snapshot.peers[pane_chip_group.peer_indexes[0]]
+                    .client_id,
             },
             row_index: pane_chip_group.row_index,
             start_column: client_chip_span.start_column,

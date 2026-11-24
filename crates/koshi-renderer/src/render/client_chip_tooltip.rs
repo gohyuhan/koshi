@@ -253,12 +253,20 @@ pub fn find_client_chip_hover(
             side: Direction::Up,
             ..
         }
-        | HitRegion::PlacementHandle { pane_id } => {
-            solve_pane_chip_hover(client_chip_groups, pane_id, false, pointer_position)
-        }
-        HitRegion::StackHeader { pane_id } => {
-            solve_pane_chip_hover(client_chip_groups, pane_id, true, pointer_position)
-        }
+        | HitRegion::PlacementHandle { pane_id } => solve_pane_chip_hover(
+            &frame_layout.session_snapshot.peers,
+            client_chip_groups,
+            pane_id,
+            false,
+            pointer_position,
+        ),
+        HitRegion::StackHeader { pane_id } => solve_pane_chip_hover(
+            &frame_layout.session_snapshot.peers,
+            client_chip_groups,
+            pane_id,
+            true,
+            pointer_position,
+        ),
         _ => None,
     }
 }
@@ -434,7 +442,11 @@ fn is_pointer_over_toast(frame_layout: FrameLayout<'_>, pointer_position: Point)
 }
 
 /// The chip group of `pane_id` and the hovered chip or mark in it.
+///
+/// `peer_snapshots` is the peer list of the snapshot the chip groups were
+/// solved from. Each chip names the peer at its `peer_indexes` position.
 fn solve_pane_chip_hover(
+    peer_snapshots: &[PeerSnapshot],
     client_chip_groups: &PaintedClientChipGroups,
     pane_id: PaneId,
     is_on_stack_header: bool,
@@ -450,10 +462,10 @@ fn solve_pane_chip_hover(
         &pane_chip_group.client_chip_group,
         pointer_position.column,
         |span_index, _| {
-            pane_chip_group.client_ids.get(span_index).map(|client_id| {
-                ClientChipHoverTarget::PeerClient {
-                    client_id: *client_id,
-                }
+            let peer_index = *pane_chip_group.peer_indexes.get(span_index)?;
+            let peer_snapshot = peer_snapshots.get(peer_index)?;
+            Some(ClientChipHoverTarget::PeerClient {
+                client_id: peer_snapshot.client_id,
             })
         },
     )?;
@@ -544,24 +556,20 @@ fn list_hidden_clients<'a>(
                 .find_pane_chip_group(pane_id, is_on_stack_header)?;
             let client_chip_group = &pane_chip_group.client_chip_group;
             let hidden_client_mark = client_chip_group.hidden_client_mark?;
-            let hidden_client_ids = pane_chip_group
-                .client_ids
+            let hidden_peer_indexes = pane_chip_group
+                .peer_indexes
                 .get(client_chip_group.client_chip_spans.len()..)?;
-            if hidden_client_ids.len() != hidden_client_mark.client_count {
+            if hidden_peer_indexes.len() != hidden_client_mark.client_count {
                 return None;
             }
-            let visible_client_count = hidden_client_ids
-                .len()
-                .min(MAX_CLIENT_CHIP_TOOLTIP_TEXT_ROW_COUNT);
-            let visible_clients = hidden_client_ids
+            let visible_clients = hidden_peer_indexes
                 .iter()
-                .take(visible_client_count)
-                .map(|client_id| {
+                .take(MAX_CLIENT_CHIP_TOOLTIP_TEXT_ROW_COUNT)
+                .map(|peer_index| {
                     render_snapshot
                         .session_snapshot
                         .peers
-                        .iter()
-                        .find(|peer_snapshot| peer_snapshot.client_id == *client_id)
+                        .get(*peer_index)
                         .map(TooltipClient::Peer)
                 })
                 .collect::<Option<Vec<_>>>()?;
