@@ -83,6 +83,7 @@ pub(crate) fn build_tray_test_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: Some(tiled_pane_id),

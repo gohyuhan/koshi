@@ -141,12 +141,16 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 FramePeer {
                     client_id: ClientId::from_uuid(Uuid::from_u128(12)),
                     color_index: 0,
+                    label: "bob".to_string(),
+                    origin: ClientOrigin::Remote,
                     typed_pane_id: Some(pane_id),
                     recent_input_pane_ids: Vec::new(),
                 },
                 FramePeer {
                     client_id: ClientId::from_uuid(Uuid::from_u128(13)),
                     color_index: 7,
+                    label: "carol".to_string(),
+                    origin: ClientOrigin::Local { is_same_user: true },
                     typed_pane_id: None,
                     recent_input_pane_ids: vec![pane_id],
                 },
@@ -177,6 +181,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
         client_snapshot: FrameClient {
             client_id: ClientId::from_uuid(Uuid::from_u128(3)),
             color_index: 4,
+            label: "alice".to_string(),
             viewport_size: Size {
                 column_count: 4,
                 row_count: 3,
@@ -572,12 +577,16 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     {
                         "client_id": "00000000-0000-0000-0000-00000000000c",
                         "color_index": 0,
+                        "label": "bob",
+                        "origin": "Remote",
                         "typed_pane_id": "00000000-0000-0000-0000-000000000004",
                         "recent_input_pane_ids": []
                     },
                     {
                         "client_id": "00000000-0000-0000-0000-00000000000d",
                         "color_index": 7,
+                        "label": "carol",
+                        "origin": { "Local": { "is_same_user": true } },
                         "typed_pane_id": null,
                         "recent_input_pane_ids": ["00000000-0000-0000-0000-000000000004"]
                     }
@@ -604,6 +613,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
             "client_snapshot": {
                 "client_id": "00000000-0000-0000-0000-000000000003",
                 "color_index": 4,
+                "label": "alice",
                 "viewport_size": { "column_count": 4, "row_count": 3 },
                 "active_tab_id": "00000000-0000-0000-0000-000000000002",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",

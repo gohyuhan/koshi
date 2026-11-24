@@ -6,6 +6,7 @@
 //! wide (CJK), emoji, and combining-mark titles.
 
 use super::*;
+use koshi_core::client::ClientOrigin;
 use koshi_core::ids::FloatingPaneId;
 use std::num::NonZeroUsize;
 
@@ -75,6 +76,7 @@ fn build_tabline_frame(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: None,
@@ -148,10 +150,19 @@ fn render_tabline(tabline_test_frame: &TablineTestFrame, column_count: u16) -> B
     let tabline_area = build_tabline_area(column_count);
     let mut render_buffer = Buffer::empty(tabline_area);
     let render_theme = Theme::default();
+    let tabline_layout = solve_tabline_layout(tabline_test_frame, tabline_area);
     draw_tabline(
         build_tabline_inputs(tabline_test_frame),
+        &tabline_layout,
         &render_theme,
-        &list_client_colors(&tabline_test_frame.render_snapshot, &render_theme),
+        &list_client_colors(
+            &tabline_test_frame.render_snapshot.session_snapshot,
+            tabline_test_frame
+                .render_snapshot
+                .client_snapshot
+                .color_index,
+            &render_theme,
+        ),
         tabline_area,
         &mut render_buffer,
     );
@@ -1104,10 +1115,16 @@ fn a_row_below_the_buffer_leaves_every_cell_untouched() {
         width: 20 + compute_version_badge_column_count(),
         height: 1,
     };
+    let tabline_layout = solve_tabline_layout(&tabline_frame, below_tabline_area);
     draw_tabline(
         build_tabline_inputs(&tabline_frame),
+        &tabline_layout,
         &render_theme,
-        &list_client_colors(&tabline_frame.render_snapshot, &render_theme),
+        &list_client_colors(
+            &tabline_frame.render_snapshot.session_snapshot,
+            tabline_frame.render_snapshot.client_snapshot.color_index,
+            &render_theme,
+        ),
         below_tabline_area,
         &mut render_buffer,
     );
@@ -1731,6 +1748,8 @@ fn set_attached_clients(
         .map(|color_index| PeerSnapshot {
             client_id: ClientId::new(),
             color_index: *color_index,
+            label: String::new(),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         })
@@ -1875,25 +1894,25 @@ fn chips_past_half_of_the_room_left_of_the_buttons_count_into_the_hidden_client_
     assert_eq!(
         tabline_layout.client_chip_group,
         Some(ClientChipGroup {
-            start_column: 34,
-            client_chip_spans: (0..8_u16)
+            start_column: 54,
+            client_chip_spans: (0..3_u16)
                 .map(|chip_index| build_client_chip_span(
                     u32::from(chip_index),
                     chip_index == 0,
-                    34 + 4 * chip_index
+                    54 + 4 * chip_index
                 ))
                 .collect(),
             hidden_client_mark: Some(HiddenClientMark {
                 start_column: 66,
-                client_count: 1,
+                client_count: 6,
             }),
         })
     );
-    assert_eq!(tabline_layout.tab_strip_end_column, 33);
+    assert_eq!(tabline_layout.tab_strip_end_column, 53);
     let render_buffer = render_tabline(&tabline_test_frame, 80);
     assert_eq!(
-        format_rendered_cells(&render_buffer, 0, 34..68),
-        " 1   2   3   4   5   6   7   8  +1"
+        format_rendered_cells(&render_buffer, 0, 54..68),
+        " 1   2   3  +6"
     );
     let hidden_client_mark_style = compute_scroll_arrow_style(&Theme::default());
     assert_eq!(

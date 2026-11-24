@@ -28,7 +28,9 @@ pub use images::{
     MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT, TERMINAL_IMAGE_UNAVAILABLE,
 };
 pub use render::{
-    build_frame_geometry, compute_content_rect, compute_pane_area, get_cursor_position,
-    get_cursor_style, is_placement_target_pane, list_changed_screen_rows, render_frame, DrawnRows,
-    FrameGeometry, FramePaneChipGroups, FramePeerCursorMarkers,
+    build_frame_geometry, build_frame_geometry_with_client_chip_groups, compute_content_rect,
+    compute_pane_area, find_client_chip_hover, get_cursor_position, get_cursor_style,
+    is_placement_target_pane, list_changed_screen_rows, render_frame,
+    solve_painted_client_chip_groups, ClientChipHover, ClientChipHoverTarget, ClientChipTooltip,
+    DrawnRows, FrameGeometry, FramePaneChipGroups, FramePeerCursorMarkers, PaintedClientChipGroups,
 };

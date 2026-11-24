@@ -55,7 +55,7 @@ use koshi_layout::solver::StackHeader;
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::floating_pane_tray::{find_drawn_floating_pane_tray_layout, FloatingPaneTrayLayout};
-use crate::hit_test::compute_tiled_pane_top_border;
+use crate::hit_test::{compute_tabline_area, compute_tiled_pane_top_border};
 use crate::images::{
     compute_floating_pane_image_placeholder_rects, compute_image_placeholder_rects,
     draw_image_placeholders, ImagePlacementKey, ImageRenderMode,
@@ -82,6 +82,7 @@ pub(crate) const PLACEMENT_HOVER_TINT_COLOR: (u8, u8, u8) = (0x3a, 0x3a, 0x3a);
 const FULLSCREEN_TAG_TEXT: &str = " [fullscreen] ";
 
 mod client_chip;
+mod client_chip_tooltip;
 mod floating;
 mod floating_pane_tray;
 mod notification;
@@ -90,6 +91,10 @@ mod peer_cursor_marker;
 mod placement;
 
 use client_chip::draw_client_chip_group;
+use client_chip_tooltip::{draw_client_chip_tooltip, solve_client_chip_tooltip};
+pub use client_chip_tooltip::{
+    find_client_chip_hover, ClientChipHover, ClientChipHoverTarget, ClientChipTooltip,
+};
 use floating::{clear_overlay_area, draw_floating_pane};
 pub(crate) use floating::{list_placed_floating_panes, PlacedFloatingPane};
 use floating_pane_tray::draw_floating_pane_tray;
@@ -189,6 +194,25 @@ pub struct FrameGeometry<'a> {
     /// The pane chip groups the frame draws on each layer
     /// ([`list_frame_pane_chip_groups`]).
     pub(crate) pane_chip_groups: FramePaneChipGroups,
+    /// The client chip tooltip the frame draws over every other surface, at
+    /// the chips or mark the viewer hovers.
+    pub(crate) client_chip_tooltip: Option<ClientChipTooltip>,
+    /// The tabline layout and pane chip groups this frame draws. Hover reads
+    /// them instead of solving the chips again.
+    pub(crate) client_chip_groups: PaintedClientChipGroups,
+}
+
+/// The tabline layout and pane chip groups one frame draws. The paint and the
+/// hover lookup read the same values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaintedClientChipGroups {
+    /// The row the tabline draws on. `None` while the frame draws no tabline.
+    pub(crate) tabline_row: Option<u16>,
+    /// The tabline layout, with its client chip group. `None` while the frame
+    /// draws no tabline.
+    pub(crate) tabline_layout: Option<TablineLayout>,
+    /// The pane chip groups of every layer.
+    pub(crate) pane_chip_groups: FramePaneChipGroups,
 }
 
 /// One layer of panes in a frame. Layers sort back to front: the active
@@ -245,6 +269,13 @@ impl<'a> FrameGeometry<'a> {
         &self.pane_chip_groups
     }
 
+    /// The client chip tooltip the frame draws, or `None` while the viewer
+    /// hovers no chip or mark.
+    #[must_use]
+    pub fn get_client_chip_tooltip(&self) -> Option<&ClientChipTooltip> {
+        self.client_chip_tooltip.as_ref()
+    }
+
     /// The cells the placement hover tint covers on `frame_layer`. Empty when
     /// the tint covers no pane of that layer.
     pub(crate) fn list_placement_hover_tint_areas(
@@ -267,9 +298,10 @@ impl<'a> FrameGeometry<'a> {
 
     /// The screen areas this frame draws over every floating pane, in draw
     /// order: the cells the notification center covers
-    /// ([`NotificationCenterLayout::drawn_rect`]), the open tray's box, and
-    /// the cells the toast covers ([`NotificationToastLayout::drawn_rect`]).
-    /// Each one is listed only while it is drawn.
+    /// ([`NotificationCenterLayout::drawn_rect`]), the open tray's box, the
+    /// cells the toast covers ([`NotificationToastLayout::drawn_rect`]), and
+    /// the client chip tooltip's box. Each one is listed only while it is
+    /// drawn.
     pub(crate) fn list_overlay_areas(&self) -> impl Iterator<Item = RatatuiRect> + '_ {
         [
             self.notification_center_layout
@@ -282,6 +314,11 @@ impl<'a> FrameGeometry<'a> {
         .into_iter()
         .flatten()
         .map(place_screen_rect)
+        .chain(
+            self.client_chip_tooltip
+                .iter()
+                .map(|client_chip_tooltip| client_chip_tooltip.get_rect()),
+        )
     }
 }
 
@@ -299,6 +336,33 @@ pub fn build_frame_geometry<'a>(
     viewport_area: RatatuiRect,
     theme: &'a Theme,
 ) -> FrameGeometry<'a> {
+    let client_chip_groups = solve_painted_client_chip_groups(
+        render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        viewport_area,
+        theme,
+    );
+    build_frame_geometry_with_client_chip_groups(
+        render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        viewport_area,
+        theme,
+        client_chip_groups,
+    )
+}
+
+/// Solve every surface of a frame, drawing the client chips already solved in
+/// `client_chip_groups`.
+pub fn build_frame_geometry_with_client_chip_groups<'a>(
+    render_snapshot: &'a RenderSnapshot,
+    committed_regions: &'a CommittedRegions,
+    viewer_chrome: ViewerChrome,
+    viewport_area: RatatuiRect,
+    theme: &'a Theme,
+    client_chip_groups: PaintedClientChipGroups,
+) -> FrameGeometry<'a> {
     let effective_layout_rect = compute_content_rect(
         compute_pane_area(committed_regions, viewport_area),
         render_snapshot
@@ -307,14 +371,15 @@ pub fn build_frame_geometry<'a>(
             .layout_area
             .solved_size,
     );
-    let placed_floating_panes = list_placed_floating_panes(
-        render_snapshot,
-        committed_regions,
-        viewer_chrome,
-        viewport_area,
-    );
+    let painted_frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
+    let placed_floating_panes = list_placed_floating_panes(painted_frame_layout, viewport_area);
     let layout_origin = get_area_origin(effective_layout_rect);
-    let client_colors = list_client_colors(render_snapshot, theme);
+    let client_colors = list_client_colors(
+        &render_snapshot.session_snapshot,
+        render_snapshot.client_snapshot.color_index,
+        theme,
+    );
     let placement_hover_tint = find_placement_hover_tint(
         render_snapshot,
         viewer_chrome,
@@ -329,13 +394,18 @@ pub fn build_frame_geometry<'a>(
         viewport_area,
         &placed_floating_panes,
     );
-    let pane_chip_groups = list_frame_pane_chip_groups(
-        render_snapshot,
-        &client_colors,
-        layout_origin,
-        viewport_area,
-        &placed_floating_panes,
-    );
+    let client_chip_tooltip = viewer_chrome
+        .client_chip_hover
+        .and_then(|client_chip_hover| {
+            solve_client_chip_tooltip(
+                render_snapshot,
+                viewport_area,
+                theme,
+                &client_chip_groups,
+                client_chip_hover,
+            )
+        });
+    let pane_chip_groups = client_chip_groups.pane_chip_groups.clone();
     FrameGeometry {
         render_snapshot,
         committed_regions,
@@ -344,18 +414,56 @@ pub fn build_frame_geometry<'a>(
         viewport_area,
         effective_layout_rect,
         placed_floating_panes,
-        floating_pane_tray_layout: find_drawn_floating_pane_tray_layout(
-            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
-        ),
-        notification_center_layout: find_drawn_notification_center_layout(
-            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
-        ),
-        notification_toast_layout: find_drawn_notification_toast_layout(
-            render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions),
-        ),
+        floating_pane_tray_layout: find_drawn_floating_pane_tray_layout(painted_frame_layout),
+        notification_center_layout: find_drawn_notification_center_layout(painted_frame_layout),
+        notification_toast_layout: find_drawn_notification_toast_layout(painted_frame_layout),
         client_colors,
         placement_hover_tint,
         peer_cursor_markers,
+        pane_chip_groups,
+        client_chip_tooltip,
+        client_chip_groups,
+    }
+}
+
+/// Solve the tabline layout and the pane chip groups of one frame. Hover and
+/// paint both read the result.
+pub fn solve_painted_client_chip_groups(
+    render_snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    viewer_chrome: ViewerChrome,
+    viewport_area: RatatuiRect,
+    theme: &Theme,
+) -> PaintedClientChipGroups {
+    let painted_frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, committed_regions);
+    let placed_floating_panes = list_placed_floating_panes(painted_frame_layout, viewport_area);
+    let effective_layout_rect = compute_content_rect(
+        compute_pane_area(committed_regions, viewport_area),
+        render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .solved_size,
+    );
+    let client_colors = list_client_colors(
+        &render_snapshot.session_snapshot,
+        render_snapshot.client_snapshot.color_index,
+        theme,
+    );
+    let tabline_area = compute_tabline_area(painted_frame_layout, viewport_area);
+    let tabline_layout =
+        solve_tabline_layout(painted_frame_layout.get_tabline_inputs(), tabline_area);
+    let pane_chip_groups = list_frame_pane_chip_groups(
+        &render_snapshot.session_snapshot,
+        &client_colors,
+        get_area_origin(effective_layout_rect),
+        viewport_area,
+        &placed_floating_panes,
+    );
+    PaintedClientChipGroups {
+        tabline_row: Some(tabline_area.y),
+        tabline_layout: Some(tabline_layout),
         pane_chip_groups,
     }
 }
@@ -366,14 +474,15 @@ pub fn build_frame_geometry<'a>(
 /// one peer of index `1` over the default theme give `#ff0000` and
 /// `#00ff4a` fills, each with black text.
 pub(crate) fn list_client_colors(
-    render_snapshot: &RenderSnapshot,
+    session_snapshot: &SessionSnapshot,
+    viewer_color_index: u32,
     theme: &Theme,
 ) -> Vec<ClientColor> {
-    let peers = &render_snapshot.session_snapshot.peers;
+    let peers = &session_snapshot.peers;
     if peers.is_empty() {
         return Vec::new();
     }
-    std::iter::once(render_snapshot.client_snapshot.color_index)
+    std::iter::once(viewer_color_index)
         .chain(peers.iter().map(|peer_snapshot| peer_snapshot.color_index))
         .map(|color_index| theme.compute_client_color(color_index))
         .collect()
@@ -732,6 +841,11 @@ pub fn render_frame(
             .get_tabline_inputs();
         draw_tabline(
             tabline_inputs,
+            frame_geometry
+                .client_chip_groups
+                .tabline_layout
+                .as_ref()
+                .expect("a drawn tabline has a solved layout"),
             theme,
             &frame_geometry.client_colors,
             tabline_rect,
@@ -751,6 +865,11 @@ pub fn render_frame(
             statusline_rect,
             screen_buffer,
         );
+    }
+
+    // The client chip tooltip draws over every other surface.
+    if let Some(client_chip_tooltip) = &frame_geometry.client_chip_tooltip {
+        draw_client_chip_tooltip(client_chip_tooltip, theme, drawn_rows, screen_buffer);
     }
 
     apply_display_widths(viewport_area, drawn_rows, screen_buffer);
@@ -774,9 +893,11 @@ pub fn render_frame(
 /// other does not are listed, the row of each pane chip group that one of
 /// `previous_pane_chip_groups` and the next frame's groups
 /// ([`FrameGeometry::get_pane_chip_groups`]) holds and the other does not,
-/// and the tabline rows when the peers' `color_index` list differs.
-/// `previous_peer_cursor_markers` and `previous_pane_chip_groups` are the
-/// markers and the groups of the frame drawn from `previous_render_snapshot`.
+/// the tabline rows when the peers' `color_index` list differs, and the rows
+/// of the client chip tooltip when it differs between the two frames.
+/// `previous_peer_cursor_markers`, `previous_pane_chip_groups` and
+/// `previous_client_chip_tooltip` belong to the frame drawn from
+/// `previous_render_snapshot`.
 /// Every other field must be equal, each grid view must keep its row count,
 /// column count and scroll offset, and each pane must show the same scroll
 /// position text.
@@ -792,6 +913,7 @@ pub fn list_changed_screen_rows(
     previous_render_snapshot: &RenderSnapshot,
     previous_peer_cursor_markers: &FramePeerCursorMarkers,
     previous_pane_chip_groups: &FramePaneChipGroups,
+    previous_client_chip_tooltip: Option<&ClientChipTooltip>,
     next_frame_geometry: &FrameGeometry<'_>,
 ) -> Option<Vec<u16>> {
     let viewport_area = next_frame_geometry.viewport_area;
@@ -891,6 +1013,15 @@ pub fn list_changed_screen_rows(
     changed_screen_rows.extend(
         previous_pane_chip_groups.list_unshared_group_rows(&next_frame_geometry.pane_chip_groups),
     );
+    let next_client_chip_tooltip = next_frame_geometry.client_chip_tooltip.as_ref();
+    if previous_client_chip_tooltip != next_client_chip_tooltip {
+        changed_screen_rows.extend(
+            previous_client_chip_tooltip
+                .into_iter()
+                .chain(next_client_chip_tooltip)
+                .flat_map(ClientChipTooltip::list_rows),
+        );
+    }
     changed_screen_rows.sort_unstable();
     changed_screen_rows.dedup();
     Some(changed_screen_rows)
@@ -2300,7 +2431,7 @@ mod style;
 mod tabline;
 
 use style::*;
-use tabline::draw_tabline;
+use tabline::{draw_tabline, TablineLayout};
 // The statusline fills its row with the same bar background as the tabline.
 pub(crate) use style::compute_bar_style;
 pub(crate) use tabline::{

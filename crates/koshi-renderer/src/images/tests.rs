@@ -14,6 +14,7 @@ use std::sync::Arc;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -137,6 +138,7 @@ fn build_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
@@ -1701,12 +1703,9 @@ fn a_floating_panes_unavailable_image_shows_text_unless_a_later_floating_pane_co
         Vec::new(),
     );
     let committed_regions = build_regions();
-    let placed_floating_panes = list_placed_floating_panes(
-        &render_snapshot,
-        &committed_regions,
-        ViewerChrome::default(),
-        build_screen_area(),
-    );
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let placed_floating_panes = list_placed_floating_panes(frame_layout, build_screen_area());
     let list_lower_placeholder_rects =
         |covering_floating_panes: &[PlacedFloatingPane], image_mode: ImageRenderMode| {
             compute_floating_pane_image_placeholder_rects(
@@ -1787,6 +1786,108 @@ fn an_image_the_open_tray_meets_is_left_out_and_paints_again_once_the_tray_close
             (
                 tiled_pane_id,
                 RatatuiRect::new(21, 2, 4, 2),
+                build_whole_source_rect(8, 4)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn an_image_the_open_client_chip_tooltip_meets_is_left_out_and_paints_again_once_the_tooltip_closes(
+) {
+    use crate::floating_pane_tray::tests::{
+        build_tray_test_render_snapshot, EIGHTY_BY_TWENTY_FOUR_SIZE,
+    };
+    use crate::hit_test::{compute_tabline_area, compute_viewport_area};
+    use crate::render::{solve_tabline_layout, ClientChipHover, ClientChipHoverTarget};
+
+    let mut render_snapshot = build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]);
+    render_snapshot.session_snapshot.peers = (1..=4)
+        .map(|color_index| PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index,
+            label: format!("peer-{color_index}"),
+            origin: ClientOrigin::Remote,
+            typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
+        })
+        .collect();
+    let pane_snapshot = &mut render_snapshot.pane_snapshots[0];
+    let tiled_pane_id = pane_snapshot.pane_id;
+    pane_snapshot.terminal_grid_view = Some(GridView::from_grid(
+        &Grid::build_blank(20, 78, Style::default()),
+        0,
+    ));
+    let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
+    let screen_area = RatatuiRect::new(0, 0, 80, 24);
+    let theme = Theme::default();
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let viewport_area = compute_viewport_area(frame_layout);
+    let tabline_area = compute_tabline_area(frame_layout, viewport_area);
+    let client_chip_group = solve_tabline_layout(frame_layout.get_tabline_inputs(), tabline_area)
+        .client_chip_group
+        .expect("the tab strip draws a client chip group");
+    let client_chip_span = client_chip_group.client_chip_spans[0];
+    let hover = ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: tabline_area.y,
+        start_column: client_chip_span.start_column,
+    };
+    let tooltip_rect = {
+        let frame_geometry = build_frame_geometry(
+            &render_snapshot,
+            &committed_regions,
+            ViewerChrome {
+                client_chip_hover: Some(hover),
+                ..ViewerChrome::default()
+            },
+            screen_area,
+            &theme,
+        );
+        frame_geometry
+            .get_client_chip_tooltip()
+            .expect("the viewer chip opens a tooltip")
+            .get_rect()
+    };
+    let inside_anchor_row = tooltip_rect.y.saturating_sub(2);
+    let inside_anchor_column = tooltip_rect.x.saturating_sub(1).min(73);
+    let pane_snapshot = &mut render_snapshot.pane_snapshots[0];
+    pane_snapshot.image_placement_snapshots = vec![
+        build_image_placement(1, 8, 4, (inside_anchor_row, inside_anchor_column), 4, 2),
+        build_image_placement(2, 8, 4, (12, 2), 4, 2),
+    ];
+    let list_sorted_paint_targets = |viewer_chrome: ViewerChrome| {
+        let mut paint_targets = list_paint_targets(&build_image_paints(&build_frame_geometry(
+            &render_snapshot,
+            &committed_regions,
+            viewer_chrome,
+            screen_area,
+            &theme,
+        )));
+        paint_targets.sort_by_key(|(_, target_area, _)| target_area.x);
+        paint_targets
+    };
+    let outside_paint_target = (
+        tiled_pane_id,
+        RatatuiRect::new(3, 14, 4, 2),
+        build_whole_source_rect(8, 4),
+    );
+
+    assert_eq!(
+        list_sorted_paint_targets(ViewerChrome {
+            client_chip_hover: Some(hover),
+            ..ViewerChrome::default()
+        }),
+        [outside_paint_target]
+    );
+    assert_eq!(
+        list_sorted_paint_targets(ViewerChrome::default()),
+        [
+            outside_paint_target,
+            (
+                tiled_pane_id,
+                RatatuiRect::new(inside_anchor_column + 1, 2, 4, 2),
                 build_whole_source_rect(8, 4)
             ),
         ]
@@ -1883,6 +1984,8 @@ fn push_typing_peer(
     render_snapshot.session_snapshot.peers.push(PeerSnapshot {
         client_id: ClientId::new(),
         color_index,
+        label: String::new(),
+        origin: ClientOrigin::Local { is_same_user: true },
         typed_pane_id: Some(typed_pane_id),
         recent_input_pane_ids: Vec::new(),
     });

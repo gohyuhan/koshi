@@ -42,6 +42,7 @@ pub(crate) fn build_mouse_frame(
         committed_regions,
         viewer_chrome,
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     )
 }
 

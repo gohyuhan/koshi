@@ -12,7 +12,9 @@
 
 use super::*;
 
-use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
+use crate::snapshot::RenderSnapshot;
+
+use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
@@ -28,7 +30,7 @@ use crate::hit_test::{resolve_hit_region, HitRegion};
 use crate::images::ImageRenderMode;
 use crate::notification::tests::build_test_notification_view;
 use crate::notification::NotificationCenterEntries;
-use crate::render::client_chip::{ClientChipSpan, HiddenClientMark};
+use crate::render::client_chip::{ClientChipGroup, ClientChipSpan, HiddenClientMark};
 use crate::render::tests::{
     build_floating_pane_slot, build_one_pane_floating_pane_slot, build_peer_snapshot,
     build_render_snapshot, format_rendered_cells, get_pane_snapshot_mut, render_frame_to_buffer,
@@ -36,6 +38,7 @@ use crate::render::tests::{
 use crate::render::{
     build_frame_geometry, list_changed_screen_rows, render_frame, DrawnRows, PeerCursorMarker,
 };
+use crate::render::{find_client_chip_hover, ClientChipHover, ClientChipHoverTarget};
 use crate::snapshot::{
     CommittedRegions, FloatingPane, GridView, KeymapHints, PanePlacementMessage,
     PanePlacementPresentation, PlacementHandleHover, ViewerChrome,
@@ -176,6 +179,7 @@ fn list_core_changed_screen_rows(
         previous_render_snapshot,
         previous_frame_geometry.get_peer_cursor_markers(),
         previous_frame_geometry.get_pane_chip_groups(),
+        previous_frame_geometry.get_client_chip_tooltip(),
         &build_frame_geometry(
             next_render_snapshot,
             &committed_regions,
@@ -234,6 +238,7 @@ fn build_bob_group(
             hidden_client_mark: None,
         },
         client_colors: vec![Theme::default().compute_client_color(BOB_COLOR_INDEX)],
+        peer_indexes: vec![0],
     }
 }
 
@@ -382,6 +387,7 @@ fn a_pane_whose_half_row_has_no_room_for_two_chips_counts_them_into_the_mark() {
                 Theme::default().compute_client_color(BOB_COLOR_INDEX),
                 Theme::default().compute_client_color(CAROL_COLOR_INDEX),
             ],
+            peer_indexes: vec![0, 1],
         }]
     );
     let render_buffer = render_core_frame(&render_snapshot, ViewerChrome::default());
@@ -1326,5 +1332,282 @@ fn a_frame_lists_the_groups_of_each_layer_apart() {
             floating_pane_index: 1
         }),
         [] as [PaneChipGroup; 0]
+    );
+}
+
+#[test]
+fn a_pane_group_draws_at_most_three_chips_then_the_mark() {
+    for peer_count in 1..=5u32 {
+        let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
+        render_snapshot.session_snapshot.peers = (1..=peer_count)
+            .map(|color_index| build_peer_snapshot(color_index, Some(left_pane_id)))
+            .collect();
+
+        let pane_chip_groups =
+            list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default());
+        let pane_chip_group = pane_chip_groups
+            .iter()
+            .find(|pane_chip_group| {
+                pane_chip_group.pane_id == left_pane_id && !pane_chip_group.is_on_stack_header
+            })
+            .expect("the left pane draws its chip group");
+
+        assert_eq!(
+            pane_chip_group.client_chip_group.client_chip_spans.len(),
+            peer_count.min(3) as usize,
+            "peer count {peer_count}"
+        );
+        assert_eq!(
+            pane_chip_group
+                .client_chip_group
+                .hidden_client_mark
+                .map(|hidden_client_mark| hidden_client_mark.client_count),
+            (peer_count > 3).then_some(peer_count.saturating_sub(3) as usize),
+            "peer count {peer_count}"
+        );
+        assert_eq!(
+            pane_chip_group.peer_indexes,
+            (0..peer_count as usize).collect::<Vec<_>>(),
+            "peer count {peer_count}"
+        );
+    }
+}
+
+#[test]
+fn five_peers_on_a_pane_border_draw_three_chips_and_a_mark_for_two() {
+    let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
+    render_snapshot.session_snapshot.peers = (1..=5)
+        .map(|color_index| build_peer_snapshot(color_index, Some(left_pane_id)))
+        .collect();
+
+    let pane_chip_groups = list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default());
+    let pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == left_pane_id)
+        .expect("the left pane draws its chip group");
+
+    assert_eq!(
+        pane_chip_group.client_chip_group,
+        ClientChipGroup {
+            start_column: 14,
+            client_chip_spans: vec![
+                ClientChipSpan {
+                    color_index: 1,
+                    is_viewer_chip: false,
+                    start_column: 14,
+                },
+                ClientChipSpan {
+                    color_index: 2,
+                    is_viewer_chip: false,
+                    start_column: 18,
+                },
+                ClientChipSpan {
+                    color_index: 3,
+                    is_viewer_chip: false,
+                    start_column: 22,
+                },
+            ],
+            hidden_client_mark: Some(HiddenClientMark {
+                start_column: 26,
+                client_count: 2,
+            }),
+        }
+    );
+}
+
+#[test]
+fn pane_peer_indexes_name_each_member_position_in_the_peer_list() {
+    let (mut render_snapshot, left_pane_id, right_pane_id) = build_two_pane_frame();
+    render_snapshot.session_snapshot.peers = (1..=7)
+        .map(|color_index| {
+            let pane_id = if color_index == 2 || color_index == 5 {
+                right_pane_id
+            } else {
+                left_pane_id
+            };
+            build_peer_snapshot(color_index, Some(pane_id))
+        })
+        .collect();
+
+    let pane_chip_groups = list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default());
+    let left_pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == left_pane_id)
+        .expect("the left pane draws its chip group");
+    let right_pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == right_pane_id)
+        .expect("the right pane draws its chip group");
+
+    assert_eq!(left_pane_chip_group.peer_indexes, vec![0, 2, 3, 5, 6]);
+    assert_eq!(right_pane_chip_group.peer_indexes, vec![1, 4]);
+}
+
+#[test]
+fn a_stack_header_chip_is_hoverable_and_names_its_peer() {
+    let (mut render_snapshot, _, watch_pane_id) = build_stack_frame(30);
+    render_snapshot.session_snapshot.peers = (1..=2)
+        .map(|color_index| build_peer_snapshot(color_index, Some(watch_pane_id)))
+        .collect();
+    let committed_regions = build_core_regions();
+    let viewer_chrome = ViewerChrome::default();
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(viewer_chrome, &committed_regions);
+    let frame_theme = Theme::default();
+    let frame_geometry = build_frame_geometry(
+        &render_snapshot,
+        &committed_regions,
+        viewer_chrome,
+        build_viewport_area(),
+        &frame_theme,
+    );
+    let pane_chip_group = frame_geometry
+        .pane_chip_groups
+        .find_pane_chip_group(watch_pane_id, true)
+        .expect("the stack header draws its chip group");
+    let client_chip_span = pane_chip_group.client_chip_group.client_chip_spans[0];
+    let pointer_position = Point {
+        column: client_chip_span.start_column + 1,
+        row: pane_chip_group.row_index,
+    };
+    let hit_region = resolve_hit_region(frame_layout, pointer_position);
+
+    assert_eq!(
+        hit_region,
+        HitRegion::StackHeader {
+            pane_id: watch_pane_id
+        }
+    );
+    assert_eq!(
+        find_client_chip_hover(
+            frame_layout,
+            &frame_geometry.client_chip_groups,
+            hit_region,
+            pointer_position,
+        ),
+        Some(ClientChipHover::Pane {
+            pane_id: watch_pane_id,
+            is_on_stack_header: true,
+            target: ClientChipHoverTarget::PeerClient {
+                client_id: render_snapshot.session_snapshot.peers[pane_chip_group.peer_indexes[0]]
+                    .client_id,
+            },
+            row_index: pane_chip_group.row_index,
+            start_column: client_chip_span.start_column,
+        })
+    );
+}
+
+#[test]
+fn a_recent_input_chip_that_expires_under_the_pointer_opens_no_tooltip() {
+    let (mut render_snapshot, left_pane_id, _) = build_two_pane_frame();
+    render_snapshot.session_snapshot.peers[0].typed_pane_id = None;
+    render_snapshot.session_snapshot.peers[0].recent_input_pane_ids = vec![left_pane_id];
+    let pane_chip_groups = list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default());
+    let pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == left_pane_id)
+        .expect("the left pane draws the recent input chip");
+    let client_chip_span = pane_chip_group.client_chip_group.client_chip_spans[0];
+    let pointer_position = Point {
+        column: client_chip_span.start_column + 1,
+        row: pane_chip_group.row_index,
+    };
+    let committed_regions = build_core_regions();
+    let frame_theme = Theme::default();
+    let frame_layout =
+        render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let hit_region = resolve_hit_region(frame_layout, pointer_position);
+    let frame_geometry = build_frame_geometry(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        build_viewport_area(),
+        &frame_theme,
+    );
+    assert!(find_client_chip_hover(
+        frame_layout,
+        &frame_geometry.client_chip_groups,
+        hit_region,
+        pointer_position,
+    )
+    .is_some());
+    let mut expired_render_snapshot = render_snapshot.clone();
+    expired_render_snapshot.session_snapshot.peers[0]
+        .recent_input_pane_ids
+        .clear();
+    let expired_frame_layout = expired_render_snapshot
+        .build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let expired_hit_region = resolve_hit_region(expired_frame_layout, pointer_position);
+    let expired_frame_geometry = build_frame_geometry(
+        &expired_render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        build_viewport_area(),
+        &frame_theme,
+    );
+
+    assert_eq!(
+        find_client_chip_hover(
+            expired_frame_layout,
+            &expired_frame_geometry.client_chip_groups,
+            expired_hit_region,
+            pointer_position
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_floating_pane_over_a_chip_makes_that_chip_not_hoverable() {
+    let (render_snapshot, left_pane_id, _) = build_two_pane_frame();
+    let pane_chip_groups = list_core_pane_chip_groups(&render_snapshot, ViewerChrome::default());
+    let pane_chip_group = pane_chip_groups
+        .iter()
+        .find(|pane_chip_group| pane_chip_group.pane_id == left_pane_id)
+        .expect("the left pane draws its chip group");
+    let client_chip_span = pane_chip_group.client_chip_group.client_chip_spans[0];
+    let pointer_position = Point {
+        column: client_chip_span.start_column + 1,
+        row: pane_chip_group.row_index,
+    };
+    let mut covered_render_snapshot = render_snapshot.clone();
+    covered_render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(build_one_pane_floating_pane_slot(
+            PaneId::new(),
+            build_cell_rect(20, 0, 30, 12),
+            false,
+        ));
+    let committed_regions = build_core_regions();
+    let frame_layout = covered_render_snapshot
+        .build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let hit_region = resolve_hit_region(frame_layout, pointer_position);
+    let theme = Theme::default();
+    let frame_geometry = build_frame_geometry(
+        &covered_render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        build_viewport_area(),
+        &theme,
+    );
+
+    assert_ne!(
+        hit_region,
+        HitRegion::PaneBorder {
+            pane_id: left_pane_id,
+            side: Direction::Up,
+            corner_horizontal_side: None,
+        }
+    );
+    assert_eq!(
+        find_client_chip_hover(
+            frame_layout,
+            &frame_geometry.client_chip_groups,
+            hit_region,
+            pointer_position
+        ),
+        None
     );
 }

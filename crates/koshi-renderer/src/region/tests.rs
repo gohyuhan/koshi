@@ -4,6 +4,7 @@
 
 use super::*;
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -52,6 +53,7 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
@@ -219,6 +221,8 @@ fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
     render_snapshot.session_snapshot.peers = vec![PeerSnapshot {
         client_id: ClientId::new(),
         color_index: 1,
+        label: String::new(),
+        origin: ClientOrigin::Local { is_same_user: true },
         typed_pane_id: None,
         recent_input_pane_ids: Vec::new(),
     }];

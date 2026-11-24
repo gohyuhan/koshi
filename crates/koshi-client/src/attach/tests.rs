@@ -41,6 +41,7 @@ use ratatui::layout::{Position, Size as RatatuiSize};
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName, ToastPosition};
 use koshi_core::action::ClientActionKind;
+use koshi_core::client::ClientOrigin;
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, CloseTabArgs, FocusTabArgs, GridPosition, NewTabArgs,
     PanePlacementAnchor, PanePlacementTarget, QuitArgs, Selection, SelectionKind, SetSelectionArgs,
@@ -83,11 +84,14 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, FloatingPane, FloatingPaneMoveDraft,
     FloatingPaneSlot, FloatingPaneTray, GridView, ImagePlacementSnapshot, LayoutAreaSnapshot,
-    MousePane, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PlacementHandleHover,
-    PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata, SessionSnapshot,
-    TabMetadata, TabSnapshot,
+    MousePane, NotificationCenter, NotificationToast, PaneSlot, PaneSnapshot, PeerSnapshot,
+    PlacementHandleHover, PlacementSnapshot, PlacementSource, RenderSnapshot, ScrollbackMetadata,
+    SessionSnapshot, TabMetadata, TabSnapshot,
 };
-use koshi_renderer::{resolve_hit_region, HitRegion};
+use koshi_renderer::{
+    build_frame_geometry_with_client_chip_groups, find_client_chip_hover, resolve_hit_region,
+    solve_painted_client_chip_groups, ClientChipHover, ClientChipHoverTarget, HitRegion,
+};
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
@@ -101,8 +105,8 @@ use crate::attach::paint::build_render_snapshot;
 use crate::floating_pane_tray::tests::{build_client_with_open_tray, build_tray_mouse_frame};
 use crate::input::tests::{build_client_viewing, build_keymap_for_modes};
 use crate::mouse::tests::{
-    build_mouse_frame_on_tab_of, build_mouse_motion, build_plain_mouse_pane,
-    build_render_snapshot_from_mouse_frame, get_content_cell,
+    build_mouse_frame_on_tab_of, build_mouse_motion, build_one_pane_mouse_frame,
+    build_plain_mouse_pane, build_render_snapshot_from_mouse_frame, get_content_cell,
     handle_mouse_and_update_pointer_hover,
 };
 use crate::tests::{
@@ -285,6 +289,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
         client_snapshot: FrameClient {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
@@ -5427,6 +5432,52 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
 }
 
 #[test]
+fn a_key_press_closes_the_chip_tooltip_and_still_goes_up_the_connection_whole() {
+    let mut client = build_test_client();
+    client.pointer_hover.client_chip_hover = Some(ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: 0,
+        start_column: 54,
+    });
+    let client_id = client.get_client_id();
+    let mut control_socket = build_test_control_socket();
+    let key_input = crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Char('a'),
+    ));
+
+    process_runtime_input(
+        &mut client,
+        &mut control_socket.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: key_input.clone(),
+        },
+        Instant::now(),
+    );
+
+    assert_eq!(client.pointer_hover.client_chip_hover, None);
+    assert!(client.is_client_chip_hover_suppressed);
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the key");
+    assert_eq!(
+        request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::Keyboard {
+                key_inputs: vec![key_input],
+                painted_input_pane_moved_by_others_count: 0,
+            },
+        }
+    );
+}
+
+#[test]
 fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
@@ -6440,6 +6491,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),
@@ -17449,4 +17501,353 @@ fn a_binding_typed_against_an_older_painted_frame_runs_nothing_and_warns() {
     assert!(client
         .get_notification_history()
         .is_notification_center_open());
+}
+
+fn build_peer_snapshot(color_index: u32, typed_pane_id: Option<PaneId>) -> PeerSnapshot {
+    PeerSnapshot {
+        client_id: ClientId::new(),
+        color_index,
+        label: format!("peer-{color_index}"),
+        origin: ClientOrigin::Remote,
+        typed_pane_id,
+        recent_input_pane_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn an_animation_frame_draws_pane_chips_from_the_displayed_frame_and_no_tooltip() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let mut final_snapshot = build_render_snapshot_from_mouse_frame(&mouse_frame);
+    final_snapshot.session_snapshot.peers = (1..=18)
+        .map(|color_index| build_peer_snapshot(color_index, Some(pane_id)))
+        .collect();
+    let mut displayed_snapshot = final_snapshot.clone();
+    let pane_slot = &mut displayed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0];
+    pane_slot.outer_rect.origin.row += 2;
+    if let Some(content_rect) = &mut pane_slot.content_rect {
+        content_rect.origin.row += 2;
+    }
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let viewport_area = RatatuiRect::new(
+        0,
+        0,
+        TEST_VIEWPORT_SIZE.column_count,
+        TEST_VIEWPORT_SIZE.row_count,
+    );
+    let theme = koshi_renderer::theme::Theme::default();
+    let final_groups = solve_painted_client_chip_groups(
+        &final_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        viewport_area,
+        &theme,
+    );
+    let expected_mouse_hover = ClientChipHover::Pane {
+        pane_id,
+        is_on_stack_header: false,
+        target: ClientChipHoverTarget::PeerClient {
+            client_id: final_snapshot.session_snapshot.peers[0].client_id,
+        },
+        row_index: 1,
+        start_column: 63,
+    };
+    let mut client = build_test_client();
+    let final_frame_layout =
+        final_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let frame_with_groups = MouseFrame::from_snapshot(
+        &final_snapshot,
+        committed_regions.clone(),
+        ViewerChrome::default(),
+        client.build_drawn_notifications(final_frame_layout),
+        final_groups.clone(),
+    );
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(Point { column: 63, row: 1 }),
+        &frame_with_groups,
+        Instant::now(),
+    );
+    assert_eq!(
+        client.pointer_hover.client_chip_hover,
+        Some(expected_mouse_hover)
+    );
+    let active_tab_id = displayed_snapshot.client_snapshot.active_tab_id;
+    let mut viewer_paint = ViewerPaint::from_client(
+        &client,
+        active_tab_id,
+        &displayed_snapshot,
+        &committed_regions,
+    );
+    let pointer_hover_chip_groups = update_painted_pointer_hover(
+        &mut client,
+        &final_snapshot,
+        &displayed_snapshot,
+        false,
+        &committed_regions,
+        active_tab_id,
+        &mut viewer_paint,
+    );
+    let displayed_layout =
+        displayed_snapshot.build_painted_frame_layout(viewer_paint.chrome, &committed_regions);
+    let displayed_chip = |column| {
+        find_client_chip_hover(
+            displayed_layout,
+            &pointer_hover_chip_groups.painted_client_chip_groups,
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            },
+            Point { column, row: 3 },
+        )
+    };
+    assert_eq!(
+        displayed_chip(63),
+        Some(ClientChipHover::Pane {
+            pane_id,
+            is_on_stack_header: false,
+            target: ClientChipHoverTarget::PeerClient {
+                client_id: final_snapshot.session_snapshot.peers[0].client_id,
+            },
+            row_index: 3,
+            start_column: 63,
+        })
+    );
+    assert_eq!(
+        displayed_chip(67),
+        Some(ClientChipHover::Pane {
+            pane_id,
+            is_on_stack_header: false,
+            target: ClientChipHoverTarget::PeerClient {
+                client_id: final_snapshot.session_snapshot.peers[1].client_id,
+            },
+            row_index: 3,
+            start_column: 67,
+        })
+    );
+    assert_eq!(
+        displayed_chip(71),
+        Some(ClientChipHover::Pane {
+            pane_id,
+            is_on_stack_header: false,
+            target: ClientChipHoverTarget::PeerClient {
+                client_id: final_snapshot.session_snapshot.peers[2].client_id,
+            },
+            row_index: 3,
+            start_column: 71,
+        })
+    );
+    assert_eq!(
+        displayed_chip(75),
+        Some(ClientChipHover::Pane {
+            pane_id,
+            is_on_stack_header: false,
+            target: ClientChipHoverTarget::HiddenClients,
+            row_index: 3,
+            start_column: 75,
+        })
+    );
+    for blank_column in [62, 66, 70, 74] {
+        assert_eq!(displayed_chip(blank_column), None);
+    }
+    assert_eq!(
+        find_client_chip_hover(
+            displayed_layout,
+            &pointer_hover_chip_groups.painted_client_chip_groups,
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            },
+            Point { column: 63, row: 1 },
+        ),
+        None
+    );
+    assert_eq!(viewer_paint.chrome.client_chip_hover, None);
+    assert_eq!(
+        build_frame_geometry_with_client_chip_groups(
+            &displayed_snapshot,
+            &committed_regions,
+            viewer_paint.chrome,
+            viewport_area,
+            &theme,
+            pointer_hover_chip_groups.painted_client_chip_groups.clone(),
+        )
+        .get_client_chip_tooltip(),
+        None
+    );
+
+    let painted_mouse_frame = MouseFrame::from_snapshot(
+        &final_snapshot,
+        committed_regions.clone(),
+        viewer_paint.chrome,
+        client.build_drawn_notifications(
+            final_snapshot.build_painted_frame_layout(viewer_paint.chrome, &committed_regions),
+        ),
+        pointer_hover_chip_groups.mouse_frame_client_chip_groups,
+    );
+    assert_eq!(
+        find_client_chip_hover(
+            painted_mouse_frame.build_frame_layout(),
+            &painted_mouse_frame.client_chip_groups,
+            HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            },
+            Point { column: 63, row: 1 },
+        ),
+        Some(expected_mouse_hover)
+    );
+}
+
+#[test]
+fn one_frame_with_no_animation_solves_the_chip_groups_once_and_keeps_the_tooltip() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let mut render_snapshot = build_render_snapshot_from_mouse_frame(&mouse_frame);
+    render_snapshot.session_snapshot.peers = (1..=18)
+        .map(|color_index| build_peer_snapshot(color_index, Some(pane_id)))
+        .collect();
+    let committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
+    let viewport_area = RatatuiRect::new(
+        0,
+        0,
+        TEST_VIEWPORT_SIZE.column_count,
+        TEST_VIEWPORT_SIZE.row_count,
+    );
+    let theme = koshi_renderer::theme::Theme::default();
+    let expected_groups = solve_painted_client_chip_groups(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+        viewport_area,
+        &theme,
+    );
+    let expected_hover = ClientChipHover::Pane {
+        pane_id,
+        is_on_stack_header: false,
+        target: ClientChipHoverTarget::PeerClient {
+            client_id: render_snapshot.session_snapshot.peers[0].client_id,
+        },
+        row_index: 1,
+        start_column: 63,
+    };
+    let mut client = build_test_client();
+    let render_frame_layout =
+        render_snapshot.build_painted_frame_layout(ViewerChrome::default(), &committed_regions);
+    let frame_with_groups = MouseFrame::from_snapshot(
+        &render_snapshot,
+        committed_regions.clone(),
+        ViewerChrome::default(),
+        client.build_drawn_notifications(render_frame_layout),
+        expected_groups.clone(),
+    );
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(Point { column: 63, row: 1 }),
+        &frame_with_groups,
+        Instant::now(),
+    );
+    assert_eq!(client.pointer_hover.client_chip_hover, Some(expected_hover));
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let mut viewer_paint =
+        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot, &committed_regions);
+    let pointer_hover_chip_groups = update_painted_pointer_hover(
+        &mut client,
+        &render_snapshot,
+        &render_snapshot,
+        true,
+        &committed_regions,
+        active_tab_id,
+        &mut viewer_paint,
+    );
+
+    assert_eq!(
+        pointer_hover_chip_groups.mouse_frame_client_chip_groups,
+        pointer_hover_chip_groups.painted_client_chip_groups
+    );
+    assert_eq!(
+        pointer_hover_chip_groups.mouse_frame_client_chip_groups,
+        expected_groups
+    );
+    assert_eq!(viewer_paint.chrome.client_chip_hover, Some(expected_hover));
+}
+
+#[test]
+fn a_key_press_while_reconnecting_closes_the_chip_tooltip_and_stays_held() {
+    let mut viewer = TestViewerWithoutLink::new();
+    viewer.client.pointer_hover.client_chip_hover = Some(ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: 0,
+        start_column: 57,
+    });
+    let client_id = viewer.client.get_client_id();
+    let key_event = viewer.build_key_press_event(build_plain_chord('a'));
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        vec![key_event],
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(viewer.client.pointer_hover.client_chip_hover, None);
+    assert!(viewer.client.is_client_chip_hover_suppressed);
+    assert_eq!(
+        held_inputs,
+        vec![HeldInput::Keyboard {
+            key_inputs: vec![crate::tests::build_key_input_for_chord(build_plain_chord(
+                'a'
+            ))],
+            painted_input_pane_moved_by_others_count: 0,
+        }]
+    );
+}
+
+#[test]
+fn a_mouse_event_while_reconnecting_closes_the_chip_tooltip() {
+    let mut viewer = TestViewerWithoutLink::new();
+    viewer.client.pointer_hover.client_chip_hover = Some(ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: 0,
+        start_column: 57,
+    });
+    let client_id = viewer.client.get_client_id();
+    let mouse_event = RuntimeEvent::MouseInput {
+        client_id,
+        mouse_input: crate::mouse::tests::build_mouse_motion(Point { column: 0, row: 0 }),
+    };
+    let (joined_answer, _session_connection) = build_joined_answer(client_id);
+    viewer.queue_incoming_event(joined_answer);
+    let (attempt_rejoin, _attempt_start_receiver, _attempt_release_sender) =
+        build_blocked_attempt();
+
+    let stretch_result = viewer.run_without_link(
+        LinkRecovery::RestartRejoin {
+            input_hold: Some(InputHold::default()),
+        },
+        vec![build_input_incoming(mouse_event, Instant::now())],
+        attempt_rejoin,
+    );
+
+    let Ok((_joined_session, held_inputs)) = stretch_result else {
+        panic!("the queued join ends the stretch");
+    };
+    assert_eq!(viewer.client.pointer_hover.client_chip_hover, None);
+    assert!(viewer.client.is_client_chip_hover_suppressed);
+    assert_eq!(held_inputs, Vec::new());
 }

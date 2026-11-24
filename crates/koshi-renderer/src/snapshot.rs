@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ActionReference;
+use koshi_core::client::ClientOrigin;
 use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::event::{
     HeldCommandRejection, PanePlacementCommitted, RejectReason, SubscriberLagged,
@@ -60,6 +61,7 @@ use koshi_terminal::state::{CursorShape, ImagePlacement, ImagePlacementId};
 use crate::hit_test::{compute_frame_pane_area, compute_viewport_area};
 use crate::notification::NotificationCardRow;
 use crate::region::{solve_core_regions, TablineInputs};
+use crate::render::ClientChipHover;
 
 /// The statusline data the renderer draws, re-exported from the keymap crate
 /// that produces it: `koshi_config::hints`.
@@ -439,6 +441,9 @@ pub struct ViewerChrome {
     /// The renderer draws an unfocused pane under the pointer in the hover color
     /// outside pane placement mode; the focused pane keeps its focus color.
     pub hovered_pane_id: Option<PaneId>,
+    /// The client chip or `+N` mark the viewer's pointer is over, or `None`
+    /// over no chip. The renderer opens the client chip tooltip at it.
+    pub client_chip_hover: Option<ClientChipHover>,
     /// The placement handle hover this frame shows, as
     /// [`find_shown_placement_handle_hover`] gives it, or `None`. Hit-testing
     /// and painting read it as it is.
@@ -886,6 +891,9 @@ pub struct MouseFrame {
     pub viewer_chrome: ViewerChrome,
     /// The notification cards and the toast this frame drew.
     pub drawn_notifications: DrawnNotifications,
+    /// The tabline layout and pane chip groups the next mouse event is placed
+    /// against. Hover reads them instead of solving the chips again.
+    pub client_chip_groups: crate::render::PaintedClientChipGroups,
 }
 
 /// The notification cards and the toast one painted frame drew, as a click on
@@ -915,9 +923,9 @@ impl MouseFrame {
         }
     }
 
-    /// Build a mouse frame from a borrowed render snapshot, the regions it was
-    /// painted with, the viewer chrome it was painted with, and the
-    /// notification cards and the toast it drew.
+    /// Build a mouse frame from a borrowed render snapshot, the regions and
+    /// chrome the next mouse event is placed against, the notification cards
+    /// and the toast it drew, and the client chip groups the event reads.
     ///
     /// The mouse frame copies session, client, and per-pane input data. It does
     /// not copy pane grids.
@@ -927,6 +935,7 @@ impl MouseFrame {
         committed_regions: CommittedRegions,
         viewer_chrome: ViewerChrome,
         drawn_notifications: DrawnNotifications,
+        client_chip_groups: crate::render::PaintedClientChipGroups,
     ) -> Self {
         Self {
             mouse_panes: render_snapshot
@@ -939,6 +948,7 @@ impl MouseFrame {
             committed_regions,
             viewer_chrome,
             drawn_notifications,
+            client_chip_groups,
         }
     }
 }
@@ -1017,6 +1027,12 @@ pub struct PeerSnapshot {
     /// The other client's index as the session assigned it, held by no other
     /// attached client.
     pub color_index: u32,
+    /// The other client's label, at most
+    /// [`MAX_CLIENT_LABEL_CELL_COUNT`](koshi_core::client::MAX_CLIENT_LABEL_CELL_COUNT)
+    /// cells. Fixed at attach.
+    pub label: String,
+    /// Whether the other client runs on this machine, and under which account.
+    pub origin: ClientOrigin,
     /// The pane the other client's keys reach: the pane it focuses, when its
     /// own solve gives that pane a content rect. `None` when its keys reach no
     /// pane: it focuses none, that pane is suppressed or hidden behind a pane
@@ -1979,6 +1995,10 @@ pub struct ClientSnapshot {
     /// The client's index as the session assigned it, held by no other
     /// attached client. The same for every frame of one connection.
     pub color_index: u32,
+    /// The client's label, at most
+    /// [`MAX_CLIENT_LABEL_CELL_COUNT`](koshi_core::client::MAX_CLIENT_LABEL_CELL_COUNT)
+    /// cells. Fixed at attach.
+    pub label: String,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is currently viewing.

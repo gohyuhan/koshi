@@ -152,6 +152,7 @@ fn list_core_changed_screen_rows(
         previous_render_snapshot,
         previous_frame_geometry.get_peer_cursor_markers(),
         previous_frame_geometry.get_pane_chip_groups(),
+        previous_frame_geometry.get_client_chip_tooltip(),
         &build_frame_geometry(
             next_render_snapshot,
             &committed_regions,

@@ -119,6 +119,8 @@ pub(crate) fn build_wire_frame_with_content_ids(
                 .map(|peer_snapshot| FramePeer {
                     client_id: peer_snapshot.client_id,
                     color_index: peer_snapshot.color_index,
+                    label: peer_snapshot.label.clone(),
+                    origin: peer_snapshot.origin,
                     typed_pane_id: peer_snapshot.typed_pane_id,
                     recent_input_pane_ids: peer_snapshot.recent_input_pane_ids.clone(),
                 })
@@ -132,6 +134,7 @@ pub(crate) fn build_wire_frame_with_content_ids(
         client_snapshot: FrameClient {
             client_id: client_snapshot.client_id,
             color_index: client_snapshot.color_index,
+            label: client_snapshot.label.clone(),
             viewport_size: client_snapshot.viewport_size,
             active_tab_id: client_snapshot.active_tab_id,
             focused_pane_id: client_snapshot.focused_pane_id,

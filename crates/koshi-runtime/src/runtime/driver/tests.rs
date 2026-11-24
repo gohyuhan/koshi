@@ -2565,6 +2565,17 @@ fn list_frame_peer_snapshots(server: &Server, client_id: ClientId) -> Vec<PeerSn
         .peers
 }
 
+/// The label the session holds for `client_id`.
+fn get_client_label(server: &Server, client_id: ClientId) -> String {
+    server
+        .session_by_id
+        .values()
+        .find_map(|session| session.clients.get_client_by_id(client_id))
+        .expect("the client is attached")
+        .get_label()
+        .to_owned()
+}
+
 /// A `SetViewerLocalInputMode` event from `client_id`.
 fn build_viewer_local_input_mode_event(
     client_id: ClientId,
@@ -2664,12 +2675,16 @@ fn a_frame_lists_every_other_attached_client_in_color_index_order_with_the_pane_
             PeerSnapshot {
                 client_id: dave_client_id,
                 color_index: 1,
+                label: get_client_label(&server, dave_client_id),
+                origin: ClientOrigin::Local { is_same_user: true },
                 typed_pane_id: Some(pane_id),
                 recent_input_pane_ids: Vec::new(),
             },
             PeerSnapshot {
                 client_id: carol_client_id,
                 color_index: 2,
+                label: get_client_label(&server, carol_client_id),
+                origin: ClientOrigin::Local { is_same_user: true },
                 typed_pane_id: Some(pane_id),
                 recent_input_pane_ids: Vec::new(),
             },
@@ -2681,12 +2696,16 @@ fn a_frame_lists_every_other_attached_client_in_color_index_order_with_the_pane_
             PeerSnapshot {
                 client_id: alice_client_id,
                 color_index: 0,
+                label: get_client_label(&server, alice_client_id),
+                origin: ClientOrigin::Local { is_same_user: true },
                 typed_pane_id: Some(pane_id),
                 recent_input_pane_ids: Vec::new(),
             },
             PeerSnapshot {
                 client_id: dave_client_id,
                 color_index: 1,
+                label: get_client_label(&server, dave_client_id),
+                origin: ClientOrigin::Local { is_same_user: true },
                 typed_pane_id: Some(pane_id),
                 recent_input_pane_ids: Vec::new(),
             },
@@ -2750,6 +2769,8 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
         vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         }]
@@ -2763,6 +2784,8 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
         vec![PeerSnapshot {
             client_id: alice_client_id,
             color_index: 0,
+            label: get_client_label(&server, alice_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(left_pane_id),
             recent_input_pane_ids: Vec::new(),
         }]
@@ -2775,6 +2798,8 @@ fn a_client_in_a_viewer_local_input_mode_is_listed_as_typing_in_no_pane_and_keep
         vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(right_pane_id),
             recent_input_pane_ids: Vec::new(),
         }]
@@ -2803,6 +2828,8 @@ fn send_alice_a_frame_with_bob_in_a_local_input_mode(
         Some(&vec![PeerSnapshot {
             client_id: *bob_client_id,
             color_index: 1,
+            label: get_client_label(server, *bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         }])
@@ -2873,6 +2900,8 @@ fn a_key_or_a_paste_a_viewer_sends_in_a_local_input_mode_reaches_the_pane_and_sh
             vec![vec![PeerSnapshot {
                 client_id: *bob_client_id,
                 color_index: 1,
+                label: get_client_label(server, *bob_client_id),
+                origin: ClientOrigin::Local { is_same_user: true },
                 typed_pane_id: None,
                 recent_input_pane_ids: vec![*right_pane_id],
             }]],
@@ -2934,6 +2963,8 @@ fn a_recent_input_pane_a_resync_snapshot_names_leaves_the_other_clients_frames_t
         vec![vec![PeerSnapshot {
             client_id: *bob_client_id,
             color_index: 1,
+            label: get_client_label(server, *bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: vec![*right_pane_id],
         }]]
@@ -2950,6 +2981,7 @@ fn a_recent_input_pane_a_resync_snapshot_names_leaves_the_other_clients_frames_t
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3007,6 +3039,8 @@ fn a_key_sent_between_two_local_input_mode_reports_shows_in_the_other_clients_ne
         vec![vec![PeerSnapshot {
             client_id: *bob_client_id,
             color_index: 1,
+            label: get_client_label(server, *bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: vec![*right_pane_id],
         }]]
@@ -3016,12 +3050,15 @@ fn a_key_sent_between_two_local_input_mode_reports_shows_in_the_other_clients_ne
 /// The peer list Alice's frames show for Bob, with his floating pane tray
 /// open and `recent_input_pane_ids` as his recent input panes.
 fn build_bob_peers_in_a_local_input_mode(
+    server: &Server,
     bob_client_id: ClientId,
     recent_input_pane_ids: Vec<PaneId>,
 ) -> Vec<PeerSnapshot> {
     vec![PeerSnapshot {
         client_id: bob_client_id,
         color_index: 1,
+        label: get_client_label(server, bob_client_id),
+        origin: ClientOrigin::Local { is_same_user: true },
         typed_pane_id: None,
         recent_input_pane_ids,
     }]
@@ -3051,6 +3088,7 @@ fn a_recent_input_pane_leaves_the_other_clients_frames_two_seconds_after_a_pass_
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             vec![*right_pane_id]
         )]
@@ -3072,6 +3110,7 @@ fn a_recent_input_pane_leaves_the_other_clients_frames_two_seconds_after_a_pass_
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3108,6 +3147,7 @@ fn a_recent_input_pane_in_a_frame_the_writing_thread_has_not_taken_stays_in_the_
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             vec![*right_pane_id]
         )]
@@ -3122,6 +3162,7 @@ fn a_recent_input_pane_in_a_frame_the_writing_thread_has_not_taken_stays_in_the_
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3164,7 +3205,7 @@ fn a_recent_input_pane_leaves_two_seconds_after_the_take_of_the_first_frame_that
     };
     assert_eq!(
         first_render_snapshot.session_snapshot.peers,
-        build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id])
+        build_bob_peers_in_a_local_input_mode(server, *bob_client_id, vec![*right_pane_id])
     );
     assert!(alice_delivery_receiver.take_frame_taken_notice());
     let take_seen_at = Instant::now().max(newer_frame_time);
@@ -3182,6 +3223,7 @@ fn a_recent_input_pane_leaves_two_seconds_after_the_take_of_the_first_frame_that
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3227,8 +3269,9 @@ fn one_pass_counts_the_recent_input_marks_of_every_frame_the_writing_thread_took
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![
-            build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id]),
+            build_bob_peers_in_a_local_input_mode(server, *bob_client_id, vec![*right_pane_id]),
             build_bob_peers_in_a_local_input_mode(
+                server,
                 *bob_client_id,
                 vec![*right_pane_id, left_pane_id]
             ),
@@ -3243,6 +3286,7 @@ fn one_pass_counts_the_recent_input_marks_of_every_frame_the_writing_thread_took
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3294,7 +3338,7 @@ fn a_pass_that_counts_a_taken_frame_asks_to_hear_of_the_take_of_the_next_waiting
     };
     assert_eq!(
         first_render_snapshot.session_snapshot.peers,
-        build_bob_peers_in_a_local_input_mode(*bob_client_id, vec![*right_pane_id])
+        build_bob_peers_in_a_local_input_mode(server, *bob_client_id, vec![*right_pane_id])
     );
     assert!(alice_delivery_receiver.take_frame_taken_notice());
     let first_take_seen_at = Instant::now().max(left_mark_frame_time);
@@ -3307,6 +3351,7 @@ fn a_pass_that_counts_a_taken_frame_asks_to_hear_of_the_take_of_the_next_waiting
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             vec![*right_pane_id, left_pane_id]
         )]
@@ -3319,6 +3364,7 @@ fn a_pass_that_counts_a_taken_frame_asks_to_hear_of_the_take_of_the_next_waiting
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3355,6 +3401,7 @@ fn a_recent_input_pane_whose_end_passed_before_the_next_wait_wakes_the_loop_at_o
     assert_eq!(
         list_queued_frame_peers(alice_delivery_receiver),
         vec![build_bob_peers_in_a_local_input_mode(
+            server,
             *bob_client_id,
             Vec::new()
         )]
@@ -3461,6 +3508,8 @@ fn a_write_to_pane_binding_into_another_pane_shows_in_the_other_clients_next_fra
         vec![vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(right_pane_id),
             recent_input_pane_ids: vec![left_pane_id],
         }]]
@@ -3527,6 +3576,8 @@ fn a_mouse_report_into_another_pane_shows_in_the_other_clients_next_frame() {
         vec![vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(right_pane_id),
             recent_input_pane_ids: vec![left_pane_id],
         }]]
@@ -3559,6 +3610,8 @@ fn alternate_scroll_arrows_into_another_pane_show_in_the_other_clients_next_fram
         vec![vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(right_pane_id),
             recent_input_pane_ids: vec![left_pane_id],
         }]]
@@ -3607,6 +3660,8 @@ fn a_pane_move_by_another_client_during_a_viewer_local_input_mode_still_drops_a_
         vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         }]
@@ -3620,6 +3675,8 @@ fn a_pane_move_by_another_client_during_a_viewer_local_input_mode_still_drops_a_
         vec![PeerSnapshot {
             client_id: bob_client_id,
             color_index: 1,
+            label: get_client_label(&server, bob_client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(left_pane_id),
             recent_input_pane_ids: Vec::new(),
         }]
@@ -3755,6 +3812,8 @@ fn an_attach_from_a_viewer_in_a_local_input_mode_is_listed_as_typing_in_no_pane(
         vec![PeerSnapshot {
             client_id: attach_accepted.client_id,
             color_index: 1,
+            label: get_client_label(&server, attach_accepted.client_id),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         }]

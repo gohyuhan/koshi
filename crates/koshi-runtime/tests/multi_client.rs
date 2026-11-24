@@ -1337,11 +1337,13 @@ fn the_peer_list_in_a_viewers_frames_follows_another_viewer_attaching_changing_i
             let mut bob_connection = open_session_connection(&runtime_directory, session_id);
             let bob_client_id =
                 attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE).client_id;
-            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
+            let (_tab_id, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             let build_bob_peers = |typed_pane_id: Option<PaneId>| {
                 vec![FramePeer {
                     client_id: bob_client_id,
                     color_index: 1,
+                    label: "host-2".to_owned(),
+                    origin: ClientOrigin::Local { is_same_user: true },
                     typed_pane_id,
                     recent_input_pane_ids: Vec::new(),
                 }]
@@ -1402,13 +1404,15 @@ fn a_recent_input_pane_reaches_a_client_that_paints_late_and_stays_two_seconds_a
             let mut bob_connection = open_session_connection(&runtime_directory, session_id);
             let bob_client_id =
                 attach_test_client(&mut bob_connection, 2, SMALL_VIEWPORT_SIZE).client_id;
-            let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
+            let (_tab_id, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
             send_viewer_local_input_mode(&mut bob_connection, 4, true);
             let (bob_connection, _) = read_until_earlier_requests_handled(bob_connection, 5);
             let build_bob_peers = move |recent_input_pane_ids: Vec<PaneId>| {
                 vec![FramePeer {
                     client_id: bob_client_id,
                     color_index: 0,
+                    label: "host".to_owned(),
+                    origin: ClientOrigin::Local { is_same_user: true },
                     typed_pane_id: None,
                     recent_input_pane_ids,
                 }]
@@ -1933,7 +1937,8 @@ fn each_way_the_smaller_client_ends_hands_the_tab_back_and_drops_its_peer_entry_
             move |runtime_directory, session_id, _fake_pty_backend| {
                 let mut large_connection = open_session_connection(&runtime_directory, session_id);
                 attach_test_client(&mut large_connection, 2, LARGE_VIEWPORT_SIZE);
-                let (_, pane_id) = get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
+                let (_tab_id, pane_id) =
+                    get_seeded_tab_and_pane_ids(&runtime_directory, session_id);
                 let (large_connection, _) =
                     read_session_frames_until_tab_size(large_connection, LARGE_PANE_VIEWPORT_SIZE);
 
@@ -1955,6 +1960,8 @@ fn each_way_the_smaller_client_ends_hands_the_tab_back_and_drops_its_peer_entry_
                         vec![FramePeer {
                             client_id: small_client_id,
                             color_index: 1,
+                            label: "host-2".to_owned(),
+                            origin: ClientOrigin::Local { is_same_user: true },
                             typed_pane_id: Some(pane_id),
                             recent_input_pane_ids: Vec::new(),
                         }],
@@ -2658,6 +2665,8 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                         == vec![FramePeer {
                             client_id: second_client_id,
                             color_index: 1,
+                            label: "C-\u{3042}\u{3056}\u{3084}\u{304b}-\u{304b}\u{305c}".to_owned(),
+                            origin: ClientOrigin::Local { is_same_user: true },
                             typed_pane_id: Some(cells_pane_id),
                             recent_input_pane_ids: Vec::new(),
                         }]
@@ -2699,6 +2708,8 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                         == vec![FramePeer {
                             client_id: first_client_id,
                             color_index: 0,
+                            label: "C-\u{5d84}\u{65b0}-\u{767d}\u{9db4}".to_owned(),
+                            origin: ClientOrigin::Local { is_same_user: true },
                             typed_pane_id: Some(cells_pane_id),
                             recent_input_pane_ids: Vec::new(),
                         }]
@@ -2866,18 +2877,36 @@ fn send_viewer_local_input_mode(
         .expect("send the local input mode report");
 }
 
-/// Everything a painted update shows its client, apart from its number.
+/// Alice's entry in `received_painted_frame`'s peer list.
+fn get_alice_peer(
+    received_painted_frame: &ReceivedPaintedFrame,
+    alice_client_id: ClientId,
+) -> FramePeer {
+    received_painted_frame
+        .painted_frame
+        .session_snapshot
+        .peers
+        .iter()
+        .find(|peer| peer.client_id == alice_client_id)
+        .expect("Bob shows Alice as a peer")
+        .clone()
+}
+
+/// Everything a painted update shows its client, apart from its number and
+/// the peer list.
 fn describe_painted_view(
     received_painted_frame: &ReceivedPaintedFrame,
 ) -> (
-    &PaintedFrame,
-    &[ReceivedPaneView],
-    Option<&PanePlacementPreview>,
+    PaintedFrame,
+    Vec<ReceivedPaneView>,
+    Option<Arc<PanePlacementPreview>>,
 ) {
+    let mut painted_frame = (*received_painted_frame.painted_frame).clone();
+    painted_frame.session_snapshot.peers.clear();
     (
-        &received_painted_frame.painted_frame,
-        &received_painted_frame.pane_views,
-        received_painted_frame.placement_preview.as_deref(),
+        painted_frame,
+        received_painted_frame.pane_views.clone(),
+        received_painted_frame.placement_preview.clone(),
     )
 }
 
@@ -3240,13 +3269,12 @@ fn a_client_changing_its_own_view_leaves_every_field_of_another_clients_view_as_
 
                 let is_alice_typing_in_no_pane =
                     move |received_painted_frame: &ReceivedPaintedFrame| {
-                        received_painted_frame.painted_frame.session_snapshot.peers
-                            == vec![FramePeer {
-                                client_id: alice_client_id,
-                                color_index: 0,
-                                typed_pane_id: None,
-                                recent_input_pane_ids: Vec::new(),
-                            }]
+                        let alice_peer = get_alice_peer(received_painted_frame, alice_client_id);
+                        alice_peer.color_index == 0
+                            && alice_peer.label == "host"
+                            && alice_peer.origin == ClientOrigin::Local { is_same_user: true }
+                            && alice_peer.typed_pane_id.is_none()
+                            && alice_peer.recent_input_pane_ids.is_empty()
                     };
                 let (bob_viewer, _) = read_session_frames_until_painted_frame(
                     bob_connection,

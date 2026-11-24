@@ -107,6 +107,7 @@ fn build_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size,
             active_tab_id,
             focused_pane_id: None,
@@ -320,6 +321,7 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
         default_regions.clone(),
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        crate::render::PaintedClientChipGroups::default(),
     );
     assert_eq!(
         resolve_hit_region(
@@ -352,6 +354,7 @@ fn mouse_hit_testing_stays_on_the_painted_region_revision() {
         side_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        crate::render::PaintedClientChipGroups::default(),
     );
     assert_eq!(
         resolve_hit_region(
@@ -416,6 +419,7 @@ fn a_left_region_shifts_the_pane_area_right() {
         ),
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        crate::render::PaintedClientChipGroups::default(),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
@@ -534,6 +538,7 @@ fn a_committed_solve_with_no_regions_leaves_every_row_to_the_panes() {
         ),
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        crate::render::PaintedClientChipGroups::default(),
     );
     let resolve_screen_hit_region = |screen_column, screen_row| {
         resolve_hit_region(
@@ -1606,6 +1611,7 @@ fn build_core_mouse_frame(
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0),
         viewer_chrome,
         DrawnNotifications::default(),
+        crate::render::PaintedClientChipGroups::default(),
     )
 }
 

@@ -22,6 +22,7 @@ use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::Color;
 
 use koshi_config::types::ToastPosition;
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -205,6 +206,7 @@ fn build_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id,
@@ -343,6 +345,7 @@ fn every_cell_classifies_as_what_was_painted() {
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
@@ -521,6 +524,7 @@ fn a_shown_tiled_handle_paints_and_hits_the_three_cells_before_the_title() {
         committed_regions,
         viewer_chrome,
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
     // The left pane's 25x10 box starts at screen (5, 2).
@@ -603,6 +607,7 @@ fn every_floating_pane_cell_classifies_as_what_was_painted() {
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
     let floating_content_rect = find_pane_content_rect(frame_layout, floating_slot_pane_id)
@@ -719,6 +724,7 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
         committed_regions,
         viewer_chrome,
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
@@ -863,6 +869,7 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         committed_regions,
         viewer_chrome,
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
@@ -1001,6 +1008,7 @@ fn a_move_draft_past_the_pane_area_paints_and_hits_inside_the_pane_area() {
         committed_regions,
         viewer_chrome,
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
@@ -1047,6 +1055,7 @@ fn a_tab_ribbon_spells_the_tab_it_hits() {
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
@@ -1092,6 +1101,8 @@ fn every_client_chip_cell_hits_the_tabline_and_a_click_on_tab_3_hits_tab_3() {
         .map(|color_index| PeerSnapshot {
             client_id: ClientId::new(),
             color_index,
+            label: String::new(),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         })
@@ -1107,6 +1118,7 @@ fn every_client_chip_cell_hits_the_tabline_and_a_click_on_tab_3_hits_tab_3() {
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
     let theme = Theme::default();
@@ -1149,6 +1161,7 @@ fn every_client_chip_cell_hits_the_tabline_and_a_click_on_tab_3_hits_tab_3() {
         committed_regions,
         peeking_viewer_chrome,
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let third_tab_id = render_snapshot.session_snapshot.tabs_metadata[2].tab_id;
     let third_tab_column_indexes: Vec<u16> = (0..TEST_VIEWPORT_SIZE.column_count)
@@ -1203,6 +1216,7 @@ fn the_cursor_lands_in_the_focused_pane_content() {
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 
@@ -1270,6 +1284,7 @@ fn a_zero_height_chrome_region_paints_nothing() {
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     let frame_layout = mouse_frame.build_frame_layout();
 

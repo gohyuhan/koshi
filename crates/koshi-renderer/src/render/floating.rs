@@ -15,7 +15,7 @@ use crate::floating_chrome::{
     FloatingTitlebar, FLOATING_CHROME_SIZE,
 };
 use crate::snapshot::{
-    CommittedRegions, DrawnFloatingPaneSlot, PaneSnapshot, PlacementHandleHover, RenderSnapshot,
+    DrawnFloatingPaneSlot, FrameLayout, PaneSnapshot, PlacementHandleHover, RenderSnapshot,
     ViewerChrome,
 };
 
@@ -125,15 +125,15 @@ impl<'a> PlacedFloatingPane<'a> {
 /// starts at `(0, 1)` has its outer area at `(150, 5)` and its layout origin
 /// at `(150, 6)`.
 pub(crate) fn list_placed_floating_panes<'a>(
-    render_snapshot: &'a RenderSnapshot,
-    committed_regions: &'a CommittedRegions,
-    viewer_chrome: ViewerChrome,
+    frame_layout: FrameLayout<'a>,
     viewport_area: RatatuiRect,
 ) -> Vec<PlacedFloatingPane<'a>> {
+    let Some(committed_regions) = frame_layout.committed_regions else {
+        return Vec::new();
+    };
     let pane_area = compute_pane_area(committed_regions, viewport_area);
     let pane_area_origin = get_area_origin(pane_area);
-    render_snapshot
-        .build_painted_frame_layout(viewer_chrome, committed_regions)
+    frame_layout
         .list_drawn_floating_pane_slots()
         .map(|drawn_floating_pane_slot| {
             let outer_area = place_cell_rect(drawn_floating_pane_slot.outer_rect, pane_area_origin);

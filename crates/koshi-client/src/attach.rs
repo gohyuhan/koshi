@@ -173,6 +173,7 @@ use std::time::{Duration, Instant, SystemTime};
 use ratatui::backend::Backend;
 use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
+use ratatui::layout::Rect as RatatuiRect;
 
 use crate::floating_pane_tray::FloatingPaneTrayAnchor;
 use crate::input::{InputReadStamp, KeyOutcome, RequestedClientActionFit};
@@ -190,7 +191,7 @@ use koshi_core::constant::{compute_frame_interval, compute_heartbeat_interval};
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{Direction, PixelCellSize, Rect as CoreRect, Size};
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
-use koshi_core::key::{KeyInput, KeySequence};
+use koshi_core::key::{KeyEventKind, KeyInput, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput};
 use koshi_core::notification::NotificationQueue;
@@ -219,6 +220,7 @@ use koshi_renderer::snapshot::{
     PanePlacementPresentation, PaneSnapshot, PlacementPreview, PlacementTabSnapshot, Reconnecting,
     RenderSnapshot, TabSnapshot, ViewerChrome,
 };
+use koshi_renderer::{solve_painted_client_chip_groups, PaintedClientChipGroups};
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::painted_update::{
     PaintedUpdateReceiver, ReceivedPaintedFrame, SessionFrame,
@@ -560,17 +562,66 @@ impl ViewerPaint {
 /// ([`Client::update_pointer_hover_for_frame`]). Then build
 /// `viewer_paint`'s chrome again with the hover found, for the paint that
 /// shows `displayed_active_tab_id`.
+///
+/// Returns the client chip groups solved from `mouse_frame_snapshot` and the
+/// groups solved from `displayed_frame_snapshot`. A displayed frame equal to
+/// the mouse frame solves once and returns the same groups twice, cloned. A
+/// different displayed frame solves again and leaves the painted chrome with
+/// no client chip hover.
 fn update_painted_pointer_hover(
     client: &mut Client,
     mouse_frame_snapshot: &RenderSnapshot,
+    displayed_frame_snapshot: &RenderSnapshot,
+    is_mouse_frame_displayed: bool,
     committed_regions: &CommittedRegions,
     displayed_active_tab_id: TabId,
     viewer_paint: &mut ViewerPaint,
-) {
-    client.update_pointer_hover_for_frame(
-        mouse_frame_snapshot.build_painted_frame_layout(viewer_paint.chrome, committed_regions),
+) -> PointerHoverClientChipGroups {
+    let frame_layout =
+        mouse_frame_snapshot.build_painted_frame_layout(viewer_paint.chrome, committed_regions);
+    let viewport_size = client.get_viewport_size();
+    let viewport_area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: viewport_size.column_count,
+        height: viewport_size.row_count,
+    };
+    let mouse_client_chip_groups = solve_painted_client_chip_groups(
+        mouse_frame_snapshot,
+        committed_regions,
+        viewer_paint.chrome,
+        viewport_area,
+        client.get_theme(),
     );
+    client.update_pointer_hover_for_frame(frame_layout, &mouse_client_chip_groups);
     viewer_paint.chrome = client.build_viewer_chrome(displayed_active_tab_id, committed_regions);
+    if is_mouse_frame_displayed {
+        return PointerHoverClientChipGroups {
+            mouse_frame_client_chip_groups: mouse_client_chip_groups.clone(),
+            painted_client_chip_groups: mouse_client_chip_groups,
+        };
+    }
+    viewer_paint.chrome.client_chip_hover = None;
+    let painted_client_chip_groups = solve_painted_client_chip_groups(
+        displayed_frame_snapshot,
+        committed_regions,
+        viewer_paint.chrome,
+        viewport_area,
+        client.get_theme(),
+    );
+    PointerHoverClientChipGroups {
+        mouse_frame_client_chip_groups: mouse_client_chip_groups,
+        painted_client_chip_groups,
+    }
+}
+
+/// The client chip groups one paint solves: the groups a mouse event is
+/// hit-tested against, and the groups that paint draws.
+struct PointerHoverClientChipGroups {
+    /// The groups solved from the frame the next mouse event is placed against.
+    mouse_frame_client_chip_groups: PaintedClientChipGroups,
+    /// The groups solved from the frame the paint draws.
+    painted_client_chip_groups: PaintedClientChipGroups,
 }
 
 /// The second line of a placement message while the session refuses the
@@ -1065,13 +1116,17 @@ impl<B: Backend> Screen<B> {
             snapshot,
             &committed_regions,
         );
-        update_painted_pointer_hover(
+        let is_mouse_frame_displayed =
+            placement_display.is_some() || displayed_render_snapshot.is_none();
+        let pointer_hover_chip_groups = update_painted_pointer_hover(
             client,
             if placement_display.is_some() {
                 displayed_snapshot
             } else {
                 snapshot
             },
+            displayed_snapshot,
+            is_mouse_frame_displayed,
             &committed_regions,
             displayed_snapshot.client_snapshot.active_tab_id,
             &mut frame_paint,
@@ -1097,6 +1152,7 @@ impl<B: Backend> Screen<B> {
             placement_display
                 .as_ref()
                 .map(|placement_display| &placement_display.displayed_tab_snapshot),
+            &pointer_hover_chip_groups.painted_client_chip_groups,
         ) {
             Ok(()) => {
                 if is_native_image_output {
@@ -1147,6 +1203,7 @@ impl<B: Backend> Screen<B> {
             committed_regions,
             painted_viewer_chrome,
             drawn_notifications,
+            pointer_hover_chip_groups.mouse_frame_client_chip_groups,
         );
         client.record_painted_input_view(
             PaintedInputView {
@@ -1265,9 +1322,13 @@ impl<B: Backend> Screen<B> {
             snapshot
         };
         let shown_pointer_hover = client.pointer_hover;
-        update_painted_pointer_hover(
+        let is_mouse_frame_displayed =
+            placement_display.is_some() || displayed_render_snapshot.is_none();
+        let pointer_hover_chip_groups = update_painted_pointer_hover(
             client,
             mouse_frame_snapshot,
+            displayed_snapshot,
+            is_mouse_frame_displayed,
             &self.committed_regions,
             displayed_active_tab_id,
             &mut viewer_paint,
@@ -1293,6 +1354,7 @@ impl<B: Backend> Screen<B> {
             placement_display
                 .as_ref()
                 .map(|placement_display| &placement_display.displayed_tab_snapshot),
+            &pointer_hover_chip_groups.painted_client_chip_groups,
         )) {
             client.pointer_hover = shown_pointer_hover;
             return None;
@@ -1316,6 +1378,7 @@ impl<B: Backend> Screen<B> {
             self.committed_regions.clone(),
             painted_viewer_chrome,
             drawn_notifications,
+            pointer_hover_chip_groups.mouse_frame_client_chip_groups,
         ))
     }
 
@@ -5115,6 +5178,9 @@ fn run_without_link<B: Backend>(
                     }
                     match runtime_event {
                         RuntimeEvent::KeyInput { key_input, .. } => {
+                            if key_input.key_event_kind != KeyEventKind::Release {
+                                client.close_client_chip_tooltip();
+                            }
                             let Some(chord) = key_input.to_binding_chord() else {
                                 pane_key_inputs.push(key_input);
                                 continue;
@@ -5167,9 +5233,11 @@ fn run_without_link<B: Backend>(
                         RuntimeEvent::OuterTerminalFocusLost { .. } => {
                             client.handle_outer_terminal_focus_lost();
                         }
-                        // A resize and a mouse event are dropped and not
-                        // recorded; the new link reads the terminal's size
-                        // itself.
+                        RuntimeEvent::MouseInput { .. } => {
+                            client.close_client_chip_tooltip();
+                        }
+                        // A resize is dropped and not recorded; the new link
+                        // reads the terminal's size itself.
                         _ => {}
                     }
                 }
@@ -6479,6 +6547,9 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
+            if key_input.key_event_kind != KeyEventKind::Release {
+                client.close_client_chip_tooltip();
+            }
             // A release has no binding chord. Pane placement mode, the move
             // chooser, and floating pane move mode own releases while on; every
             // other release goes to the focused pane.

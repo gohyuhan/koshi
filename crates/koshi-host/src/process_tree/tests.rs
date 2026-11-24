@@ -802,7 +802,11 @@ fn stop_processes_ends_a_shell_and_both_of_its_background_jobs() {
             std::slice::from_ref(&shell_record),
             &list_process_records().expect("the process list is readable"),
         );
-        if member_records.len() == 2 || Instant::now() >= wait_end {
+        let has_both_sleeps = member_records.len() == 2
+            && member_records
+                .iter()
+                .all(|member_record| member_record.executable_name == "sleep");
+        if has_both_sleeps || Instant::now() >= wait_end {
             break member_records;
         }
         std::thread::sleep(Duration::from_millis(20));

@@ -111,6 +111,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,

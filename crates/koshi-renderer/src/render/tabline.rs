@@ -48,6 +48,7 @@ mod tests;
 /// nothing, and a zero-width or zero-height `tabline_area` paints nothing.
 pub(super) fn draw_tabline(
     tabline_inputs: TablineInputs<'_>,
+    tabline_layout: &TablineLayout,
     theme: &Theme,
     client_colors: &[ClientColor],
     tabline_area: RatatuiRect,
@@ -62,8 +63,6 @@ pub(super) fn draw_tabline(
     // blocks set their own background over it.
     Clear.render(tabline_area, screen_buffer);
     screen_buffer.set_style(tabline_area, compute_bar_style(theme));
-
-    let tabline_layout = solve_tabline_layout(tabline_inputs, tabline_area);
 
     // Right block: it owns the right edge whole.
     let right_block_line = build_right_block(tabline_inputs, theme);
@@ -187,6 +186,7 @@ pub(crate) const FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT: u16 = 3;
 ///
 /// [`draw_tabline`] paints from it, and [`crate::resolve_hit_region()`] maps a click to a
 /// tab or arrow with it. Both read the same solve.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TablineLayout {
     /// Cells the left session block occupies, measured from `tabline_area.x`.
     pub session_block_width: u16,

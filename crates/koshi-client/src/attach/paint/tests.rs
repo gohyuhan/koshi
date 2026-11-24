@@ -6,6 +6,7 @@
 
 use std::num::NonZeroUsize;
 
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -378,6 +379,7 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,
@@ -532,12 +534,16 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         PeerSnapshot {
             client_id: ClientId::new(),
             color_index: 1,
+            label: String::new(),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: Some(empty_pane_id),
             recent_input_pane_ids: Vec::new(),
         },
         PeerSnapshot {
             client_id: ClientId::new(),
             color_index: 4,
+            label: String::new(),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: vec![empty_pane_id],
         },
@@ -1743,6 +1749,7 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
         committed_regions,
         koshi_renderer::snapshot::ViewerChrome::default(),
         DrawnNotifications::default(),
+        koshi_renderer::PaintedClientChipGroups::default(),
     );
     assert_eq!(mouse_frame.client_snapshot.active_tab_id, active_tab_id);
     assert_eq!(mouse_frame.client_snapshot.focused_pane_id, focused_pane_id);
@@ -2074,6 +2081,7 @@ fn a_typed_character_lists_only_its_row_after_the_painted_updates_travel() {
             &first_received_render_snapshot,
             first_frame_geometry.get_peer_cursor_markers(),
             first_frame_geometry.get_pane_chip_groups(),
+            first_frame_geometry.get_client_chip_tooltip(),
             &koshi_renderer::build_frame_geometry(
                 &second_received_render_snapshot,
                 &committed_regions,

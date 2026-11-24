@@ -13,16 +13,39 @@ use koshi_test_support::fixtures::build_floating_pane_id;
 use super::*;
 use koshi_core::ids::FloatingPaneId;
 
+fn build_client_chip_groups(
+    render_snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    viewer_chrome: ViewerChrome,
+) -> crate::render::PaintedClientChipGroups {
+    let viewport_size = committed_regions.viewport_size;
+    crate::render::build_frame_geometry(
+        render_snapshot,
+        committed_regions,
+        viewer_chrome,
+        ratatui::layout::Rect::new(0, 0, viewport_size.column_count, viewport_size.row_count),
+        &crate::theme::Theme::default(),
+    )
+    .client_chip_groups
+    .clone()
+}
+
 /// The mouse frame for `render_snapshot` under the compiled-in region solve for
 /// its client's viewport, at input revision `0`.
 fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);
+    let client_chip_groups = build_client_chip_groups(
+        &render_snapshot,
+        &committed_regions,
+        ViewerChrome::default(),
+    );
     MouseFrame::from_snapshot(
         &render_snapshot,
         committed_regions,
         ViewerChrome::default(),
         DrawnNotifications::default(),
+        client_chip_groups,
     )
 }
 
@@ -122,6 +145,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
     let client_snapshot = ClientSnapshot {
         client_id: ClientId::new(),
         color_index: 0,
+        label: String::new(),
         viewport_size: Size {
             column_count: 80,
             row_count: 24,
@@ -412,11 +436,14 @@ fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve_and_viewer_chrome()
         ..ViewerChrome::default()
     };
 
+    let client_chip_groups =
+        build_client_chip_groups(&render_snapshot, &committed_regions, viewer_chrome);
     let mouse_frame = MouseFrame::from_snapshot(
         &render_snapshot,
         committed_regions.clone(),
         viewer_chrome,
         DrawnNotifications::default(),
+        client_chip_groups,
     );
 
     assert_eq!(mouse_frame.committed_regions, committed_regions);
@@ -618,6 +645,7 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
         ViewerChrome::default(),
         ViewerChrome {
             hovered_pane_id: None,
+            client_chip_hover: None,
             placement_handle_hover: None,
             active_input_mode: None,
             tabline_offset: None,
@@ -696,11 +724,14 @@ fn a_mouse_frame_layout_carries_the_regions_and_viewer_chrome_that_were_painted(
         tabline_offset: Some(1),
         ..ViewerChrome::default()
     };
+    let client_chip_groups =
+        build_client_chip_groups(&render_snapshot, &committed_regions, viewer_chrome);
     let mouse_frame = MouseFrame::from_snapshot(
         &render_snapshot,
         committed_regions.clone(),
         viewer_chrome,
         DrawnNotifications::default(),
+        client_chip_groups,
     );
 
     let frame_layout = mouse_frame.build_frame_layout();

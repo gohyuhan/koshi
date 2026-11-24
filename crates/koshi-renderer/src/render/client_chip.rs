@@ -1,8 +1,9 @@
 //! The client chips: a client number with one blank cell on each side, in
 //! the client's colors, packed left to right with one cell between two chips,
 //! and the `+N` mark that counts the clients with no chip. The tab strip
-//! draws one chip per attached client, and a pane's top border or stack
-//! header draws one chip per peer whose keys reach that pane.
+//! draws the viewing client and its peers, and a pane's top border or stack
+//! header draws the peers whose keys reach that pane. A group draws at most
+//! [`MAX_DRAWN_CLIENT_CHIP_COUNT`] chips.
 
 use ratatui::buffer::Buffer;
 use ratatui::style::{Modifier, Style};
@@ -16,6 +17,10 @@ use super::{compute_client_color_style, set_line_clipped};
 
 #[cfg(test)]
 mod tests;
+
+/// The most chips one group draws. Every further client of the group goes
+/// into the `+N` mark.
+pub(crate) const MAX_DRAWN_CLIENT_CHIP_COUNT: usize = 3;
 
 /// One client chip: ` 3 `, the client number with one blank cell on each
 /// side. The number is `color_index + 1` ([`compute_client_number`]), so
@@ -62,11 +67,13 @@ pub(crate) struct ClientChipGroup {
 /// clients of `chip_clients`. `group_room_width` is `group_end_column` or
 /// less.
 ///
-/// 1. When every chip fits, every chip is drawn and no mark.
-/// 2. Otherwise the chips are drawn in order, and the mark `+N` follows
-///    them, one cell apart. `N` counts the clients with no chip, and the
-///    mark takes `+` and the digits of `N`. The chips drawn are the most
-///    that fit together with their mark.
+/// 1. At most [`MAX_DRAWN_CLIENT_CHIP_COUNT`] chips are drawn, the first
+///    clients of `chip_clients` in order.
+/// 2. When every chip fits the width and the cap, every chip is drawn and
+///    no mark.
+/// 3. Otherwise the mark `+N` follows the chips, one cell apart. `N` counts
+///    the clients with no chip, and the mark takes `+` and the digits of
+///    `N`. The chips drawn are the most that fit together with their mark.
 ///
 /// `None` when `client_count` is `0`, or when the mark alone does not fit.
 ///
@@ -81,7 +88,10 @@ pub(super) fn solve_client_chip_group(
     if client_count == 0 {
         return None;
     }
-    let (mut packed_chips, mut chips_width) = pack_client_chips(chip_clients, group_room_width);
+    let (mut packed_chips, mut chips_width) = pack_client_chips(
+        chip_clients.take(MAX_DRAWN_CLIENT_CHIP_COUNT),
+        group_room_width,
+    );
     let mut hidden_client_mark_width = 0;
     while packed_chips.len() < client_count {
         hidden_client_mark_width =
@@ -157,7 +167,7 @@ fn pack_client_chips(
 /// of its number ([`compute_client_number`]) and one blank cell on each side.
 /// Index `0` gives `3`, index `11` gives `4`, and index `4294967295`
 /// gives `12`.
-fn compute_client_chip_width(color_index: u32) -> u16 {
+pub(super) fn compute_client_chip_width(color_index: u32) -> u16 {
     count_decimal_digits(compute_client_number(color_index)) + 2
 }
 
@@ -226,9 +236,25 @@ fn build_client_chip_line(
     client_chip_span: ClientChipSpan,
     client_color: ClientColor,
 ) -> Line<'static> {
+    build_client_chip_text(
+        client_chip_span.color_index,
+        client_chip_span.is_viewer_chip,
+        client_color,
+    )
+}
+
+/// The chip text of the client of index `color_index` in `client_color`: the
+/// client number with one blank cell on each side, its number bold and
+/// underlined when `is_viewer_chip`. Each chip cell drops every attribute of
+/// the cell it is drawn over. Index `2` gives ` 3 `.
+pub(super) fn build_client_chip_text(
+    color_index: u32,
+    is_viewer_chip: bool,
+    client_color: ClientColor,
+) -> Line<'static> {
     let chip_style = compute_client_color_style(client_color).remove_modifier(Modifier::all());
-    let client_number_text = compute_client_number(client_chip_span.color_index).to_string();
-    let client_number_style = if client_chip_span.is_viewer_chip {
+    let client_number_text = compute_client_number(color_index).to_string();
+    let client_number_style = if is_viewer_chip {
         chip_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         chip_style

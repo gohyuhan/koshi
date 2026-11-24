@@ -43,6 +43,7 @@
 use koshi_test_support::fixtures::build_floating_pane_id;
 
 use super::*;
+use koshi_core::client::ClientOrigin;
 
 use crate::floating_chrome::compute_floating_content_rect;
 use crate::notification::tests::build_test_notification_view;
@@ -57,6 +58,7 @@ use koshi_core::mouse::MouseTracking;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
 use koshi_test_support::fixtures::build_cell_rect;
+use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 use koshi_test_support::output_workloads::SeededSequence;
 use ratatui::widgets::{Block, Borders, Widget};
 
@@ -124,11 +126,19 @@ pub(crate) fn build_one_pane_floating_pane_slot(
     )
 }
 
+/// A stable client id for the peer of `color_index`, so a test can name the
+/// same peer in an expected chip group.
+pub(crate) fn build_peer_client_id(color_index: u32) -> ClientId {
+    ClientId::from_uuid(build_test_uuid_with_suffix((color_index % 100) as u8))
+}
+
 /// A peer of index `color_index` whose keys reach `typed_pane_id`.
 pub(crate) fn build_peer_snapshot(color_index: u32, typed_pane_id: Option<PaneId>) -> PeerSnapshot {
     PeerSnapshot {
-        client_id: ClientId::new(),
+        client_id: build_peer_client_id(color_index),
         color_index,
+        label: String::new(),
+        origin: ClientOrigin::Local { is_same_user: true },
         typed_pane_id,
         recent_input_pane_ids: Vec::new(),
     }
@@ -220,6 +230,7 @@ pub(crate) fn build_render_snapshot(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id,
@@ -5597,6 +5608,7 @@ fn list_core_changed_screen_rows(
         previous_render_snapshot,
         previous_frame_geometry.get_peer_cursor_markers(),
         previous_frame_geometry.get_pane_chip_groups(),
+        previous_frame_geometry.get_client_chip_tooltip(),
         &build_frame_geometry(
             next_render_snapshot,
             &CommittedRegions::build_core(next_render_snapshot.client_snapshot.viewport_size, 0),
@@ -6068,6 +6080,8 @@ fn build_frame_with_peers(viewer_color_index: u32, peer_color_indices: &[u32]) -
         render_snapshot.session_snapshot.peers.push(PeerSnapshot {
             client_id: ClientId::new(),
             color_index,
+            label: String::new(),
+            origin: ClientOrigin::Local { is_same_user: true },
             typed_pane_id: None,
             recent_input_pane_ids: Vec::new(),
         });
@@ -6080,7 +6094,11 @@ fn list_client_colors_is_empty_while_the_session_has_no_peer() {
     let render_snapshot = build_frame_with_peers(0, &[]);
 
     assert_eq!(
-        list_client_colors(&render_snapshot, &Theme::default()),
+        list_client_colors(
+            &render_snapshot.session_snapshot,
+            render_snapshot.client_snapshot.color_index,
+            &Theme::default(),
+        ),
         Vec::new()
     );
 }
@@ -6090,7 +6108,11 @@ fn list_client_colors_gives_the_viewer_then_each_peer_in_list_order() {
     let render_snapshot = build_frame_with_peers(1, &[2, 0]);
 
     assert_eq!(
-        list_client_colors(&render_snapshot, &Theme::default()),
+        list_client_colors(
+            &render_snapshot.session_snapshot,
+            render_snapshot.client_snapshot.color_index,
+            &Theme::default(),
+        ),
         vec![
             ClientColor {
                 fill_color: (0x00, 0xff, 0x4a),

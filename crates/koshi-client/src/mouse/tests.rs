@@ -23,6 +23,7 @@ use super::*;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::action::ClientActionKind;
+use koshi_core::client::ClientOrigin;
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
@@ -37,9 +38,10 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::placement::PlacementPreviewError;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, DrawnNotifications, FloatingPane, LayoutAreaSnapshot,
-    LinkStatus, MousePane, PaneSlot, PlacementSnapshot, PlacementTabSnapshot, Reconnecting,
-    RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
+    LinkStatus, MousePane, PaneSlot, PeerSnapshot, PlacementSnapshot, PlacementTabSnapshot,
+    Reconnecting, RenderSnapshot, SessionSnapshot, TabMetadata, TabSnapshot,
 };
+use koshi_renderer::{ClientChipHover, ClientChipHoverTarget};
 use koshi_test_support::fixtures::build_cell_rect;
 
 use crate::input::KeyOutcome;
@@ -164,6 +166,7 @@ pub(crate) fn build_mouse_frame(
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
             color_index: 0,
+            label: String::new(),
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id,
@@ -180,6 +183,7 @@ pub(crate) fn build_mouse_frame(
         committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
         viewer_chrome: ViewerChrome::default(),
         drawn_notifications: DrawnNotifications::default(),
+        client_chip_groups: PaintedClientChipGroups::default(),
     }
 }
 
@@ -213,7 +217,7 @@ pub(crate) fn handle_mouse_and_update_pointer_hover(
 }
 
 /// A frame holding one plain terminal pane, focused.
-fn build_one_pane_mouse_frame(mouse_pane: MousePane) -> MouseFrame {
+pub(crate) fn build_one_pane_mouse_frame(mouse_pane: MousePane) -> MouseFrame {
     let pane_id = mouse_pane.pane_id;
     build_mouse_frame(&[mouse_pane], Some(pane_id))
 }
@@ -6313,6 +6317,123 @@ fn keyboard_placement_drops_a_held_handle_drag() {
 }
 
 #[test]
+fn losing_the_outer_terminals_focus_closes_the_chip_tooltip_until_the_next_mouse_event() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let mut client = build_test_client();
+    client.pointer_hover.client_chip_hover = Some(ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: 0,
+        start_column: 54,
+    });
+
+    client.handle_outer_terminal_focus_lost();
+
+    assert_eq!(client.pointer_hover.client_chip_hover, None);
+    assert!(client.is_client_chip_hover_suppressed);
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(Point { column: 0, row: 0 }),
+        &mouse_frame,
+        Instant::now(),
+    );
+    assert!(!client.is_client_chip_hover_suppressed);
+}
+
+#[test]
+fn showing_a_pane_placement_closes_the_chip_tooltip() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut client = build_test_client();
+    client.set_frame_view(
+        active_tab_id,
+        Some(pane_id),
+        Some(pane_id),
+        vec![active_tab_id],
+    );
+    client.pointer_hover.client_chip_hover = Some(ClientChipHover::TabStrip {
+        target: ClientChipHoverTarget::ViewerClient,
+        row_index: 0,
+        start_column: 54,
+    });
+
+    assert!(client.begin_placement_mode());
+
+    let viewer_chrome = client.build_viewer_chrome(
+        active_tab_id,
+        &CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
+    );
+    assert_eq!(viewer_chrome.client_chip_hover, None);
+}
+
+fn solve_mouse_frame_client_chip_groups(
+    mouse_frame: &MouseFrame,
+) -> koshi_renderer::PaintedClientChipGroups {
+    let render_snapshot = koshi_renderer::snapshot::RenderSnapshot {
+        session_snapshot: mouse_frame.session_snapshot.clone(),
+        pane_snapshots: Vec::new(),
+        client_snapshot: mouse_frame.client_snapshot.clone(),
+        placement_preview: None,
+    };
+    koshi_renderer::solve_painted_client_chip_groups(
+        &render_snapshot,
+        &mouse_frame.committed_regions,
+        mouse_frame.viewer_chrome,
+        ratatui::layout::Rect::new(
+            0,
+            0,
+            TEST_VIEWPORT_SIZE.column_count,
+            TEST_VIEWPORT_SIZE.row_count,
+        ),
+        &koshi_renderer::theme::Theme::default(),
+    )
+}
+
+#[test]
+fn a_chip_that_leaves_under_the_pointer_closes_the_tooltip() {
+    let pane_id = PaneId::new();
+    let mut mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    mouse_frame.session_snapshot.peers = (1..=18)
+        .map(|color_index| PeerSnapshot {
+            client_id: ClientId::new(),
+            color_index,
+            label: format!("peer-{color_index}"),
+            origin: ClientOrigin::Remote,
+            typed_pane_id: None,
+            recent_input_pane_ids: Vec::new(),
+        })
+        .collect();
+    let client_chip_groups = solve_mouse_frame_client_chip_groups(&mouse_frame);
+    mouse_frame.client_chip_groups = client_chip_groups.clone();
+    let chip_pointer_position = Point { column: 53, row: 0 };
+    let mut client = build_test_client();
+    handle_mouse_and_update_pointer_hover(
+        &mut client,
+        build_mouse_motion(chip_pointer_position),
+        &mouse_frame,
+        Instant::now(),
+    );
+    assert_eq!(
+        client.pointer_hover.client_chip_hover,
+        Some(ClientChipHover::TabStrip {
+            target: ClientChipHoverTarget::ViewerClient,
+            row_index: 0,
+            start_column: 53,
+        })
+    );
+    let mut removed_mouse_frame = mouse_frame.clone();
+    removed_mouse_frame.session_snapshot.peers.clear();
+    removed_mouse_frame.client_chip_groups =
+        solve_mouse_frame_client_chip_groups(&removed_mouse_frame);
+
+    update_pointer_hover_for_mouse_frame(&mut client, &removed_mouse_frame);
+
+    assert_eq!(client.pointer_position, Some(chip_pointer_position));
+    assert_eq!(client.pointer_hover.client_chip_hover, None);
+}
+
+#[test]
 fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() {
     let floating_slot_pane_id = PaneId::new();
     let mouse_frame = build_floating_mouse_frame(
@@ -8913,7 +9034,10 @@ fn find_painted_pointer_hover(
 /// chrome, as each paint does before it draws.
 fn update_pointer_hover_for_mouse_frame(client: &mut Client, mouse_frame: &MouseFrame) {
     let painted_mouse_frame = repaint_mouse_frame(client, mouse_frame);
-    client.update_pointer_hover_for_frame(painted_mouse_frame.build_frame_layout());
+    client.update_pointer_hover_for_frame(
+        painted_mouse_frame.build_frame_layout(),
+        &painted_mouse_frame.client_chip_groups,
+    );
 }
 
 #[test]

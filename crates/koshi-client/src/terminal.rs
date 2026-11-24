@@ -52,9 +52,10 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
-    build_frame_geometry, build_image_cell_snapshot, build_image_paints, get_cursor_position,
-    get_cursor_style, list_changed_screen_rows, render_frame, DrawnRows, FrameGeometry,
-    FramePaneChipGroups, FramePeerCursorMarkers, ImagePlacementKey, ImageRenderMode,
+    build_frame_geometry_with_client_chip_groups, build_image_cell_snapshot, build_image_paints,
+    get_cursor_position, get_cursor_style, list_changed_screen_rows, render_frame,
+    ClientChipTooltip, DrawnRows, FrameGeometry, FramePaneChipGroups, FramePeerCursorMarkers,
+    ImagePlacementKey, ImageRenderMode, PaintedClientChipGroups,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
@@ -1851,6 +1852,9 @@ pub(crate) struct FrameInputs {
     /// The pane chip groups of the frame drawn from these inputs
     /// ([`FrameGeometry::get_pane_chip_groups`]).
     pane_chip_groups: FramePaneChipGroups,
+    /// The client chip tooltip of the frame drawn from these inputs
+    /// ([`FrameGeometry::get_client_chip_tooltip`]).
+    client_chip_tooltip: Option<ClientChipTooltip>,
 }
 
 impl FrameInputs {
@@ -1882,14 +1886,19 @@ impl FrameInputs {
             notification_revision,
             peer_cursor_markers: _,
             pane_chip_groups: _,
+            client_chip_tooltip: _,
         } = next_frame_inputs;
+        let mut previous_viewer_chrome = self.viewer_chrome;
+        let mut next_viewer_chrome = *viewer_chrome;
+        previous_viewer_chrome.client_chip_hover = None;
+        next_viewer_chrome.client_chip_hover = None;
         if self.has_placement_state
             || *has_placement_state
             || self.committed_regions != *committed_regions
             || self.theme != *theme
             || self.keymap_hints != *keymap_hints
             || self.pending_key_sequence != *pending_key_sequence
-            || self.viewer_chrome != *viewer_chrome
+            || previous_viewer_chrome != next_viewer_chrome
             || self.image_mode != *image_mode
             || self.unavailable_image_placement_keys != *unavailable_image_placement_keys
             || self.terminal_size != *terminal_size
@@ -1901,6 +1910,7 @@ impl FrameInputs {
             &self.render_snapshot,
             &self.peer_cursor_markers,
             &self.pane_chip_groups,
+            self.client_chip_tooltip.as_ref(),
             next_frame_geometry,
         )
     }
@@ -1979,6 +1989,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     last_cursor_style: &mut Option<CursorStyle>,
     placement_snapshot: Option<&PlacementSnapshot>,
     placement_display_tab_snapshot: Option<&PlacementTabSnapshot>,
+    client_chip_groups: &PaintedClientChipGroups,
 ) -> Result<(), PaintError<B::Error>> {
     let window_title_text = build_window_title(displayed_snapshot);
     let is_window_title_changed = window_title_text != *last_window_title;
@@ -1994,12 +2005,13 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
     );
     let terminal_size = client.get_viewport_size();
     let render_area = Rect::new(0, 0, terminal_size.column_count, terminal_size.row_count);
-    let frame_geometry = build_frame_geometry(
+    let frame_geometry = build_frame_geometry_with_client_chip_groups(
         displayed_snapshot,
         committed_regions,
         frame_paint.chrome,
         render_area,
         client.get_theme(),
+        client_chip_groups.clone(),
     );
     let is_focused_pane_softened = displayed_snapshot
         .client_snapshot
@@ -2075,6 +2087,7 @@ pub(crate) fn paint_frame_with_writer<B: Backend, W: Write>(
         notification_revision: frame_paint.notification_revision,
         peer_cursor_markers: frame_geometry.get_peer_cursor_markers().clone(),
         pane_chip_groups: frame_geometry.get_pane_chip_groups().clone(),
+        client_chip_tooltip: frame_geometry.get_client_chip_tooltip().cloned(),
     };
     let changed_rows = shown_frame_inputs.take().and_then(|last_frame_inputs| {
         last_frame_inputs.list_changed_screen_rows(&frame_inputs, &frame_geometry)
